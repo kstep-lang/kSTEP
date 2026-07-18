@@ -28,6 +28,37 @@ feedback loop the LLM can act on directly, without a separate benchmark
 or fine-tuning step. kSTEP compiles that DSL down to the neutral,
 standardized ISO 10303 exchange format.
 
+== Vision
+
+kSTEP is not "just another CAD tool." The ambition is to cover the
+**entire STEP standard (ISO 10303)** — CAD is the entry point, not the
+boundary. STEP spans far more than mechanical geometry: manufacturing
+(STEP-NC), electrical and electronics (assemblies, PCBs, wiring),
+kinematics, composites, FEM/simulation, and plant/process data are all
+part of the standard, each carved out as its own Application Protocol
+(AP242, AP238, AP210, AP209, and others). Those APs are the building
+blocks kSTEP intends to grow into over time.
+
+The CAD market today splits into two camps: classic CAD suites
+(SolidWorks, CATIA, Siemens NX, Fusion 360, Inventor, Onshape) — GUI-
+centric, click-based, proprietary formats, AI bolted on after the fact —
+and code-first CAD (OpenSCAD, CadQuery, Build123d, Replicad, JSCAD) —
+scriptable and Git-friendly, but niche and without real AI integration.
+kSTEP is the deliberate third way: code-first like the second camp,
+AI-first like neither camp, and STEP-native instead of proprietary. It
+is the same thesis as its sibling project
+https://github.com/kuml-dev/kUML[kUML] in the UML/SysML space, applied
+across the full breadth of engineering rather than just software
+architecture — kUML covers the IT domain, kSTEP covers the engineering
+domain, both grounded in the same Typed Domain Grounding (TDG)
+principle described above.
+
+V1 deliberately starts narrow — a single Application Protocol (AP242),
+scoped down to product structure and metadata with no geometry and no
+PMI (see <<roadmap,Roadmap>> below and kSTEP-ADR-0001) — but the
+architecture is meant to carry the wider vision from the start, not to
+box it in.
+
 [#status]
 == Status
 
