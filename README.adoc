@@ -17,13 +17,16 @@ but measurably weak at generating external, low-resource DSLs — and STEP's
 native exchange format (Part 21, graphs of `#123`-style entity references)
 is a particularly hostile one to read or write directly.
 
-kSTEP applies the pattern already validated by its sibling project,
-https://github.com/kuml-dev/kUML[kUML]: expose a domain as a type-safe,
-embedded Kotlin DSL with semantic validation and structured errors, so
-that both human developers and LLM agents can work in it reliably. The
-syntax stays Kotlin (high-resource); only the vocabulary is
-domain-specific, enforced by the type system. kSTEP compiles that DSL
-down to the neutral, standardized ISO 10303 exchange format.
+kSTEP applies **Typed Domain Grounding (TDG)** — the pattern already
+validated by its sibling project, https://github.com/kuml-dev/kUML[kUML]:
+expose a domain as a type-safe, embedded Kotlin DSL with semantic
+validation and structured errors, so that both human developers and LLM
+agents can work in it reliably. The syntax stays Kotlin (high-resource);
+only the vocabulary is domain-specific, enforced by the type system. A
+strict type system, a compiler, and structured validation errors form a
+feedback loop the LLM can act on directly, without a separate benchmark
+or fine-tuning step. kSTEP compiles that DSL down to the neutral,
+standardized ISO 10303 exchange format.
 
 [#status]
 == Status
