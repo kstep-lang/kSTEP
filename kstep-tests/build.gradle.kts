@@ -11,6 +11,7 @@ dependencies {
     implementation(project(":kstep-express"))
     implementation(project(":kstep-core"))
     implementation(libs.antlr4.runtime)
+    testImplementation(libs.kotlinpoet)
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
 }

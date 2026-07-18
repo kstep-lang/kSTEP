@@ -28,18 +28,71 @@ feedback loop the LLM can act on directly, without a separate benchmark
 or fine-tuning step. kSTEP compiles that DSL down to the neutral,
 standardized ISO 10303 exchange format.
 
+== Vision
+
+kSTEP is not "just another CAD tool." The ambition is to cover the
+**entire STEP standard (ISO 10303)** — CAD is the entry point, not the
+boundary. STEP spans far more than mechanical geometry: manufacturing
+(STEP-NC), electrical and electronics (assemblies, PCBs, wiring),
+kinematics, composites, FEM/simulation, and plant/process data are all
+part of the standard, each carved out as its own Application Protocol
+(AP242, AP238, AP210, AP209, and others). Those APs are the building
+blocks kSTEP intends to grow into over time.
+
+The CAD market today splits into two camps: classic CAD suites
+(SolidWorks, CATIA, Siemens NX, Fusion 360, Inventor, Onshape) — GUI-
+centric, click-based, proprietary formats, AI bolted on after the fact —
+and code-first CAD (OpenSCAD, CadQuery, Build123d, Replicad, JSCAD) —
+scriptable and Git-friendly, but niche and without real AI integration.
+kSTEP is the deliberate third way: code-first like the second camp,
+AI-first like neither camp, and STEP-native instead of proprietary. It
+is the same thesis as its sibling project
+https://github.com/kuml-dev/kUML[kUML] in the UML/SysML space, applied
+across the full breadth of engineering rather than just software
+architecture — kUML covers the IT domain, kSTEP covers the engineering
+domain, both grounded in the same Typed Domain Grounding (TDG)
+principle described above.
+
+V1 deliberately starts narrow — a single Application Protocol (AP242),
+scoped down to product structure and metadata with no geometry and no
+PMI (see <<roadmap,Roadmap>> below and kSTEP-ADR-0001) — but the
+architecture is meant to carry the wider vision from the start, not to
+box it in.
+
 [#status]
 == Status
 
-The project bootstrapped its Gradle module skeleton and the EXPRESS
-grammar integration (M1, first wave). Concretely, as of this writing:
+The project has completed the EXPRESS parser, semantic model, and
+Kotlin code generation (M1, first two waves). Concretely, as of this
+writing:
 
 * An ANTLR4-based parser for the EXPRESS schema language (ISO 10303-11)
   exists and successfully parses a hand-written AP242-subset fixture in
   `kstep-tests`.
-* No semantic model, no EXPRESS-to-Kotlin code generation, no Part 21
-  reader/writer, and no CLI commands exist yet — `kstep-core`,
-  `kstep-step21`, and the CLI are placeholder skeletons.
+* A semantic model walks the ANTLR parse tree into a typed Kotlin AST
+  (`dev.kstep.express.semantic`): entities with their explicit
+  attributes (declared type, optional-ness), supertype/subtype
+  relationships, and `WHERE`-rule clauses. Attribute types resolve
+  against a per-schema, case-insensitive symbol table built in a
+  two-pass walk, so forward references (an entity referencing an
+  entity declared later in the same schema) resolve correctly.
+  `WHERE`-rule bodies are captured verbatim as unparsed source text —
+  evaluating them is not implemented yet (see <<roadmap,Roadmap>>).
+* A KotlinPoet-based code generator
+  (`dev.kstep.express.codegen.ExpressKotlinCodeGenerator`) turns the
+  semantic model into idiomatic Kotlin `data class`es, one per entity,
+  with named (and, for `OPTIONAL` attributes, defaulted) constructor
+  parameters mirroring the EXPRESS declaration order. Verified
+  end-to-end against all six entities of the AP242-subset fixture.
+  Constructs the generator doesn't yet turn into Kotlin — `SUBTYPE OF`,
+  redeclared attributes, `LOGICAL`/`NUMBER`/`BINARY`-typed attributes,
+  and attributes referencing a defined `TYPE` — raise a structured
+  `CodeGenException` instead of emitting a silently wrong or partial
+  class. Not yet wired into a Gradle task; it's a plain Kotlin API
+  callable from tests.
+* No Part 21 reader/writer, no `WHERE`-rule evaluation, and no CLI
+  commands exist yet — `kstep-core`, `kstep-step21`, and the CLI are
+  placeholder skeletons.
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -54,10 +107,13 @@ See <<roadmap,Roadmap>> for what's planned next.
 | Empty skeleton — no source yet
 
 | `kstep-express`
-| ANTLR4-generated parser for the EXPRESS schema language (ISO 10303-11),
-  wrapped by `dev.kstep.express.ExpressParserFactory`
-| Working: parses EXPRESS source into an ANTLR parse tree, throws
-  `ExpressSyntaxException` on the first syntax error
+| ANTLR4-generated EXPRESS parser (`dev.kstep.express.ExpressParserFactory`),
+  semantic model (`dev.kstep.express.semantic`), and Kotlin code
+  generator (`dev.kstep.express.codegen.ExpressKotlinCodeGenerator`,
+  built on KotlinPoet)
+| Working: parses EXPRESS source into an ANTLR parse tree; walks it
+  into a semantic AST; generates Kotlin `data class`es from that AST.
+  Not yet wired into a Gradle task.
 
 | `kstep-step21`
 | STEP Part 21 (physical file exchange format) reader/writer
@@ -69,7 +125,9 @@ See <<roadmap,Roadmap>> for what's planned next.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
-| One smoke test parsing a hand-written AP242-subset EXPRESS fixture
+| Smoke test for the EXPRESS parser, plus semantic-model, naming-convention,
+  and code-generation tests, all exercised against a hand-written
+  AP242-subset EXPRESS fixture
 |===
 
 == Building
@@ -81,17 +139,19 @@ Requires JDK 21. The Gradle wrapper pins Gradle 9.6.1.
 ./gradlew clean check
 ----
 
-`check` runs ktlint and the Kotest test suite (currently just the
-`kstep-express` smoke test in `kstep-tests`).
+`check` runs ktlint and the Kotest test suite in `kstep-tests`: the
+EXPRESS parser smoke test, semantic-model tests, naming-convention
+tests, and code-generation tests.
 
 == Usage (current capability)
 
-The only thing usable end-to-end today is parsing an EXPRESS schema
-into an ANTLR parse tree:
+Parsing an EXPRESS schema and generating Kotlin `data class`es from it
+works end-to-end today:
 
 [source,kotlin]
 ----
-import dev.kstep.express.ExpressParserFactory
+import dev.kstep.express.codegen.ExpressKotlinCodeGenerator
+import dev.kstep.express.semantic.ExpressSemanticModelBuilder
 
 val schema = """
     SCHEMA example_schema;
@@ -102,14 +162,29 @@ val schema = """
     END_SCHEMA;
 """.trimIndent()
 
-val tree = ExpressParserFactory.parse(schema)
-println(tree.schemaDecl().size) // 1
+val model = ExpressSemanticModelBuilder.build(schema)
+val kotlinSource = ExpressKotlinCodeGenerator.generateFileSource(
+    model.schemas.single(),
+    "dev.kstep.generated.example",
+)
+println(kotlinSource)
+// package dev.kstep.generated.example
+//
+// public data class Product(
+//   public val id: String,
+//   public val name: String,
+// )
 ----
 
-`ExpressParserFactory.parse` throws `ExpressSyntaxException` on the
-first syntax error instead of returning a partial tree. There is no
-semantic model or code generation on top of the parse tree yet — that
-is the next wave of work.
+`ExpressParserFactory.parse` (used internally by
+`ExpressSemanticModelBuilder.build`) throws `ExpressSyntaxException` on
+the first syntax error instead of returning a partial tree.
+`ExpressSemanticModelBuilder` throws `SemanticModelException` for a
+named type that resolves to neither a known entity nor a known `TYPE`
+in the same schema. `ExpressKotlinCodeGenerator` throws
+`CodeGenException` for EXPRESS constructs it doesn't yet turn into
+Kotlin (see <<status,Status>> above). None of this is wired into the
+CLI or a Gradle task yet — that is upcoming work.
 
 [#roadmap]
 == Roadmap (V1 scope)
@@ -118,12 +193,26 @@ Per the project's scope-reduction decision (kSTEP-ADR-0001, analogous to
 kUML-ADR-0004), V1 deliberately excludes B-rep geometry and PMI, and
 focuses on a semantic core that a type-safe DSL benefits from most:
 
-. EXPRESS parser (done, see above) + EXPRESS-to-Kotlin code generation,
-  driven off the official AP242 schemas.
+. EXPRESS parser (done) + EXPRESS-to-Kotlin code generation (done, see
+  above — semantic model and KotlinPoet-based generator, verified
+  end-to-end against the six-entity AP242-subset fixture). Still
+  pending: running the generator against the official AP242 schemas
+  themselves (the fixture is a hand-written, structurally-inspired
+  subset, not the licensed AP242 EXPRESS source) and wiring code
+  generation into a Gradle task.
 . A semantic AP242 core: product structure and metadata, without
   B-rep geometry and without PMI (PMI references geometry shape
-  aspects and moves with the geometry milestone).
+  aspects and moves with the geometry milestone). The Kotlin type
+  layer for its six core entities (`PRODUCT`, `PRODUCT_DEFINITION` +
+  revision, `PRODUCT_DEFINITION_FORMATION`,
+  `NEXT_ASSEMBLY_USAGE_OCCURRENCE`, `APPROVAL`,
+  `PERSON_AND_ORGANIZATION`) now generates correctly from the fixture;
+  no runtime construction/validation API on top of the generated types
+  exists yet.
 . Validation: EXPRESS `WHERE` rules surfaced as structured errors.
+  The semantic model already captures `WHERE`-rule labels and
+  verbatim expression text per entity; evaluating those expressions
+  is not implemented yet.
 . STEP Part 21 export/import, with a lossless roundtrip through
   external CAD/PLM tools as the acceptance criterion.
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and

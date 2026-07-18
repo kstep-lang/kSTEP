@@ -44,6 +44,22 @@ object ExpressParserFactory {
         parser.removeErrorListeners()
         parser.addErrorListener(throwingErrorListener)
 
-        return parser.syntax()
+        // ANTLR's generated parser implements several grammar rules (e.g.
+        // parameterType -> generalizedTypes -> generalAggregationTypes -> generalSetType/
+        // generalListType/generalBagType/generalArrayType -> parameterType, and the
+        // left-recursive expression/term/factor rules) as genuine recursive-descent Java
+        // method calls, one JVM stack frame per nesting level. Malformed or adversarial
+        // input (e.g. thousands of nested "SET OF SET OF ...") can therefore exhaust the
+        // JVM stack *during parsing itself*, before any downstream tree-walk code (which
+        // may have its own depth guards) ever runs. Converting that StackOverflowError into
+        // the same structured ExpressSyntaxException used for ordinary syntax errors keeps
+        // this the one place callers need to handle, instead of letting a raw Error escape.
+        return try {
+            parser.syntax()
+        } catch (overflow: StackOverflowError) {
+            throw ExpressSyntaxException(
+                "EXPRESS source exceeds the maximum supported nesting depth (stack overflow while parsing)",
+            )
+        }
     }
 }
