@@ -1,4 +1,7 @@
 = kSTEP
+
+image::docs/images/kstep-banner.png[Lapis Net,link=https://github.com/kstep-lang/kSTEP]
+
 Type-safe Kotlin DSL for the STEP standard (ISO 10303).
 
 Licensed under the Apache License, Version 2.0. See link:LICENSE[LICENSE].
