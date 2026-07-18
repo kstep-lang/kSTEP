@@ -1,0 +1,8 @@
+= kSTEP
+Type-safe Kotlin DSL for the STEP standard (ISO 10303).
+
+Licensed under the Apache License, Version 2.0. See link:LICENSE[LICENSE].
+
+The bundled EXPRESS grammar (`kstep-express/src/main/antlr/dev/kstep/express/grammar/Express.g4`)
+is vendored from https://github.com/lutaml/express-grammar[lutaml/express-grammar] and is
+BSD-2-Clause licensed (Ribose Inc.); see link:NOTICE[NOTICE] for full attribution.
