@@ -11,6 +11,7 @@ kotlin {
 dependencies {
     antlr(libs.antlr4)
     implementation(libs.antlr4.runtime)
+    implementation(libs.kotlinpoet)
 }
 
 tasks.generateGrammarSource {
