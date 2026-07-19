@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="70mm"
+   height="70mm"
+   viewBox="-1.5 -1.5 70 69.999999"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4.4 (dcaf3e7, 2026-05-05)"
+   sodipodi:docname="kSTEP.svg"
+   inkscape:export-filename="kSTEP_400.png"
+   inkscape:export-xdpi="145.14285"
+   inkscape:export-ydpi="145.14285"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     inkscape:zoom="2.2"
+     inkscape:cx="116.36364"
+     inkscape:cy="139.31818"
+     inkscape:window-width="1728"
+     inkscape:window-height="1056"
+     inkscape:window-x="1430"
+     inkscape:window-y="1318"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="layer1"
+     inkscape:export-bgcolor="#ffffffff" />
+  <defs
+     id="defs1" />
+  <g
+     inkscape:label="Ebene 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(-37.703868,-34.872265)">
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:19.7556px;line-height:0;font-family:Inter;-inkscape-font-specification:'Inter Bold';text-align:center;letter-spacing:0px;text-anchor:middle;fill:#0d1525;fill-opacity:1;stroke-width:0.264583"
+       x="71.208443"
+       y="66.817642"
+       id="text1"><tspan
+         sodipodi:role="line"
+         id="tspan1"
+         style="font-style:normal;font-variant:normal;font-weight:500;font-stretch:normal;font-size:42.3333px;line-height:1.05;font-family:Inter;-inkscape-font-specification:'Inter Medium';letter-spacing:0px;fill:#1d2b4f;fill-opacity:1;stroke-width:0.264583"
+         x="71.208443"
+         y="66.817642"><tspan
+   style="letter-spacing:7.9375px"
+   id="tspan6">{</tspan><tspan
+   style="font-style:italic;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:42.3333px;font-family:Inter;-inkscape-font-specification:'Inter Italic';letter-spacing:7.9375px;fill:#c49a2e;fill-opacity:1"
+   id="tspan4">k</tspan>}</tspan><tspan
+         sodipodi:role="line"
+         style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:21.8722px;line-height:1.5;font-family:Inter;-inkscape-font-specification:'Inter Bold';letter-spacing:0px;fill:#0d1525;fill-opacity:1;stroke-width:0.264583"
+         x="71.208443"
+         y="99.298836"
+         id="tspan2"><tspan
+           style="font-size:21.8722px;line-height:1.5;letter-spacing:0px;fill:#c49a2e;fill-opacity:1"
+           id="tspan5">k</tspan><tspan
+           style="font-size:21.8722px;line-height:1.5;letter-spacing:0px;fill:#1d2b4f;fill-opacity:1"
+           id="tspan3">STEP</tspan></tspan></text>
+  </g>
+</svg>
