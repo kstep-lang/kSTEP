@@ -22,5 +22,6 @@ include(
     "kstep-express",
     "kstep-step21",
     "kstep-cli",
+    "kstep-mcp",
     "kstep-tests",
 )

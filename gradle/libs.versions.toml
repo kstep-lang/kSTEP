@@ -4,6 +4,7 @@ ktlint-plugin = "14.2.0"
 antlr = "4.13.2"
 kotest = "5.9.1"
 kotlinpoet = "2.2.0"
+mcp-kotlin-sdk = "0.14.0"
 
 [libraries]
 antlr4 = { module = "org.antlr:antlr4", version.ref = "antlr" }
@@ -11,7 +12,11 @@ antlr4-runtime = { module = "org.antlr:antlr4-runtime", version.ref = "antlr" }
 kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
 kotlinpoet = { module = "com.squareup:kotlinpoet", version.ref = "kotlinpoet" }
+mcp-kotlin-sdk-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref = "mcp-kotlin-sdk" }
+mcp-kotlin-sdk-client = { module = "io.modelcontextprotocol:kotlin-sdk-client", version.ref = "mcp-kotlin-sdk" }
+mcp-kotlin-sdk-testing = { module = "io.modelcontextprotocol:kotlin-sdk-testing", version.ref = "mcp-kotlin-sdk" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint-plugin" }
