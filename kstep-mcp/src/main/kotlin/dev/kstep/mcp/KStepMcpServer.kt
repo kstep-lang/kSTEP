@@ -9,6 +9,7 @@ import dev.kstep.mcp.tools.registerBuildProductTool
 import dev.kstep.mcp.tools.registerExportPart21Tool
 import dev.kstep.mcp.tools.registerGetEntityTool
 import dev.kstep.mcp.tools.registerListEntitiesTool
+import io.github.oshai.kotlinlogging.KotlinLogging
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.StdioServerTransport
@@ -19,6 +20,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.io.asSink
 import kotlinx.io.asSource
 import kotlinx.io.buffered
+
+private val logger = KotlinLogging.logger {}
 
 /**
  * Assembles the kSTEP MCP server: the six V1 entity builders as `build_*` tools, `export_part21`
@@ -42,6 +45,7 @@ fun buildServer(store: EntityStore = EntityStore()): Server {
     registerExportPart21Tool(server, store)
     registerListEntitiesTool(server, store)
     registerGetEntityTool(server, store)
+    logger.info { "kSTEP MCP server assembled: 9 tools registered" }
     return server
 }
 
@@ -57,9 +61,13 @@ suspend fun runStdioServer(server: Server = buildServer()) {
             input = System.`in`.asSource().buffered(),
             output = System.out.asSink().buffered(),
         )
+    logger.info { "kSTEP MCP server starting stdio session" }
     val session = server.createSession(transport)
     val done = Job()
-    session.onClose { done.complete() }
+    session.onClose {
+        logger.info { "kSTEP MCP server stdio session closed" }
+        done.complete()
+    }
     done.join()
 }
 

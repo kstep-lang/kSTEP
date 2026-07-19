@@ -102,6 +102,11 @@ private val EXPECTED_GENERATED =
     setOf("product", "product_definition", "product_definition_formation", "approval", "person_and_organization")
 private val EXPECTED_SKIPPED = setOf("next_assembly_usage_occurrence")
 
+// Deliberately plain println, not kotlin-logging (kSTEP M2 Welle 2 scope decision): this main()
+// IS the generateExpressKotlin Gradle task's own console report, the same category of output as
+// `./gradlew build`'s own build summary -- not diagnostic/operational logging. Converting it would
+// bury task output behind log-level filtering instead of matching Gradle's own console output.
+
 /**
  * Entry point for the `generateExpressKotlin` Gradle task (see kstep-express/build.gradle.kts).
  * A top-level `main`, not an object method, because `JavaExec` needs a JVM entry point on the

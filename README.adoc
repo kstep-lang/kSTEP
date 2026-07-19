@@ -393,7 +393,9 @@ See <<roadmap,Roadmap>> for what's planned next.
   over stdio transport, with a session-scoped in-memory `EntityStore`
   (bounded, thread-safe) resolving entity-typed references by
   caller-supplied id/handle. No CLI wiring yet, no HTTP/SSE transport.
-  Depends on `kstep-core` and `kstep-step21` only.
+  Depends on `kstep-core` and `kstep-step21` only. (M2 Welle 2) Server
+  lifecycle and every tool call's outcome are logged via kotlin-logging
+  over an explicit `slf4j-simple` backend.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
@@ -403,11 +405,13 @@ See <<roadmap,Roadmap>> for what's planned next.
   integration test); `kstep-core` DSL builder tests; real-schema
   six-V1-entity codegen tests; (M1 Welle 5) Part 21 writer, reader,
   and roundtrip tests (`Part21WriterTest`, `Part21ReaderTest`,
-  `Part21RoundtripTest`); and (M2 Welle 1) an end-to-end `kstep-mcp`
+  `Part21RoundtripTest`); (M2 Welle 1) an end-to-end `kstep-mcp`
   test suite (`KStepMcpServerTest`) driving a real MCP `Server` through
-  the SDK's own in-memory `ChannelTransport` — all exercised against
-  either the hand-written AP242-subset fixture or the real-schema
-  excerpt
+  the SDK's own in-memory `ChannelTransport`; and (M2 Welle 2)
+  `McpLoggingTest`, which captures `System.err` around one MCP tool
+  call and asserts the configured `slf4j-simple` backend actually
+  emitted the tool-outcome log line — all exercised against either the
+  hand-written AP242-subset fixture or the real-schema excerpt
 |===
 
 == Building
@@ -432,6 +436,23 @@ tests, and (M2 Welle 1) the end-to-end `kstep-mcp` MCP server test
 suite (`KStepMcpServerTest`). `kstep-mcp` itself compiles and is
 ktlint-checked as part of `check`; it has no tests of its own — its
 tests live in `kstep-tests`, matching every other module's pattern.
+
+kSTEP logs through kotlin-logging
+(`io.github.oshai:kotlin-logging-jvm`), an idiomatic Kotlin wrapper
+over SLF4J. `kstep-mcp`'s server lifecycle and tool-call outcomes are
+the first real usage of it (M2 Welle 2); `kstep-core`, `kstep-express`,
+and `kstep-step21` remain untouched, since their existing structured-
+exception/`ValidationResult` error model already covers their
+diagnostic needs. The SLF4J backend is `slf4j-simple` (MIT-licensed,
+zero-config, prints to stderr) — `kstep-mcp` depends on it at
+`runtimeOnly`, and `kstep-tests` carries a matching
+`testImplementation`, so `./gradlew clean check` now shows real log
+output instead of SLF4J's "No SLF4J providers were found ...
+Defaulting to no-operation (NOP) logger" warning.
+`Ap242V1CodeGen`'s `generateExpressKotlin` console report and
+`kstep-cli`'s placeholder `main()` remain plain `println` deliberately
+— that is Gradle-task/CLI stdout output, not diagnostic logging, and
+stays outside kotlin-logging's scope.
 
 `generateExpressKotlin` can also be run on its own:
 

@@ -1,16 +1,20 @@
 package dev.kstep.mcp
 
 import dev.kstep.core.DslViolation
+import io.github.oshai.kotlinlogging.KotlinLogging
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 const val MAX_STRING_FIELD_LENGTH = 4096
 const val MAX_LIST_ITEMS = 64
+
+private val logger = KotlinLogging.logger {}
 
 /** Thrown for a decoded-but-still-invalid tool argument (oversized field/list) — routed into the same
  * malformed-input [CallToolResult] shape as a [SerializationException] by [mcpToolCall], since both are
@@ -74,18 +78,48 @@ data class UnknownReference(
 suspend fun mcpToolCall(
     toolName: String,
     block: suspend () -> CallToolResult,
-): CallToolResult =
-    try {
-        block()
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: SerializationException) {
-        malformedInputError(toolName, e.message ?: "invalid arguments")
-    } catch (e: ToolInputException) {
-        malformedInputError(toolName, e.message ?: "invalid arguments")
-    } catch (e: Exception) {
-        internalError(e::class.simpleName)
+): CallToolResult {
+    val result =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: SerializationException) {
+            malformedInputError(toolName, e.message ?: "invalid arguments")
+        } catch (e: ToolInputException) {
+            malformedInputError(toolName, e.message ?: "invalid arguments")
+        } catch (e: Exception) {
+            internalError(e::class.simpleName)
+        }
+    logToolOutcome(toolName, result)
+    return result
+}
+
+// Reuses the errorKind this file's own *Error() builders already put into structuredContent,
+// rather than a second parallel taxonomy. internal_error (an unexpected, unhandled exception) is
+// ERROR -- an operator-actionable anomaly; every other structured error is WARN -- caller-driven
+// and expected, but worth seeing; a clean result is DEBUG. Never reads e.message directly: only
+// the already-sanitized fields (toolName, errorKind) that the CallToolResult itself carries, so
+// nothing reaches the log that the response wasn't already safe to send to the caller.
+private fun logToolOutcome(
+    toolName: String,
+    result: CallToolResult,
+) {
+    if (result.isError != true) {
+        logger.debug { "tool call succeeded: tool=$toolName" }
+        return
     }
+    val errorKind =
+        result.structuredContent
+            ?.get("errorKind")
+            ?.jsonPrimitive
+            ?.content
+    if (errorKind == "internal_error") {
+        logger.error { "tool call failed: tool=$toolName errorKind=$errorKind" }
+    } else {
+        logger.warn { "tool call failed: tool=$toolName errorKind=$errorKind" }
+    }
+}
 
 fun malformedInputError(
     toolName: String,

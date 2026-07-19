@@ -5,6 +5,8 @@ antlr = "4.13.2"
 kotest = "5.9.1"
 kotlinpoet = "2.2.0"
 mcp-kotlin-sdk = "0.14.0"
+kotlin-logging = "8.0.4"
+slf4j-simple = "2.0.18"
 
 [libraries]
 antlr4 = { module = "org.antlr:antlr4", version.ref = "antlr" }
@@ -15,6 +17,8 @@ kotlinpoet = { module = "com.squareup:kotlinpoet", version.ref = "kotlinpoet" }
 mcp-kotlin-sdk-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref = "mcp-kotlin-sdk" }
 mcp-kotlin-sdk-client = { module = "io.modelcontextprotocol:kotlin-sdk-client", version.ref = "mcp-kotlin-sdk" }
 mcp-kotlin-sdk-testing = { module = "io.modelcontextprotocol:kotlin-sdk-testing", version.ref = "mcp-kotlin-sdk" }
+kotlin-logging-jvm = { module = "io.github.oshai:kotlin-logging-jvm", version.ref = "kotlin-logging" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j-simple" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

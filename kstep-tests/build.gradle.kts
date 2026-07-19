@@ -19,6 +19,7 @@ dependencies {
     testImplementation(libs.mcp.kotlin.sdk.server)
     testImplementation(libs.mcp.kotlin.sdk.testing)
     testImplementation(libs.mcp.kotlin.sdk.client)
+    testImplementation(libs.slf4j.simple)
 }
 
 tasks.withType<Test>().configureEach {
