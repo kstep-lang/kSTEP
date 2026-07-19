@@ -10,8 +10,8 @@ import org.antlr.v4.runtime.ParserRuleContext
  *
  * Uses plain hand-written functions over the typed ANTLR context objects, not the
  * generated `ExpressBaseVisitor`/`ExpressBaseListener`: the grammar's `expression`/`stmt`
- * subtrees are never visited (WHERE-rule bodies are captured as raw source substrings,
- * see [verbatim]), and each schema needs a two-pass walk (symbol table first, then type
+ * subtrees are never visited (WHERE-rule and DERIVE-initializer bodies are captured as raw
+ * source substrings, see [verbatim]), and each schema needs a two-pass walk (symbol table first, then type
  * resolution) with different data threaded through each pass — direct `ctx.xxx()`
  * accessor calls fit that more directly than the visitor's single-return-type dispatch.
  *
@@ -100,6 +100,24 @@ object ExpressSemanticModelBuilder {
             ctx.entityBody().explicitAttr().flatMap { explicitAttrCtx ->
                 buildAttributesFor(explicitAttrCtx, symbols, name, source)
             }
+        val derivedAttributes =
+            ctx
+                .entityBody()
+                .deriveClause()
+                ?.derivedAttr()
+                ?.map { buildDerivedAttribute(it, symbols, name, source) } ?: emptyList()
+        val inverseAttributes =
+            ctx
+                .entityBody()
+                .inverseClause()
+                ?.inverseAttr()
+                ?.map { buildInverseAttribute(it, source) } ?: emptyList()
+        val uniqueRules =
+            ctx
+                .entityBody()
+                .uniqueClause()
+                ?.uniqueRule()
+                ?.map { buildUniqueRule(it, source) } ?: emptyList()
         val whereRules =
             ctx
                 .entityBody()
@@ -113,6 +131,9 @@ object ExpressSemanticModelBuilder {
             supertypes = supertypes,
             supertypeConstraintRawText = supertypeConstraint?.let { verbatim(it, source) },
             attributes = attributes,
+            derivedAttributes = derivedAttributes,
+            inverseAttributes = inverseAttributes,
+            uniqueRules = uniqueRules,
             whereRules = whereRules,
             sourceLine = ctx.start.line,
         )
@@ -167,6 +188,88 @@ object ExpressSemanticModelBuilder {
         ExpressWhereRule(
             label = ctx.ruleLabelId()?.text,
             expressionText = verbatim(ctx.expression(), source),
+            sourceLine = ctx.start.line,
+        )
+
+    // derivedAttr shares attributeDecl with explicitAttr, which can itself be a redeclared
+    // (SELF\entity.attr) name -- a subtype overriding an inherited DERIVE with a more
+    // specific type is legal EXPRESS. Mirrors buildAttributesFor's Explicit/Redeclared split
+    // rather than failing the whole build on a construct the codebase already knows how to
+    // capture for explicit attributes.
+    private fun buildDerivedAttribute(
+        ctx: ExpressParser.DerivedAttrContext,
+        symbols: SchemaSymbols,
+        entityName: String,
+        source: String,
+    ): ExpressDerivedAttribute {
+        val attributeId = ctx.attributeDecl().attributeId()
+        val declaredType = mapParameterType(ctx.parameterType(), symbols, entityName, source)
+        val expressionText = verbatim(ctx.expression(), source)
+        return if (attributeId != null) {
+            ExpressDerivedAttribute.Explicit(
+                name = attributeId.text,
+                declaredType = declaredType,
+                expressionText = expressionText,
+                sourceLine = ctx.start.line,
+            )
+        } else {
+            ExpressDerivedAttribute.Redeclared(
+                rawText = verbatim(ctx.attributeDecl(), source),
+                declaredType = declaredType,
+                expressionText = expressionText,
+                sourceLine = ctx.start.line,
+            )
+        }
+    }
+
+    // Same Explicit/Redeclared split as buildDerivedAttribute, for the same reason --
+    // inverseAttr shares attributeDecl too.
+    private fun buildInverseAttribute(
+        ctx: ExpressParser.InverseAttrContext,
+        source: String,
+    ): ExpressInverseAttribute {
+        val attributeId = ctx.attributeDecl().attributeId()
+        val inverseAttrType = ctx.inverseAttrType()
+        val kind =
+            when {
+                inverseAttrType.SET() != null -> InverseAggregationKind.SET
+                inverseAttrType.BAG() != null -> InverseAggregationKind.BAG
+                else -> null
+            }
+        val boundsRawText = inverseAttrType.boundSpec()?.let { verbatim(it, source) }
+        val targetEntity = inverseAttrType.entityRef().text
+        val forEntity = ctx.entityRef()?.text
+        val forAttribute = ctx.attributeRef().text
+        return if (attributeId != null) {
+            ExpressInverseAttribute.Explicit(
+                name = attributeId.text,
+                kind = kind,
+                boundsRawText = boundsRawText,
+                targetEntity = targetEntity,
+                forEntity = forEntity,
+                forAttribute = forAttribute,
+                sourceLine = ctx.start.line,
+            )
+        } else {
+            ExpressInverseAttribute.Redeclared(
+                rawText = verbatim(ctx.attributeDecl(), source),
+                kind = kind,
+                boundsRawText = boundsRawText,
+                targetEntity = targetEntity,
+                forEntity = forEntity,
+                forAttribute = forAttribute,
+                sourceLine = ctx.start.line,
+            )
+        }
+    }
+
+    private fun buildUniqueRule(
+        ctx: ExpressParser.UniqueRuleContext,
+        source: String,
+    ): ExpressUniqueRule =
+        ExpressUniqueRule(
+            label = ctx.ruleLabelId()?.text,
+            referencedAttributes = ctx.referencedAttribute().map { verbatim(it, source) },
             sourceLine = ctx.start.line,
         )
 

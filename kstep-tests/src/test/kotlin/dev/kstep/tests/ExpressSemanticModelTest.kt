@@ -1,13 +1,18 @@
 package dev.kstep.tests
 
+import dev.kstep.express.codegen.Ap242V1CodeGen
 import dev.kstep.express.semantic.AggregationKind
 import dev.kstep.express.semantic.AggregationType
 import dev.kstep.express.semantic.BinaryType
 import dev.kstep.express.semantic.BooleanType
+import dev.kstep.express.semantic.DefinedTypeRef
 import dev.kstep.express.semantic.EntityTypeRef
 import dev.kstep.express.semantic.ExpressAttribute
+import dev.kstep.express.semantic.ExpressDerivedAttribute
+import dev.kstep.express.semantic.ExpressInverseAttribute
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
 import dev.kstep.express.semantic.IntegerType
+import dev.kstep.express.semantic.InverseAggregationKind
 import dev.kstep.express.semantic.NumberType
 import dev.kstep.express.semantic.RealType
 import dev.kstep.express.semantic.SemanticModelException
@@ -18,6 +23,7 @@ import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.types.shouldBeInstanceOf
 
 private fun loadFixture(name: String): String =
     requireNotNull(
@@ -105,6 +111,12 @@ class ExpressSemanticModelTest :
             entitiesByName.getValue("next_assembly_usage_occurrence").whereRules.single().let {
                 it.label shouldBe "wr1"
                 it.expressionText shouldBe "(SELF.id <> '') AND (SELF.reference_designator <> '')"
+            }
+
+            schema.entities.forEach { entity ->
+                entity.derivedAttributes shouldBe emptyList()
+                entity.inverseAttributes shouldBe emptyList()
+                entity.uniqueRules shouldBe emptyList()
             }
         }
 
@@ -389,6 +401,174 @@ class ExpressSemanticModelTest :
 
             val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
             schema.definedTypes.single { it.name == "thing" }.underlyingSimpleType shouldBe null
+        }
+
+        "real AP242 ground truth captures DERIVE and UNIQUE clauses without disturbing WHERE-rule capture" {
+            val schema = Ap242V1CodeGen.loadSchema()
+            val entitiesByName = schema.entities.associateBy { it.name }
+
+            val productDefinition = entitiesByName.getValue("product_definition")
+            productDefinition.derivedAttributes shouldHaveSize 1
+            productDefinition.derivedAttributes.single().shouldBeInstanceOf<ExpressDerivedAttribute.Explicit>().let {
+                it.name shouldBe "name"
+                it.declaredType shouldBe DefinedTypeRef("label")
+                it.expressionText shouldBe "get_name_value(SELF)"
+            }
+            productDefinition.uniqueRules shouldBe emptyList()
+            productDefinition.whereRules.single().label shouldBe "WR1"
+
+            val productDefinitionFormation = entitiesByName.getValue("product_definition_formation")
+            productDefinitionFormation.derivedAttributes shouldBe emptyList()
+            productDefinitionFormation.uniqueRules shouldHaveSize 1
+            productDefinitionFormation.uniqueRules.single().let {
+                it.label shouldBe "UR1"
+                it.referencedAttributes shouldContainExactly listOf("id", "of_product")
+            }
+
+            val nauo = entitiesByName.getValue("next_assembly_usage_occurrence")
+            nauo.derivedAttributes.single().shouldBeInstanceOf<ExpressDerivedAttribute.Explicit>().let {
+                it.name shouldBe "product_definition_occurrence_id"
+                it.declaredType shouldBe DefinedTypeRef("identifier")
+                it.expressionText shouldBe
+                    "SELF\\product_definition_relationship.related_product_definition" +
+                    "\\product_definition_occurrence.id"
+            }
+            nauo.uniqueRules shouldHaveSize 2
+            nauo.uniqueRules[0].label shouldBe "UR1"
+            nauo.uniqueRules[0].referencedAttributes shouldContainExactly
+                listOf(
+                    "SELF\\assembly_component_usage.reference_designator",
+                    "SELF\\product_definition_relationship.relating_product_definition",
+                )
+            nauo.uniqueRules[1].label shouldBe "UR2"
+            nauo.uniqueRules[1].referencedAttributes shouldContainExactly
+                listOf(
+                    "product_definition_occurrence_id",
+                    "SELF\\product_definition_relationship.relating_product_definition",
+                )
+            nauo.inverseAttributes shouldBe emptyList()
+
+            val personAndOrganization = entitiesByName.getValue("person_and_organization")
+            personAndOrganization.derivedAttributes shouldHaveSize 2
+            personAndOrganization.derivedAttributes[0].shouldBeInstanceOf<ExpressDerivedAttribute.Explicit>().let {
+                it.name shouldBe "name"
+                it.declaredType shouldBe DefinedTypeRef("label")
+                it.expressionText shouldBe "get_name_value(SELF)"
+            }
+            personAndOrganization.derivedAttributes[1].shouldBeInstanceOf<ExpressDerivedAttribute.Explicit>().let {
+                it.name shouldBe "description"
+                it.declaredType shouldBe DefinedTypeRef("text")
+                it.expressionText shouldBe "get_description_value(SELF)"
+            }
+            personAndOrganization.whereRules shouldHaveSize 2
+            personAndOrganization.whereRules[0].label shouldBe "WR1"
+            personAndOrganization.whereRules[1].label shouldBe "WR2"
+        }
+
+        "INVERSE clause is captured structurally, including a SET-of-bounded and an entityRef-qualified FOR form" {
+            val source =
+                """
+                SCHEMA inverse_test;
+                ENTITY gadget;
+                  owner : widget;
+                END_ENTITY;
+                ENTITY widget;
+                  id : STRING;
+                INVERSE
+                  owned_gadgets : SET [0:?] OF gadget FOR owner;
+                  primary_gadget : gadget FOR gadget.owner;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+            val widget = schema.entities.single { it.name == "widget" }
+            widget.inverseAttributes shouldHaveSize 2
+
+            widget.inverseAttributes[0].shouldBeInstanceOf<ExpressInverseAttribute.Explicit>().let {
+                it.name shouldBe "owned_gadgets"
+                it.kind shouldBe InverseAggregationKind.SET
+                it.boundsRawText shouldBe "[0:?]"
+                it.targetEntity shouldBe "gadget"
+                it.forEntity shouldBe null
+                it.forAttribute shouldBe "owner"
+            }
+            widget.inverseAttributes[1].shouldBeInstanceOf<ExpressInverseAttribute.Explicit>().let {
+                it.name shouldBe "primary_gadget"
+                it.kind shouldBe null
+                it.boundsRawText shouldBe null
+                it.targetEntity shouldBe "gadget"
+                it.forEntity shouldBe "gadget"
+                it.forAttribute shouldBe "owner"
+            }
+
+            val gadget = schema.entities.single { it.name == "gadget" }
+            gadget.inverseAttributes shouldBe emptyList()
+            gadget.derivedAttributes shouldBe emptyList()
+            gadget.uniqueRules shouldBe emptyList()
+        }
+
+        "DERIVE attribute using a redeclared (SELF\\entity.attr) name is captured as Redeclared, not thrown" {
+            val source =
+                """
+                SCHEMA derive_redeclared_test;
+                ENTITY base;
+                  level : INTEGER;
+                DERIVE
+                  computed : INTEGER := 1;
+                END_ENTITY;
+                ENTITY derived SUBTYPE OF (base);
+                DERIVE
+                  SELF\base.computed : INTEGER := 2;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val base = schema.entities.single { it.name == "base" }
+            base.derivedAttributes.single().shouldBeInstanceOf<ExpressDerivedAttribute.Explicit>().let {
+                it.name shouldBe "computed"
+                it.declaredType shouldBe IntegerType
+                it.expressionText shouldBe "1"
+            }
+
+            val derived = schema.entities.single { it.name == "derived" }
+            derived.derivedAttributes.single().shouldBeInstanceOf<ExpressDerivedAttribute.Redeclared>().let {
+                it.rawText shouldBe "SELF\\base.computed"
+                it.declaredType shouldBe IntegerType
+                it.expressionText shouldBe "2"
+            }
+        }
+
+        "INVERSE attribute using a redeclared (SELF\\entity.attr) name is captured as Redeclared, not thrown" {
+            val source =
+                """
+                SCHEMA inverse_redeclared_test;
+                ENTITY gadget;
+                  owner : widget;
+                END_ENTITY;
+                ENTITY widget;
+                  id : STRING;
+                INVERSE
+                  owned_gadgets : SET OF gadget FOR owner;
+                END_ENTITY;
+                ENTITY special_widget SUBTYPE OF (widget);
+                INVERSE
+                  SELF\widget.owned_gadgets : SET OF gadget FOR owner;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val specialWidget = schema.entities.single { it.name == "special_widget" }
+            specialWidget.inverseAttributes.single().shouldBeInstanceOf<ExpressInverseAttribute.Redeclared>().let {
+                it.rawText shouldBe "SELF\\widget.owned_gadgets"
+                it.kind shouldBe InverseAggregationKind.SET
+                it.targetEntity shouldBe "gadget"
+                it.forAttribute shouldBe "owner"
+            }
         }
     })
 

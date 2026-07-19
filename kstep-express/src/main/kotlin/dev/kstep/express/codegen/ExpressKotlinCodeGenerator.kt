@@ -20,6 +20,10 @@ import dev.kstep.express.semantic.ExpressSchema
  * silently-wrong or partial classes. Constructor parameters follow the kUML "named
  * parameters everywhere" convention: every EXPRESS attribute becomes a named, and — for
  * OPTIONAL attributes — defaulted, constructor parameter, in EXPRESS declaration order.
+ *
+ * As of M1 Welle 6, [ExpressEntity] also carries `derivedAttributes`/`inverseAttributes`/
+ * `uniqueRules` — this generator still does not read them; `DERIVE`/`INVERSE`/`UNIQUE`
+ * remain capture-only metadata with no Kotlin representation.
  */
 object ExpressKotlinCodeGenerator {
     fun generateFile(

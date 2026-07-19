@@ -116,8 +116,11 @@ surface (M1, first three waves). Concretely, as of this writing:
   now succeeds for `product`, `product_definition`,
   `product_definition_formation`, `approval`, and
   `person_and_organization` — `product_definition`'s and
-  `person_and_organization`'s `DERIVE` attributes are still silently
-  dropped (a pre-existing, documented Welle-2 gap, not this wave's job).
+  `person_and_organization`'s `DERIVE` attributes were, at that time,
+  still silently dropped by the semantic model itself (a pre-existing
+  Welle-2 gap; M1 Welle 6, below, closes it — the semantic model now
+  captures them, though `ExpressKotlinCodeGenerator` still does not turn
+  them into Kotlin).
   `next_assembly_usage_occurrence`'s *real* form is
   `SUBTYPE OF (assembly_component_usage)` with **zero of its own
   explicit attributes** — everything comes from the supertype via
@@ -239,6 +242,35 @@ surface (M1, first three waves). Concretely, as of this writing:
   matching how Wave 2's codegen and Wave 3's WHERE-rule evaluator were
   introduced as plain Kotlin APIs before any CLI wiring. The CLI
   module itself (`kstep-cli`) is still a placeholder skeleton.
+* (M1 Welle 6) The semantic model now captures `DERIVE`, `INVERSE`, and
+  `UNIQUE` entity-body clauses — a gap flagged across three separate
+  wave reviews (`ExpressEntity`'s own "losslessly captured" KDoc was,
+  until now, aspirational rather than true). Three new data classes in
+  `dev.kstep.express.semantic`: `ExpressDerivedAttribute` (name,
+  declared type via the same `parameterType` resolution explicit
+  attributes already use, verbatim initializer `expressionText` —
+  DERIVE expressions are captured, not evaluated, exactly like WHERE
+  rules), `ExpressInverseAttribute` (name, optional SET/BAG
+  `InverseAggregationKind` + bounds, unresolved raw `targetEntity`,
+  optional `forEntity` qualifier, `forAttribute`), and
+  `ExpressUniqueRule` (optional label, verbatim
+  `referencedAttributes` list, covering both bare and
+  `SELF\entity.attr`-qualified forms). `ExpressEntity` gained matching
+  `derivedAttributes`/`inverseAttributes`/`uniqueRules` fields,
+  defaulting to empty lists exactly like `whereRules` when a clause is
+  absent. DERIVE and UNIQUE assertions are cross-checked against the
+  real `product_definition`, `product_definition_formation`,
+  `next_assembly_usage_occurrence`, and `person_and_organization`
+  entities in `ap242-v1-entities.exp`; no V1 entity has an `INVERSE`
+  clause, so that capture is proven against a small, hand-written
+  synthetic fixture instead. A redeclared (`SELF\entity.attr`) DERIVE
+  or INVERSE name throws a structured `SemanticModelException` rather
+  than silently dropping the clause or NPE-ing, mirroring
+  `mapParameterType`'s existing precedent for out-of-scope
+  constructs. Evaluation of `DERIVE`/`INVERSE`/`UNIQUE` and
+  `ExpressKotlinCodeGenerator` codegen support remain out of scope —
+  this wave is capture only, exactly like WHERE-rule capture (Wave 2)
+  preceded WHERE-rule evaluation (Wave 3).
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -526,8 +558,9 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   for the two support entities `product_context`/
   `product_definition_context` that `product`/`product_definition`
   reference but can't yet fully compile against), `DERIVE`/`INVERSE`/
-  `UNIQUE` clause capture and codegen, and `SELECT`/`ENUMERATION`-type
-  and transitive-`TYPE`-alias resolution.
+  `UNIQUE` clause codegen and evaluation (capture done as of M1 Welle 6
+  — see <<status,Status>>), and `SELECT`/`ENUMERATION`-type and
+  transitive-`TYPE`-alias resolution.
 . A semantic AP242 core: product structure and metadata, without
   B-rep geometry and without PMI (PMI references geometry shape
   aspects and moves with the geometry milestone). The Kotlin type
