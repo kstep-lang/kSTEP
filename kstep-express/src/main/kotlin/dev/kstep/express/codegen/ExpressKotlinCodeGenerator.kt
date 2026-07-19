@@ -143,9 +143,9 @@ object ExpressKotlinCodeGenerator {
         }
     }
 
-    // Informational only, no evaluation logic — WHERE-rule interpretation is out of scope
-    // for this wave. Uses the "%L" literal placeholder rather than interpolating the raw
-    // expression text into the KDoc format string directly, so a "%" inside a WHERE
+    // Informational only, no evaluation logic here — this generated class does not evaluate
+    // its own WHERE rules. Uses the "%L" literal placeholder rather than interpolating the
+    // raw expression text into the KDoc format string directly, so a "%" inside a WHERE
     // expression (however unlikely) can't be misread as a KotlinPoet format specifier.
     private fun addWhereRulesKdoc(
         entity: ExpressEntity,
@@ -154,7 +154,10 @@ object ExpressKotlinCodeGenerator {
         if (entity.whereRules.isEmpty()) return
         val kdoc =
             buildString {
-                appendLine("WHERE rules (not evaluated by kSTEP V1):")
+                appendLine(
+                    "WHERE rules (evaluated at runtime via dev.kstep.express.validation.WhereRuleValidator, " +
+                        "not by this generated class itself):",
+                )
                 entity.whereRules.forEach { rule ->
                     appendLine("- ${rule.label ?: "(unlabeled)"}: ${rule.expressionText}")
                 }

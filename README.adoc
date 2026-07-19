@@ -62,9 +62,9 @@ box it in.
 [#status]
 == Status
 
-The project has completed the EXPRESS parser, semantic model, and
-Kotlin code generation (M1, first two waves). Concretely, as of this
-writing:
+The project has completed the EXPRESS parser, semantic model, Kotlin
+code generation, `WHERE`-rule evaluation, and a first runtime DSL
+surface (M1, first three waves). Concretely, as of this writing:
 
 * An ANTLR4-based parser for the EXPRESS schema language (ISO 10303-11)
   exists and successfully parses a hand-written AP242-subset fixture in
@@ -76,8 +76,7 @@ writing:
   against a per-schema, case-insensitive symbol table built in a
   two-pass walk, so forward references (an entity referencing an
   entity declared later in the same schema) resolve correctly.
-  `WHERE`-rule bodies are captured verbatim as unparsed source text —
-  evaluating them is not implemented yet (see <<roadmap,Roadmap>>).
+  `WHERE`-rule bodies are captured verbatim as unparsed source text.
 * A KotlinPoet-based code generator
   (`dev.kstep.express.codegen.ExpressKotlinCodeGenerator`) turns the
   semantic model into idiomatic Kotlin `data class`es, one per entity,
@@ -90,9 +89,51 @@ writing:
   `CodeGenException` instead of emitting a silently wrong or partial
   class. Not yet wired into a Gradle task; it's a plain Kotlin API
   callable from tests.
-* No Part 21 reader/writer, no `WHERE`-rule evaluation, and no CLI
-  commands exist yet — `kstep-core`, `kstep-step21`, and the CLI are
-  placeholder skeletons.
+* A `WHERE`-rule evaluator (`dev.kstep.express.validation`) interprets
+  the actually-occurring subset of EXPRESS WHERE-rule expressions:
+  comparisons (`>`, `>=`, `<`, `<=`, `=`, `<>`), `SELF.attribute`
+  references (and the equivalent bare `attribute` form) resolved
+  against an instance attribute value bag, string/integer/real
+  literals, and `AND`/`OR`/`NOT` boolean combinators.
+  `WhereRuleExpressionBuilder` re-parses the verbatim expression text
+  via a new `ExpressParserFactory.parseExpression` entry point and
+  walks the `expression` parse tree into a small AST;
+  `WhereRuleEvaluator` evaluates that AST against a
+  `Map<String, WhereRuleValue>`; `WhereRuleValidator` ties both
+  together into a `(entityName, rules, attributeValues) ->
+  List<WhereRuleViolation>` API. Anything outside the supported subset
+  (`EXISTS()`, `SIZEOF()`, other function calls, aggregate/set
+  operations, `QUERY`, arithmetic operators, the tri-state `LOGICAL`
+  type, ...) raises a structured `UnsupportedWhereExpressionException`
+  instead of silently doing the wrong thing; a genuine evaluation-time
+  problem (a missing attribute, a non-boolean result, an
+  incompatible-type comparison) raises `WhereRuleEvaluationException`.
+  Both the re-parse and the AST walk are depth-guarded against
+  pathologically deep (but syntactically valid) expressions, mirroring
+  the existing `StackOverflowError` guard at the ANTLR-parse boundary
+  and the `MAX_TYPE_NESTING_DEPTH` guard in the semantic model. The
+  `ap242-subset.exp` fixture now carries a `WHERE` rule on five of its
+  six entities (`product_definition_formation` deliberately has none),
+  exercised end-to-end from parse through evaluation.
+* `kstep-core` now has hand-authored, type-safe Kotlin builders for all
+  six V1 entities (`dev.kstep.core.ap242`): `product`,
+  `personAndOrganization`, `approval`, `productDefinitionFormation`,
+  `productDefinition`, `nextAssemblyUsageOccurrence`. Each is a
+  named-parameter, lambda-with-receiver DSL function returning
+  `dev.kstep.core.ValidationResult<T>` — `Valid(value)` or
+  `Invalid(violations)`, never a thrown exception for a validation
+  failure. Building an instance runs the WHERE-rule evaluator against
+  the built values and also checks that every mandatory entity-typed
+  reference attribute was actually set, collecting *all* violations
+  (never stopping at the first) as structured `DslViolation`s with
+  `KSTEP-W-001` (WHERE rule not satisfied) or `KSTEP-M-001` (missing
+  mandatory reference) codes, analogous to kUML's `KUML-E-xxx`
+  structured errors. These six types are currently hand-authored
+  independently of `ExpressKotlinCodeGenerator`'s generated output —
+  reconciling the two is tracked as future work (see
+  <<roadmap,Roadmap>>).
+* No Part 21 reader/writer and no CLI commands exist yet —
+  `kstep-step21` and the CLI are placeholder skeletons.
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -103,17 +144,28 @@ See <<roadmap,Roadmap>> for what's planned next.
 
 | `kstep-core`
 | Core DSL types (schema-independent runtime support for the generated
-  Kotlin DSL)
-| Empty skeleton — no source yet
+  Kotlin DSL): `dev.kstep.core.ValidationResult`/`DslViolation`, and
+  hand-authored named-parameter builders for the six V1 AP242 entities
+  under `dev.kstep.core.ap242`
+| Working: `product`/`personAndOrganization`/`approval`/
+  `productDefinitionFormation`/`productDefinition`/
+  `nextAssemblyUsageOccurrence` builder functions, each running
+  WHERE-rule and mandatory-reference validation and returning a
+  `ValidationResult`. Depends on `kstep-express` for
+  `dev.kstep.express.validation` only (no ANTLR types on its own
+  compile classpath).
 
 | `kstep-express`
 | ANTLR4-generated EXPRESS parser (`dev.kstep.express.ExpressParserFactory`),
-  semantic model (`dev.kstep.express.semantic`), and Kotlin code
+  semantic model (`dev.kstep.express.semantic`), Kotlin code
   generator (`dev.kstep.express.codegen.ExpressKotlinCodeGenerator`,
-  built on KotlinPoet)
+  built on KotlinPoet), and WHERE-rule validation
+  (`dev.kstep.express.validation`)
 | Working: parses EXPRESS source into an ANTLR parse tree; walks it
-  into a semantic AST; generates Kotlin `data class`es from that AST.
-  Not yet wired into a Gradle task.
+  into a semantic AST; generates Kotlin `data class`es from that AST;
+  evaluates the supported WHERE-rule expression subset against
+  instance attribute values. Code generation is not yet wired into a
+  Gradle task.
 
 | `kstep-step21`
 | STEP Part 21 (physical file exchange format) reader/writer
@@ -125,9 +177,11 @@ See <<roadmap,Roadmap>> for what's planned next.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
-| Smoke test for the EXPRESS parser, plus semantic-model, naming-convention,
-  and code-generation tests, all exercised against a hand-written
-  AP242-subset EXPRESS fixture
+| Smoke test for the EXPRESS parser; semantic-model, naming-convention,
+  and code-generation tests; WHERE-rule expression-builder, evaluator,
+  and validator tests (unit-level and an end-to-end fixture
+  integration test); and `kstep-core` DSL builder tests — all
+  exercised against a hand-written AP242-subset EXPRESS fixture
 |===
 
 == Building
@@ -141,7 +195,8 @@ Requires JDK 21. The Gradle wrapper pins Gradle 9.6.1.
 
 `check` runs ktlint and the Kotest test suite in `kstep-tests`: the
 EXPRESS parser smoke test, semantic-model tests, naming-convention
-tests, and code-generation tests.
+tests, code-generation tests, WHERE-rule expression-builder/evaluator/
+validator tests, and `kstep-core` DSL builder tests.
 
 == Usage (current capability)
 
@@ -186,6 +241,57 @@ in the same schema. `ExpressKotlinCodeGenerator` throws
 Kotlin (see <<status,Status>> above). None of this is wired into the
 CLI or a Gradle task yet — that is upcoming work.
 
+Building a `kstep-core` DSL entity runs WHERE-rule validation and
+returns a structured result instead of throwing for a validation
+failure:
+
+[source,kotlin]
+----
+import dev.kstep.core.ValidationResult
+import dev.kstep.core.ap242.product
+
+val result = product(id = "BRK-001") {
+    name = "Bracket"
+    description = "Mounting bracket"
+}
+when (result) {
+    is ValidationResult.Valid -> println(result.value)
+    is ValidationResult.Invalid -> println(result.violations)
+}
+
+// An empty id violates product's WHERE rule (SELF.id <> ''):
+val invalid = product(id = "") { name = "Bracket" }
+println((invalid as ValidationResult.Invalid).violations)
+// [DslViolation(code=KSTEP-W-001, entityName=product, ruleLabel=wr1,
+//   expressionText=SELF.id <> '', message=WHERE rule wr1 not satisfied: SELF.id <> '')]
+----
+
+`WhereRuleValidator.validate` — the lower-level API `kstep-core`'s
+builders call internally — re-parses WHERE-rule expression text and
+evaluates it against a `Map<String, WhereRuleValue>`:
+
+[source,kotlin]
+----
+import dev.kstep.express.validation.WhereRuleSpec
+import dev.kstep.express.validation.WhereRuleValidator
+import dev.kstep.express.validation.WhereRuleValue
+
+val violations = WhereRuleValidator.validate(
+    entityName = "approval",
+    rules = listOf(WhereRuleSpec(label = "wr1", expressionText = "SELF.level >= 0")),
+    attributeValues = mapOf("level" to WhereRuleValue.IntegerValue(-1)),
+)
+println(violations)
+// [WhereRuleViolation(entityName=approval, ruleLabel=wr1, expressionText=SELF.level >= 0, sourceLine=0)]
+----
+
+A WHERE-rule expression using a construct outside the supported subset
+(`EXISTS()`, `QUERY`, arithmetic, ...) throws
+`UnsupportedWhereExpressionException`; a genuine evaluation-time
+problem (a missing attribute, a non-boolean result, an
+incompatible-type comparison) throws `WhereRuleEvaluationException`.
+Neither is ever silently swallowed into an empty violation list.
+
 [#roadmap]
 == Roadmap (V1 scope)
 
@@ -206,13 +312,26 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   layer for its six core entities (`PRODUCT`, `PRODUCT_DEFINITION` +
   revision, `PRODUCT_DEFINITION_FORMATION`,
   `NEXT_ASSEMBLY_USAGE_OCCURRENCE`, `APPROVAL`,
-  `PERSON_AND_ORGANIZATION`) now generates correctly from the fixture;
-  no runtime construction/validation API on top of the generated types
-  exists yet.
+  `PERSON_AND_ORGANIZATION`) now generates correctly from the fixture,
+  and `kstep-core` now has a runtime construction/validation API on
+  top of hand-authored equivalents of those six types (see
+  <<status,Status>> above) — reconciling the hand-authored types with
+  `ExpressKotlinCodeGenerator`'s generated output is still pending,
+  tracked for once codegen has run against a real (non-fixture) AP242
+  schema.
 . Validation: EXPRESS `WHERE` rules surfaced as structured errors.
-  The semantic model already captures `WHERE`-rule labels and
-  verbatim expression text per entity; evaluating those expressions
-  is not implemented yet.
+  Done for the supported expression subset (comparisons, `SELF.attribute`
+  references, `AND`/`OR`/`NOT`, string/integer/real literals) — see
+  <<status,Status>> above. Constructs outside that subset (`EXISTS()`,
+  `SIZEOF()`, other function calls, aggregate/set operations, `QUERY`,
+  arithmetic operators, the tri-state `LOGICAL` type) are not evaluated
+  and raise a structured exception instead. Note that WHERE-rule
+  evaluation is not the same thing as EXPRESS mandatory-attribute-
+  presence enforcement (the `$`-token / non-OPTIONAL mechanism) — an
+  attribute with no WHERE rule backing it is not checked for presence
+  beyond what `kstep-core`'s builders separately enforce for
+  entity-typed references; this remains a known, intentional gap for a
+  future wave, not a bug.
 . STEP Part 21 export/import, with a lossless roundtrip through
   external CAD/PLM tools as the acceptance criterion.
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and

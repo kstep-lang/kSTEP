@@ -2,8 +2,9 @@ package dev.kstep.express.semantic
 
 /**
  * A `WHERE` clause `domainRule`, captured as raw, unparsed expression text. Evaluating
- * WHERE-rule expressions is explicitly deferred to a later wave — this just records that
- * a rule exists, its optional label, and its verbatim source text.
+ * this text is not this class's job — see `dev.kstep.express.validation.WhereRuleValidator`,
+ * which re-parses `expressionText` via `ExpressParserFactory.parseExpression` and evaluates
+ * it against actual instance attribute values.
  */
 data class ExpressWhereRule(
     val label: String?,

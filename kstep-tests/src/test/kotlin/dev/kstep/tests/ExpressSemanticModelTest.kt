@@ -77,7 +77,30 @@ class ExpressSemanticModelTest :
             schema.entities.forEach { entity ->
                 entity.isAbstract shouldBe false
                 entity.supertypes shouldBe emptyList()
-                entity.whereRules shouldBe emptyList()
+            }
+
+            // product_definition_formation is the fixture's deliberate "entity legitimately
+            // has zero WHERE rules" case; the other five each carry exactly one.
+            entitiesByName.getValue("product_definition_formation").whereRules shouldBe emptyList()
+            entitiesByName.getValue("person_and_organization").whereRules.single().let {
+                it.label shouldBe "wr1"
+                it.expressionText shouldBe "NOT ((SELF.the_person = '') AND (SELF.the_organization = ''))"
+            }
+            entitiesByName.getValue("approval").whereRules.single().let {
+                it.label shouldBe "wr1"
+                it.expressionText shouldBe "SELF.level >= 0"
+            }
+            entitiesByName.getValue("product").whereRules.single().let {
+                it.label shouldBe "wr1"
+                it.expressionText shouldBe "SELF.id <> ''"
+            }
+            entitiesByName.getValue("product_definition").whereRules.single().let {
+                it.label shouldBe "wr1"
+                it.expressionText shouldBe "SELF.id <> ''"
+            }
+            entitiesByName.getValue("next_assembly_usage_occurrence").whereRules.single().let {
+                it.label shouldBe "wr1"
+                it.expressionText shouldBe "(SELF.id <> '') AND (SELF.reference_designator <> '')"
             }
         }
 
