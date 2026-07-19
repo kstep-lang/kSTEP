@@ -64,11 +64,11 @@ class Ap242DslTest :
             valid.value.theOrganization shouldBe ""
         }
 
-        "approval builds a Valid instance when the reference is set and the level is non-negative" {
+        "approval builds a Valid instance when the reference is set and the level is non-empty" {
             val personAndOrg = validPersonAndOrganization()
             val result =
                 approval("approved") {
-                    level = 3
+                    level = "3"
                     authorizedBy = personAndOrg
                 }
             result.shouldBeInstanceOf<ValidationResult.Valid<*>>()
@@ -123,11 +123,11 @@ class Ap242DslTest :
             result.violations.single().code shouldBe DslViolationCodes.WHERE_RULE_NOT_SATISFIED
         }
 
-        "approval with a negative level fails its WHERE rule (reference is otherwise valid)" {
+        "approval with an empty level fails its WHERE rule (reference is otherwise valid)" {
             val personAndOrg = validPersonAndOrganization()
             val result =
                 approval("approved") {
-                    level = -1
+                    level = ""
                     authorizedBy = personAndOrg
                 }
             result.shouldBeInstanceOf<ValidationResult.Invalid>()
@@ -159,7 +159,7 @@ class Ap242DslTest :
         }
 
         "approval with authorizedBy never set fails with a missing-mandatory-reference violation" {
-            val result = approval("approved") { level = 3 }
+            val result = approval("approved") { level = "3" }
             result.shouldBeInstanceOf<ValidationResult.Invalid>()
             result.violations shouldHaveSize 1
             result.violations.single().code shouldBe DslViolationCodes.MISSING_MANDATORY_REFERENCE

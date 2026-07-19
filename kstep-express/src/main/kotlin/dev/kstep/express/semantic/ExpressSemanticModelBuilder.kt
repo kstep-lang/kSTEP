@@ -47,10 +47,14 @@ object ExpressSemanticModelBuilder {
             bodyDeclarations
                 .mapNotNull { it.declaration()?.entityDecl() }
                 .map { buildEntity(it, symbols, source) }
+        val definedTypes =
+            bodyDeclarations
+                .mapNotNull { it.declaration()?.typeDecl() }
+                .map { buildDefinedType(it, source) }
         return ExpressSchema(
             name = name,
             entities = entities,
-            definedTypeNames = symbols.definedTypeNamesByLowerCase.values.toSet(),
+            definedTypes = definedTypes,
             sourceLine = ctx.start.line,
         )
     }
@@ -140,6 +144,20 @@ object ExpressSemanticModelBuilder {
                 )
             }
         }
+    }
+
+    // Only resolves the single-level simple-alias case (concreteTypes -> simpleTypes); every
+    // other underlyingType shape (aggregationTypes, typeRef, constructedTypes) yields a null
+    // underlyingSimpleType, deliberately not chased further — see ExpressDefinedType.
+    private fun buildDefinedType(
+        ctx: ExpressParser.TypeDeclContext,
+        source: String,
+    ): ExpressDefinedType {
+        val simpleTypes = ctx.underlyingType().concreteTypes()?.simpleTypes()
+        return ExpressDefinedType(
+            name = ctx.typeId().text,
+            underlyingSimpleType = simpleTypes?.let { mapSimpleTypes(it, source) },
+        )
     }
 
     private fun buildWhereRule(

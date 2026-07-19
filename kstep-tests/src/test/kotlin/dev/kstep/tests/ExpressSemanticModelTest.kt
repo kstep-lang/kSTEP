@@ -2,10 +2,14 @@ package dev.kstep.tests
 
 import dev.kstep.express.semantic.AggregationKind
 import dev.kstep.express.semantic.AggregationType
+import dev.kstep.express.semantic.BinaryType
+import dev.kstep.express.semantic.BooleanType
 import dev.kstep.express.semantic.EntityTypeRef
 import dev.kstep.express.semantic.ExpressAttribute
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
 import dev.kstep.express.semantic.IntegerType
+import dev.kstep.express.semantic.NumberType
+import dev.kstep.express.semantic.RealType
 import dev.kstep.express.semantic.SemanticModelException
 import dev.kstep.express.semantic.StringType
 import io.kotest.assertions.throwables.shouldThrow
@@ -58,7 +62,7 @@ class ExpressSemanticModelTest :
             approval.attributes.map { (it as ExpressAttribute.Explicit).name to it.declaredType } shouldContainExactly
                 listOf(
                     "status" to StringType(widthText = null, fixed = false),
-                    "level" to IntegerType,
+                    "level" to StringType(widthText = null, fixed = false),
                     "authorized_by" to EntityTypeRef("person_and_organization"),
                 )
 
@@ -88,7 +92,7 @@ class ExpressSemanticModelTest :
             }
             entitiesByName.getValue("approval").whereRules.single().let {
                 it.label shouldBe "wr1"
-                it.expressionText shouldBe "SELF.level >= 0"
+                it.expressionText shouldBe "SELF.level <> ''"
             }
             entitiesByName.getValue("product").whereRules.single().let {
                 it.label shouldBe "wr1"
@@ -282,6 +286,109 @@ class ExpressSemanticModelTest :
             shouldThrow<SemanticModelException> {
                 ExpressSemanticModelBuilder.build(source)
             }
+        }
+
+        "TYPE aliasing each simple type captures its matching underlyingSimpleType" {
+            val source =
+                """
+                SCHEMA simple_alias_test;
+                TYPE a_string = STRING;
+                END_TYPE;
+                TYPE an_integer = INTEGER;
+                END_TYPE;
+                TYPE a_real = REAL;
+                END_TYPE;
+                TYPE a_boolean = BOOLEAN;
+                END_TYPE;
+                TYPE a_number = NUMBER;
+                END_TYPE;
+                TYPE a_binary = BINARY;
+                END_TYPE;
+                ENTITY widget;
+                  id : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+            val definedTypesByName = schema.definedTypes.associateBy { it.name }
+
+            definedTypesByName.getValue("a_string").underlyingSimpleType shouldBe
+                StringType(widthText = null, fixed = false)
+            definedTypesByName.getValue("an_integer").underlyingSimpleType shouldBe IntegerType
+            definedTypesByName.getValue("a_real").underlyingSimpleType shouldBe RealType(precisionText = null)
+            definedTypesByName.getValue("a_boolean").underlyingSimpleType shouldBe BooleanType
+            definedTypesByName.getValue("a_number").underlyingSimpleType shouldBe NumberType
+            definedTypesByName.getValue("a_binary").underlyingSimpleType shouldBe
+                BinaryType(widthText = null, fixed = false)
+        }
+
+        "TYPE aliasing another TYPE (one level of indirection) captures a null underlyingSimpleType" {
+            val source =
+                """
+                SCHEMA transitive_alias_test;
+                TYPE inner = STRING;
+                END_TYPE;
+                TYPE outer = inner;
+                END_TYPE;
+                ENTITY widget;
+                  id : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+            schema.definedTypes.single { it.name == "inner" }.underlyingSimpleType shouldBe
+                StringType(widthText = null, fixed = false)
+            schema.definedTypes.single { it.name == "outer" }.underlyingSimpleType shouldBe null
+        }
+
+        "TYPE aliasing SET OF STRING (an aggregation) captures a null underlyingSimpleType" {
+            val source =
+                """
+                SCHEMA aggregation_alias_test;
+                TYPE tags = SET OF STRING;
+                END_TYPE;
+                ENTITY widget;
+                  id : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+            schema.definedTypes.single { it.name == "tags" }.underlyingSimpleType shouldBe null
+        }
+
+        "TYPE aliasing an ENUMERATION captures a null underlyingSimpleType" {
+            val source =
+                """
+                SCHEMA enumeration_alias_test;
+                TYPE status = ENUMERATION OF (open, closed);
+                END_TYPE;
+                ENTITY widget;
+                  id : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+            schema.definedTypes.single { it.name == "status" }.underlyingSimpleType shouldBe null
+        }
+
+        "TYPE aliasing a SELECT captures a null underlyingSimpleType" {
+            val source =
+                """
+                SCHEMA select_alias_test;
+                ENTITY widget;
+                  id : STRING;
+                END_ENTITY;
+                TYPE thing = SELECT (widget);
+                END_TYPE;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+            schema.definedTypes.single { it.name == "thing" }.underlyingSimpleType shouldBe null
         }
     })
 

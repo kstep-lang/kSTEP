@@ -16,10 +16,10 @@ END_ENTITY;
 
 ENTITY approval;
   status         : STRING;
-  level          : INTEGER;
+  level          : STRING;
   authorized_by  : person_and_organization;
 WHERE
-  wr1: SELF.level >= 0;
+  wr1: SELF.level <> '';
 END_ENTITY;
 
 ENTITY product;

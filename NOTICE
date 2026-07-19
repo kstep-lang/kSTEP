@@ -9,6 +9,37 @@ lutaml/express-grammar project, Copyright (c) 2020 Ribose Inc.,
 licensed under the BSD 2-Clause License. The grammar file is vendored
 under kstep-express/src/main/antlr/dev/kstep/express/grammar/Express.g4.
 
+This product includes a small excerpt of the official AP242 EXPRESS
+schema — eleven declarations (the six V1 entities `product`,
+`product_definition`, `product_definition_formation`,
+`next_assembly_usage_occurrence`, `approval`, `person_and_organization`,
+plus the minimal supporting `TYPE`/`ENTITY` declarations their attribute
+types reference: `identifier`, `label`, `text`, `product_context`,
+`product_definition_context`, `approval_status`, `person`,
+`organization`) copied verbatim from
+ap242ed2_dis2_mim_lf_v1.101.exp — ISO TS 10303-442 AP242 "managed model
+based 3d engineering", EXPRESS MIM Long Form, v1.101 (2019) — obtained
+from the CAx Implementor Forum / MBx Implementor Forum's public EXPRESS
+schema resources at https://www.mbx-if.org/home/mbx/resources/express-schemas/.
+This excerpt is vendored under
+kstep-express/src/main/resources/dev/kstep/express/codegen/ap242-v1-entities.exp
+(see that file's own header comment for the exact provenance of each
+declaration); it is not the paywalled ISO standard prose (ISO/TS
+10303-442) and is not itself kSTEP source code or a build dependency.
+
+Provenance note: the complete, unmodified schema file is not vendored
+in this repository — only the eleven-declaration excerpt above. The
+decision to include even that excerpt rests on established precedent
+in the open-source STEP tooling ecosystem: the STEPcode project (BSD
+licensed, https://github.com/stepcode/stepcode) bundles this same
+MBx-IF-published AP242 schema family in full
+(https://github.com/stepcode/stepcode/tree/develop/data/ap242), without
+a separate copyright or license notice attached to the schema file
+itself beyond attribution to its ISO document number — the same
+attribution pattern followed here. This is not a legal opinion; it is
+a documented precedent, offered so a future maintainer or auditor can
+evaluate the same evidence rather than trusting an unverified claim.
+
 BSD 2-Clause License (Ribose Inc.)
 -----------------------------------
 Copyright (c) 2020, Ribose Inc.

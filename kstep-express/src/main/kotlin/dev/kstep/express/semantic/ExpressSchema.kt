@@ -4,6 +4,6 @@ package dev.kstep.express.semantic
 data class ExpressSchema(
     val name: String,
     val entities: List<ExpressEntity>,
-    val definedTypeNames: Set<String>,
+    val definedTypes: List<ExpressDefinedType>,
     val sourceLine: Int,
 )

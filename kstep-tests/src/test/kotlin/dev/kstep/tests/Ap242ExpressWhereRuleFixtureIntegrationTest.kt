@@ -49,17 +49,17 @@ class Ap242ExpressWhereRuleFixtureIntegrationTest :
             violations.single().ruleLabel shouldBe "wr1"
         }
 
-        "approval's WHERE rule passes for a non-negative level and fails for a negative one" {
+        "approval's WHERE rule passes for a non-empty level and fails for an empty one" {
             val entity = loadEntities().getValue("approval")
             val satisfying =
                 mapOf(
                     "status" to WhereRuleValue.StringValue("approved"),
-                    "level" to WhereRuleValue.IntegerValue(3),
+                    "level" to WhereRuleValue.StringValue("3"),
                 )
             val violating =
                 mapOf(
                     "status" to WhereRuleValue.StringValue("approved"),
-                    "level" to WhereRuleValue.IntegerValue(-1),
+                    "level" to WhereRuleValue.StringValue(""),
                 )
 
             WhereRuleValidator.validate(entity, satisfying).shouldBeEmpty()

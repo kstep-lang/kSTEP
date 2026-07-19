@@ -120,7 +120,7 @@ class ExpressCodeGenTest :
             exception.message shouldContain "SUBTYPE OF"
         }
 
-        "TYPE-referencing attribute resolves in the semantic model but throws CodeGenException in codegen" {
+        "TYPE-referencing attribute resolves to the underlying Kotlin type when it's a simple STRING alias" {
             val source =
                 """
                 SCHEMA type_ref_codegen_test;
@@ -132,10 +132,75 @@ class ExpressCodeGenTest :
                 END_SCHEMA;
                 """.trimIndent()
             val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val fileSpec = ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+
+            val widget = fileSpec.typeSpecs.single { it.name == "Widget" }
+            val nameParameter = widget.primaryConstructor!!.parameters.single { it.name == "name" }
+            nameParameter.type shouldBe STRING
+        }
+
+        "TYPE-referencing attribute throws CodeGenException when no defined-type context is supplied" {
+            val source =
+                """
+                SCHEMA type_ref_no_context_codegen_test;
+                TYPE label = STRING;
+                END_TYPE;
+                ENTITY widget;
+                  name : label;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
             val widget = schema.entities.single { it.name == "widget" }
 
+            // generateEntityType's definedTypes parameter defaults to emptyMap(): a caller
+            // driving single-entity codegen directly (like every other test in this file) gets
+            // a structured CodeGenException instead of an unresolved lookup crashing, even
+            // though the SAME attribute resolves fine when generateFile supplies the schema's
+            // own definedTypes (see the test above).
             shouldThrow<CodeGenException> {
                 ExpressKotlinCodeGenerator.generateEntityType(widget, PACKAGE_NAME)
+            }
+        }
+
+        "TYPE aliasing another TYPE (one level of indirection) throws CodeGenException, not resolved transitively" {
+            val source =
+                """
+                SCHEMA transitive_type_codegen_test;
+                TYPE inner = STRING;
+                END_TYPE;
+                TYPE outer = inner;
+                END_TYPE;
+                ENTITY widget;
+                  name : outer;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val exception =
+                shouldThrow<CodeGenException> {
+                    ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+                }
+            exception.message shouldContain "outer"
+        }
+
+        "TYPE aliasing an ENUMERATION throws CodeGenException even with a defined-type context supplied" {
+            val source =
+                """
+                SCHEMA enum_type_codegen_test;
+                TYPE status = ENUMERATION OF (open, closed);
+                END_TYPE;
+                ENTITY widget;
+                  state : status;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            shouldThrow<CodeGenException> {
+                ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
             }
         }
 

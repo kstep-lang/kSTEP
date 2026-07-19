@@ -6,11 +6,17 @@ import dev.kstep.express.validation.WhereRuleValidator
 import dev.kstep.express.validation.WhereRuleValue
 
 private const val ENTITY_NAME = "approval"
-private val WHERE_RULES = listOf(WhereRuleSpec(label = "wr1", expressionText = "SELF.level >= 0"))
+private val WHERE_RULES = listOf(WhereRuleSpec(label = "wr1", expressionText = "SELF.level <> ''"))
 
 /**
- * `dev.kstep.express` AP242-subset `approval` entity — `status`/`STRING`, `level`/`INTEGER`,
+ * `dev.kstep.express` AP242-subset `approval` entity — `status`/`STRING`, `level`/`STRING`,
  * `authorized_by`/`person_and_organization`.
+ *
+ * `level` is `STRING`, not `INTEGER`: the real AP242 MIM's `approval.level` attribute is typed
+ * `label` (a `TYPE label = STRING;` alias, see `ap242-v1-entities.exp` and
+ * `dev.kstep.express.codegen.Ap242V1CodeGen`), which this fixture and builder now match — a
+ * correctness fix from M1 Welle 4, which had originally (Welle 3) assumed `INTEGER` without a
+ * real schema to check against.
  *
  * The constructor is `internal` — see [Product]'s equivalent doc note for why: only the
  * [approval] builder function may produce an instance, so it always passes through
@@ -20,12 +26,12 @@ private val WHERE_RULES = listOf(WhereRuleSpec(label = "wr1", expressionText = "
 @ConsistentCopyVisibility
 data class Approval internal constructor(
     val status: String,
-    val level: Int,
+    val level: String,
     val authorizedBy: PersonAndOrganization,
 )
 
 class ApprovalBuilder internal constructor() {
-    var level: Int = 0
+    var level: String = ""
 
     // Nullable purely as an internal "was it set" presence sentinel: authorized_by is not an
     // EXPRESS OPTIONAL attribute, so a still-null reference at build() time is a structural
@@ -48,7 +54,7 @@ fun approval(
     val attributeValues =
         mapOf(
             "status" to WhereRuleValue.StringValue(status),
-            "level" to WhereRuleValue.IntegerValue(builder.level.toLong()),
+            "level" to WhereRuleValue.StringValue(builder.level),
         )
     val whereRuleViolations =
         WhereRuleValidator.validate(ENTITY_NAME, WHERE_RULES, attributeValues).map { it.toDslViolation() }

@@ -7,6 +7,7 @@ import com.squareup.kotlinpoet.ParameterSpec
 import com.squareup.kotlinpoet.PropertySpec
 import com.squareup.kotlinpoet.TypeSpec
 import dev.kstep.express.semantic.ExpressAttribute
+import dev.kstep.express.semantic.ExpressDefinedType
 import dev.kstep.express.semantic.ExpressEntity
 import dev.kstep.express.semantic.ExpressSchema
 
@@ -26,6 +27,7 @@ object ExpressKotlinCodeGenerator {
         packageName: String,
     ): FileSpec {
         val fileBuilder = FileSpec.builder(packageName, NamingConventions.toClassName(schema.name))
+        val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
         // Declaration order is preserved for readability, but codegen must not rely on it:
         // Kotlin doesn't require forward declaration within a file, so entities can
         // reference other entities regardless of their relative order in the schema.
@@ -47,7 +49,7 @@ object ExpressKotlinCodeGenerator {
                         "or case); codegen refuses to emit a file with duplicate class declarations",
                 )
             }
-            fileBuilder.addType(generateEntityType(entity, packageName))
+            fileBuilder.addType(generateEntityType(entity, packageName, definedTypesByLowerName))
         }
         return fileBuilder.build()
     }
@@ -63,6 +65,7 @@ object ExpressKotlinCodeGenerator {
     fun generateEntityType(
         entity: ExpressEntity,
         packageName: String,
+        definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
     ): TypeSpec {
         if (entity.supertypes.isNotEmpty()) {
             throw CodeGenException(
@@ -89,7 +92,15 @@ object ExpressKotlinCodeGenerator {
         // with the same name and different types — non-compiling Kotlin. Guard loudly instead.
         val seenPropertyNames = mutableSetOf<String>()
         entity.attributes.forEach { attribute ->
-            addAttribute(attribute, entity, packageName, constructorBuilder, classBuilder, seenPropertyNames)
+            addAttribute(
+                attribute,
+                entity,
+                packageName,
+                definedTypes,
+                constructorBuilder,
+                classBuilder,
+                seenPropertyNames,
+            )
         }
 
         classBuilder.primaryConstructor(constructorBuilder.build())
@@ -102,6 +113,7 @@ object ExpressKotlinCodeGenerator {
         attribute: ExpressAttribute,
         entity: ExpressEntity,
         packageName: String,
+        definedTypes: Map<String, ExpressDefinedType>,
         constructorBuilder: FunSpec.Builder,
         classBuilder: TypeSpec.Builder,
         seenPropertyNames: MutableSet<String>,
@@ -114,7 +126,7 @@ object ExpressKotlinCodeGenerator {
                 )
             is ExpressAttribute.Explicit -> {
                 val errorContext = "entity '${entity.name}' attribute '${attribute.name}'"
-                val baseType = resolveKotlinTypeName(attribute.declaredType, packageName, errorContext)
+                val baseType = resolveKotlinTypeName(attribute.declaredType, packageName, errorContext, definedTypes)
                 val propertyType = if (attribute.isOptional) baseType.copy(nullable = true) else baseType
                 val propertyName =
                     NamingConventions.escapeIfKotlinKeyword(NamingConventions.toPropertyName(attribute.name))
