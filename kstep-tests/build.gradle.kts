@@ -10,6 +10,7 @@ kotlin {
 dependencies {
     implementation(project(":kstep-express"))
     implementation(project(":kstep-core"))
+    implementation(project(":kstep-step21"))
     implementation(libs.antlr4.runtime)
     testImplementation(libs.kotlinpoet)
     testImplementation(libs.kotest.runner.junit5)

@@ -187,8 +187,58 @@ surface (M1, first three waves). Concretely, as of this writing:
   independently of `ExpressKotlinCodeGenerator`'s generated output —
   reconciling the two is tracked as future work (see
   <<roadmap,Roadmap>>).
-* No Part 21 reader/writer and no CLI commands exist yet —
-  `kstep-step21` and the CLI are placeholder skeletons.
+* (M1 Welle 5) `kstep-step21` now has a real STEP Part 21 (ISO
+  10303-21 physical file exchange format) writer and reader for the
+  six V1 AP242 entities, in `dev.kstep.step21`. Part 21 is a
+  different, much simpler ISO 10303 sub-format than EXPRESS (the
+  physical `#123=ENTITY_NAME(...);` exchange syntax, not a schema
+  language), so this wave deliberately does not reuse the ANTLR
+  EXPRESS grammar/parser — it is a small, independent, hand-rolled
+  scanner (`Part21Tokenizer`) plus a two-pass graph resolver
+  (`Part21GraphResolver`). `Part21Writer.write(header, roots)`
+  serializes a graph of already-validated `kstep-core` instances,
+  deduplicating shared references by object identity (not structural
+  equality) so a single shared `Product` gets exactly one `#N` no
+  matter how many `ProductDefinitionFormation`s reference it.
+  `Part21Reader.read(source)` parses Part-21 text back, resolving
+  forward references (an entity may reference a `#N` defined later in
+  the file) via an iterative, non-recursive topological sort, and
+  reconstructs each instance through its `kstep-core` builder function
+  — so `WHERE`-rule validation runs on read too, not only on write.
+  Genuine structural malformation (missing semicolon, malformed `#N=`,
+  unknown entity name, wrong argument arity/kind, a reference pointing
+  at the wrong target entity type, a dangling reference, a reference
+  cycle, or a DoS-guard trip on source length/instance count/nesting
+  depth/reference-chain depth) raises one of six structured exceptions
+  (`Part21SyntaxException`, `Part21EncodingException`,
+  `Part21DanglingReferenceException`, `Part21CycleException`,
+  `Part21LimitExceededException`, `Part21WriteException`). A
+  `WHERE`-rule failure while reconstructing a parsed instance is
+  *not* thrown — it surfaces as a `DslViolation` in the returned
+  `Part21ReadResult.violations`, with any instance that (directly or
+  transitively) depended on a failed instance recorded in
+  `Part21ReadResult.skipped` instead of being attempted, mirroring
+  `kstep-core`'s own "a validation failure is structured data, not a
+  thrown exception" philosophy. V1 does not implement ISO 10303-21's
+  `\X\`/`\X2\`/`\X4\` non-ASCII escape mechanism — string values are
+  scoped to printable ASCII plus the `''`-doubling convention for an
+  embedded `'`; anything else raises `Part21EncodingException` rather
+  than being silently mis-encoded. **Acceptance-criterion honesty**:
+  kSTEP-ADR-0001 names a lossless roundtrip through an external
+  CAD/PLM tool (e.g. FreeCAD) as the real-world bar for Part 21
+  export/import. No such tool is available in this development
+  environment, so that external validation has **not** been done —
+  this wave's acceptance test is a self-roundtrip only
+  (`Part21Reader.read(Part21Writer.write(header, model)) == model`,
+  verified in `Part21RoundtripTest`). This closes the kSTEP-own-format
+  half of the ADR-0001 bar, not the external-interop half; see
+  <<roadmap,Roadmap>> below, which carries the FreeCAD/external-tool
+  gap forward explicitly rather than overclaiming it.
+* `kstep-step21` has no CLI wiring yet (no `kstep render`/`kstep
+  import` command) — it is a library API only, callable from tests,
+  matching how Wave 2's codegen and Wave 3's WHERE-rule evaluator were
+  introduced as plain Kotlin APIs before any CLI wiring. The CLI
+  module itself (`kstep-cli`) is still a placeholder skeleton.
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -228,8 +278,14 @@ See <<roadmap,Roadmap>> for what's planned next.
   module's own compile classpath — see Building below).
 
 | `kstep-step21`
-| STEP Part 21 (physical file exchange format) reader/writer
-| Empty skeleton — no source yet
+| STEP Part 21 (ISO 10303-21 physical file exchange format)
+  reader/writer for the six V1 AP242 entities (`dev.kstep.step21`)
+| Working: `Part21Writer.write`/`Part21Reader.read`, a hand-rolled
+  scanner and two-pass graph resolver (independent of the ANTLR
+  EXPRESS grammar — Part 21 is a different sub-format). Verified via a
+  self-roundtrip test suite in `kstep-tests`; no external CAD/PLM
+  tool (e.g. FreeCAD) validation yet — see Status above. No CLI
+  wiring yet. Depends on `kstep-core` only.
 
 | `kstep-cli`
 | Command-line entry point (`dev.kstep.cli.MainKt`)
@@ -240,8 +296,10 @@ See <<roadmap,Roadmap>> for what's planned next.
 | Smoke test for the EXPRESS parser; semantic-model, naming-convention,
   and code-generation tests; WHERE-rule expression-builder, evaluator,
   and validator tests (unit-level and an end-to-end fixture
-  integration test); `kstep-core` DSL builder tests; and real-schema
-  six-V1-entity codegen tests — all exercised against either the
+  integration test); `kstep-core` DSL builder tests; real-schema
+  six-V1-entity codegen tests; and (M1 Welle 5) Part 21 writer, reader,
+  and roundtrip tests (`Part21WriterTest`, `Part21ReaderTest`,
+  `Part21RoundtripTest`) — all exercised against either the
   hand-written AP242-subset fixture or the real-schema excerpt
 |===
 
@@ -261,7 +319,8 @@ drift from the documented boundary), and the Kotest test suite in
 `kstep-tests`: the EXPRESS parser smoke test, semantic-model tests,
 naming-convention tests, code-generation tests (including real-schema
 six-V1-entity regeneration), WHERE-rule expression-builder/evaluator/
-validator tests, and `kstep-core` DSL builder tests.
+validator tests, `kstep-core` DSL builder tests, and (M1 Welle 5)
+`kstep-step21` Part 21 writer/reader/roundtrip tests.
 
 `generateExpressKotlin` can also be run on its own:
 
@@ -375,6 +434,81 @@ problem (a missing attribute, a non-boolean result, an
 incompatible-type comparison) throws `WhereRuleEvaluationException`.
 Neither is ever silently swallowed into an empty violation list.
 
+(M1 Welle 5) Exporting a `kstep-core` product structure to a STEP
+Part 21 physical file, then reading it back:
+
+[source,kotlin]
+----
+import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productDefinition
+import dev.kstep.core.ap242.productDefinitionFormation
+import dev.kstep.core.getOrThrow
+import dev.kstep.step21.Part21Header
+import dev.kstep.step21.Part21Reader
+import dev.kstep.step21.Part21Writer
+
+val bracket = product("BRK-001") { name = "Bracket" }.getOrThrow()
+val builtFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
+val definition = productDefinition("BRK-001-D") { formation = builtFormation }.getOrThrow()
+
+val header = Part21Header(
+    fileName = "bracket.step",
+    timestamp = "2026-07-19T12:00:00",
+    schemaIdentifiers = listOf("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"),
+)
+val exported = Part21Writer.write(header, listOf(definition))
+println(exported)
+// ISO-10303-21;
+// HEADER;
+// FILE_DESCRIPTION((),'2;1');
+// FILE_NAME('bracket.step','2026-07-19T12:00:00',(),(),'','kSTEP','');
+// FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));
+// ENDSEC;
+// DATA;
+// #1=PRODUCT('BRK-001','Bracket','');
+// #2=PRODUCT_DEFINITION_FORMATION('BRK-001-F','',#1);
+// #3=PRODUCT_DEFINITION('BRK-001-D','',#2);
+// ENDSEC;
+// END-ISO-10303-21;
+
+val result = Part21Reader.read(exported)
+println(result.isFullySuccessful) // true
+----
+
+`Part21Reader.read` throws `Part21SyntaxException`,
+`Part21EncodingException`, `Part21DanglingReferenceException`,
+`Part21CycleException`, or `Part21LimitExceededException` for
+structurally malformed input (see <<status,Status>> above). A
+`WHERE`-rule failure while reconstructing a parsed instance is never
+thrown — it surfaces in `Part21ReadResult.violations`, with any
+dependent instance recorded in `Part21ReadResult.skipped` instead of
+attempted:
+
+[source,kotlin]
+----
+// A hand-edited file with an empty product id (violates product's WHERE rule):
+val handEdited = """
+    ISO-10303-21;
+    HEADER;
+    FILE_DESCRIPTION((),'2;1');
+    FILE_NAME('n','t',(),(),'','','');
+    FILE_SCHEMA(('S'));
+    ENDSEC;
+    DATA;
+    #1=PRODUCT('','','');
+    #2=PRODUCT_DEFINITION_FORMATION('PDF-001','',#1);
+    ENDSEC;
+    END-ISO-10303-21;
+""".trimIndent()
+
+val badResult = Part21Reader.read(handEdited)
+println(badResult.violations) // {1=[DslViolation(code=KSTEP-W-001, ...)]}
+println(badResult.skipped)    // {2=[1]}
+----
+
+No `kstep-cli` command wraps this yet — `Part21Writer`/`Part21Reader`
+are a library API only, called directly from tests.
+
 [#roadmap]
 == Roadmap (V1 scope)
 
@@ -421,8 +555,22 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   beyond what `kstep-core`'s builders separately enforce for
   entity-typed references; this remains a known, intentional gap for a
   future wave, not a bug.
-. STEP Part 21 export/import, with a lossless roundtrip through
-  external CAD/PLM tools as the acceptance criterion.
+. STEP Part 21 export/import. (M1 Welle 5) Done for the
+  kSTEP-own-format half: `Part21Writer`/`Part21Reader` in
+  `kstep-step21` losslessly roundtrip the six V1 entities through
+  ISO 10303-21 physical file text
+  (`Part21Reader.read(Part21Writer.write(header, model)) == model`,
+  verified in `Part21RoundtripTest`) — see <<status,Status>> and
+  Usage above. **Still open, and not to be conflated with the above**:
+  kSTEP-ADR-0001's actual acceptance bar is a lossless roundtrip
+  through an *external* CAD/PLM tool (e.g. FreeCAD), which has not
+  been attempted — no such tool is available in this development
+  environment. A self-roundtrip proves internal consistency (the
+  writer and reader agree with each other); it does not prove kSTEP's
+  Part 21 output is actually interoperable with real-world STEP
+  tooling, nor that this reader can parse real-world Part 21 files
+  beyond the six V1 entity shapes it targets. Closing that gap is
+  future work, not assumed by this wave.
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and
   the kSTEP DSL as generation targets.
 . Later: geometry via an OpenCascade (OCCT) bridge, additional STEP
