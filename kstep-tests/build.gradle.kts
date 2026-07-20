@@ -12,6 +12,7 @@ dependencies {
     implementation(project(":kstep-core"))
     implementation(project(":kstep-step21"))
     implementation(project(":kstep-mcp"))
+    implementation(project(":kstep-cli"))
     implementation(libs.antlr4.runtime)
     testImplementation(libs.kotlinpoet)
     testImplementation(libs.kotest.runner.junit5)

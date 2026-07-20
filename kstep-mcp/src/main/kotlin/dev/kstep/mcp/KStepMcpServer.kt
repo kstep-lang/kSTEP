@@ -71,8 +71,9 @@ suspend fun runStdioServer(server: Server = buildServer()) {
     done.join()
 }
 
-// Manual dev-time entry point only — no kstep-cli wiring this wave (M2 Welle 1 scope). A future
-// `kstep mcp` subcommand only needs to call runStdioServer() from kstep-cli's Main.kt.
+// Manual dev-time entry point for running this module standalone (e.g. `./gradlew
+// :kstep-mcp:run`) without going through the `kstep mcp` subcommand kstep-cli wires up
+// (M2 Welle 3) — that subcommand calls runStdioServer() directly, it doesn't invoke this main.
 fun main() =
     runBlocking {
         runStdioServer()

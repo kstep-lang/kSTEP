@@ -243,8 +243,7 @@ Welle 1, below). Concretely, as of this writing:
 * `kstep-step21` has no CLI wiring yet (no `kstep render`/`kstep
   import` command) — it is a library API only, callable from tests,
   matching how Wave 2's codegen and Wave 3's WHERE-rule evaluator were
-  introduced as plain Kotlin APIs before any CLI wiring. The CLI
-  module itself (`kstep-cli`) is still a placeholder skeleton.
+  introduced as plain Kotlin APIs before any CLI wiring.
 * (M1 Welle 6) The semantic model now captures `DERIVE`, `INVERSE`, and
   `UNIQUE` entity-body clauses — a gap flagged across three separate
   wave reviews (`ExpressEntity`'s own "losslessly captured" KDoc was,
@@ -330,6 +329,33 @@ Welle 1, below). Concretely, as of this writing:
   yet — `runStdioServer()` is fully wired and ready for a future
   one-line CLI subcommand to call), and any transport other than
   stdio.
+* **(M2 Welle 3)** `kstep-cli` is no longer a placeholder skeleton: `kstep
+  mcp` starts the `kstep-mcp` server over stdio by calling its existing,
+  unmodified `runStdioServer()`. No arguments, `help`, or `--help` print a
+  short usage message and exit `0`; an unknown subcommand (or `mcp` with
+  extra trailing arguments) prints the same usage message and exits `1`.
+  The argument-dispatch logic lives in a pure `resolveCommand(args:
+  Array<String>): CliCommand` function, kept deliberately separate from
+  `main()`'s side effects (`println`/`exitProcess`/`runBlocking`) so it's
+  directly unit-testable — `main()` itself calls `exitProcess` on the
+  error path, which would tear down a test JVM if invoked in-process, so
+  it is intentionally never called from a test. Tests live in
+  `kstep-tests` (`CliMainTest`), not a `kstep-cli`-local test source set,
+  matching this project's one-test-module pattern (see Building below).
+  Verified empirically (not assumed) what happens once `runStdioServer()`
+  returns: at that point the JVM has exactly one non-daemon thread left
+  (`main`, parked in `runBlocking`), so the process exits on its own with
+  code `0` — no explicit `exitProcess(0)` needed on that path. Also
+  verified: an immediate stdin EOF (e.g. `< /dev/null`) does not reliably
+  make `runStdioServer()` return on its own — a `kotlin-sdk-server:0.14.0`
+  / `StdioServerTransport` behavior, not introduced by this wave and out
+  of scope to fix here (would mean changing `kstep-mcp`'s own transport
+  handling). In practice this matches how MCP hosts actually manage
+  stdio subprocesses: SIGTERM/SIGKILL the child directly rather than
+  relying on it observing a clean stdin close, and a SIGTERM does
+  terminate the process immediately, verified the same way. No new CLI
+  subcommand beyond `mcp`, no argument-parsing library — a plain `when`
+  over `args` is enough at this scope.
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -380,7 +406,10 @@ See <<roadmap,Roadmap>> for what's planned next.
 
 | `kstep-cli`
 | Command-line entry point (`dev.kstep.cli.MainKt`)
-| Placeholder `main()` only, no real commands yet
+| Working (M2 Welle 3): `kstep mcp` starts the MCP server (`kstep-mcp`'s
+  `runStdioServer()`); no-args, `help`, and `--help` all print a short
+  usage message and exit `0`; an unknown subcommand exits `1`. No other
+  subcommands. Depends on `kstep-mcp` only.
 
 | `kstep-mcp`
 | MCP server exposing the six V1 entity builders and Part-21 export as
@@ -392,10 +421,12 @@ See <<roadmap,Roadmap>> for what's planned next.
   `build_approval`, `export_part21`, `list_entities`, `get_entity` —
   over stdio transport, with a session-scoped in-memory `EntityStore`
   (bounded, thread-safe) resolving entity-typed references by
-  caller-supplied id/handle. No CLI wiring yet, no HTTP/SSE transport.
+  caller-supplied id/handle. No HTTP/SSE transport.
   Depends on `kstep-core` and `kstep-step21` only. (M2 Welle 2) Server
   lifecycle and every tool call's outcome are logged via kotlin-logging
-  over an explicit `slf4j-simple` backend.
+  over an explicit `slf4j-simple` backend. (M2 Welle 3) `kstep-cli` now
+  wraps `runStdioServer()` behind a `kstep mcp` subcommand — see the
+  `kstep-cli` row above.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
@@ -407,10 +438,13 @@ See <<roadmap,Roadmap>> for what's planned next.
   and roundtrip tests (`Part21WriterTest`, `Part21ReaderTest`,
   `Part21RoundtripTest`); (M2 Welle 1) an end-to-end `kstep-mcp`
   test suite (`KStepMcpServerTest`) driving a real MCP `Server` through
-  the SDK's own in-memory `ChannelTransport`; and (M2 Welle 2)
+  the SDK's own in-memory `ChannelTransport`; (M2 Welle 2)
   `McpLoggingTest`, which captures `System.err` around one MCP tool
   call and asserts the configured `slf4j-simple` backend actually
-  emitted the tool-outcome log line — all exercised against either the
+  emitted the tool-outcome log line; and (M2 Welle 3) `CliMainTest`,
+  unit-testing `kstep-cli`'s pure `resolveCommand` argument-dispatch
+  function and its `USAGE_TEXT` (not `main()` itself, which calls
+  `exitProcess` on its error path) — all exercised against either the
   hand-written AP242-subset fixture or the real-schema excerpt
 |===
 
@@ -432,10 +466,12 @@ semantic-model tests, naming-convention tests, code-generation tests
 (including real-schema six-V1-entity regeneration), WHERE-rule
 expression-builder/evaluator/validator tests, `kstep-core` DSL builder
 tests, (M1 Welle 5) `kstep-step21` Part 21 writer/reader/roundtrip
-tests, and (M2 Welle 1) the end-to-end `kstep-mcp` MCP server test
-suite (`KStepMcpServerTest`). `kstep-mcp` itself compiles and is
-ktlint-checked as part of `check`; it has no tests of its own — its
-tests live in `kstep-tests`, matching every other module's pattern.
+tests, (M2 Welle 1) the end-to-end `kstep-mcp` MCP server test
+suite (`KStepMcpServerTest`), and (M2 Welle 3) `CliMainTest` for
+`kstep-cli`'s argument-dispatch logic. `kstep-mcp` and `kstep-cli`
+themselves compile and are ktlint-checked as part of `check`; neither
+has tests of its own — their tests live in `kstep-tests`, matching
+every other module's pattern.
 
 kSTEP logs through kotlin-logging
 (`io.github.oshai:kotlin-logging-jvm`), an idiomatic Kotlin wrapper
@@ -450,9 +486,10 @@ zero-config, prints to stderr) — `kstep-mcp` depends on it at
 output instead of SLF4J's "No SLF4J providers were found ...
 Defaulting to no-operation (NOP) logger" warning.
 `Ap242V1CodeGen`'s `generateExpressKotlin` console report and
-`kstep-cli`'s placeholder `main()` remain plain `println` deliberately
-— that is Gradle-task/CLI stdout output, not diagnostic logging, and
-stays outside kotlin-logging's scope.
+`kstep-cli`'s `main()` — including its `USAGE_TEXT` help output (M2
+Welle 3) — remain plain `println` deliberately: that is Gradle-task/CLI
+stdout output, not diagnostic logging, and stays outside kotlin-logging's
+scope.
 
 `generateExpressKotlin` can also be run on its own:
 
@@ -670,19 +707,23 @@ println(invalid.structuredContent)
 // {"errorKind":"validation_failed","violations":[{"code":"KSTEP-W-001","entityName":"product", ...}]}
 ----
 
-To run the server for real (manual/dev-time only — no `kstep-cli`
-wiring yet):
+To run the server for real, `kstep-cli` wraps this directly (M2 Welle 3):
 
-[source,kotlin]
+[source,shell]
 ----
-import dev.kstep.mcp.runStdioServer
-import kotlinx.coroutines.runBlocking
-
-fun main() = runBlocking { runStdioServer() } // blocks on stdin/stdout until the session closes
+kstep mcp
 ----
 
-`runStdioServer()` is fully wired and ready for a future `kstep-cli`
-`kstep mcp` subcommand to call directly — see <<roadmap,Roadmap>>.
+This blocks on stdin/stdout until the session closes, exactly like
+`runStdioServer()` above — `kstep mcp` is a one-line call to it, nothing
+more. In practice, expect the process to be terminated by its MCP host
+(SIGTERM/SIGKILL) rather than to exit on its own from a clean stdin
+close: an immediate stdin EOF does not reliably make `runStdioServer()`
+return in the underlying `kotlin-sdk-server:0.14.0` transport, a
+pre-existing SDK behavior out of scope for `kstep-cli` to work around
+(see <<status,Status>> above). Once `runStdioServer()` does return —
+whichever way the session actually closes — the process exits on its own
+with code `0`; no explicit shutdown call is needed on that path.
 
 [#roadmap]
 == Roadmap (V1 scope)
@@ -761,10 +802,9 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   DSL (via `kstep-mcp`) as generation targets — is real API cost and
   experiment-design work, deliberately **not started**, and deferred to
   an explicit discussion with the project owner rather than assumed by
-  this wave. `kstep-cli` wiring for the MCP server (a `kstep mcp`
-  subcommand) is also still open — `runStdioServer()` is ready for it,
-  see Usage above — but is a small, separate follow-up, not required
-  for the server itself to exist and be tested.
+  this wave. **(M2 Welle 3, done)** `kstep-cli` now wraps the MCP server
+  behind a `kstep mcp` subcommand — see <<status,Status>> and Usage
+  above.
 . Later: geometry via an OpenCascade (OCCT) bridge, additional STEP
   Application Protocols as needed.
 
