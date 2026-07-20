@@ -25,6 +25,18 @@ object WhereRuleEvaluator {
         return booleanResult.value
     }
 
+    /**
+     * Evaluates [expression] to its raw [WhereRuleValue], without [evaluate]'s top-level
+     * boolean requirement — a DERIVE initializer's result is a value (string/integer/real/
+     * boolean), not a domain-rule pass/fail. Reuses the same private tree-walk [evaluate]
+     * itself uses, seeded at depth 0 exactly like [evaluate] does; this is a thin additional
+     * public entry point, not a second interpreter.
+     */
+    fun evaluateToValue(
+        expression: WhereRuleExpression,
+        attributeValues: Map<String, WhereRuleValue>,
+    ): WhereRuleValue = evaluateValue(expression, attributeValues, 0)
+
     private fun evaluateValue(
         expression: WhereRuleExpression,
         attributeValues: Map<String, WhereRuleValue>,

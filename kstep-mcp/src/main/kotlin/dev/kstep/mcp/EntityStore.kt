@@ -33,6 +33,12 @@ import java.util.concurrent.ConcurrentHashMap
  * so two concurrent calls near the cap can never both slip through (a
  * `ConcurrentHashMap.size()` read followed by a separate `put()` would be a classic TOCTOU
  * race here); plain reads ([get]/[snapshot]) stay lock-free on top of [ConcurrentHashMap].
+ *
+ * [putIfNoConflict] extends the same single-lock guarantee to a caller-supplied UNIQUE-rule
+ * scan (see `NextAssemblyUsageOccurrenceTool`'s UR1 check) — the scan and the insert happen
+ * inside the same [capacityLock] critical section as [put]'s own checks, so two concurrent
+ * calls that would both pass an unlocked "scan the store, then put" sequence can no longer
+ * both slip a conflicting pair past the check (kSTEP M2 Welle 4 review/security finding).
  */
 class EntityStore(
     private val maxEntities: Int = DEFAULT_MAX_ENTITIES,
@@ -53,23 +59,47 @@ class EntityStore(
             val existingEntityType: String,
             val newEntityType: String,
         ) : PutOutcome
+
+        data class Conflict(
+            val conflictingId: String,
+        ) : PutOutcome
     }
 
     fun put(
         id: String,
         entry: EntityStoreEntry,
+    ): PutOutcome = putIfNoConflict(id, entry) { null }
+
+    /**
+     * Same as [put], but runs [findConflict] — a scan over the current entries, excluding
+     * [id]'s own prior slot is [findConflict]'s own responsibility — inside the same lock as
+     * the type/capacity checks and the insert itself, so the whole check-then-write sequence
+     * is atomic. Returns [PutOutcome.Conflict] if [findConflict] returns a non-null id instead
+     * of writing [entry].
+     */
+    fun putIfNoConflict(
+        id: String,
+        entry: EntityStoreEntry,
+        findConflict: (Map<String, EntityStoreEntry>) -> String?,
     ): PutOutcome =
         synchronized(capacityLock) {
             val existing = entries[id]
             when {
                 existing != null && existing.entityType != entry.entityType ->
                     PutOutcome.TypeMismatch(id, existing.entityType, entry.entityType)
-                existing == null && entries.size >= maxEntities ->
-                    PutOutcome.CapacityExceeded(entries.size, maxEntities)
-                else -> {
-                    entries[id] = entry
-                    PutOutcome.Ok
-                }
+                else ->
+                    when (val conflictingId = findConflict(entries)) {
+                        null ->
+                            when {
+                                existing == null && entries.size >= maxEntities ->
+                                    PutOutcome.CapacityExceeded(entries.size, maxEntities)
+                                else -> {
+                                    entries[id] = entry
+                                    PutOutcome.Ok
+                                }
+                            }
+                        else -> PutOutcome.Conflict(conflictingId)
+                    }
             }
         }
 

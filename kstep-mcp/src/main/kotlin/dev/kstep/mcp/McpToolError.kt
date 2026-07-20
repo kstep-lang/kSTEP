@@ -238,6 +238,55 @@ fun typeMismatchError(
             },
     )
 
+data class UniqueConstraintFieldValue(
+    val field: String,
+    val value: String,
+)
+
+/** A `UNIQUE` rule violated by a newly-built entity against one already in the [EntityStore] —
+ * the fields named in [fieldValues] duplicate a combination another entity ([conflictingId])
+ * already holds.
+ */
+fun uniqueConstraintViolatedError(
+    entityType: String,
+    ruleLabel: String,
+    conflictingId: String,
+    fieldValues: List<UniqueConstraintFieldValue>,
+): CallToolResult {
+    val summary = fieldValues.joinToString(", ") { "${it.field}='${it.value}'" }
+    return CallToolResult(
+        content =
+            listOf(
+                TextContent(
+                    text =
+                        "UNIQUE constraint '$ruleLabel' on '$entityType' violated: ($summary) already used by " +
+                            "id '$conflictingId'",
+                ),
+            ),
+        isError = true,
+        structuredContent =
+            buildJsonObject {
+                put("errorKind", "unique_constraint_violated")
+                put("entityType", entityType)
+                put("ruleLabel", ruleLabel)
+                put("conflictingId", conflictingId)
+                put(
+                    "fields",
+                    buildJsonArray {
+                        for (fieldValue in fieldValues) {
+                            add(
+                                buildJsonObject {
+                                    put("field", fieldValue.field)
+                                    put("value", fieldValue.value)
+                                },
+                            )
+                        }
+                    },
+                )
+            },
+    )
+}
+
 fun exportFailedError(message: String?): CallToolResult {
     val sanitized = sanitizeMessage(message)
     return CallToolResult(
@@ -276,18 +325,42 @@ fun storeOrCapacityError(
     id: String,
     entry: EntityStoreEntry,
     onStored: () -> CallToolResult,
+): CallToolResult = store.put(id, entry).toCallToolResult(onConflict = null, onStored = onStored)
+
+/**
+ * Same as [storeOrCapacityError], but atomically runs [findConflict] (a UNIQUE-rule scan over
+ * the store) inside [EntityStore.putIfNoConflict]'s own lock before writing, mapping a
+ * [EntityStore.PutOutcome.Conflict] through [onConflict] instead of writing [entry] — see
+ * [EntityStore.putIfNoConflict]'s KDoc for why the scan and the write must share one lock.
+ */
+fun storeIfNoConflictOrError(
+    store: EntityStore,
+    id: String,
+    entry: EntityStoreEntry,
+    findConflict: (Map<String, EntityStoreEntry>) -> String?,
+    onConflict: (conflictingId: String) -> CallToolResult,
+    onStored: () -> CallToolResult,
+): CallToolResult = store.putIfNoConflict(id, entry, findConflict).toCallToolResult(onConflict, onStored)
+
+private fun EntityStore.PutOutcome.toCallToolResult(
+    onConflict: ((conflictingId: String) -> CallToolResult)?,
+    onStored: () -> CallToolResult,
 ): CallToolResult =
-    when (val outcome = store.put(id, entry)) {
+    when (this) {
         is EntityStore.PutOutcome.CapacityExceeded ->
             storeCapacityExceededError(
-                outcome.currentSize,
-                outcome.maxEntities,
+                currentSize,
+                maxEntities,
             )
         is EntityStore.PutOutcome.TypeMismatch ->
             typeMismatchError(
-                outcome.id,
-                outcome.existingEntityType,
-                outcome.newEntityType,
+                id,
+                existingEntityType,
+                newEntityType,
             )
+        is EntityStore.PutOutcome.Conflict ->
+            // Only storeIfNoConflictOrError's callers ever pass a findConflict able to
+            // produce this outcome, so onConflict is non-null exactly when it's needed.
+            onConflict!!(conflictingId)
         EntityStore.PutOutcome.Ok -> onStored()
     }

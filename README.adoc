@@ -356,6 +356,64 @@ Welle 1, below). Concretely, as of this writing:
   terminate the process immediately, verified the same way. No new CLI
   subcommand beyond `mcp`, no argument-parsing library — a plain `when`
   over `args` is enough at this scope.
+* **(M2 Welle 4)** `DERIVE`-expression evaluation and `UNIQUE`-constraint
+  enforcement now exist, building on M1 Welle 6's capture-only clauses.
+  `dev.kstep.express.validation` gained `WhereRuleEvaluator.evaluateToValue`
+  (a thin additive entry point returning the raw `WhereRuleValue` an
+  expression reduces to, without `evaluate`'s top-level boolean
+  requirement) and a new `DerivedAttributeEvaluator`, which re-parses an
+  `ExpressDerivedAttribute`'s initializer text and evaluates it via the
+  *same* `WhereRuleExpressionBuilder`/`WhereRuleEvaluator` machinery WHERE
+  rules already use — DERIVE's initializer and WHERE's `domainRule` are
+  the identical `expression` grammar production, so this is deliberately
+  not a second parser/evaluator. Verified against all three real DERIVE
+  clauses in `ap242-v1-entities.exp`: `product_definition`'s and
+  `person_and_organization`'s (`get_name_value(SELF)`,
+  `get_description_value(SELF)`) and `next_assembly_usage_occurrence`'s
+  (a two-hop `SELF\entity.attr\entity.attr` chain) all correctly throw
+  `UnsupportedWhereExpressionException` — function calls and multi-hop
+  qualifier chains are outside the supported subset, exactly like WHERE
+  rules using the same constructs, and that is this wave's expected,
+  complete outcome for those three clauses, not a gap. A small synthetic
+  fixture (`DERIVE canonical_id : STRING := SELF.id;` and similar) proves
+  positive evaluation actually works when the expression is within the
+  supported subset. `INVERSE` evaluation remains explicitly out of scope
+  — no real V1 entity has an `INVERSE` clause, and `kstep-core` has no
+  bidirectional-relationship modeling to evaluate against.
++
+Separately, `kstep-mcp`'s `build_next_assembly_usage_occurrence` tool now
+enforces the real AP242 `next_assembly_usage_occurrence` `UNIQUE UR1`
+rule — `(reference_designator, relating_product_definition)` must be
+unique across every `next_assembly_usage_occurrence` already in the
+`EntityStore` — comparing `relating_product_definition` by object
+identity (mirroring `EntityStore.keyOf`'s existing precedent for
+"no natural id" entity comparisons). A conflict returns a new structured
+`unique_constraint_violated` tool error (added to `McpToolError.kt`,
+following the file's existing shape/conventions) naming the rule, the
+conflicting id, and the duplicated field values, instead of silently
+allowing the duplicate or crashing. The rule constant and the scan logic
+live in `kstep-mcp`'s tool file, not in `kstep-core` — UNIQUE is
+fundamentally cross-instance, and `kstep-core`'s builders are pure,
+single-instance constructors with no visibility into other instances;
+the `EntityStore` is the only place in this codebase with that
+visibility. The scan is `O(n)` over the store's current entries, bounded
+by the store's existing `maxEntities` cap, so this does not introduce
+unbounded work. Two rules are deliberately **not** newly enforced, both
+documented in code and here rather than faked or approximated: NAUO's
+own `UNIQUE UR2` (`product_definition_occurrence_id`,
+`relating_product_definition`), because `product_definition_occurrence_id`
+is itself a `DERIVE` value chained through `product_definition_occurrence`,
+an entity nowhere modeled among `kstep-core`'s six V1 types; and
+`product_definition_formation`'s own `UNIQUE UR1` (`id`, `of_product`),
+because the `EntityStore` already keys every `product_definition_formation`
+by that same `id`, so the composite key can never actually collide
+without `id` itself colliding first — a claim proven empirically by a
+test (`KStepMcpServerTest`), not just asserted in prose. The UR1 scan and
+the store write run atomically under `EntityStore`'s existing
+`capacityLock` (a new `putIfNoConflict`, alongside the plain `put` used by
+every other tool), so two concurrent, conflicting
+`build_next_assembly_usage_occurrence` calls can no longer both pass the
+scan before either lands.
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -389,10 +447,14 @@ See <<roadmap,Roadmap>> for what's planned next.
   walks it into a semantic AST; generates Kotlin
   `data class`es from that AST, including single-level simple `TYPE`-alias
   resolution; evaluates the supported WHERE-rule expression subset
-  against instance attribute values. The `generateExpressKotlin` Gradle
-  task regenerates the six V1 entities from a real-schema extraction as
-  a build artifact (wired into `check`, not into this or any other
-  module's own compile classpath — see Building below).
+  against instance attribute values. (M2 Welle 4) Also evaluates `DERIVE`
+  initializer expressions within that same supported subset, via
+  `DerivedAttributeEvaluator` and the new `WhereRuleEvaluator.evaluateToValue`
+  entry point — reusing the WHERE-rule builder/evaluator, not a second
+  parser. The `generateExpressKotlin` Gradle task regenerates the six V1
+  entities from a real-schema extraction as a build artifact (wired into
+  `check`, not into this or any other module's own compile classpath —
+  see Building below).
 
 | `kstep-step21`
 | STEP Part 21 (ISO 10303-21 physical file exchange format)
@@ -426,7 +488,11 @@ See <<roadmap,Roadmap>> for what's planned next.
   lifecycle and every tool call's outcome are logged via kotlin-logging
   over an explicit `slf4j-simple` backend. (M2 Welle 3) `kstep-cli` now
   wraps `runStdioServer()` behind a `kstep mcp` subcommand — see the
-  `kstep-cli` row above.
+  `kstep-cli` row above. (M2 Welle 4) `build_next_assembly_usage_occurrence`
+  now also enforces NAUO's real `UNIQUE UR1` rule against the
+  `EntityStore`'s current entries, returning a new
+  `unique_constraint_violated` structured error on conflict (tool count
+  stays at nine — no new tool added).
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
@@ -441,11 +507,17 @@ See <<roadmap,Roadmap>> for what's planned next.
   the SDK's own in-memory `ChannelTransport`; (M2 Welle 2)
   `McpLoggingTest`, which captures `System.err` around one MCP tool
   call and asserts the configured `slf4j-simple` backend actually
-  emitted the tool-outcome log line; and (M2 Welle 3) `CliMainTest`,
+  emitted the tool-outcome log line; (M2 Welle 3) `CliMainTest`,
   unit-testing `kstep-cli`'s pure `resolveCommand` argument-dispatch
   function and its `USAGE_TEXT` (not `main()` itself, which calls
-  `exitProcess` on its error path) — all exercised against either the
-  hand-written AP242-subset fixture or the real-schema excerpt
+  `exitProcess` on its error path); and (M2 Welle 4)
+  `DerivedAttributeEvaluatorTest` (DERIVE-expression evaluation,
+  including all three real `ap242-v1-entities.exp` DERIVE clauses and a
+  synthetic supported-subset positive case) plus new
+  `KStepMcpServerTest` cases for NAUO's `UNIQUE UR1` enforcement (conflict,
+  non-conflict, self-overwrite, and the `product_definition_formation`
+  redundancy proof) — all exercised against either the hand-written
+  AP242-subset fixture or the real-schema excerpt
 |===
 
 == Building
@@ -725,6 +797,50 @@ pre-existing SDK behavior out of scope for `kstep-cli` to work around
 whichever way the session actually closes — the process exits on its own
 with code `0`; no explicit shutdown call is needed on that path.
 
+(M2 Welle 4) Evaluating a `DERIVE` initializer expression works exactly
+like `WhereRuleValidator.validate` above, via `DerivedAttributeEvaluator`:
+
+[source,kotlin]
+----
+import dev.kstep.express.validation.DerivedAttributeEvaluator
+import dev.kstep.express.validation.WhereRuleValue
+
+val value = DerivedAttributeEvaluator.evaluate(
+    expressionText = "SELF.id",
+    attributeValues = mapOf("id" to WhereRuleValue.StringValue("W-1")),
+)
+println(value) // StringValue(value=W-1)
+
+// The real AP242 product_definition.name DERIVE (get_name_value(SELF)) is a function
+// call, outside the supported subset — this throws, exactly like an equivalent WHERE
+// rule would:
+// DerivedAttributeEvaluator.evaluate("get_name_value(SELF)", emptyMap())
+// -> UnsupportedWhereExpressionException
+----
+
+`build_next_assembly_usage_occurrence` now also enforces NAUO's real
+`UNIQUE UR1` rule — a second NAUO sharing an already-used
+`(reference_designator, relating_product_definition)` pair is rejected:
+
+[source,kotlin]
+----
+// after building NAUO-1 with reference_designator "RD-1" and
+// relating_product_definition_id "PD-A":
+val conflict = client.callTool(
+    "build_next_assembly_usage_occurrence",
+    mapOf(
+        "id" to "NAUO-2",
+        "relating_product_definition_id" to "PD-A",
+        "related_product_definition_id" to "PD-OTHER",
+        "reference_designator" to "RD-1",
+    ),
+)
+println(conflict.isError) // true
+println(conflict.structuredContent)
+// {"errorKind":"unique_constraint_violated","entityType":"next_assembly_usage_occurrence",
+//  "ruleLabel":"UR1","conflictingId":"NAUO-1","fields":[...]}
+----
+
 [#roadmap]
 == Roadmap (V1 scope)
 
@@ -742,9 +858,18 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   for the two support entities `product_context`/
   `product_definition_context` that `product`/`product_definition`
   reference but can't yet fully compile against), `DERIVE`/`INVERSE`/
-  `UNIQUE` clause codegen and evaluation (capture done as of M1 Welle 6
-  — see <<status,Status>>), and `SELECT`/`ENUMERATION`-type and
-  transitive-`TYPE`-alias resolution.
+  `UNIQUE` clause codegen (still not started), and `SELECT`/`ENUMERATION`-
+  type and transitive-`TYPE`-alias resolution. `DERIVE`/`UNIQUE`
+  *evaluation* (as opposed to codegen) is now partially done — capture
+  was M1 Welle 6, and M2 Welle 4 added evaluation for the WHERE-rule-
+  supported expression subset (`DerivedAttributeEvaluator`) plus
+  `next_assembly_usage_occurrence`'s `UNIQUE UR1` enforcement in
+  `kstep-mcp` — see <<status,Status>> above. Still open: `INVERSE`
+  evaluation (no real V1 entity has an `INVERSE` clause, and `kstep-core`
+  has no bidirectional-relationship modeling to evaluate against) and
+  NAUO's `UNIQUE UR2` (depends on `product_definition_occurrence`, an
+  entity not modeled in `kstep-core`) — both carried forward explicitly
+  as named limitations, not silently dropped.
 . A semantic AP242 core: product structure and metadata, without
   B-rep geometry and without PMI (PMI references geometry shape
   aspects and moves with the geometry milestone). The Kotlin type
@@ -804,7 +929,9 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   an explicit discussion with the project owner rather than assumed by
   this wave. **(M2 Welle 3, done)** `kstep-cli` now wraps the MCP server
   behind a `kstep mcp` subcommand — see <<status,Status>> and Usage
-  above.
+  above. **(M2 Welle 4, done)** `build_next_assembly_usage_occurrence`
+  now enforces NAUO's real `UNIQUE UR1` rule against the `EntityStore`'s
+  current entries — see <<status,Status>> and Usage above.
 . Later: geometry via an OpenCascade (OCCT) bridge, additional STEP
   Application Protocols as needed.
 

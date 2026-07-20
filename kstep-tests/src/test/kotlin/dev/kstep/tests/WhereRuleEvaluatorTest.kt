@@ -260,4 +260,11 @@ class WhereRuleEvaluatorTest :
                 )
             }
         }
+
+        "evaluateToValue returns a raw non-boolean value that evaluate() itself would reject" {
+            WhereRuleEvaluator.evaluateToValue(
+                WhereRuleExpression.SelfAttribute("level"),
+                mapOf("level" to WhereRuleValue.IntegerValue(7)),
+            ) shouldBe WhereRuleValue.IntegerValue(7)
+        }
     })

@@ -369,6 +369,233 @@ class KStepMcpServerTest :
             result.text() shouldNotContain Regex("""\.kt:\d+""")
         }
 
+        "a second NAUO with the same (reference_designator, relating_product_definition) is rejected" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-1", "of_product_id" to "P-1"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
+                .isError shouldBe null
+
+            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-2", "of_product_id" to "P-2"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATED-A", "formation_id" to "PDF-2"))
+                .isError shouldBe null
+
+            client.callTool("build_product", mapOf("id" to "P-3")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-3", "of_product_id" to "P-3"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATED-B", "formation_id" to "PDF-3"))
+                .isError shouldBe null
+
+            client
+                .callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-1",
+                        "relating_product_definition_id" to "PD-RELATING",
+                        "related_product_definition_id" to "PD-RELATED-A",
+                        "reference_designator" to "RD-1",
+                    ),
+                ).isError shouldBe null
+
+            val conflict =
+                client.callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-2",
+                        "relating_product_definition_id" to "PD-RELATING",
+                        "related_product_definition_id" to "PD-RELATED-B",
+                        "reference_designator" to "RD-1",
+                    ),
+                )
+            conflict.isError shouldBe true
+            conflict.errorKind() shouldBe "unique_constraint_violated"
+            conflict.structuredContent!!["conflictingId"]!!.jsonPrimitive.content shouldBe "NAUO-1"
+            conflict.structuredContent!!["ruleLabel"]!!.jsonPrimitive.content shouldBe "UR1"
+            conflict.structuredContent!!["entityType"]!!.jsonPrimitive.content shouldBe
+                "next_assembly_usage_occurrence"
+        }
+
+        "two NAUOs differing only in reference_designator both succeed" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-1", "of_product_id" to "P-1"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
+                .isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-2", "of_product_id" to "P-2"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATED", "formation_id" to "PDF-2"))
+                .isError shouldBe null
+
+            client
+                .callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-1",
+                        "relating_product_definition_id" to "PD-RELATING",
+                        "related_product_definition_id" to "PD-RELATED",
+                        "reference_designator" to "RD-1",
+                    ),
+                ).isError shouldBe null
+            client
+                .callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-2",
+                        "relating_product_definition_id" to "PD-RELATING",
+                        "related_product_definition_id" to "PD-RELATED",
+                        "reference_designator" to "RD-2",
+                    ),
+                ).isError shouldBe null
+        }
+
+        "two NAUOs differing only in relating_product_definition both succeed" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-1", "of_product_id" to "P-1"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATING-A", "formation_id" to "PDF-1"))
+                .isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-2", "of_product_id" to "P-2"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATING-B", "formation_id" to "PDF-2"))
+                .isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-3")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-3", "of_product_id" to "P-3"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATED", "formation_id" to "PDF-3"))
+                .isError shouldBe null
+
+            client
+                .callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-1",
+                        "relating_product_definition_id" to "PD-RELATING-A",
+                        "related_product_definition_id" to "PD-RELATED",
+                        "reference_designator" to "RD-1",
+                    ),
+                ).isError shouldBe null
+            client
+                .callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-2",
+                        "relating_product_definition_id" to "PD-RELATING-B",
+                        "related_product_definition_id" to "PD-RELATED",
+                        "reference_designator" to "RD-1",
+                    ),
+                ).isError shouldBe null
+        }
+
+        "rebuilding the same NAUO id with unchanged fields succeeds, not a false self-conflict" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-1", "of_product_id" to "P-1"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
+                .isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-2", "of_product_id" to "P-2"),
+                ).isError shouldBe null
+            client
+                .callTool("build_product_definition", mapOf("id" to "PD-RELATED", "formation_id" to "PDF-2"))
+                .isError shouldBe null
+
+            val args =
+                mapOf(
+                    "id" to "NAUO-1",
+                    "relating_product_definition_id" to "PD-RELATING",
+                    "related_product_definition_id" to "PD-RELATED",
+                    "reference_designator" to "RD-1",
+                )
+            client.callTool("build_next_assembly_usage_occurrence", args).isError shouldBe null
+            val rebuilt = client.callTool("build_next_assembly_usage_occurrence", args)
+            rebuilt.isError shouldBe null
+            rebuilt.errorKind() shouldBe null
+        }
+
+        "product_definition_formation's UNIQUE UR1 needs no enforcement: store id-keying already guarantees it" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client.callTool("build_product", mapOf("id" to "SHARED-PRODUCT")).isError shouldBe null
+
+            // Two different ids referencing the SAME of_product both succeed — no
+            // unique_constraint_violated is ever returned for product_definition_formation
+            // because none is implemented for it: the composite key (id, of_product) can never
+            // collide once id alone already differs, which the store already guarantees.
+            val first =
+                client.callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-A", "of_product_id" to "SHARED-PRODUCT"),
+                )
+            first.isError shouldBe null
+            val second =
+                client.callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-B", "of_product_id" to "SHARED-PRODUCT"),
+                )
+            second.isError shouldBe null
+
+            // Rebuilding under the SAME id succeeds via EntityStore's pre-existing overwrite
+            // semantics — not a new UNIQUE-checking code path.
+            val rebuilt =
+                client.callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "PDF-A", "of_product_id" to "SHARED-PRODUCT"),
+                )
+            rebuilt.isError shouldBe null
+            rebuilt.errorKind() shouldBe null
+        }
+
         "concurrent tool calls from two independent sessions against one shared server do not lose writes" {
             val server = buildServer()
             val clientA = connectedClient(server)
