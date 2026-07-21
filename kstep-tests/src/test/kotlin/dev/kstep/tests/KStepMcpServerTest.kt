@@ -572,6 +572,12 @@ class KStepMcpServerTest :
             rebuilt.errorKind() shouldBe null
         }
 
+        // See README Roadmap, "M2 Welle 8 — codegen reconciliation" divergence-inventory table,
+        // product_definition_formation / UNIQUE UR1 row: this test is the proof cited there for
+        // "resolved by construction", contrasted with NAUO's real UNIQUE UR1 enforcement above
+        // (whose fields exclude the store key and so do need a scan). Do not "helpfully" add a
+        // putIfNoConflict-style scan for this entity — it would be dead code, since no
+        // tool-reachable input can ever produce a conflict here.
         "product_definition_formation's UNIQUE UR1 needs no enforcement: store id-keying already guarantees it" {
             val server = buildServer()
             val client = connectedClient(server)
@@ -587,15 +593,19 @@ class KStepMcpServerTest :
                     mapOf("id" to "PDF-A", "of_product_id" to "SHARED-PRODUCT"),
                 )
             first.isError shouldBe null
+            first.errorKind() shouldBe null
             val second =
                 client.callTool(
                     "build_product_definition_formation",
                     mapOf("id" to "PDF-B", "of_product_id" to "SHARED-PRODUCT"),
                 )
             second.isError shouldBe null
+            second.errorKind() shouldBe null
 
             // Rebuilding under the SAME id succeeds via EntityStore's pre-existing overwrite
-            // semantics — not a new UNIQUE-checking code path.
+            // semantics — not a new UNIQUE-checking code path. Asserting errorKind() is null
+            // (an overwrite), not merely isError, is the explicit record that this is NOT a
+            // unique_constraint_violated path.
             val rebuilt =
                 client.callTool(
                     "build_product_definition_formation",

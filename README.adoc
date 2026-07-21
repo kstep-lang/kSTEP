@@ -996,6 +996,38 @@ println(conflict.structuredContent)
 //  "ruleLabel":"UR1","conflictingId":"NAUO-1","fields":[...]}
 ----
 
+By contrast, `build_product_definition_formation` deliberately has **no**
+such `UNIQUE` check — and needs none. Its real `UR1` is `(id, of_product)`,
+and because the `EntityStore` already keys every formation by `id`, two
+formations can only share a composite key by sharing `id`, which is a
+re-build (overwrite), not a second instance. Two formations of the *same*
+product under *different* ids both succeed (a product legitimately has
+many formations); re-building under the same id overwrites. No
+`unique_constraint_violated` is reachable for this entity — verified by
+test, not just asserted:
+
+[source,kotlin]
+----
+// after building product "SHARED-PRODUCT":
+val first = client.callTool(
+    "build_product_definition_formation",
+    mapOf("id" to "PDF-A", "of_product_id" to "SHARED-PRODUCT"),
+)
+val second = client.callTool(
+    "build_product_definition_formation",
+    mapOf("id" to "PDF-B", "of_product_id" to "SHARED-PRODUCT"),
+)
+println(first.isError)  // null — different id, so (id, of_product) cannot collide
+println(second.isError) // null — same story, even though of_product is shared
+
+// rebuilding PDF-A under the SAME id overwrites, it does not conflict:
+val rebuilt = client.callTool(
+    "build_product_definition_formation",
+    mapOf("id" to "PDF-A", "of_product_id" to "SHARED-PRODUCT"),
+)
+println(rebuilt.isError) // null
+----
+
 (M2 Welle 6) Exporting a `*.kstep.kts` script directly to a STEP Part 21
 file via `kstep export`, no hand-written Kotlin caller needed. A script
 ends with `stepFile(fileName = "...") { ... }`; the six `kstep-core`
@@ -1161,7 +1193,7 @@ inventory:
 
 | `product_definition_formation`
 | real `UNIQUE UR1: id, of_product` not enforced anywhere in `kstep-core`
-| documented (no `UNIQUE`-rule enforcement exists yet — broader gap)
+| resolved by construction — `id` is the `EntityStore`'s primary key, so `(id, of_product)` cannot collide unless `id` alone does; store id-keying already guarantees UR1, proven by `KStepMcpServerTest` ("product_definition_formation's UNIQUE UR1 needs no enforcement: store id-keying already guarantees it"). Contrast NAUO's `UNIQUE UR1` above, whose fields exclude the store key and so needed a real scan.
 
 | `next_assembly_usage_occurrence`
 | real flattened shape inherits an `OPTIONAL text description` (`product_definition_relationship`); `kstep-core` omits it
