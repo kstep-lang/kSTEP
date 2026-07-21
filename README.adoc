@@ -429,6 +429,58 @@ the store write run atomically under `EntityStore`'s existing
 every other tool), so two concurrent, conflicting
 `build_next_assembly_usage_occurrence` calls can no longer both pass the
 scan before either lands.
+* **(M2 Welle 6)** A new module, `kstep-script` (`dev.kstep.script`), adds
+  a Kotlin-scripting DSL surface: `*.kstep.kts` scripts author kSTEP
+  models with the same six `kstep-core` builders (available without
+  explicit imports, via `KStepScriptCompilationConfiguration`'s
+  `defaultImports`) and end with a `stepFile(fileName = "...") { ... }`
+  call whose result — a `KStepModel` — becomes the script's return value.
+  `KStepModelBuilder.root(...)` accepts either an already-unwrapped entity
+  (the concise `getOrThrow()` pattern) or a raw `ValidationResult` — the
+  latter *aggregates* every violation across every registered root into
+  `KStepModel.violations` instead of aborting the script at the first bad
+  entity, the preferred form for LLM/JSON consumption (kSTEP-ADR-0001
+  acceptance criterion #3). `KStepScriptHost.eval` (a `File` or inline
+  `String` overload) compiles and runs a script and maps *every* outcome —
+  never a thrown exception or a raw stack trace — into a structured
+  `KStepScriptOutcome`: `Success`, `CompilationError` (`KSTEP-S-001`, a
+  Kotlin syntax/type error, with source line/column), `NoModelProduced`
+  (`KSTEP-S-002`, the last expression wasn't a `KStepModel`),
+  `ValidationErrors` (the aggregated `DslViolation` list, or — belt-and-
+  braces — a single synthetic `KSTEP-S-004` violation when a script uses
+  `getOrThrow()` directly and it throws), and `RuntimeError`
+  (`KSTEP-S-003`, any other script-thrown exception, exception class +
+  message only). A blank `timestamp` in `stepFile(...)` is defaulted to
+  the current time by the host (not the builder, keeping the DSL surface
+  itself pure/deterministic) once a model is known to be fully valid.
+  `kstep-cli` gained a new `kstep export <script.kstep.kts> [--out
+  <file.step>] [--output json]` subcommand: `--out` defaults to the
+  script's own name with `.kstep.kts` replaced by `.step`; `--output
+  json` renders the same success/error information as a JSON document
+  instead of human-readable text (both are the command's own stdout
+  output, so both stay plain `println`, matching this module's existing
+  reasoning for `USAGE_TEXT`). `resolveCommand`'s argument parsing for
+  `export` is a small hand-rolled flag loop, no argument-parsing library,
+  same stance as the `mcp`/`help` dispatch above. `kstep-script` is
+  deliberately **not** sandboxed — `KStepScriptCompilationConfiguration`
+  uses `dependenciesFromCurrentContext(wholeClasspath = true)` with no
+  curated/allowlisted classpath, mirroring kUML's *trusted in-process*
+  script path (kUML's sandboxed path exists only for its hosted-portal
+  "compile someone else's script" scenario, which kSTEP has no equivalent
+  of yet — see `KStepScriptHost`'s KDoc for the full reasoning). Verified
+  against the real `kstep-cli` distribution, not just the test JVM:
+  `./gradlew :kstep-cli:installDist` followed by running the built
+  `bin/kstep-cli export` binary against both fixtures below reproduces
+  the exact JSON/text/exit-code behavior asserted in the test suite —
+  `kotlin-compiler-embeddable` and the rest of the scripting toolchain
+  ride along automatically on `kstep-cli`'s `runtimeClasspath` (and so
+  into `installDist`'s `lib/`) via the ordinary `implementation
+  project(":kstep-script")` dependency, no jlink/native-image wiring
+  needed for this. Two fixture scripts (`hello-assembly.kstep.kts`,
+  `hello-invalid.kstep.kts`) live in `kstep-tests/src/test/resources` —
+  not under `kstep-script` itself, matching this project's established
+  single-shared-test-module convention (see Building below) — and double
+  as the README usage examples below.
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -478,15 +530,34 @@ See <<roadmap,Roadmap>> for what's planned next.
   scanner and two-pass graph resolver (independent of the ANTLR
   EXPRESS grammar — Part 21 is a different sub-format). Verified via a
   self-roundtrip test suite in `kstep-tests`; no external CAD/PLM
-  tool (e.g. FreeCAD) validation yet — see Status above. No CLI
-  wiring yet. Depends on `kstep-core` only.
+  tool (e.g. FreeCAD) validation yet — see Status above. (M2 Welle 6)
+  Now wired into the CLI via `kstep-script`/`kstep export` — see the
+  `kstep-script`/`kstep-cli` rows below.
+
+| `kstep-script`
+| Kotlin-scripting DSL surface for `*.kstep.kts` scripts
+  (`dev.kstep.script`)
+| Working (M2 Welle 6): `KStepScript`/`KStepScriptCompilationConfiguration`
+  (the `@KotlinScript` template + `defaultImports`), `stepFile { }` /
+  `KStepModel` / `KStepModelBuilder` (the DSL entry point a script ends
+  with), and `KStepScriptHost.eval` (`File` or inline `String`), which
+  maps every compile/runtime outcome into a structured
+  `KStepScriptOutcome` — never a thrown exception. See Status above for
+  the full breakdown. Deliberately unsandboxed (trusted in-process path
+  only, `wholeClasspath = true`) — see Status above and
+  `KStepScriptHost`'s KDoc. Depends on `kstep-core` and `kstep-step21`
+  only (both `api`, so their types resolve inside scripts).
 
 | `kstep-cli`
 | Command-line entry point (`dev.kstep.cli.MainKt`)
 | Working (M2 Welle 3): `kstep mcp` starts the MCP server (`kstep-mcp`'s
   `runStdioServer()`); no-args, `help`, and `--help` all print a short
-  usage message and exit `0`; an unknown subcommand exits `1`. No other
-  subcommands. Depends on `kstep-mcp` only.
+  usage message and exit `0`; an unknown subcommand exits `1`. (M2
+  Welle 6) `kstep export <script.kstep.kts> [--out <file.step>]
+  [--output json]` compiles and runs a `*.kstep.kts` script via
+  `kstep-script`'s `KStepScriptHost` and writes the resulting Part 21
+  file via `kstep-step21`'s `Part21Writer` — see Status above and Usage
+  below. Depends on `kstep-mcp` and `kstep-script`.
 
 | `kstep-mcp`
 | MCP server exposing the six V1 entity builders and Part-21 export as
@@ -532,7 +603,19 @@ See <<roadmap,Roadmap>> for what's planned next.
   `KStepMcpServerTest` cases for NAUO's `UNIQUE UR1` enforcement (conflict,
   non-conflict, self-overwrite, and the `product_definition_formation`
   redundancy proof) — all exercised against either the hand-written
-  AP242-subset fixture or the real-schema excerpt
+  AP242-subset fixture or the real-schema excerpt; (M2 Welle 6)
+  `KStepScriptHostTest` (every `KStepScriptOutcome` case: a valid
+  multi-part-assembly script, the aggregating `root(ValidationResult)`
+  form, a structural `KSTEP-M-001` violation, a `getOrThrow()` abort, a
+  Kotlin syntax error, an unresolved reference, a wrong-last-expression-
+  type script, a plain runtime exception, and empty/whitespace-only
+  scripts — none of them ever throw out of the host), `KStepScriptExportTest`
+  (the `hello-assembly.kstep.kts`/`hello-invalid.kstep.kts` fixtures
+  driven end-to-end through `KStepScriptHost` + `Part21Writer`, with a
+  self-roundtrip via `Part21Reader`), and new `CliMainTest` cases for
+  `resolveCommand`'s `export` argument parsing (`--out`, `--output json`,
+  every malformed-flag combination, and `USAGE_TEXT`'s new `kstep export`
+  entry)
 |===
 
 == Building
@@ -544,21 +627,27 @@ Requires JDK 21. The Gradle wrapper pins Gradle 9.6.1.
 ./gradlew clean check
 ----
 
-`check` runs ktlint (now including `kstep-mcp`), `kstep-express`'s
-`generateExpressKotlin` task (regenerates the six V1 entities from
-real-schema ground truth — see Status above — and fails the build if
-its success/skip counts ever drift from the documented boundary), and
-the Kotest test suite in `kstep-tests`: the EXPRESS parser smoke test,
-semantic-model tests, naming-convention tests, code-generation tests
-(including real-schema six-V1-entity regeneration), WHERE-rule
-expression-builder/evaluator/validator tests, `kstep-core` DSL builder
-tests, (M1 Welle 5) `kstep-step21` Part 21 writer/reader/roundtrip
-tests, (M2 Welle 1) the end-to-end `kstep-mcp` MCP server test
-suite (`KStepMcpServerTest`), and (M2 Welle 3) `CliMainTest` for
-`kstep-cli`'s argument-dispatch logic. `kstep-mcp` and `kstep-cli`
-themselves compile and are ktlint-checked as part of `check`; neither
-has tests of its own — their tests live in `kstep-tests`, matching
-every other module's pattern.
+`check` runs ktlint (now including `kstep-mcp`, `kstep-cli`, and
+`kstep-script`), `kstep-express`'s `generateExpressKotlin` task
+(regenerates the six V1 entities from real-schema ground truth — see
+Status above — and fails the build if its success/skip counts ever
+drift from the documented boundary), and the Kotest test suite in
+`kstep-tests`: the EXPRESS parser smoke test, semantic-model tests,
+naming-convention tests, code-generation tests (including real-schema
+six-V1-entity regeneration), WHERE-rule expression-builder/evaluator/
+validator tests, `kstep-core` DSL builder tests, (M1 Welle 5)
+`kstep-step21` Part 21 writer/reader/roundtrip tests, (M2 Welle 1) the
+end-to-end `kstep-mcp` MCP server test suite (`KStepMcpServerTest`),
+(M2 Welle 3) `CliMainTest` for `kstep-cli`'s argument-dispatch logic,
+and (M2 Welle 6) `KStepScriptHostTest`/`KStepScriptExportTest` for
+`kstep-script`'s scripting host, plus `CliMainTest`'s new `export`
+argument-parsing cases. `kstep-mcp`, `kstep-cli`, and `kstep-script`
+themselves compile and are ktlint-checked as part of `check`; none of
+them has tests of its own — their tests live in `kstep-tests`, matching
+every other module's pattern (the two `*.kstep.kts` test fixtures are
+resources under `kstep-tests/src/test/resources`, loaded via
+`getResourceAsStream` — not under `kstep-script` itself, for the same
+reason).
 
 kSTEP logs through kotlin-logging
 (`io.github.oshai:kotlin-logging-jvm`), an idiomatic Kotlin wrapper
@@ -566,17 +655,23 @@ over SLF4J. `kstep-mcp`'s server lifecycle and tool-call outcomes are
 the first real usage of it (M2 Welle 2); `kstep-core`, `kstep-express`,
 and `kstep-step21` remain untouched, since their existing structured-
 exception/`ValidationResult` error model already covers their
-diagnostic needs. The SLF4J backend is `slf4j-simple` (MIT-licensed,
-zero-config, prints to stderr) — `kstep-mcp` depends on it at
-`runtimeOnly`, and `kstep-tests` carries a matching
-`testImplementation`, so `./gradlew clean check` now shows real log
-output instead of SLF4J's "No SLF4J providers were found ...
+diagnostic needs. (M2 Welle 6) `kstep-script`'s `KStepScriptHost` is the
+second real usage: it logs a warning if `host.eval(...)` itself throws
+before producing a scripting result at all (the one case its own
+`KStepScriptOutcome` mapping can't attribute to the script source) —
+every *expected* outcome (compile error, validation failure, runtime
+exception) is structured data, not a log line. The SLF4J backend is
+`slf4j-simple` (MIT-licensed, zero-config, prints to stderr) —
+`kstep-mcp` depends on it at `runtimeOnly`, and `kstep-tests` carries a
+matching `testImplementation`, so `./gradlew clean check` now shows real
+log output instead of SLF4J's "No SLF4J providers were found ...
 Defaulting to no-operation (NOP) logger" warning.
 `Ap242V1CodeGen`'s `generateExpressKotlin` console report and
 `kstep-cli`'s `main()` — including its `USAGE_TEXT` help output (M2
-Welle 3) — remain plain `println` deliberately: that is Gradle-task/CLI
-stdout output, not diagnostic logging, and stays outside kotlin-logging's
-scope.
+Welle 3) and (M2 Welle 6) `kstep export`'s own success/error rendering,
+text or JSON — remain plain `println` deliberately: that is
+Gradle-task/CLI stdout output, not diagnostic logging, and stays outside
+kotlin-logging's scope.
 
 `generateExpressKotlin` can also be run on its own:
 
@@ -762,8 +857,10 @@ println(badResult.violations) // {1=[DslViolation(code=KSTEP-W-001, ...)]}
 println(badResult.skipped)    // {2=[1]}
 ----
 
-No `kstep-cli` command wraps this yet — `Part21Writer`/`Part21Reader`
-are a library API only, called directly from tests.
+`Part21Writer`/`Part21Reader` are called directly here as a library
+API; (M2 Welle 6) below, the `kstep export` CLI subcommand wraps this
+same pair via the `kstep-script` scripting DSL instead of hand-written
+Kotlin.
 
 (M2 Welle 1) Driving the `kstep-mcp` server end-to-end from an MCP
 client — the same tool-call sequence an LLM agent would make, here
@@ -856,6 +953,71 @@ println(conflict.structuredContent)
 //  "ruleLabel":"UR1","conflictingId":"NAUO-1","fields":[...]}
 ----
 
+(M2 Welle 6) Exporting a `*.kstep.kts` script directly to a STEP Part 21
+file via `kstep export`, no hand-written Kotlin caller needed. A script
+ends with `stepFile(fileName = "...") { ... }`; the six `kstep-core`
+builders and `stepFile`/`root` are available without any `import`
+(`KStepScriptCompilationConfiguration`'s `defaultImports`):
+
+[source,kotlin]
+----
+// bracket.kstep.kts
+val bracket = product("BRK-001") { name = "Bracket" }.getOrThrow()
+val bracketFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
+val definition = productDefinition("BRK-001-D") { formation = bracketFormation }.getOrThrow()
+
+stepFile(fileName = "bracket.step") {
+    root(definition)
+}
+----
+
+[source,shell]
+----
+kstep export bracket.kstep.kts
+# Exported 1 root(s) to bracket.step
+----
+
+`--out` overrides the derived output path; `--output json` renders the
+same information as a JSON document instead of human-readable text —
+useful for tool/LLM consumption (kSTEP-ADR-0001 acceptance criterion
+#3). The two `root(...)` forms differ in what happens to a validation
+failure: `root(entity)` takes an already-`getOrThrow()`-unwrapped
+entity, so an `Invalid` result aborts the script immediately; passing
+the raw `ValidationResult` to `root(...)` instead *aggregates* every
+violation across every registered root, which is what the second
+fixture below demonstrates:
+
+[source,kotlin]
+----
+// hello-invalid.kstep.kts — an empty product id violates product's WHERE rule
+stepFile(fileName = "hello-invalid.step") {
+    root(product(id = "") { name = "Nameless" })
+}
+----
+
+[source,shell]
+----
+kstep export --output json hello-invalid.kstep.kts
+----
+
+[source,json]
+----
+{"status":"error","errorKind":"validation_failed","violations":[
+  {"code":"KSTEP-W-001","entityName":"product","ruleLabel":"wr1",
+   "expressionText":"SELF.id <> ''","message":"WHERE rule wr1 not satisfied: SELF.id <> ''"}
+]}
+----
+
+A Kotlin syntax error, an unresolved reference, a script whose last
+expression isn't a `KStepModel`, and a plain runtime exception all
+produce their own structured `KSTEP-S-xxx` error document the same way
+(`compilation_error`, `no_model_produced`, `runtime_error`) — see Status
+above for the full `KStepScriptOutcome` breakdown — never a raw Kotlin
+stack trace on stdout/stderr. Both fixture scripts above are the actual
+`kstep-tests` test resources (`hello-assembly.kstep.kts` is the
+3-part-assembly variant of the first example), not just README prose —
+see the `kstep-tests` Modules row above.
+
 [#roadmap]
 == Roadmap (V1 scope)
 
@@ -930,7 +1092,14 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   Part 21 output is actually interoperable with real-world STEP
   tooling, nor that this reader can parse real-world Part 21 files
   beyond the six V1 entity shapes it targets. Closing that gap is
-  future work, not assumed by this wave.
+  future work, not assumed by this wave. **(M2 Welle 6, done)** CLI
+  wiring now exists: `kstep export <script.kstep.kts>` (via the new
+  `kstep-script` module's `*.kstep.kts` scripting DSL and
+  `KStepScriptHost`) compiles and runs a script and writes its
+  `Part21Writer` output to disk — see <<status,Status>> and Usage
+  above. The external-CAD/PLM-tool roundtrip gap above is unchanged by
+  this — `kstep export`'s output still needs the same manual FreeCAD
+  import to close acceptance criterion #2.
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and
   the kSTEP DSL as generation targets. **(M2 Welle 1) Split into two
   halves, only the first of which is done**: the MCP server itself

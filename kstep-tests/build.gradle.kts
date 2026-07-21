@@ -11,6 +11,7 @@ dependencies {
     implementation(project(":kstep-express"))
     implementation(project(":kstep-core"))
     implementation(project(":kstep-step21"))
+    implementation(project(":kstep-script"))
     implementation(project(":kstep-mcp"))
     implementation(project(":kstep-cli"))
     implementation(libs.antlr4.runtime)

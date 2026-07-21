@@ -61,4 +61,56 @@ class CliMainTest :
         "USAGE_TEXT documents the help subcommand" {
             USAGE_TEXT shouldContain "kstep help"
         }
+
+        "\"export <path>\" with no flags resolves to Export with a null outPath and jsonOutput false" {
+            resolveCommand(arrayOf("export", "a.kstep.kts")) shouldBe
+                CliCommand.Export(scriptPath = "a.kstep.kts", outPath = null, jsonOutput = false)
+        }
+
+        "\"export <path> --out <file>\" resolves to Export with the given outPath" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--out", "b.step")) shouldBe
+                CliCommand.Export(scriptPath = "a.kstep.kts", outPath = "b.step", jsonOutput = false)
+        }
+
+        "\"export <path> --output json\" resolves to Export with jsonOutput true" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--output", "json")) shouldBe
+                CliCommand.Export(scriptPath = "a.kstep.kts", outPath = null, jsonOutput = true)
+        }
+
+        "\"export\" parses --out and --output json together, in any order" {
+            resolveCommand(arrayOf("export", "--output", "json", "--out", "b.step", "a.kstep.kts")) shouldBe
+                CliCommand.Export(scriptPath = "a.kstep.kts", outPath = "b.step", jsonOutput = true)
+        }
+
+        "\"export\" with no script path resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"export\" with only flags and no script path resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "--out", "b.step")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"export <path> --out\" with no value resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--out")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"export <path> --output\" with no value resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--output")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"export <path> --output xml\" (an unknown --output value) resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--output", "xml")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"export <path> --bogus\" (an unknown flag) resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--bogus")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"export\" with two positional script paths resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "b.kstep.kts")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "USAGE_TEXT documents the export subcommand" {
+            USAGE_TEXT shouldContain "kstep export"
+        }
     })
