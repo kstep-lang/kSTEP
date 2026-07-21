@@ -48,11 +48,14 @@ tasks
 // Runs ExpressKotlinCodeGenerator (via dev.kstep.express.codegen.Ap242V1CodeGen) against the
 // real-schema six-V1-entity extraction and writes the generated Kotlin source as a plain build
 // artifact under build/generated/expressKotlin/main. Deliberately NOT added to any sourceSet —
-// two of the six entities' generated classes (Product, ProductDefinition) reference support
-// types (ProductContext, ProductDefinitionContext) that this task does not itself generate (see
-// Ap242V1CodeGen.kt), so the output does not compile standalone; wiring it into this module's
-// own compileKotlin would break `check`. Reconciling generated output with kstep-core's
-// hand-authored types remains separate future work (see README's Roadmap).
+// as of the SUBTYPE OF inheritance-flattening wave, all six entities' generated classes
+// (including the two, Product/ProductDefinition, that used to reference ungenerated
+// ProductContext/ProductDefinitionContext support types) are now self-contained and compile
+// standalone, but wiring this output into this module's own compileKotlin would still create
+// classes with the same simple names as kstep-core's hand-authored equivalents (Product,
+// ProductDefinition, etc., built to the ValidationResult<T>/Named-Parameters conventions, not
+// this generator's plain data classes) in the same build. Reconciling generated output with
+// kstep-core's hand-authored types remains separate future work (see README's Roadmap).
 val generateExpressKotlin by
     tasks.registering(JavaExec::class) {
         group = "code generation"

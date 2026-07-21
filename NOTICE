@@ -10,13 +10,8 @@ licensed under the BSD 2-Clause License. The grammar file is vendored
 under kstep-express/src/main/antlr/dev/kstep/express/grammar/Express.g4.
 
 This product includes a small excerpt of the official AP242 EXPRESS
-schema — eleven declarations (the six V1 entities `product`,
-`product_definition`, `product_definition_formation`,
-`next_assembly_usage_occurrence`, `approval`, `person_and_organization`,
-plus the minimal supporting `TYPE`/`ENTITY` declarations their attribute
-types reference: `identifier`, `label`, `text`, `product_context`,
-`product_definition_context`, `approval_status`, `person`,
-`organization`) copied verbatim from
+schema — nineteen declarations total, copied (mostly verbatim, two
+spots deliberately adapted — see below) from
 ap242ed2_dis2_mim_lf_v1.101.exp — ISO TS 10303-442 AP242 "managed model
 based 3d engineering", EXPRESS MIM Long Form, v1.101 (2019) — obtained
 from the CAx Implementor Forum / MBx Implementor Forum's public EXPRESS
@@ -27,12 +22,39 @@ kstep-express/src/main/resources/dev/kstep/express/codegen/ap242-v1-entities.exp
 declaration); it is not the paywalled ISO standard prose (ISO/TS
 10303-442) and is not itself kSTEP source code or a build dependency.
 
+Verbatim (copied unmodified): the six V1 entities `product`,
+`product_definition`, `product_definition_formation`,
+`next_assembly_usage_occurrence`, `approval`, `person_and_organization`;
+the three `TYPE` declarations (`identifier`, `label`, `text`); and the
+seven supporting `ENTITY` declarations `product_context`,
+`product_definition_context`, `approval_status`, `person`,
+`organization`, `application_context_element`, `application_context`.
+
+Adapted (not verbatim — deliberate truncations, added for the M2
+SUBTYPE-OF-codegen wave so `next_assembly_usage_occurrence`'s SUBTYPE OF
+chain resolves): `product_definition_relationship`,
+`product_definition_usage`, `assembly_component_usage`.
+`product_definition_relationship`'s `relating_product_definition`/
+`related_product_definition` are typed `product_definition` here rather
+than the real schema's `product_definition_or_reference` SELECT type
+(SELECT types have no Kotlin mapping in this codebase and vendoring one
+plus its full member-entity list was judged to exceed the "minimal,
+gap-driven excerpt" precedent this NOTICE documents); the `SUPERTYPE OF`
+clauses of `product_definition_usage`/`assembly_component_usage`/
+`application_context_element` are kept verbatim in full but name sibling
+entities (`make_from_usage_option`, `multi_level_reference_designator`,
+`promissory_usage_occurrence`, `specified_higher_usage_occurrence`,
+`quantified_assembly_component_usage`, `product_concept_context`) that
+are not themselves vendored here — the same pre-existing treatment
+already applied to `product_definition`'s own `SUPERTYPE OF ONEOF` list.
+See the schema file's own header comment for the full rationale.
+
 Provenance note: the complete, unmodified schema file is not vendored
-in this repository — only the eleven-declaration excerpt above. The
-decision to include even that excerpt rests on established precedent
-in the open-source STEP tooling ecosystem: the STEPcode project (BSD
-licensed, https://github.com/stepcode/stepcode) bundles this same
-MBx-IF-published AP242 schema family in full
+in this repository — only the excerpt above. The decision to include
+even that excerpt rests on established precedent in the open-source
+STEP tooling ecosystem: the STEPcode project (BSD licensed,
+https://github.com/stepcode/stepcode) bundles this same MBx-IF-published
+AP242 schema family in full
 (https://github.com/stepcode/stepcode/tree/develop/data/ap242), without
 a separate copyright or license notice attached to the schema file
 itself beyond attribution to its ISO document number — the same

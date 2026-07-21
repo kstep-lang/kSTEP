@@ -5,6 +5,8 @@ import com.squareup.kotlinpoet.STRING
 import dev.kstep.express.codegen.CodeGenException
 import dev.kstep.express.codegen.ExpressKotlinCodeGenerator
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
+import dev.kstep.express.semantic.InheritanceResolver
+import dev.kstep.express.semantic.SemanticModelException
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldContainExactly
@@ -98,7 +100,7 @@ class ExpressCodeGenTest :
             tagParameter.defaultValue?.toString() shouldBe "null"
         }
 
-        "SUBTYPE-bearing entity throws CodeGenException mentioning SUBTYPE OF" {
+        "generateEntityType(ExpressEntity, ...) throws CodeGenException for a SUBTYPE-bearing entity" {
             val source =
                 """
                 SCHEMA subtype_codegen_test;
@@ -118,6 +120,118 @@ class ExpressCodeGenTest :
                     ExpressKotlinCodeGenerator.generateEntityType(derived, PACKAGE_NAME)
                 }
             exception.message shouldContain "SUBTYPE OF"
+            exception.message shouldContain "InheritanceResolver"
+        }
+
+        "single-supertype entity generates a flattened data class with inherited-then-own params in order" {
+            val source =
+                """
+                SCHEMA inheritance_codegen_test;
+                ENTITY base;
+                  id    : STRING;
+                  label : STRING;
+                END_ENTITY;
+                ENTITY derived SUBTYPE OF (base);
+                  extra : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+            val resolvedEntities = InheritanceResolver.resolve(schema)
+            val derived = resolvedEntities.getValue("derived")
+
+            val typeSpec = ExpressKotlinCodeGenerator.generateEntityType(derived, PACKAGE_NAME)
+
+            typeSpec.name shouldBe "Derived"
+            val parameters = typeSpec.primaryConstructor!!.parameters
+            parameters.map { it.name } shouldContainExactly listOf("id", "label", "extra")
+            parameters.forEach { it.type shouldBe STRING }
+        }
+
+        "generateFile skips an ABSTRACT SUPERTYPE entity entirely -- it contributes attributes but no TypeSpec" {
+            val source =
+                """
+                SCHEMA abstract_codegen_test;
+                ENTITY base ABSTRACT SUPERTYPE;
+                  id : STRING;
+                END_ENTITY;
+                ENTITY derived SUBTYPE OF (base);
+                  extra : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val fileSpec = ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+
+            fileSpec.typeSpecs.map { it.name } shouldContainExactly listOf("Derived")
+            val parameters =
+                fileSpec.typeSpecs
+                    .single()
+                    .primaryConstructor!!
+                    .parameters
+            parameters.map { it.name } shouldContainExactly listOf("id", "extra")
+        }
+
+        "generateEntityType throws CodeGenException when called directly on an ABSTRACT SUPERTYPE's ResolvedEntity" {
+            val source =
+                """
+                SCHEMA abstract_direct_codegen_test;
+                ENTITY base ABSTRACT SUPERTYPE;
+                  id : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+            val resolvedEntities = InheritanceResolver.resolve(schema)
+            val base = resolvedEntities.getValue("base")
+
+            val exception =
+                shouldThrow<CodeGenException> {
+                    ExpressKotlinCodeGenerator.generateEntityType(base, PACKAGE_NAME)
+                }
+            exception.message shouldContain "ABSTRACT SUPERTYPE"
+        }
+
+        "an entity with more than one SUBTYPE OF supertype throws SemanticModelException during resolution" {
+            val source =
+                """
+                SCHEMA multiple_supertype_codegen_test;
+                ENTITY base_a;
+                  a : STRING;
+                END_ENTITY;
+                ENTITY base_b;
+                  b : STRING;
+                END_ENTITY;
+                ENTITY derived SUBTYPE OF (base_a, base_b);
+                  extra : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            shouldThrow<SemanticModelException> {
+                InheritanceResolver.resolve(schema)
+            }
+        }
+
+        "a redeclared inherited attribute throws SemanticModelException during resolution, not CodeGenException" {
+            val source =
+                """
+                SCHEMA redeclared_inherited_codegen_test;
+                ENTITY base;
+                  id : STRING;
+                END_ENTITY;
+                ENTITY derived SUBTYPE OF (base);
+                  SELF\base.id RENAMED base_id : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            shouldThrow<SemanticModelException> {
+                InheritanceResolver.resolve(schema)
+            }
         }
 
         "TYPE-referencing attribute resolves to the underlying Kotlin type when it's a simple STRING alias" {

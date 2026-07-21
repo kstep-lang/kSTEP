@@ -3,6 +3,8 @@ package dev.kstep.express.codegen
 import com.squareup.kotlinpoet.FileSpec
 import dev.kstep.express.semantic.ExpressSchema
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
+import dev.kstep.express.semantic.InheritanceResolver
+import dev.kstep.express.semantic.ResolvedEntity
 import java.io.File
 
 /**
@@ -28,17 +30,34 @@ object Ap242V1CodeGen {
         )
 
     // Not part of TARGET_ENTITY_NAMES (which tracks the six V1 entities this wave reports on)
-    // but emitted alongside whichever of them succeed: all three are already present in
-    // ap242-v1-entities.exp purely for the semantic model's attribute-type symbol resolution
-    // (approval.status : approval_status, person_and_organization.the_person : person /
-    // the_organization : organization), and — unlike product_context/product_definition_context,
-    // which have their own SUBTYPE OF and so cannot be code-generated in V1 (the same
-    // limitation documented for next_assembly_usage_occurrence) — all three codegen cleanly on
-    // their own. Emitting them means Approval's and PersonAndOrganization's generated Kotlin is
-    // actually self-contained, not just structurally emitted with a dangling class reference;
-    // Product and ProductDefinition keep exactly that dangling-reference limitation, via
-    // ProductContext/ProductDefinitionContext, which this does not attempt to fix — see README.
-    private val SUPPORT_ENTITY_NAMES = listOf("approval_status", "person", "organization")
+    // but emitted alongside whichever of them succeed, because a target entity's *generated*
+    // Kotlin references them as an attribute type:
+    //   - approval_status (approval.status), person / organization
+    //     (person_and_organization.the_person / .the_organization)
+    //   - product_context (product.frame_of_reference : SET [1:?] OF product_context) and
+    //     product_definition_context (product_definition.frame_of_reference), both SUBTYPE OF
+    //     application_context_element and so, as of the SUBTYPE OF inheritance-flattening wave,
+    //     code-generate cleanly (previously blocked -- see git history / README for the prior
+    //     "dangling reference" limitation)
+    //   - application_context (product_context.frame_of_reference /
+    //     product_definition_context.frame_of_reference, both inherited from
+    //     application_context_element)
+    // Emitting all of them means every one of the six target entities' generated Kotlin is now
+    // self-contained: no dangling class references anywhere in the emitted file. The three pure
+    // SUBTYPE OF ancestors that exist in ap242-v1-entities.exp *only* to make
+    // next_assembly_usage_occurrence's attribute flattening resolve (product_definition_relationship,
+    // product_definition_usage, assembly_component_usage) are deliberately NOT listed here: nothing
+    // in the emitted file references them as an attribute type, so emitting them would add classes
+    // with no incoming reference -- they stay resolver-only ancestors, not emitted Kotlin.
+    private val SUPPORT_ENTITY_NAMES =
+        listOf(
+            "approval_status",
+            "person",
+            "organization",
+            "product_context",
+            "product_definition_context",
+            "application_context",
+        )
 
     data class Outcome(
         val fileSpec: FileSpec,
@@ -55,26 +74,35 @@ object Ap242V1CodeGen {
     }
 
     // Tries each target entity independently via generateEntityType (not the all-or-nothing
-    // generateFile) precisely because one of the six (next_assembly_usage_occurrence) is
-    // expected to throw CodeGenException — a single throwing entity must not prevent the other
-    // five from generating. The successes are re-run through generateFile at the end only to
-    // reuse its duplicate-class-name guard and produce one coherent FileSpec; every entity name
-    // fed into it there already passed generateEntityType once above, so that second pass never
-    // throws.
+    // generateFile) so a single throwing entity can't prevent the others from generating (a
+    // real codegen limitation -- e.g. an unsupported attribute type -- could still make one of
+    // the six throw in the future, even though none currently do). The successes are re-run
+    // through generateFile at the end only to reuse its duplicate-class-name guard and produce
+    // one coherent FileSpec; every entity name fed into it there already passed
+    // generateEntityType once above, so that second pass never throws.
+    //
+    // Inheritance is resolved once, up front, against the *unfiltered* schema (resolvedEntities)
+    // -- not recomputed later against the filtered schema passed to generateFile. This matters:
+    // next_assembly_usage_occurrence's SUBTYPE OF chain reaches product_definition_relationship /
+    // product_definition_usage / assembly_component_usage, none of which end up in
+    // filteredSchema's entity list (see SUPPORT_ENTITY_NAMES above), so resolving against the
+    // filtered schema would throw "does not resolve to a known entity". Resolving once against
+    // the full schema and threading the same resolvedEntities map through both generateEntityType
+    // calls and the final generateFile call avoids that.
     fun generate(packageName: String = DEFAULT_PACKAGE_NAME): Outcome {
         val schema = loadSchema()
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
-        val entitiesByName = schema.entities.associateBy { it.name }
+        val resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema)
 
         val skipped = mutableMapOf<String, String>()
         val generated = mutableListOf<String>()
         TARGET_ENTITY_NAMES.forEach { name ->
-            val entity =
-                requireNotNull(entitiesByName[name]) {
+            val resolved =
+                requireNotNull(resolvedEntities[name]) {
                     "target entity '$name' not found in $SCHEMA_RESOURCE_PATH"
                 }
             try {
-                ExpressKotlinCodeGenerator.generateEntityType(entity, packageName, definedTypesByLowerName)
+                ExpressKotlinCodeGenerator.generateEntityType(resolved, packageName, definedTypesByLowerName)
                 generated += name
             } catch (e: CodeGenException) {
                 skipped[name] = e.message ?: "codegen limitation with no message"
@@ -83,7 +111,7 @@ object Ap242V1CodeGen {
 
         val emittedNames = (generated + SUPPORT_ENTITY_NAMES).toSet()
         val filteredSchema = schema.copy(entities = schema.entities.filter { it.name in emittedNames })
-        val fileSpec = ExpressKotlinCodeGenerator.generateFile(filteredSchema, packageName)
+        val fileSpec = ExpressKotlinCodeGenerator.generateFile(filteredSchema, packageName, resolvedEntities)
         return Outcome(fileSpec, generated, skipped)
     }
 
@@ -99,8 +127,15 @@ object Ap242V1CodeGen {
 }
 
 private val EXPECTED_GENERATED =
-    setOf("product", "product_definition", "product_definition_formation", "approval", "person_and_organization")
-private val EXPECTED_SKIPPED = setOf("next_assembly_usage_occurrence")
+    setOf(
+        "product",
+        "product_definition",
+        "product_definition_formation",
+        "next_assembly_usage_occurrence",
+        "approval",
+        "person_and_organization",
+    )
+private val EXPECTED_SKIPPED = emptySet<String>()
 
 // Deliberately plain println, not kotlin-logging (kSTEP M2 Welle 2 scope decision): this main()
 // IS the generateExpressKotlin Gradle task's own console report, the same category of output as
@@ -115,10 +150,12 @@ private val EXPECTED_SKIPPED = setOf("next_assembly_usage_occurrence")
  *
  * Asserts the observed success/skip sets against [EXPECTED_GENERATED]/[EXPECTED_SKIPPED] and
  * fails loudly (non-zero exit via the uncaught [IllegalStateException]) if they ever drift —
- * e.g. a future codegen enhancement that makes next_assembly_usage_occurrence generate, or a
- * regression that breaks one of the five that currently succeed. Silently accepting a changed
- * set would let `generateExpressKotlin` (wired into `check`, see build.gradle.kts) keep
- * reporting green while this wave's documented real-schema codegen boundary quietly moved.
+ * e.g. a regression that breaks one of the six that currently succeed, or a future codegen
+ * enhancement/regression that changes which entities generate. Since the SUBTYPE OF
+ * inheritance-flattening wave, all six V1 entities generate and EXPECTED_SKIPPED is empty.
+ * Silently accepting a changed set would let `generateExpressKotlin` (wired into `check`, see
+ * build.gradle.kts) keep reporting green while this wave's documented real-schema codegen
+ * boundary quietly moved.
  */
 fun main(args: Array<String>) {
     require(args.size == 1) { "usage: Ap242V1CodeGenKt <outputDir>" }

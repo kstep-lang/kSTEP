@@ -12,8 +12,11 @@ sealed interface ExpressAttribute {
     ) : ExpressAttribute
 
     /**
-     * `SELF\entity.attr (RENAMED newName)?` — captured verbatim, not resolved.
-     * Resolving it requires supertype attribute inheritance, out of scope for this wave.
+     * `SELF\entity.attr (RENAMED newName)?` — captured verbatim, not resolved. Still out of
+     * scope even after [InheritanceResolver] added SUBTYPE OF attribute flattening: a
+     * `Redeclared` attribute encountered while flattening makes [InheritanceResolver] throw a
+     * [SemanticModelException] rather than attempt to resolve it, a deliberate V1 scope
+     * decision, not a missing capability.
      */
     data class Redeclared(
         val rawText: String,
