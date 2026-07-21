@@ -12,6 +12,26 @@ private val WHERE_RULES = listOf(WhereRuleSpec(label = "wr1", expressionText = "
  * `dev.kstep.express` AP242-subset `approval` entity — `status`/`STRING`, `level`/`STRING`,
  * `authorized_by`/`person_and_organization`.
  *
+ * **Honesty note (M2 Welle 8 — codegen reconciliation):** this shape is `kstep-core`'s
+ * deliberately ergonomic approximation of the real AP242 `approval` entity
+ * (`ap242-v1-entities.exp` lines 202–205: `status : approval_status; level : label;` — nothing
+ * else), not that entity itself. Two divergences, both pinned by
+ * `dev.kstep.tests.Ap242CoreSchemaConsistencyTest` so neither can drift further without a
+ * deliberate allowlist edit:
+ * - The real `status` is typed the entity `approval_status`, not `STRING` — modeled here as
+ *   [String] as a deliberate simplification.
+ * - [authorizedBy] (`authorized_by`) **does not exist on the real AP242 `approval` at all**. It
+ *   is a kSTEP-invented convenience linkage to [PersonAndOrganization], carried over from the
+ *   `ap242-subset.exp` parser/codegen test fixture — a legitimate fixture for exercising
+ *   entity-typed attribute resolution, but not a real-schema attribute. Removing it here alone
+ *   (while leaving `status` a bare `String`) would only mint a *third*, still-incoherent shape
+ *   matching neither the fixture nor the real schema, so it is scheduled for removal together
+ *   with entity-typed `status` modeling in a future, milestone-scoped wave — see the README's
+ *   Roadmap "codegen reconciliation" entry for the full deferral rationale.
+ *
+ * `wr1: SELF.level <> ''` is also a **synthesized** ergonomic WHERE rule, not a real one: the
+ * real AP242 `approval` entity has no WHERE rule at all.
+ *
  * `level` is `STRING`, not `INTEGER`: the real AP242 MIM's `approval.level` attribute is typed
  * `label` (a `TYPE label = STRING;` alias, see `ap242-v1-entities.exp` and
  * `dev.kstep.express.codegen.Ap242V1CodeGen`), which this fixture and builder now match — a

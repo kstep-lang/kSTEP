@@ -13,6 +13,17 @@ private val WHERE_RULES = listOf(WhereRuleSpec(label = "wr1", expressionText = "
  * `id` and `name` are non-`OPTIONAL` (`identifier`/`label`); `description` is `OPTIONAL text`
  * (`ap242-v1-entities.exp` line 138) — an empty `description` is legal EXPRESS, not a gap.
  *
+ * **Honesty note (M2 Welle 8 — codegen reconciliation):** the real AP242 `product`
+ * (`ap242-v1-entities.exp` lines 135–140) also declares a mandatory
+ * `frame_of_reference : SET [1:?] OF product_context`, which `kstep-core` **omits entirely** —
+ * an aggregation-of-entity attribute this hand-authored layer does not yet model. `description`
+ * is represented as a non-null [String] defaulting to `""` rather than a nullable `String?`, the
+ * pervasive "`OPTIONAL text`/`label` as empty-default string" convention used throughout
+ * `kstep-core`. `wr1: SELF.id <> ''` is a **synthesized** ergonomic WHERE rule — the real
+ * `product` entity has no WHERE rule of its own. All three are pinned by
+ * `dev.kstep.tests.Ap242CoreSchemaConsistencyTest`; see the README's Roadmap
+ * "codegen reconciliation" entry for the full deferral rationale.
+ *
  * The constructor is `internal` so the only way to obtain an instance from outside this module is the
  * [product] builder function, which always runs WHERE-rule validation first — a public constructor (and its
  * generated `copy()`) would let callers construct or mutate an instance that violates its own WHERE rule

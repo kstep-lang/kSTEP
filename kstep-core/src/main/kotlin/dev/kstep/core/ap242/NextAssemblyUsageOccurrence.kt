@@ -19,6 +19,19 @@ private val WHERE_RULES =
  * `reference_designator`/`STRING`, `relating_product_definition`/`related_product_definition`
  * both `product_definition`.
  *
+ * **Honesty note (M2 Welle 8 — codegen reconciliation):** the real
+ * `next_assembly_usage_occurrence`'s flattened SUBTYPE OF chain (`assembly_component_usage` →
+ * `product_definition_usage` → `product_definition_relationship`, see `ap242-v1-entities.exp`
+ * lines 165–200) also carries an inherited `description : OPTIONAL text`
+ * (`product_definition_relationship`), which `kstep-core` **omits entirely**. The inherited
+ * `reference_designator : OPTIONAL identifier` (`assembly_component_usage`) is present but its
+ * optionality is **narrowed**: `kstep-core` models it as a non-null [String] defaulting to `""`
+ * rather than a nullable `String?`. `wr1: (SELF.id <> '') AND (SELF.reference_designator <> '')`
+ * is a **synthesized** ergonomic WHERE rule — the real WR1 (`acyclic_product_definition_relationship(...)`)
+ * is outside the supported WHERE-expression subset. All three are pinned by
+ * `dev.kstep.tests.Ap242CoreSchemaConsistencyTest`; see the README's Roadmap
+ * "codegen reconciliation" entry for the full deferral rationale.
+ *
  * The constructor is `internal` — see [Product]'s equivalent doc note for why: only the
  * [nextAssemblyUsageOccurrence] builder function may produce an instance, so it always passes
  * through WHERE-rule and missing-reference validation first. `@ConsistentCopyVisibility` keeps

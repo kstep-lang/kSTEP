@@ -207,10 +207,26 @@ Welle 1, below). Concretely, as of this writing:
   **(M2 Welle 7)** `KSTEP-M-002` (missing mandatory primitive
   attribute) codes, analogous to kUML's `KUML-E-xxx` structured errors
   — see <<roadmap,Roadmap>> above for what `KSTEP-M-002` covers and
-  what it deliberately doesn't. These six types are currently
-  hand-authored independently of `ExpressKotlinCodeGenerator`'s
-  generated output — reconciling the two is tracked as future work (see
-  <<roadmap,Roadmap>>).
+  what it deliberately doesn't. These six types are hand-authored
+  independently of `ExpressKotlinCodeGenerator`'s generated output, and
+  **(M2 Welle 8)** that relationship is now precisely characterized
+  rather than a vague "future work" placeholder: (i) codegen already
+  produces schema-faithful equivalents of all six types plus their
+  six support entities in the generated `dev.kstep.generated.ap242v1`
+  package (see <<status,Status>> above and `Ap242V1CodeGenTest`) — the
+  generator needed no changes; (ii) `kstep-core` is a deliberately
+  ergonomic layer aligned to the `ap242-subset.exp` fixture, which
+  simplifies the real excerpt in specific, now-enumerated ways (entity
+  references modeled as `String`, a few real attributes omitted, one
+  optionality narrowed, one attribute invented, several WHERE rules
+  synthesized — see each type's KDoc in `dev.kstep.core.ap242` for the
+  per-attribute rationale); (iii) this wave adds
+  `dev.kstep.tests.Ap242CoreSchemaConsistencyTest`, which re-derives
+  the real shape live from `ap242-v1-entities.exp` on every run and
+  fails the build on any divergence not explicitly named in its
+  allowlist — so the gap is now bounded and guarded, not open-ended.
+  See <<roadmap,Roadmap>> for the full divergence inventory and what
+  remains deliberately deferred.
 * **(M2 Welle 7)** A correctness fix in the same spirit as the
   `approval.level` one above: `Product.kt`'s doc comment claimed `id,
   name, description, all STRING, none OPTIONAL`, which contradicted the
@@ -1087,10 +1103,114 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   and — all six, see <<status,Status>> above — from the real
   AP242 schema, and `kstep-core` now has a runtime construction/
   validation API on top of hand-authored equivalents of those six types
-  (see <<status,Status>> above) — reconciling the hand-authored types
-  with `ExpressKotlinCodeGenerator`'s generated output is still
-  pending, now that codegen has run against the real (non-fixture)
-  AP242 schema.
+  (see <<status,Status>> above). **(M2 Welle 8 — codegen
+  reconciliation, resolved-this-wave vs. deliberately-deferred:)**
++
+--
+Resolved this wave: every divergence between `kstep-core`'s hand-authored
+shape and the real AP242 excerpt is now enumerated, documented in each
+type's KDoc (`dev.kstep.core.ap242`), and pinned by
+`dev.kstep.tests.Ap242CoreSchemaConsistencyTest` (re-derives the real
+shape live from `ap242-v1-entities.exp` via `InheritanceResolver` on
+every run, fails the build on any *new*, undocumented drift). The full
+inventory:
+
+[cols="2,3,3", options="header"]
+|===
+| Entity | Divergence | Status
+
+| `approval`
+| `status` is entity-typed (`approval_status`) in the real schema; `String` in `kstep-core`
+| accepted, guarded
+
+| `approval`
+| `authorized_by` does not exist on the real entity at all — a kSTEP-invented convenience linkage
+| accepted, guarded; removal deferred (see below)
+
+| `approval`
+| real entity has no WHERE rule; `kstep-core`'s `wr1` is synthesized
+| documented (WHERE rules are out of the guard's scope, see below)
+
+| `person_and_organization`
+| `the_person`/`the_organization` are entity-typed (`person`/`organization`) in the real schema; `String` in `kstep-core`
+| accepted, guarded
+
+| `person_and_organization`
+| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
+| documented
+
+| `product`
+| real entity has a mandatory `frame_of_reference : SET [1:?] OF product_context`; `kstep-core` omits it
+| accepted, guarded
+
+| `product`
+| real `WR1` uses `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
+| documented
+
+| `product_definition`
+| real entity has a mandatory `frame_of_reference : product_definition_context`; `kstep-core` omits it
+| accepted, guarded
+
+| `product_definition`
+| real `WR1` uses `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
+| documented
+
+| `product`, `product_definition`, `product_definition_formation`
+| real `OPTIONAL text description`; `kstep-core` models it as non-null `String` defaulting to `""`
+| accepted, guarded (named convention, "OptionalStringAsEmptyDefault")
+
+| `product_definition_formation`
+| real `UNIQUE UR1: id, of_product` not enforced anywhere in `kstep-core`
+| documented (no `UNIQUE`-rule enforcement exists yet — broader gap)
+
+| `next_assembly_usage_occurrence`
+| real flattened shape inherits an `OPTIONAL text description` (`product_definition_relationship`); `kstep-core` omits it
+| accepted, guarded
+
+| `next_assembly_usage_occurrence`
+| real inherited `reference_designator` (`assembly_component_usage`) is `OPTIONAL identifier`; `kstep-core` narrows it to non-null `String` defaulting to `""`
+| accepted, guarded
+
+| `next_assembly_usage_occurrence`
+| real `WR1` is `acyclic_product_definition_relationship(...)` (unsupported); `kstep-core`'s rule is synthesized
+| documented
+|===
+
+Deliberately deferred, not attempted this wave: entity-typed modeling of
+`kstep-core`'s `status`/`the_person`/`the_organization` (i.e. actually
+building `ApprovalStatus`/`Person`/`Organization`/`ProductContext`/
+`ProductDefinitionContext`/`ApplicationContext` into the hand-authored
+layer, and dropping `authorizedBy`). This needs capabilities the
+hand-authored layer does not have yet — `LIST`/aggregation support
+(`person`'s `middle_names`/`prefix_titles`/`suffix_titles`) and
+`EXISTS()` WHERE-rule evaluation (`person`'s `WR1`) — and would, without
+those, only re-derive by hand what `ExpressKotlinCodeGenerator` already
+generates faithfully (see <<status,Status>> above). It is therefore a
+milestone-scoped architecture decision, not a wave: the real fork is
+whether to rebuild `kstep-core`'s ergonomic layer *on top of* the
+generated `dev.kstep.generated.ap242v1` types (no duplication, but
+couples the ergonomic API to generated shapes and needs a builder/
+validation layer over generated data classes) or to keep hand-authoring
+and extend the hand layer with `LIST` + `EXISTS` support — an explicit
+decision for the project owner, not pre-committed here.
+`authorizedBy` removal, `status`-as-entity modeling, and the Part-21
+`APPROVAL` real-arity alignment (`kstep-step21`'s `Part21EntityKind`,
+currently 3 positional args, matching `ap242-subset.exp`, not the real
+2-attribute `approval`) all travel together in that future wave —
+removing `authorizedBy` alone would leave `status` a bare `String`,
+which matches *neither* the fixture nor the real schema, an incoherent
+half-step.
+
+WHERE-rule divergences are documentation-only, not covered by the drift
+test: every real WHERE rule on these six entities uses
+`SIZEOF`/`USEDIN`/`EXISTS`/`acyclic_...`, all outside
+`WhereRuleValidator`'s supported expression subset, so there is no
+supported real rule to mechanically align a synthesized one to.
+`UNIQUE`/`DERIVE`/`INVERSE` clause enforcement is likewise out of the
+drift test's scope. The test guards attribute shape only (field set,
+primitive-vs-entity-vs-aggregation category, optionality) — where
+silent structural drift would actually hide.
+--
 . Validation: EXPRESS `WHERE` rules surfaced as structured errors.
   Done for the supported expression subset (comparisons, `SELF.attribute`
   references, `AND`/`OR`/`NOT`, string/integer/real literals) — see
@@ -1118,7 +1238,8 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   (`approval.status`, `person_and_organization.the_person`/
   `the_organization` are hand-modeled as strings where the real schema
   has entity-typed references; reconciling those with generated output
-  is the already-tracked codegen-reconciliation item below), and the
+  is the entity-typed-reconciliation item explicitly deferred in the
+  "codegen reconciliation" roadmap entry above), and the
   general model-driven form (auto-deriving presence checks from
   `ResolvedEntity`/`ExpressAttribute.isOptional` instead of a per-
   builder null-check) which awaits that reconciliation. No non-STRING

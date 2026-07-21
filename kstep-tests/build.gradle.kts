@@ -22,6 +22,10 @@ dependencies {
     testImplementation(libs.mcp.kotlin.sdk.testing)
     testImplementation(libs.mcp.kotlin.sdk.client)
     testImplementation(libs.slf4j.simple)
+    // kotlin-reflect: Ap242CoreSchemaConsistencyTest inspects kstep-core data classes'
+    // primary-constructor parameters (name/type/nullability) via kotlin-reflect to compare
+    // their shape against the real AP242 schema -- not needed by any other test in this module.
+    testImplementation(libs.kotlin.reflect)
 }
 
 tasks.withType<Test>().configureEach {
