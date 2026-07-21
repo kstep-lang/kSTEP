@@ -9,7 +9,9 @@ private const val ENTITY_NAME = "product"
 private val WHERE_RULES = listOf(WhereRuleSpec(label = "wr1", expressionText = "SELF.id <> ''"))
 
 /**
- * `dev.kstep.express` AP242-subset `product` entity — `id`, `name`, `description`, all `STRING`, none `OPTIONAL`.
+ * `dev.kstep.express` AP242-subset `product` entity — `id`, `name`, `description`, all `STRING`.
+ * `id` and `name` are non-`OPTIONAL` (`identifier`/`label`); `description` is `OPTIONAL text`
+ * (`ap242-v1-entities.exp` line 138) — an empty `description` is legal EXPRESS, not a gap.
  *
  * The constructor is `internal` so the only way to obtain an instance from outside this module is the
  * [product] builder function, which always runs WHERE-rule validation first — a public constructor (and its
@@ -26,29 +28,45 @@ data class Product internal constructor(
 )
 
 class ProductBuilder internal constructor() {
-    var name: String = ""
+    // Nullable purely as an internal "was it set" presence sentinel — same rationale as
+    // Approval.authorizedBy, generalized from entity references to a mandatory primitive:
+    // `name` is a non-OPTIONAL `label` with no WHERE rule of its own, so a still-null value at
+    // build() time is a structural violation (KSTEP-M-002), never a legitimate empty value. An
+    // explicitly-assigned empty string, by contrast, is a legal EXPRESS value here and must stay
+    // Valid — see missingMandatoryAttributeViolation's KDoc.
+    var name: String? = null
     var description: String = ""
 }
 
 /**
  * Builds a [Product], running WHERE-rule validation ([WHERE_RULES]) against the built
- * values. Never throws for a validation failure — returns [ValidationResult.Invalid] with
- * structured [dev.kstep.core.DslViolation]s instead.
+ * values plus a presence check for the mandatory [ProductBuilder.name] attribute. Never throws
+ * for a validation failure — returns [ValidationResult.Invalid] with structured
+ * [dev.kstep.core.DslViolation]s instead.
  */
 fun product(
     id: String,
     block: ProductBuilder.() -> Unit = {},
 ): ValidationResult<Product> {
     val builder = ProductBuilder().apply(block)
+
+    val structuralViolations =
+        buildList {
+            if (builder.name == null) add(missingMandatoryAttributeViolation(ENTITY_NAME, "name"))
+        }
+
     val attributeValues =
         mapOf(
             "id" to WhereRuleValue.StringValue(id),
-            "name" to WhereRuleValue.StringValue(builder.name),
+            "name" to WhereRuleValue.StringValue(builder.name ?: ""),
             "description" to WhereRuleValue.StringValue(builder.description),
         )
-    val violations = WhereRuleValidator.validate(ENTITY_NAME, WHERE_RULES, attributeValues).map { it.toDslViolation() }
+    val whereRuleViolations =
+        WhereRuleValidator.validate(ENTITY_NAME, WHERE_RULES, attributeValues).map { it.toDslViolation() }
+
+    val violations = structuralViolations + whereRuleViolations
     return if (violations.isEmpty()) {
-        ValidationResult.Valid(Product(id, builder.name, builder.description))
+        ValidationResult.Valid(Product(id, builder.name!!, builder.description))
     } else {
         ValidationResult.Invalid(violations)
     }

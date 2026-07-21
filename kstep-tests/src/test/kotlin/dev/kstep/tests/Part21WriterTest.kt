@@ -49,7 +49,7 @@ class Part21WriterTest :
         }
 
         "FILE_DESCRIPTION renders an empty description list as an empty parenthesis" {
-            val product = product("BRK-001") { }.getOrThrow()
+            val product = product("BRK-001") { name = "" }.getOrThrow()
             val text = Part21Writer.write(testHeader().copy(description = emptyList()), listOf(product))
             text shouldContain "FILE_DESCRIPTION((),'2;1');\n"
         }
@@ -87,7 +87,7 @@ class Part21WriterTest :
         }
 
         "productDefinition serializes as PRODUCT_DEFINITION(id,description,#formation)" {
-            val product = product("BRK-001") { }.getOrThrow()
+            val product = product("BRK-001") { name = "" }.getOrThrow()
             val builtFormation = productDefinitionFormation("BRK-001-F") { ofProduct = product }.getOrThrow()
             val definition = productDefinition("BRK-001-D") { formation = builtFormation }.getOrThrow()
             val text = Part21Writer.write(testHeader(), listOf(definition))
@@ -110,14 +110,15 @@ class Part21WriterTest :
         // verified against ap242-subset.exp — NOT the illustrative prompt example's (id, name,
         // reference_designator, #relating, #related), which puts reference_designator in the wrong position.
         "nextAssemblyUsageOccurrence serializes own attrs then its two refs, reference_designator last" {
-            val product1 = product("BRK-001") { }.getOrThrow()
+            val product1 = product("BRK-001") { name = "" }.getOrThrow()
             val formation1 = productDefinitionFormation("BRK-001-F") { ofProduct = product1 }.getOrThrow()
             val relating = productDefinition("BRK-001-D") { formation = formation1 }.getOrThrow()
-            val product2 = product("HSG-001") { }.getOrThrow()
+            val product2 = product("HSG-001") { name = "" }.getOrThrow()
             val formation2 = productDefinitionFormation("HSG-001-F") { ofProduct = product2 }.getOrThrow()
             val related = productDefinition("HSG-001-D") { formation = formation2 }.getOrThrow()
             val nauo =
                 nextAssemblyUsageOccurrence("NAUO-001") {
+                    name = ""
                     relatingProductDefinition = relating
                     relatedProductDefinition = related
                     referenceDesignator = "RD-1"
@@ -162,7 +163,7 @@ class Part21WriterTest :
         }
 
         "a shared instance referenced from two different sites is written exactly once" {
-            val product = product("BRK-001") { }.getOrThrow()
+            val product = product("BRK-001") { name = "" }.getOrThrow()
             val formationA = productDefinitionFormation("BRK-001-F-A") { ofProduct = product }.getOrThrow()
             val formationB = productDefinitionFormation("BRK-001-F-B") { ofProduct = product }.getOrThrow()
 
@@ -171,7 +172,7 @@ class Part21WriterTest :
         }
 
         "the vararg write overload delegates to the List overload" {
-            val product = product("BRK-001") { }.getOrThrow()
+            val product = product("BRK-001") { name = "" }.getOrThrow()
             Part21Writer.write(testHeader(), product) shouldBe Part21Writer.write(testHeader(), listOf(product))
         }
     })

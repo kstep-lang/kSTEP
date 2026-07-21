@@ -34,7 +34,11 @@ data class NextAssemblyUsageOccurrence internal constructor(
 )
 
 class NextAssemblyUsageOccurrenceBuilder internal constructor() {
-    var name: String = ""
+    // Nullable purely as an internal "was it set" presence sentinel (see Product.name's
+    // equivalent doc note): `name` is a non-OPTIONAL `label` inherited from
+    // `product_definition_relationship` with no WHERE rule of its own, so a still-null value at
+    // build() time is a structural violation (KSTEP-M-002), never a legitimate empty value.
+    var name: String? = null
     var relatingProductDefinition: ProductDefinition? = null
     var relatedProductDefinition: ProductDefinition? = null
     var referenceDesignator: String = ""
@@ -47,8 +51,8 @@ fun nextAssemblyUsageOccurrence(
     val builder = NextAssemblyUsageOccurrenceBuilder().apply(block)
 
     // Collects all structural violations rather than stopping at the first — this entity is
-    // the deliberate "three simultaneous violations in one call" proof (two missing refs plus
-    // a failing WHERE rule can all show up together).
+    // the deliberate "multiple simultaneous violations in one call" proof (missing refs, a
+    // missing name, and a failing WHERE rule can all show up together).
     val structuralViolations =
         buildList {
             if (builder.relatingProductDefinition == null) {
@@ -57,12 +61,15 @@ fun nextAssemblyUsageOccurrence(
             if (builder.relatedProductDefinition == null) {
                 add(missingMandatoryReferenceViolation(ENTITY_NAME, "related_product_definition"))
             }
+            if (builder.name == null) {
+                add(missingMandatoryAttributeViolation(ENTITY_NAME, "name"))
+            }
         }
 
     val attributeValues =
         mapOf(
             "id" to WhereRuleValue.StringValue(id),
-            "name" to WhereRuleValue.StringValue(builder.name),
+            "name" to WhereRuleValue.StringValue(builder.name ?: ""),
             "reference_designator" to WhereRuleValue.StringValue(builder.referenceDesignator),
         )
     val whereRuleViolations =
@@ -73,7 +80,7 @@ fun nextAssemblyUsageOccurrence(
         ValidationResult.Valid(
             NextAssemblyUsageOccurrence(
                 id = id,
-                name = builder.name,
+                name = builder.name!!,
                 relatingProductDefinition = builder.relatingProductDefinition!!,
                 relatedProductDefinition = builder.relatedProductDefinition!!,
                 referenceDesignator = builder.referenceDesignator,

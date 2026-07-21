@@ -205,17 +205,64 @@ class Ap242DslTest :
                 )
         }
 
+        "product with name never set fails with a missing-mandatory-attribute violation" {
+            val result = product("BRK-001") { }
+            result.shouldBeInstanceOf<ValidationResult.Invalid>()
+            result.violations shouldHaveSize 1
+            val violation = result.violations.single()
+            violation.code shouldBe DslViolationCodes.MISSING_MANDATORY_ATTRIBUTE
+            violation.entityName shouldBe "product"
+        }
+
+        "product with name explicitly set to empty is Valid — presence, not non-emptiness, is enforced" {
+            val result = product("BRK-001") { name = "" }
+            result.shouldBeInstanceOf<ValidationResult.Valid<Product>>()
+            result.value.name shouldBe ""
+        }
+
+        "nextAssemblyUsageOccurrence with name never set fails with a missing-mandatory-attribute violation" {
+            val relating = validProductDefinition()
+            val related = validProductDefinition()
+            val result =
+                nextAssemblyUsageOccurrence("NAUO-1") {
+                    relatingProductDefinition = relating
+                    relatedProductDefinition = related
+                    referenceDesignator = "A1"
+                }
+            result.shouldBeInstanceOf<ValidationResult.Invalid>()
+            result.violations shouldHaveSize 1
+            val violation = result.violations.single()
+            violation.code shouldBe DslViolationCodes.MISSING_MANDATORY_ATTRIBUTE
+            violation.entityName shouldBe "next_assembly_usage_occurrence"
+        }
+
+        "nextAssemblyUsageOccurrence with id/name/both refs/reference_designator all missing collects four violations" {
+            val result =
+                nextAssemblyUsageOccurrence("") {
+                    referenceDesignator = ""
+                }
+            result.shouldBeInstanceOf<ValidationResult.Invalid>()
+            result.violations shouldHaveSize 4
+            result.violations.map { it.code } shouldContainExactlyInAnyOrder
+                listOf(
+                    DslViolationCodes.MISSING_MANDATORY_REFERENCE,
+                    DslViolationCodes.MISSING_MANDATORY_REFERENCE,
+                    DslViolationCodes.MISSING_MANDATORY_ATTRIBUTE,
+                    DslViolationCodes.WHERE_RULE_NOT_SATISFIED,
+                )
+        }
+
         "ValidationResult.isValid returns true for Valid and false for Invalid" {
-            product("BRK-001") { }.isValid() shouldBe true
-            product("") { }.isValid() shouldBe false
+            product("BRK-001") { name = "Bracket" }.isValid() shouldBe true
+            product("") { name = "Bracket" }.isValid() shouldBe false
         }
 
         "ValidationResult.getOrThrow returns the value for Valid and throws for Invalid" {
-            val built = product("BRK-001") { }.getOrThrow()
+            val built = product("BRK-001") { name = "Bracket" }.getOrThrow()
             built.id shouldBe "BRK-001"
-            built.name shouldBe ""
+            built.name shouldBe "Bracket"
             built.description shouldBe ""
-            val exception = runCatching { product("") { }.getOrThrow() }.exceptionOrNull()
+            val exception = runCatching { product("") { name = "Bracket" }.getOrThrow() }.exceptionOrNull()
             exception.shouldBeInstanceOf<IllegalStateException>()
         }
     })

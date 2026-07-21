@@ -86,6 +86,7 @@ class KStepMcpServerTest :
                     "build_next_assembly_usage_occurrence",
                     mapOf(
                         "id" to "NAUO-001",
+                        "name" to "bracket usage",
                         "relating_product_definition_id" to "HSG-001-D",
                         "related_product_definition_id" to "BRK-001-D",
                         "reference_designator" to "RD-1",
@@ -124,7 +125,7 @@ class KStepMcpServerTest :
         "build_product with an empty id returns a structured validation_failed error, not a crash" {
             val server = buildServer()
             val client = connectedClient(server)
-            val result = client.callTool("build_product", mapOf("id" to ""))
+            val result = client.callTool("build_product", mapOf("id" to "", "name" to "Bracket"))
             result.isError shouldBe true
             result.errorKind() shouldBe "validation_failed"
             val violations = result.structuredContent!!["violations"]!!.jsonArray
@@ -138,7 +139,7 @@ class KStepMcpServerTest :
         "nextAssemblyUsageOccurrence with valid references but an empty reference_designator returns one violation" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "BRK-001")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -155,6 +156,7 @@ class KStepMcpServerTest :
                     "build_next_assembly_usage_occurrence",
                     mapOf(
                         "id" to "",
+                        "name" to "bracket usage",
                         "relating_product_definition_id" to "BRK-001-D",
                         "related_product_definition_id" to "BRK-001-D",
                     ),
@@ -214,7 +216,7 @@ class KStepMcpServerTest :
         "a wrong-type reference id is treated as unknown_reference, not a ClassCastException" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "BRK-001")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket")).isError shouldBe null
             val result = client.callTool("build_product_definition", mapOf("id" to "PD-1", "formation_id" to "BRK-001"))
             result.isError shouldBe true
             result.errorKind() shouldBe "unknown_reference"
@@ -246,7 +248,7 @@ class KStepMcpServerTest :
             emptyListing.isError shouldBe null
             emptyListing.structuredContent!!["count"]!!.jsonPrimitive.int shouldBe 0
 
-            client.callTool("build_product", mapOf("id" to "BRK-001")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket")).isError shouldBe null
             client
                 .callTool(
                     "build_person_and_organization",
@@ -323,10 +325,10 @@ class KStepMcpServerTest :
             val server = buildServer(store)
             val client = connectedClient(server)
 
-            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-3")).isError shouldBe null
-            val fourth = client.callTool("build_product", mapOf("id" to "P-4"))
+            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-3", "name" to "N3")).isError shouldBe null
+            val fourth = client.callTool("build_product", mapOf("id" to "P-4", "name" to "N4"))
             fourth.isError shouldBe true
             fourth.errorKind() shouldBe "store_capacity_exceeded"
         }
@@ -372,7 +374,7 @@ class KStepMcpServerTest :
         "a second NAUO with the same (reference_designator, relating_product_definition) is rejected" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -382,7 +384,7 @@ class KStepMcpServerTest :
                 .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
                 .isError shouldBe null
 
-            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -392,7 +394,7 @@ class KStepMcpServerTest :
                 .callTool("build_product_definition", mapOf("id" to "PD-RELATED-A", "formation_id" to "PDF-2"))
                 .isError shouldBe null
 
-            client.callTool("build_product", mapOf("id" to "P-3")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-3", "name" to "N3")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -407,6 +409,7 @@ class KStepMcpServerTest :
                     "build_next_assembly_usage_occurrence",
                     mapOf(
                         "id" to "NAUO-1",
+                        "name" to "usage 1",
                         "relating_product_definition_id" to "PD-RELATING",
                         "related_product_definition_id" to "PD-RELATED-A",
                         "reference_designator" to "RD-1",
@@ -418,6 +421,7 @@ class KStepMcpServerTest :
                     "build_next_assembly_usage_occurrence",
                     mapOf(
                         "id" to "NAUO-2",
+                        "name" to "usage 2",
                         "relating_product_definition_id" to "PD-RELATING",
                         "related_product_definition_id" to "PD-RELATED-B",
                         "reference_designator" to "RD-1",
@@ -434,7 +438,7 @@ class KStepMcpServerTest :
         "two NAUOs differing only in reference_designator both succeed" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -443,7 +447,7 @@ class KStepMcpServerTest :
             client
                 .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
                 .isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -458,6 +462,7 @@ class KStepMcpServerTest :
                     "build_next_assembly_usage_occurrence",
                     mapOf(
                         "id" to "NAUO-1",
+                        "name" to "usage 1",
                         "relating_product_definition_id" to "PD-RELATING",
                         "related_product_definition_id" to "PD-RELATED",
                         "reference_designator" to "RD-1",
@@ -468,6 +473,7 @@ class KStepMcpServerTest :
                     "build_next_assembly_usage_occurrence",
                     mapOf(
                         "id" to "NAUO-2",
+                        "name" to "usage 2",
                         "relating_product_definition_id" to "PD-RELATING",
                         "related_product_definition_id" to "PD-RELATED",
                         "reference_designator" to "RD-2",
@@ -478,7 +484,7 @@ class KStepMcpServerTest :
         "two NAUOs differing only in relating_product_definition both succeed" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -487,7 +493,7 @@ class KStepMcpServerTest :
             client
                 .callTool("build_product_definition", mapOf("id" to "PD-RELATING-A", "formation_id" to "PDF-1"))
                 .isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -496,7 +502,7 @@ class KStepMcpServerTest :
             client
                 .callTool("build_product_definition", mapOf("id" to "PD-RELATING-B", "formation_id" to "PDF-2"))
                 .isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-3")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-3", "name" to "N3")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -511,6 +517,7 @@ class KStepMcpServerTest :
                     "build_next_assembly_usage_occurrence",
                     mapOf(
                         "id" to "NAUO-1",
+                        "name" to "usage 1",
                         "relating_product_definition_id" to "PD-RELATING-A",
                         "related_product_definition_id" to "PD-RELATED",
                         "reference_designator" to "RD-1",
@@ -521,6 +528,7 @@ class KStepMcpServerTest :
                     "build_next_assembly_usage_occurrence",
                     mapOf(
                         "id" to "NAUO-2",
+                        "name" to "usage 2",
                         "relating_product_definition_id" to "PD-RELATING-B",
                         "related_product_definition_id" to "PD-RELATED",
                         "reference_designator" to "RD-1",
@@ -531,7 +539,7 @@ class KStepMcpServerTest :
         "rebuilding the same NAUO id with unchanged fields succeeds, not a false self-conflict" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "P-1")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -540,7 +548,7 @@ class KStepMcpServerTest :
             client
                 .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
                 .isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-2")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
@@ -553,6 +561,7 @@ class KStepMcpServerTest :
             val args =
                 mapOf(
                     "id" to "NAUO-1",
+                    "name" to "usage 1",
                     "relating_product_definition_id" to "PD-RELATING",
                     "related_product_definition_id" to "PD-RELATED",
                     "reference_designator" to "RD-1",
@@ -566,7 +575,7 @@ class KStepMcpServerTest :
         "product_definition_formation's UNIQUE UR1 needs no enforcement: store id-keying already guarantees it" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "SHARED-PRODUCT")).isError shouldBe null
+            client.callTool("build_product", mapOf("id" to "SHARED-PRODUCT", "name" to "Shared")).isError shouldBe null
 
             // Two different ids referencing the SAME of_product both succeed — no
             // unique_constraint_violated is ever returned for product_definition_formation
@@ -606,8 +615,8 @@ class KStepMcpServerTest :
                 val jobs =
                     (1..n).flatMap { i ->
                         listOf(
-                            async { clientA.callTool("build_product", mapOf("id" to "A-$i")) },
-                            async { clientB.callTool("build_product", mapOf("id" to "B-$i")) },
+                            async { clientA.callTool("build_product", mapOf("id" to "A-$i", "name" to "N-$i")) },
+                            async { clientB.callTool("build_product", mapOf("id" to "B-$i", "name" to "N-$i")) },
                         )
                     }
                 jobs.awaitAll().forEach { it.isError shouldBe null }

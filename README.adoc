@@ -200,14 +200,34 @@ Welle 1, below). Concretely, as of this writing:
   `Invalid(violations)`, never a thrown exception for a validation
   failure. Building an instance runs the WHERE-rule evaluator against
   the built values and also checks that every mandatory entity-typed
-  reference attribute was actually set, collecting *all* violations
-  (never stopping at the first) as structured `DslViolation`s with
-  `KSTEP-W-001` (WHERE rule not satisfied) or `KSTEP-M-001` (missing
-  mandatory reference) codes, analogous to kUML's `KUML-E-xxx`
-  structured errors. These six types are currently hand-authored
-  independently of `ExpressKotlinCodeGenerator`'s generated output —
-  reconciling the two is tracked as future work (see
+  reference attribute and every mandatory primitive attribute was
+  actually set, collecting *all* violations (never stopping at the
+  first) as structured `DslViolation`s with `KSTEP-W-001` (WHERE rule
+  not satisfied), `KSTEP-M-001` (missing mandatory reference), or
+  **(M2 Welle 7)** `KSTEP-M-002` (missing mandatory primitive
+  attribute) codes, analogous to kUML's `KUML-E-xxx` structured errors
+  — see <<roadmap,Roadmap>> above for what `KSTEP-M-002` covers and
+  what it deliberately doesn't. These six types are currently
+  hand-authored independently of `ExpressKotlinCodeGenerator`'s
+  generated output — reconciling the two is tracked as future work (see
   <<roadmap,Roadmap>>).
+* **(M2 Welle 7)** A correctness fix in the same spirit as the
+  `approval.level` one above: `Product.kt`'s doc comment claimed `id,
+  name, description, all STRING, none OPTIONAL`, which contradicted the
+  real AP242 MIM (`description : OPTIONAL text;`, `ap242-v1-entities.exp`
+  line 138) and the builder's own `description` handling — corrected to
+  state plainly that only `id`/`name` are non-`OPTIONAL`. This wave also
+  closes the mandatory-primitive-attribute-presence gap: `product.name`
+  and `next_assembly_usage_occurrence.name` are non-`OPTIONAL` `label`
+  attributes with no WHERE rule, previously left silently defaultable to
+  `""` by both `kstep-core`'s builders and `kstep-mcp`'s
+  `build_product`/`build_next_assembly_usage_occurrence` tools (which
+  used to write `name = args.name ?: ""`). Both now use a nullable
+  presence sentinel and surface `KSTEP-M-002` — including through the
+  MCP tool path, since that is exactly the "compiler as oracle for the
+  LLM" surface this project exists to demonstrate — when `name` is
+  never assigned. An explicitly empty `name` is unaffected and stays
+  `Valid`.
 * (M1 Welle 5) `kstep-step21` now has a real STEP Part 21 (ISO
   10303-21 physical file exchange format) writer and reader for the
   six V1 AP242 entities, in `dev.kstep.step21`. Part 21 is a
@@ -497,7 +517,9 @@ See <<roadmap,Roadmap>> for what's planned next.
 | Working: `product`/`personAndOrganization`/`approval`/
   `productDefinitionFormation`/`productDefinition`/
   `nextAssemblyUsageOccurrence` builder functions, each running
-  WHERE-rule and mandatory-reference validation and returning a
+  WHERE-rule, mandatory-reference (`KSTEP-M-001`), and — (M2 Welle 7)
+  `product.name`/`next_assembly_usage_occurrence.name` — mandatory-
+  primitive-attribute (`KSTEP-M-002`) validation and returning a
   `ValidationResult`. Depends on `kstep-express` for
   `dev.kstep.express.validation` only (no ANTLR types on its own
   compile classpath).
@@ -884,11 +906,16 @@ client.connect(clientTransport)
 val built = client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket"))
 println(built.structuredContent) // {"id":"BRK-001","name":"Bracket","description":"","entityType":"product"}
 
-// A validation failure comes back as structured content, not a protocol-level error:
+// A validation failure comes back as structured content, not a protocol-level error.
+// Both the empty id (WHERE rule) and the never-set name (mandatory attribute, (M2 Welle 7))
+// are collected in the same response, not just the first one found:
 val invalid = client.callTool("build_product", mapOf("id" to ""))
 println(invalid.isError) // true
 println(invalid.structuredContent)
-// {"errorKind":"validation_failed","violations":[{"code":"KSTEP-W-001","entityName":"product", ...}]}
+// {"errorKind":"validation_failed","violations":[
+//   {"code":"KSTEP-W-001","entityName":"product", ...},
+//   {"code":"KSTEP-M-002","entityName":"product","message":"required attribute 'name' ..."}
+// ]}
 ----
 
 To run the server for real, `kstep-cli` wraps this directly (M2 Welle 3):
@@ -1072,11 +1099,31 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   arithmetic operators, the tri-state `LOGICAL` type) are not evaluated
   and raise a structured exception instead. Note that WHERE-rule
   evaluation is not the same thing as EXPRESS mandatory-attribute-
-  presence enforcement (the `$`-token / non-OPTIONAL mechanism) — an
-  attribute with no WHERE rule backing it is not checked for presence
-  beyond what `kstep-core`'s builders separately enforce for
-  entity-typed references; this remains a known, intentional gap for a
-  future wave, not a bug.
+  presence enforcement (the `$`-token / non-OPTIONAL mechanism) —
+  **(M2 Welle 7)** this is now enforced for non-OPTIONAL *primitive*
+  attributes too, not only entity-typed references: `kstep-core`'s
+  builders model such an attribute as a nullable presence sentinel
+  (mirroring the existing entity-reference pattern) and emit a
+  structured `KSTEP-M-002` (missing mandatory attribute) when one is
+  left unset, alongside `KSTEP-M-001` for references. In the six V1
+  entities this closes the two real instances — `product.name` and
+  `next_assembly_usage_occurrence.name` — both non-OPTIONAL `label`
+  attributes that previously carried no WHERE rule and so silently
+  accepted an unset value as an empty string. Enforcement is
+  *presence*, not non-emptiness: an explicitly assigned empty string is
+  a legal value for a non-OPTIONAL STRING that no WHERE rule
+  constrains, and stays `Valid`. **Still deliberately out of scope:**
+  non-OPTIONAL attributes on the three hand-authored entities whose
+  Kotlin shape currently diverges from the real schema
+  (`approval.status`, `person_and_organization.the_person`/
+  `the_organization` are hand-modeled as strings where the real schema
+  has entity-typed references; reconciling those with generated output
+  is the already-tracked codegen-reconciliation item below), and the
+  general model-driven form (auto-deriving presence checks from
+  `ResolvedEntity`/`ExpressAttribute.isOptional` instead of a per-
+  builder null-check) which awaits that reconciliation. No non-STRING
+  (INTEGER/REAL) primitive presence case exists among the six V1
+  entities, so that reasoning is not yet needed either.
 . STEP Part 21 export/import. (M1 Welle 5) Done for the
   kSTEP-own-format half: `Part21Writer`/`Part21Reader` in
   `kstep-step21` losslessly roundtrip the six V1 entities through

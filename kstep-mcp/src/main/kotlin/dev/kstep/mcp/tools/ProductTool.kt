@@ -30,7 +30,7 @@ private val INPUT_SCHEMA =
                 putJsonObject("name") { put("type", "string") }
                 putJsonObject("description") { put("type", "string") }
             },
-        required = listOf("id"),
+        required = listOf("id", "name"),
     )
 
 fun registerBuildProductTool(
@@ -42,7 +42,10 @@ fun registerBuildProductTool(
         description =
             "Builds a kSTEP AP242 'product' entity (id, name, description) and stores it in this " +
                 "session under its own id, for later reference by build_product_definition_formation's " +
-                "of_product_id. Re-building with an id already in the store OVERWRITES the previous entry " +
+                "of_product_id. 'name' is mandatory in the real AP242 schema (non-OPTIONAL 'label') and " +
+                "omitting it returns a structured validation_failed error (KSTEP-M-002) rather than " +
+                "silently defaulting to an empty name; 'description' is genuinely OPTIONAL and may be " +
+                "omitted. Re-building with an id already in the store OVERWRITES the previous entry " +
                 "— entities that already resolved a reference to the old value keep pointing at it, since " +
                 "kstep-core entities are immutable.",
         inputSchema = INPUT_SCHEMA,
@@ -56,7 +59,7 @@ fun registerBuildProductTool(
             when (
                 val result =
                     product(args.id) {
-                        name = args.name ?: ""
+                        name = args.name
                         description = args.description ?: ""
                     }
             ) {

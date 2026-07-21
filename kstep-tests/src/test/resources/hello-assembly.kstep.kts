@@ -33,6 +33,7 @@ val housingDefinition = productDefinition("HSG-001-D") { formation = housingForm
 stepFile(fileName = "hello-assembly.step") {
     root(
         nextAssemblyUsageOccurrence("NAUO-001") {
+            name = "housing to bracket"
             relatingProductDefinition = housingDefinition
             relatedProductDefinition = bracketDefinition
             referenceDesignator = "RD-1"
@@ -40,6 +41,7 @@ stepFile(fileName = "hello-assembly.step") {
     )
     root(
         nextAssemblyUsageOccurrence("NAUO-002") {
+            name = "housing to screw"
             relatingProductDefinition = housingDefinition
             relatedProductDefinition = screwDefinition
             referenceDesignator = "RD-2"

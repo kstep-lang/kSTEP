@@ -70,7 +70,7 @@ private val INPUT_SCHEMA =
                 putJsonObject("related_product_definition_id") { put("type", "string") }
                 putJsonObject("reference_designator") { put("type", "string") }
             },
-        required = listOf("id", "relating_product_definition_id", "related_product_definition_id"),
+        required = listOf("id", "name", "relating_product_definition_id", "related_product_definition_id"),
     )
 
 fun registerBuildNextAssemblyUsageOccurrenceTool(
@@ -87,8 +87,12 @@ fun registerBuildNextAssemblyUsageOccurrenceTool(
                 "is returned WITHOUT attempting the build, so a WHERE-rule violation (e.g. an empty " +
                 "reference_designator) on the same call is not also reported in that response — fix the " +
                 "reference(s) first, then call again to see any remaining validation_failed violations. " +
-                "Also enforces the real AP242 UNIQUE UR1 rule: (reference_designator, " +
-                "relating_product_definition_id) must be unique across every " +
+                "'name' is mandatory in the real AP242 schema (non-OPTIONAL 'label') and omitting it " +
+                "returns a structured validation_failed error (KSTEP-M-002) rather than silently defaulting " +
+                "to an empty name; 'reference_designator' is genuinely OPTIONAL in the real schema (this " +
+                "builder's own WHERE rule still requires it non-empty here, a known, pre-existing " +
+                "over-constraint — see README). Also enforces the real AP242 UNIQUE UR1 rule: " +
+                "(reference_designator, relating_product_definition_id) must be unique across every " +
                 "next_assembly_usage_occurrence already in the store — a conflicting pair returns a " +
                 "structured unique_constraint_violated error naming the conflicting id, instead of " +
                 "silently allowing the duplicate. Stores the result under its own id, overwriting any " +
@@ -134,7 +138,7 @@ fun registerBuildNextAssemblyUsageOccurrenceTool(
             when (
                 val result =
                     nextAssemblyUsageOccurrence(args.id) {
-                        name = args.name ?: ""
+                        name = args.name
                         relatingProductDefinition = relating
                         relatedProductDefinition = related
                         referenceDesignator = args.referenceDesignator ?: ""
