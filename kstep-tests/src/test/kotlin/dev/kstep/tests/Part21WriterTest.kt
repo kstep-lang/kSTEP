@@ -1,12 +1,21 @@
 package dev.kstep.tests
 
+import dev.kstep.core.ap242.applicationContext
 import dev.kstep.core.ap242.approval
+import dev.kstep.core.ap242.approvalStatus
 import dev.kstep.core.ap242.nextAssemblyUsageOccurrence
+import dev.kstep.core.ap242.organization
+import dev.kstep.core.ap242.person
 import dev.kstep.core.ap242.personAndOrganization
 import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productContext
 import dev.kstep.core.ap242.productDefinition
+import dev.kstep.core.ap242.productDefinitionContext
 import dev.kstep.core.ap242.productDefinitionFormation
 import dev.kstep.core.getOrThrow
+import dev.kstep.generated.ap242v1.ApplicationContext
+import dev.kstep.generated.ap242v1.ProductContext
+import dev.kstep.generated.ap242v1.ProductDefinitionContext
 import dev.kstep.step21.Part21EncodingException
 import dev.kstep.step21.Part21Header
 import dev.kstep.step21.Part21WriteException
@@ -26,13 +35,40 @@ private fun testHeader(): Part21Header =
         organization = listOf("kSTEP"),
     )
 
+private fun buildAppCtx(): ApplicationContext = applicationContext { application = "config control" }.getOrThrow()
+
+private fun buildProductCtx(appCtx: ApplicationContext = buildAppCtx()): ProductContext =
+    productContext {
+        name = "engineering"
+        frameOfReference = appCtx
+        disciplineType = "mechanical"
+    }.getOrThrow()
+
+private fun buildProductDefCtx(appCtx: ApplicationContext = buildAppCtx()): ProductDefinitionContext =
+    productDefinitionContext {
+        name = "engineering"
+        frameOfReference = appCtx
+        lifeCycleStage = "design"
+    }.getOrThrow()
+
+/** Finds the "#N=ENTITY_NAME(...)" line for [entityName] and returns its full argument text. */
+private fun String.instanceArgsOf(entityName: String): String {
+    val match =
+        Regex("""#\d+=$entityName\((.*)\);""").find(this)
+            ?: error("no $entityName instance line found in:\n$this")
+    return match.groupValues[1]
+}
+
 class Part21WriterTest :
     StringSpec({
         "header statements serialize all fields in FILE_DESCRIPTION/FILE_NAME/FILE_SCHEMA order" {
+            val appCtx = buildAppCtx()
+            val prodCtx = buildProductCtx(appCtx)
             val product =
                 product("BRK-001") {
                     name = "Bracket"
                     description = "Mounting bracket"
+                    frameOfReference = setOf(prodCtx)
                 }.getOrThrow()
             val text = Part21Writer.write(testHeader(), listOf(product))
 
@@ -49,73 +85,147 @@ class Part21WriterTest :
         }
 
         "FILE_DESCRIPTION renders an empty description list as an empty parenthesis" {
-            val product = product("BRK-001") { name = "" }.getOrThrow()
+            val prodCtx = buildProductCtx()
+            val product =
+                product("BRK-001") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             val text = Part21Writer.write(testHeader().copy(description = emptyList()), listOf(product))
             text shouldContain "FILE_DESCRIPTION((),'2;1');\n"
         }
 
-        "product serializes as PRODUCT(id,name,description) in declaration order" {
+        "applicationContext serializes as APPLICATION_CONTEXT(application)" {
+            val text = Part21Writer.write(testHeader(), listOf(buildAppCtx()))
+            text.instanceArgsOf("APPLICATION_CONTEXT") shouldBe "'config control'"
+        }
+
+        "productContext serializes as PRODUCT_CONTEXT(name,#frameOfReference,disciplineType)" {
+            val text = Part21Writer.write(testHeader(), listOf(buildProductCtx()))
+            text.instanceArgsOf("PRODUCT_CONTEXT") shouldBe "'engineering',#1,'mechanical'"
+        }
+
+        "organization serializes as ORGANIZATION(id,name,description) with \$ for unset id/description" {
+            val org = organization { name = "Acme" }.getOrThrow()
+            val text = Part21Writer.write(testHeader(), listOf(org))
+            text.instanceArgsOf("ORGANIZATION") shouldBe "\$,'Acme',\$"
+        }
+
+        "person serializes with \$ for every unset optional field and (...) for a set LIST OF label" {
+            val p =
+                person("P-001") {
+                    lastName = "Doe"
+                    middleNames = listOf("Alice", "Bob")
+                }.getOrThrow()
+            val text = Part21Writer.write(testHeader(), listOf(p))
+            text.instanceArgsOf("PERSON") shouldBe "'P-001','Doe',\$,('Alice','Bob'),\$,\$"
+        }
+
+        "product serializes as PRODUCT(id,name,description,(#frameOfReference...)) in declaration order" {
+            val appCtx = buildAppCtx()
+            val prodCtx = buildProductCtx(appCtx)
             val product =
                 product("BRK-001") {
                     name = "Bracket"
                     description = "Mounting bracket"
+                    frameOfReference = setOf(prodCtx)
                 }.getOrThrow()
             val text = Part21Writer.write(testHeader(), listOf(product))
-            text shouldContain "#1=PRODUCT('BRK-001','Bracket','Mounting bracket');\n"
+            text.instanceArgsOf("PRODUCT") shouldBe "'BRK-001','Bracket','Mounting bracket',(#2)"
+            // #2 must indeed be the PRODUCT_CONTEXT — proves the reference list, not just its shape.
+            text shouldContain "#2=PRODUCT_CONTEXT("
         }
 
-        "personAndOrganization serializes as PERSON_AND_ORGANIZATION(the_person,the_organization)" {
-            val person =
+        "personAndOrganization serializes as PERSON_AND_ORGANIZATION(#thePerson,#theOrganization)" {
+            val person = person("P-001") { lastName = "Doe" }.getOrThrow()
+            val org = organization { name = "Acme Corp" }.getOrThrow()
+            val result =
                 personAndOrganization {
-                    thePerson = "Jane Doe"
-                    theOrganization = "Acme Corp"
+                    thePerson = person
+                    theOrganization = org
                 }.getOrThrow()
-            val text = Part21Writer.write(testHeader(), listOf(person))
-            text shouldContain "#1=PERSON_AND_ORGANIZATION('Jane Doe','Acme Corp');\n"
+            val text = Part21Writer.write(testHeader(), listOf(result))
+            text.instanceArgsOf("PERSON_AND_ORGANIZATION") shouldBe "#1,#2"
+            text shouldContain "#1=PERSON("
+            text shouldContain "#2=ORGANIZATION("
         }
 
         "productDefinitionFormation serializes as PRODUCT_DEFINITION_FORMATION(id,description,#ofProduct)" {
-            val product = product("BRK-001") { name = "Bracket" }.getOrThrow()
+            val prodCtx = buildProductCtx()
+            val product =
+                product("BRK-001") {
+                    name = "Bracket"
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             val formation =
                 productDefinitionFormation("BRK-001-F") {
-                    description = ""
                     ofProduct = product
                 }.getOrThrow()
             val text = Part21Writer.write(testHeader(), listOf(formation))
-            text shouldContain "#1=PRODUCT('BRK-001','Bracket','');\n"
-            text shouldContain "#2=PRODUCT_DEFINITION_FORMATION('BRK-001-F','',#1);\n"
+            text.instanceArgsOf("PRODUCT_DEFINITION_FORMATION") shouldContain "'BRK-001-F',\$,#"
+            // appCtx=#1, prodCtx=#2, product=#3, formation=#4 — post-order DFS from formation.
+            text.instanceArgsOf("PRODUCT") shouldBe "'BRK-001','Bracket',\$,(#2)"
         }
 
-        "productDefinition serializes as PRODUCT_DEFINITION(id,description,#formation)" {
-            val product = product("BRK-001") { name = "" }.getOrThrow()
+        "productDefinition serializes as PRODUCT_DEFINITION(id,description,#formation,#frameOfReference)" {
+            val prodCtx = buildProductCtx()
+            val product =
+                product("BRK-001") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             val builtFormation = productDefinitionFormation("BRK-001-F") { ofProduct = product }.getOrThrow()
-            val definition = productDefinition("BRK-001-D") { formation = builtFormation }.getOrThrow()
+            val defCtx = buildProductDefCtx()
+            val definition =
+                productDefinition("BRK-001-D") {
+                    formation = builtFormation
+                    frameOfReference = defCtx
+                }.getOrThrow()
             val text = Part21Writer.write(testHeader(), listOf(definition))
-            text shouldContain "#3=PRODUCT_DEFINITION('BRK-001-D','',#2);\n"
+            val args = text.instanceArgsOf("PRODUCT_DEFINITION").split(",")
+            args[0] shouldBe "'BRK-001-D'"
+            args[1] shouldBe "\$"
+            text shouldContain "${args[2]}=PRODUCT_DEFINITION_FORMATION("
+            text shouldContain "${args[3]}=PRODUCT_DEFINITION_CONTEXT("
         }
 
-        "approval serializes as APPROVAL(status,level,#authorizedBy)" {
-            val person = personAndOrganization { thePerson = "Jane Doe" }.getOrThrow()
+        "approval serializes as APPROVAL(#status,level)" {
+            val status = approvalStatus { name = "approved" }.getOrThrow()
             val approval =
-                approval("APPROVED") {
+                approval {
+                    this.status = status
                     level = "A1"
-                    authorizedBy = person
                 }.getOrThrow()
             val text = Part21Writer.write(testHeader(), listOf(approval))
-            text shouldContain "#1=PERSON_AND_ORGANIZATION('Jane Doe','');\n"
-            text shouldContain "#2=APPROVAL('APPROVED','A1',#1);\n"
+            text.instanceArgsOf("APPROVAL") shouldBe "#1,'A1'"
+            text shouldContain "#1=APPROVAL_STATUS("
         }
 
-        // The declaration order here (id, name, #relating, #related, reference_designator) is the one
-        // verified against ap242-subset.exp — NOT the illustrative prompt example's (id, name,
-        // reference_designator, #relating, #related), which puts reference_designator in the wrong position.
         "nextAssemblyUsageOccurrence serializes own attrs then its two refs, reference_designator last" {
-            val product1 = product("BRK-001") { name = "" }.getOrThrow()
+            val prodCtx = buildProductCtx()
+            val defCtx = buildProductDefCtx()
+            val product1 =
+                product("BRK-001") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             val formation1 = productDefinitionFormation("BRK-001-F") { ofProduct = product1 }.getOrThrow()
-            val relating = productDefinition("BRK-001-D") { formation = formation1 }.getOrThrow()
-            val product2 = product("HSG-001") { name = "" }.getOrThrow()
+            val relating =
+                productDefinition("BRK-001-D") {
+                    formation = formation1
+                    frameOfReference = defCtx
+                }.getOrThrow()
+            val product2 =
+                product("HSG-001") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             val formation2 = productDefinitionFormation("HSG-001-F") { ofProduct = product2 }.getOrThrow()
-            val related = productDefinition("HSG-001-D") { formation = formation2 }.getOrThrow()
+            val related =
+                productDefinition("HSG-001-D") {
+                    formation = formation2
+                    frameOfReference = defCtx
+                }.getOrThrow()
             val nauo =
                 nextAssemblyUsageOccurrence("NAUO-001") {
                     name = ""
@@ -125,37 +235,130 @@ class Part21WriterTest :
                 }.getOrThrow()
 
             val text = Part21Writer.write(testHeader(), listOf(nauo))
-            text shouldContain "NEXT_ASSEMBLY_USAGE_OCCURRENCE('NAUO-001','',#3,#6,'RD-1');\n"
+            val args = text.instanceArgsOf("NEXT_ASSEMBLY_USAGE_OCCURRENCE").split(",")
+            args[0] shouldBe "'NAUO-001'"
+            args[1] shouldBe "''"
+            args[2] shouldBe "\$" // description, never set
+            text shouldContain "${args[3]}=PRODUCT_DEFINITION("
+            text shouldContain "${args[4]}=PRODUCT_DEFINITION("
+            args[5] shouldBe "'RD-1'"
+        }
+
+        "nextAssemblyUsageOccurrence with an unset reference_designator serializes it as \$" {
+            val prodCtx = buildProductCtx()
+            val defCtx = buildProductDefCtx()
+            val product1 =
+                product("BRK-001") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
+            val formation1 = productDefinitionFormation("BRK-001-F") { ofProduct = product1 }.getOrThrow()
+            val relating =
+                productDefinition("BRK-001-D") {
+                    formation = formation1
+                    frameOfReference = defCtx
+                }.getOrThrow()
+            val nauo =
+                nextAssemblyUsageOccurrence("NAUO-001") {
+                    name = ""
+                    relatingProductDefinition = relating
+                    relatedProductDefinition = relating
+                }.getOrThrow()
+
+            val text = Part21Writer.write(testHeader(), listOf(nauo))
+            text.instanceArgsOf("NEXT_ASSEMBLY_USAGE_OCCURRENCE").split(",").last() shouldBe "\$"
         }
 
         "an id containing an embedded single quote round-trips via '' doubling" {
-            val product = product("O'Brien-01") { name = "Bracket" }.getOrThrow()
+            val prodCtx = buildProductCtx()
+            val product =
+                product("O'Brien-01") {
+                    name = "Bracket"
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             val text = Part21Writer.write(testHeader(), listOf(product))
-            text shouldContain "#1=PRODUCT('O''Brien-01','Bracket','');\n"
+            text.instanceArgsOf("PRODUCT") shouldContain "'O''Brien-01'"
         }
 
         "a non-ASCII character in an attribute value throws Part21EncodingException" {
-            val product = product("BRK-001") { name = "Bräcket" }.getOrThrow()
+            val prodCtx = buildProductCtx()
+            val product =
+                product("BRK-001") {
+                    name = "Bräcket"
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             shouldThrow<Part21EncodingException> { Part21Writer.write(testHeader(), listOf(product)) }
         }
 
         "an embedded control character in an attribute value throws Part21EncodingException" {
-            val product = product("BRK-001") { name = "Bracket\u0001" }.getOrThrow()
+            val prodCtx = buildProductCtx()
+            val product =
+                product("BRK-001") {
+                    name = "Bracket"
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             shouldThrow<Part21EncodingException> { Part21Writer.write(testHeader(), listOf(product)) }
         }
 
-        "a root object that is not one of the six supported kstep-core types throws Part21WriteException" {
+        "a reverse solidus in an attribute value throws Part21EncodingException rather than being written unescaped" {
+            val prodCtx = buildProductCtx()
+            val product =
+                product("BRK-001") {
+                    name = "SAFE\\X2\\04100420\\X0\\"
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
+            shouldThrow<Part21EncodingException> { Part21Writer.write(testHeader(), listOf(product)) }
+        }
+
+        "a reverse solidus is rejected in an id, a description, and a LIST OF label element" {
+            val prodCtx = buildProductCtx()
+
+            shouldThrow<Part21EncodingException> {
+                val badProduct =
+                    product("BRK\\001") {
+                        name = "Bracket"
+                        frameOfReference = setOf(prodCtx)
+                    }.getOrThrow()
+                Part21Writer.write(testHeader(), listOf(badProduct))
+            }
+            shouldThrow<Part21EncodingException> {
+                val badProduct =
+                    product("BRK-001") {
+                        name = "Bracket"
+                        description = "back\\slash"
+                        frameOfReference = setOf(prodCtx)
+                    }.getOrThrow()
+                Part21Writer.write(testHeader(), listOf(badProduct))
+            }
+            shouldThrow<Part21EncodingException> {
+                val badPerson =
+                    person("P-001") {
+                        lastName = "Doe"
+                        middleNames = listOf("Al\\ice")
+                    }.getOrThrow()
+                Part21Writer.write(testHeader(), listOf(badPerson))
+            }
+        }
+
+        "a root object that is not one of the twelve supported kstep-core types throws Part21WriteException" {
             shouldThrow<Part21WriteException> { Part21Writer.write(testHeader(), listOf("not a kstep-core entity")) }
         }
 
-        "writing the same object graph twice produces byte-identical output" {
+        "writing the same object graph twice produces byte-identical output — including a Set-valued attribute" {
+            val prodCtx = buildProductCtx()
             val product =
                 product("BRK-001") {
                     name = "Bracket"
                     description = "Mounting bracket"
+                    frameOfReference = setOf(prodCtx)
                 }.getOrThrow()
             val builtFormation = productDefinitionFormation("BRK-001-F") { ofProduct = product }.getOrThrow()
-            val definition = productDefinition("BRK-001-D") { formation = builtFormation }.getOrThrow()
+            val defCtx = buildProductDefCtx()
+            val definition =
+                productDefinition("BRK-001-D") {
+                    formation = builtFormation
+                    frameOfReference = defCtx
+                }.getOrThrow()
 
             val first = Part21Writer.write(testHeader(), listOf(definition))
             val second = Part21Writer.write(testHeader(), listOf(definition))
@@ -163,7 +366,12 @@ class Part21WriterTest :
         }
 
         "a shared instance referenced from two different sites is written exactly once" {
-            val product = product("BRK-001") { name = "" }.getOrThrow()
+            val prodCtx = buildProductCtx()
+            val product =
+                product("BRK-001") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             val formationA = productDefinitionFormation("BRK-001-F-A") { ofProduct = product }.getOrThrow()
             val formationB = productDefinitionFormation("BRK-001-F-B") { ofProduct = product }.getOrThrow()
 
@@ -171,8 +379,30 @@ class Part21WriterTest :
             Regex("=PRODUCT\\(").findAll(text).count() shouldBe 1
         }
 
+        "a shared product_context referenced by two different products is written exactly once" {
+            val prodCtx = buildProductCtx()
+            val productA =
+                product("A") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
+            val productB =
+                product("B") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
+
+            val text = Part21Writer.write(testHeader(), listOf(productA, productB))
+            Regex("=PRODUCT_CONTEXT\\(").findAll(text).count() shouldBe 1
+        }
+
         "the vararg write overload delegates to the List overload" {
-            val product = product("BRK-001") { name = "" }.getOrThrow()
+            val prodCtx = buildProductCtx()
+            val product =
+                product("BRK-001") {
+                    name = ""
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
             Part21Writer.write(testHeader(), product) shouldBe Part21Writer.write(testHeader(), listOf(product))
         }
     })

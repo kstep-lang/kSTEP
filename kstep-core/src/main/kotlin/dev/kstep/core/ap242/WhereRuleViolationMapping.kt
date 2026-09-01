@@ -43,3 +43,24 @@ internal fun missingMandatoryAttributeViolation(
         expressionText = null,
         message = "required attribute '$attributeName' of entity '$entityName' was never set",
     )
+
+/**
+ * The "set, but violates its lower bound" sibling of [missingMandatoryReferenceViolation] — see
+ * [DslViolationCodes.AGGREGATION_BOUND_VIOLATED]'s KDoc for why this is a distinct code, not a
+ * reuse of [DslViolationCodes.MISSING_MANDATORY_REFERENCE].
+ */
+internal fun aggregationBoundViolation(
+    entityName: String,
+    attributeName: String,
+    declaredBounds: String,
+    actualSize: Int,
+): DslViolation =
+    DslViolation(
+        code = DslViolationCodes.AGGREGATION_BOUND_VIOLATED,
+        entityName = entityName,
+        ruleLabel = null,
+        expressionText = null,
+        message =
+            "attribute '$attributeName' of entity '$entityName' declares bound $declaredBounds but was given " +
+                "$actualSize element(s)",
+    )

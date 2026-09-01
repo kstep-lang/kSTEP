@@ -1,60 +1,37 @@
 package dev.kstep.core.ap242
 
 import dev.kstep.core.ValidationResult
-import dev.kstep.express.validation.WhereRuleSpec
-import dev.kstep.express.validation.WhereRuleValidator
-import dev.kstep.express.validation.WhereRuleValue
+import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
+import dev.kstep.generated.ap242v1.ProductDefinition
 
 private const val ENTITY_NAME = "next_assembly_usage_occurrence"
-private val WHERE_RULES =
-    listOf(
-        WhereRuleSpec(
-            label = "wr1",
-            expressionText = "(SELF.id <> '') AND (SELF.reference_designator <> '')",
-        ),
-    )
 
 /**
- * `dev.kstep.express` AP242-subset `next_assembly_usage_occurrence` entity — `id`/`name`/
- * `reference_designator`/`STRING`, `relating_product_definition`/`related_product_definition`
- * both `product_definition`.
+ * Ergonomic wrapper over the codegen-generated [NextAssemblyUsageOccurrence] (kSTEP M2 Welle 10
+ * — see [Product]'s equivalent doc note). `id`/`name` are mandatory; `description` (inherited
+ * from `product_definition_relationship`) and `reference_designator` (inherited from
+ * `assembly_component_usage`) are both genuinely `OPTIONAL` in the real schema.
+ * `relating_product_definition`/`related_product_definition` are mandatory references.
  *
- * **Honesty note (M2 Welle 8 — codegen reconciliation):** the real
- * `next_assembly_usage_occurrence`'s flattened SUBTYPE OF chain (`assembly_component_usage` →
- * `product_definition_usage` → `product_definition_relationship`, see `ap242-v1-entities.exp`
- * lines 165–200) also carries an inherited `description : OPTIONAL text`
- * (`product_definition_relationship`), which `kstep-core` **omits entirely**. The inherited
- * `reference_designator : OPTIONAL identifier` (`assembly_component_usage`) is present but its
- * optionality is **narrowed**: `kstep-core` models it as a non-null [String] defaulting to `""`
- * rather than a nullable `String?`. `wr1: (SELF.id <> '') AND (SELF.reference_designator <> '')`
- * is a **synthesized** ergonomic WHERE rule — the real WR1 (`acyclic_product_definition_relationship(...)`)
- * is outside the supported WHERE-expression subset. All three are pinned by
- * `dev.kstep.tests.Ap242CoreSchemaConsistencyTest`; see the README's Roadmap
- * "codegen reconciliation" entry for the full deferral rationale.
- *
- * The constructor is `internal` — see [Product]'s equivalent doc note for why: only the
- * [nextAssemblyUsageOccurrence] builder function may produce an instance, so it always passes
- * through WHERE-rule and missing-reference validation first. `@ConsistentCopyVisibility` keeps
- * the generated `copy()` `internal` too.
+ * Pre-Welle-10, this builder enforced a synthesized WHERE rule requiring a non-blank
+ * `reference_designator` — an over-constraint on what the real schema leaves `OPTIONAL`,
+ * carried over from an earlier fixture. That rule is dropped entirely in this wave, not
+ * relabeled: `reference_designator` may now be left unset, matching the real AP242 entity.
+ * `kstep-mcp`'s UNIQUE UR1 enforcement (`(reference_designator, relating_product_definition)`
+ * uniqueness) is updated accordingly to treat two unset `reference_designator`s as
+ * non-conflicting — EXPRESS's `<>` is not satisfied by two unknown values, so UR1 does not
+ * apply when either side is unset (see `NextAssemblyUsageOccurrenceTool`'s scan).
  */
-@ConsistentCopyVisibility
-data class NextAssemblyUsageOccurrence internal constructor(
-    val id: String,
-    val name: String,
-    val relatingProductDefinition: ProductDefinition,
-    val relatedProductDefinition: ProductDefinition,
-    val referenceDesignator: String,
-)
-
 class NextAssemblyUsageOccurrenceBuilder internal constructor() {
     // Nullable purely as an internal "was it set" presence sentinel (see Product.name's
-    // equivalent doc note): `name` is a non-OPTIONAL `label` inherited from
+    // long-standing equivalent doc note): `name` is a non-OPTIONAL `label` inherited from
     // `product_definition_relationship` with no WHERE rule of its own, so a still-null value at
     // build() time is a structural violation (KSTEP-M-002), never a legitimate empty value.
     var name: String? = null
+    var description: String? = null
     var relatingProductDefinition: ProductDefinition? = null
     var relatedProductDefinition: ProductDefinition? = null
-    var referenceDesignator: String = ""
+    var referenceDesignator: String? = null
 }
 
 fun nextAssemblyUsageOccurrence(
@@ -64,8 +41,8 @@ fun nextAssemblyUsageOccurrence(
     val builder = NextAssemblyUsageOccurrenceBuilder().apply(block)
 
     // Collects all structural violations rather than stopping at the first — this entity is
-    // the deliberate "multiple simultaneous violations in one call" proof (missing refs, a
-    // missing name, and a failing WHERE rule can all show up together).
+    // the deliberate "multiple simultaneous violations in one call" proof (missing refs and a
+    // missing name can show up together).
     val structuralViolations =
         buildList {
             if (builder.relatingProductDefinition == null) {
@@ -79,27 +56,18 @@ fun nextAssemblyUsageOccurrence(
             }
         }
 
-    val attributeValues =
-        mapOf(
-            "id" to WhereRuleValue.StringValue(id),
-            "name" to WhereRuleValue.StringValue(builder.name ?: ""),
-            "reference_designator" to WhereRuleValue.StringValue(builder.referenceDesignator),
-        )
-    val whereRuleViolations =
-        WhereRuleValidator.validate(ENTITY_NAME, WHERE_RULES, attributeValues).map { it.toDslViolation() }
-
-    val violations = structuralViolations + whereRuleViolations
-    return if (violations.isEmpty()) {
+    return if (structuralViolations.isEmpty()) {
         ValidationResult.Valid(
             NextAssemblyUsageOccurrence(
                 id = id,
                 name = builder.name!!,
+                description = builder.description,
                 relatingProductDefinition = builder.relatingProductDefinition!!,
                 relatedProductDefinition = builder.relatedProductDefinition!!,
                 referenceDesignator = builder.referenceDesignator,
             ),
         )
     } else {
-        ValidationResult.Invalid(violations)
+        ValidationResult.Invalid(structuralViolations)
     }
 }

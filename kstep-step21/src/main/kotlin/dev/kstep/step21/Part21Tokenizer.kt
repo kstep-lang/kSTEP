@@ -117,28 +117,62 @@ internal object Part21Tokenizer {
         cursor.expectLiteral(")")
         cursor.expectLiteral(";")
 
-        if (args.size != kind.argKinds.size) {
+        if (args.size != kind.args.size) {
             throw Part21SyntaxException(
-                "entity '${kind.entityName}' (#$id) expects ${kind.argKinds.size} argument(s) but found ${args.size}",
+                "entity '${kind.entityName}' (#$id) expects ${kind.args.size} argument(s) but found ${args.size}",
             )
         }
-        args.forEachIndexed { index, value ->
-            val expectedKind = kind.argKinds[index]
-            val actualKind =
-                when (value) {
-                    is Part21Value.Str -> Part21ArgKind.STRING
-                    is Part21Value.Ref -> Part21ArgKind.REFERENCE
-                    is Part21Value.ListValue -> null
-                }
-            if (actualKind != expectedKind) {
-                throw Part21SyntaxException(
-                    "entity '${kind.entityName}' (#$id) argument ${index + 1} must be $expectedKind but was ${actualKind ?: "a LIST"}",
-                )
-            }
-        }
+        args.forEachIndexed { index, value -> checkArgShape(kind, id, index, value) }
 
         return Part21RawInstance(id, kind.entityName, args, sourceLine)
     }
+
+    // Validates one already-parsed argument [value] at position [index] against the entity
+    // kind's declared shape at that position: kind (STRING/REFERENCE/STRING_LIST/REFERENCE_LIST)
+    // and $-eligibility (optional). REFERENCE_LIST/STRING_LIST element-kind checking happens
+    // here too (a LIST that mixes strings and references, or a LIST at a REFERENCE position
+    // containing a bare string, is rejected at this pass); which *target entity type* a
+    // REFERENCE/REFERENCE_LIST points at is a pass-2 concern (Part21GraphResolver), since it
+    // needs the complete instance table to check.
+    private fun checkArgShape(
+        kind: Part21EntityKind,
+        id: Int,
+        index: Int,
+        value: Part21Value,
+    ) {
+        val spec = kind.args[index]
+        if (value is Part21Value.Unset) {
+            if (!spec.optional) {
+                throw Part21SyntaxException(
+                    "entity '${kind.entityName}' (#$id) argument ${index + 1} is not OPTIONAL and cannot be '\$'",
+                )
+            }
+            return
+        }
+        val matches =
+            when (spec.kind) {
+                Part21ArgKind.STRING -> value is Part21Value.Str
+                Part21ArgKind.REFERENCE -> value is Part21Value.Ref
+                Part21ArgKind.STRING_LIST ->
+                    value is Part21Value.ListValue && value.items.all { it is Part21Value.Str }
+                Part21ArgKind.REFERENCE_LIST ->
+                    value is Part21Value.ListValue && value.items.all { it is Part21Value.Ref }
+            }
+        if (!matches) {
+            throw Part21SyntaxException(
+                "entity '${kind.entityName}' (#$id) argument ${index + 1} must be ${spec.kind} but was " +
+                    "${describeShape(value)}",
+            )
+        }
+    }
+
+    private fun describeShape(value: Part21Value): String =
+        when (value) {
+            is Part21Value.Str -> "STRING"
+            is Part21Value.Ref -> "REFERENCE"
+            is Part21Value.ListValue -> "a LIST (mixed or wrong-element-kind)"
+            is Part21Value.Unset -> "'\$'"
+        }
 
     private fun parseInstanceId(
         cursor: Part21Cursor,
@@ -216,6 +250,10 @@ internal object Part21Tokenizer {
             '\'' -> parseStringLiteral(cursor)
             '#' -> parseReferenceValue(cursor)
             '(' -> parseListValue(cursor, depth)
+            '$' -> {
+                cursor.advance()
+                Part21Value.Unset
+            }
             null -> throw Part21SyntaxException("unexpected end of input while parsing a value")
             else ->
                 throw Part21SyntaxException(

@@ -2,16 +2,27 @@ package dev.kstep.step21
 
 import dev.kstep.core.DslViolation
 import dev.kstep.core.ValidationResult
-import dev.kstep.core.ap242.PersonAndOrganization
-import dev.kstep.core.ap242.Product
-import dev.kstep.core.ap242.ProductDefinition
-import dev.kstep.core.ap242.ProductDefinitionFormation
+import dev.kstep.core.ap242.applicationContext
 import dev.kstep.core.ap242.approval
+import dev.kstep.core.ap242.approvalStatus
 import dev.kstep.core.ap242.nextAssemblyUsageOccurrence
+import dev.kstep.core.ap242.organization
+import dev.kstep.core.ap242.person
 import dev.kstep.core.ap242.personAndOrganization
 import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productContext
 import dev.kstep.core.ap242.productDefinition
+import dev.kstep.core.ap242.productDefinitionContext
 import dev.kstep.core.ap242.productDefinitionFormation
+import dev.kstep.generated.ap242v1.ApplicationContext
+import dev.kstep.generated.ap242v1.ApprovalStatus
+import dev.kstep.generated.ap242v1.Organization
+import dev.kstep.generated.ap242v1.Person
+import dev.kstep.generated.ap242v1.Product
+import dev.kstep.generated.ap242v1.ProductContext
+import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.generated.ap242v1.ProductDefinitionContext
+import dev.kstep.generated.ap242v1.ProductDefinitionFormation
 
 /**
  * Pass 2: resolves a [Part21RawDocument] (pass-1 output) into a [Part21ReadResult].
@@ -21,13 +32,14 @@ import dev.kstep.core.ap242.productDefinitionFormation
  * 1. Build the type-agnostic `#N` reference graph, detect dangling references (a `#N` used but
  *    never defined) and reference cycles via an iterative (non-recursive) topological sort.
  *    This step must run *before* step 2, because per-reference target-*type* verification
- *    would otherwise make [Part21CycleException] permanently unreachable dead code: the six
- *    real V1 entity shapes form a strict, acyclic reference DAG, so the only way to construct
- *    a genuinely reachable cycle in a test (or a hostile file) is to cross-wire two entities
- *    whose `REFERENCE`-argument *shape* matches at the same position but whose declared target
- *    *type* doesn't — a case step 2's type check would reject first if it ran first.
+ *    would otherwise make [Part21CycleException] permanently unreachable dead code: the twelve
+ *    real V1+support entity shapes form a strict, acyclic reference DAG, so the only way to
+ *    construct a genuinely reachable cycle in a test (or a hostile file) is to cross-wire two
+ *    entities whose `REFERENCE`-argument *shape* matches at the same position but whose declared
+ *    target *type* doesn't — a case step 2's type check would reject first if it ran first.
  * 2. Per-reference target-entity-type verification, now that every reference is known to
- *    resolve to a real, cycle-free instance.
+ *    resolve to a real, cycle-free instance. Applies to both single `REFERENCE` positions and
+ *    every element of a `REFERENCE_LIST` position.
  * 3. Typed construction via the matching `dev.kstep.core.ap242` builder function, in
  *    topological order (dependencies before dependents), so every entity-typed reference
  *    argument can be resolved from an already-built instance. A builder's
@@ -41,14 +53,26 @@ internal object Part21GraphResolver {
     fun resolve(document: Part21RawDocument): Part21ReadResult {
         val rawById: Map<Int, Part21RawInstance> = document.instances.associateBy { it.id }
         val idOrder: List<Int> = document.instances.map { it.id }
-        val edges: Map<Int, List<Int>> =
-            rawById.mapValues { (_, raw) -> raw.args.filterIsInstance<Part21Value.Ref>().map { it.id } }
+        val edges: Map<Int, List<Int>> = rawById.mapValues { (_, raw) -> referenceIdsOf(raw) }
 
         checkDangling(rawById, edges)
         val order = topologicalOrder(idOrder, edges)
         checkReferenceTargetTypes(order, rawById)
         return construct(document.header, order, rawById, edges)
     }
+
+    // Every #N a raw instance's arguments mention, single REFERENCE positions and every element
+    // of a REFERENCE_LIST position alike — this is the edge set the dangling/cycle/topological
+    // passes below all operate on, so a missing or cyclic reference nested inside a
+    // REFERENCE_LIST is caught exactly like a single-REFERENCE one.
+    private fun referenceIdsOf(raw: Part21RawInstance): List<Int> =
+        raw.args.flatMap { arg ->
+            when (arg) {
+                is Part21Value.Ref -> listOf(arg.id)
+                is Part21Value.ListValue -> arg.items.filterIsInstance<Part21Value.Ref>().map { it.id }
+                else -> emptyList()
+            }
+        }
 
     private fun checkDangling(
         rawById: Map<Int, Part21RawInstance>,
@@ -141,17 +165,33 @@ internal object Part21GraphResolver {
             val raw = rawById.getValue(id)
             val kind = Part21EntityKind.byEntityName.getValue(raw.entityName)
             raw.args.forEachIndexed { index, arg ->
-                if (arg is Part21Value.Ref) {
-                    val expectedTarget = kind.referenceTargets.getValue(index)
-                    val actual = rawById.getValue(arg.id)
-                    if (actual.entityName != expectedTarget.entityName) {
-                        throw Part21SyntaxException(
-                            "${kind.entityName} #$id argument ${index + 1} must reference a " +
-                                "${expectedTarget.entityName}, but #${arg.id} is a ${actual.entityName}",
-                        )
-                    }
+                val expectedTarget = kind.referenceTargets[index] ?: return@forEachIndexed
+                when (arg) {
+                    is Part21Value.Ref -> checkOneReferenceTarget(kind, id, index, expectedTarget, arg.id, rawById)
+                    is Part21Value.ListValue ->
+                        arg.items.filterIsInstance<Part21Value.Ref>().forEach { ref ->
+                            checkOneReferenceTarget(kind, id, index, expectedTarget, ref.id, rawById)
+                        }
+                    else -> Unit
                 }
             }
+        }
+    }
+
+    private fun checkOneReferenceTarget(
+        kind: Part21EntityKind,
+        id: Int,
+        index: Int,
+        expectedTarget: Part21EntityKind,
+        refId: Int,
+        rawById: Map<Int, Part21RawInstance>,
+    ) {
+        val actual = rawById.getValue(refId)
+        if (actual.entityName != expectedTarget.entityName) {
+            throw Part21SyntaxException(
+                "${kind.entityName} #$id argument ${index + 1} must reference a " +
+                    "${expectedTarget.entityName}, but #$refId is a ${actual.entityName}",
+            )
         }
     }
 
@@ -192,40 +232,90 @@ internal object Part21GraphResolver {
     ): ValidationResult<Any> {
         fun str(index: Int) = (raw.args[index] as Part21Value.Str).text
 
+        fun strOrNull(index: Int) = (raw.args[index] as? Part21Value.Str)?.text
+
+        fun strList(index: Int): List<String>? =
+            when (val arg = raw.args[index]) {
+                is Part21Value.ListValue -> arg.items.map { (it as Part21Value.Str).text }
+                else -> null
+            }
+
         fun refId(index: Int) = (raw.args[index] as Part21Value.Ref).id
 
+        @Suppress("UNCHECKED_CAST")
+        fun <T> refValue(index: Int): T = built.getValue(refId(index)) as T
+
+        @Suppress("UNCHECKED_CAST")
+        fun <T> refListValues(index: Int): List<T> =
+            (raw.args[index] as Part21Value.ListValue).items.map { item ->
+                built.getValue((item as Part21Value.Ref).id) as T
+            }
+
         return when (kind) {
+            Part21EntityKind.APPLICATION_CONTEXT ->
+                applicationContext { application = str(0) }
+            Part21EntityKind.PRODUCT_CONTEXT ->
+                productContext {
+                    name = str(0)
+                    frameOfReference = refValue<ApplicationContext>(1)
+                    disciplineType = str(2)
+                }
+            Part21EntityKind.PRODUCT_DEFINITION_CONTEXT ->
+                productDefinitionContext {
+                    name = str(0)
+                    frameOfReference = refValue<ApplicationContext>(1)
+                    lifeCycleStage = str(2)
+                }
+            Part21EntityKind.APPROVAL_STATUS ->
+                approvalStatus { name = str(0) }
+            Part21EntityKind.PERSON ->
+                person(str(0)) {
+                    lastName = strOrNull(1)
+                    firstName = strOrNull(2)
+                    middleNames = strList(3)
+                    prefixTitles = strList(4)
+                    suffixTitles = strList(5)
+                }
+            Part21EntityKind.ORGANIZATION ->
+                organization {
+                    id = strOrNull(0)
+                    name = str(1)
+                    description = strOrNull(2)
+                }
             Part21EntityKind.PRODUCT ->
                 product(str(0)) {
                     name = str(1)
-                    description = str(2)
-                }
-            Part21EntityKind.PERSON_AND_ORGANIZATION ->
-                personAndOrganization {
-                    thePerson = str(0)
-                    theOrganization = str(1)
+                    description = strOrNull(2)
+                    frameOfReference = refListValues<ProductContext>(3).toSet()
                 }
             Part21EntityKind.PRODUCT_DEFINITION_FORMATION ->
                 productDefinitionFormation(str(0)) {
-                    description = str(1)
-                    ofProduct = built.getValue(refId(2)) as Product
+                    description = strOrNull(1)
+                    ofProduct = refValue<Product>(2)
                 }
             Part21EntityKind.PRODUCT_DEFINITION ->
                 productDefinition(str(0)) {
-                    description = str(1)
-                    formation = built.getValue(refId(2)) as ProductDefinitionFormation
+                    description = strOrNull(1)
+                    formation = refValue<ProductDefinitionFormation>(2)
+                    frameOfReference = refValue<ProductDefinitionContext>(3)
                 }
             Part21EntityKind.NEXT_ASSEMBLY_USAGE_OCCURRENCE ->
                 nextAssemblyUsageOccurrence(str(0)) {
                     name = str(1)
-                    relatingProductDefinition = built.getValue(refId(2)) as ProductDefinition
-                    relatedProductDefinition = built.getValue(refId(3)) as ProductDefinition
-                    referenceDesignator = str(4)
+                    description = strOrNull(2)
+                    relatingProductDefinition = refValue<ProductDefinition>(3)
+                    relatedProductDefinition = refValue<ProductDefinition>(4)
+                    referenceDesignator = strOrNull(5)
                 }
             Part21EntityKind.APPROVAL ->
-                approval(str(0)) {
+                approval {
+                    status = refValue<ApprovalStatus>(0)
                     level = str(1)
-                    authorizedBy = built.getValue(refId(2)) as PersonAndOrganization
+                }
+            Part21EntityKind.PERSON_AND_ORGANIZATION ->
+                personAndOrganization {
+                    thePerson = refValue<Person>(0)
+                    theOrganization = refValue<Organization>(1)
                 }
         }
     }

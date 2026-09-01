@@ -6,7 +6,7 @@ import dev.kstep.mcp.EntityStore
 import dev.kstep.mcp.EntityStoreEntry
 import dev.kstep.mcp.UnknownReference
 import dev.kstep.mcp.dto.BuildApprovalArgs
-import dev.kstep.mcp.findPersonAndOrganization
+import dev.kstep.mcp.findApprovalStatus
 import dev.kstep.mcp.mcpToolCall
 import dev.kstep.mcp.requireBoundedString
 import dev.kstep.mcp.storeOrCapacityError
@@ -30,11 +30,10 @@ private val INPUT_SCHEMA =
         properties =
             buildJsonObject {
                 putJsonObject("handle") { put("type", "string") }
-                putJsonObject("status") { put("type", "string") }
+                putJsonObject("status_handle") { put("type", "string") }
                 putJsonObject("level") { put("type", "string") }
-                putJsonObject("authorized_by_handle") { put("type", "string") }
             },
-        required = listOf("handle", "status", "authorized_by_handle"),
+        required = listOf("handle", "status_handle", "level"),
     )
 
 fun registerApprovalTool(
@@ -44,38 +43,32 @@ fun registerApprovalTool(
     server.addTool(
         name = TOOL_NAME,
         description =
-            "Builds a kSTEP AP242 'approval' entity, referencing an already-built person_and_organization " +
-                "by authorized_by_handle (must be a handle previously stored by " +
-                "build_person_and_organization; an unknown or wrong-type handle returns a structured " +
-                "unknown_reference error, not a crash). Stores the result under the caller-supplied 'handle' " +
-                "(this entity has no natural id of its own). Re-building with a handle already in the store " +
-                "OVERWRITES the previous entry.",
+            "Builds a kSTEP AP242 'approval' entity, referencing an already-built approval_status by " +
+                "status_handle (must be a handle previously stored by build_approval_status; an unknown or " +
+                "wrong-type handle returns a structured unknown_reference error, not a crash). 'level' is " +
+                "mandatory in the real AP242 schema (non-OPTIONAL 'label') and omitting it returns a " +
+                "structured validation_failed error (KSTEP-M-002). Stores the result under the " +
+                "caller-supplied 'handle' (this entity has no natural id of its own). Re-building with a " +
+                "handle already in the store OVERWRITES the previous entry.",
         inputSchema = INPUT_SCHEMA,
     ) { request ->
         mcpToolCall(TOOL_NAME) {
             val args = Json.decodeFromJsonElement<BuildApprovalArgs>(request.arguments ?: JsonObject(emptyMap()))
             requireBoundedString("handle", args.handle)
-            requireBoundedString("status", args.status)
+            requireBoundedString("status_handle", args.statusHandle)
             args.level?.let { requireBoundedString("level", it) }
-            requireBoundedString("authorized_by_handle", args.authorizedByHandle)
 
-            val authorizedBy =
-                store.findPersonAndOrganization(args.authorizedByHandle)
+            val status =
+                store.findApprovalStatus(args.statusHandle)
                     ?: return@mcpToolCall unknownReferenceError(
-                        listOf(
-                            UnknownReference(
-                                "authorized_by_handle",
-                                args.authorizedByHandle,
-                                "person_and_organization",
-                            ),
-                        ),
+                        listOf(UnknownReference("status_handle", args.statusHandle, "approval_status")),
                     )
 
             when (
                 val result =
-                    approval(args.status) {
-                        level = args.level ?: ""
-                        this.authorizedBy = authorizedBy
+                    approval {
+                        this.status = status
+                        level = args.level
                     }
             ) {
                 is ValidationResult.Invalid -> validationFailedError(result.violations)
@@ -87,16 +80,15 @@ fun registerApprovalTool(
                                 listOf(
                                     TextContent(
                                         text =
-                                            "Built approval '${args.handle}': status='${entity.status}', " +
+                                            "Built approval '${args.handle}': status='${status.name}', " +
                                                 "level='${entity.level}'",
                                     ),
                                 ),
                             structuredContent =
                                 buildJsonObject {
                                     put("handle", args.handle)
-                                    put("status", entity.status)
+                                    put("status_handle", args.statusHandle)
                                     put("level", entity.level)
-                                    put("authorized_by_handle", args.authorizedByHandle)
                                     put("entityType", "approval")
                                 },
                         )

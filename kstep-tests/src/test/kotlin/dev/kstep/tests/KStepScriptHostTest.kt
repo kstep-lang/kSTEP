@@ -86,10 +86,19 @@ class KStepScriptHostTest :
         }
 
         "a missing mandatory reference surfaces as ValidationErrors with the structural KSTEP-M-001 code" {
+            // frame_of_reference is set deliberately, isolating the one violation this test is
+            // actually about (a never-set 'formation') from the unrelated KSTEP-M-001 that omitting
+            // frame_of_reference too would also produce as of kSTEP M2 Welle 10.
             val script =
                 """
+                val appCtx = applicationContext { application = "config control" }.getOrThrow()
+                val defCtx = productDefinitionContext {
+                    name = "engineering"
+                    frameOfReference = appCtx
+                    lifeCycleStage = "design"
+                }.getOrThrow()
                 stepFile(fileName = "missing-ref.step") {
-                    root(productDefinition("PD-001") { description = "no formation set" })
+                    root(productDefinition("PD-001") { description = "no formation set"; frameOfReference = defCtx })
                 }
                 """.trimIndent()
             val outcome = KStepScriptHost.eval(script, "missing-ref.kstep.kts")
@@ -100,7 +109,19 @@ class KStepScriptHostTest :
         }
 
         "a getOrThrow() abort on an Invalid ValidationResult surfaces as ValidationErrors, not a RuntimeError" {
-            val script = """product(id = "").getOrThrow()"""
+            // frame_of_reference is set deliberately, isolating the one WHERE-rule violation this
+            // test is about (a blank id) from the unrelated KSTEP-M-001 an unset frame_of_reference
+            // would also produce as of kSTEP M2 Welle 10.
+            val script =
+                """
+                val appCtx = applicationContext { application = "config control" }.getOrThrow()
+                val prodCtx = productContext {
+                    name = "engineering"
+                    frameOfReference = appCtx
+                    disciplineType = "mechanical"
+                }.getOrThrow()
+                product(id = "") { frameOfReference = setOf(prodCtx) }.getOrThrow()
+                """.trimIndent()
             val outcome = KStepScriptHost.eval(script, "get-or-throw-abort.kstep.kts")
             val validationErrors = outcome.shouldBeInstanceOf<KStepScriptOutcome.ValidationErrors>()
             val violation = validationErrors.violations.shouldHaveSize(1).single()

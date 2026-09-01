@@ -117,10 +117,14 @@ fun registerExportPart21Tool(
             try {
                 val text = Part21Writer.write(header, roots)
                 CallToolResult(
+                    // The Part-21 text lives only in `content` — duplicating it into
+                    // `structuredContent` as well (as an earlier version of this tool did) would
+                    // hold the full export text in memory a second time per call, and again in
+                    // the JSON-serialized response buffer; `structuredContent` here carries only
+                    // small caller-useful metadata, not the payload itself.
                     content = listOf(TextContent(text = text)),
                     structuredContent =
                         buildJsonObject {
-                            put("part21Text", text)
                             put("rootCount", roots.size)
                             putJsonArray("schemaIdentifiers") {
                                 header.schemaIdentifiers.forEach { add(JsonPrimitive(it)) }

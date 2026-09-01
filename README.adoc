@@ -227,6 +227,34 @@ Welle 1, below). Concretely, as of this writing:
   allowlist — so the gap is now bounded and guarded, not open-ended.
   See <<roadmap,Roadmap>> for the full divergence inventory and what
   remains deliberately deferred.
+* **(M2 Welle 10 — `kstep-core` rebuilt on the codegen-generated
+  types)** The fork M2 Welle 9 left open (extend the hand-authored
+  layer with `LIST`/`EXISTS()` support, or rebuild it on top of the
+  generated types) is resolved: `kstep-core` no longer hand-authors any
+  AP242 entity shape at all. `Ap242V1CodeGen.CORE_MODULE_OPTIONS`
+  generates all twelve entities (the six V1 types plus the six support
+  entities their shapes require — `application_context`,
+  `product_context`, `product_definition_context`, `approval_status`,
+  `person`, `organization`) directly into `kstep-core`'s own compiled
+  output, `internal constructor` + `@ConsistentCopyVisibility`, wired
+  via a Gradle `consumable`/`resolvable` configuration pair (not a
+  cross-project `sourceSets` reach-through). `dev.kstep.core.ap242` now
+  supplies exactly one validating builder function per entity on top.
+  Eleven of the M2 Welle 8 divergence-table's thirteen entries are
+  resolved outright; `EXISTS(<attribute>)` WHERE-rule support was added
+  specifically for `person.WR1`, the one genuinely real, evaluable rule
+  in the schema slice once `person` is modeled; a new
+  `KSTEP-A-001`/`AGGREGATION_BOUND_VIOLATED` code distinguishes "an
+  aggregation was never set" from "set, but empty" for every real
+  `[1:?]`-bounded aggregation in the schema slice: `product.
+  frame_of_reference : SET [1:?]` (mandatory) and `person`'s
+  `middle_names`/`prefix_titles`/`suffix_titles : OPTIONAL LIST [1:?]`
+  (each individually optional, but non-empty once assigned at all).
+  Full rationale, the resolved
+  divergence table, and the accepted consequences (a real ergonomic
+  regression on `product`/`productDefinition`, which now need an
+  explicit context built first; the Part-21/MCP breaking changes) are
+  in `docs/adr/ADR-0004-core-on-generated-types.adoc`.
 * **(M2 Welle 7)** A correctness fix in the same spirit as the
   `approval.level` one above: `Product.kt`'s doc comment claimed `id,
   name, description, all STRING, none OPTIONAL`, which contradicted the
@@ -280,7 +308,14 @@ Welle 1, below). Concretely, as of this writing:
   `\X\`/`\X2\`/`\X4\` non-ASCII escape mechanism — string values are
   scoped to printable ASCII plus the `''`-doubling convention for an
   embedded `'`; anything else raises `Part21EncodingException` rather
-  than being silently mis-encoded. **Acceptance-criterion honesty**:
+  than being silently mis-encoded. This includes a bare reverse
+  solidus (`\`, 0x5C) on write: although it is itself printable ASCII,
+  an unescaped `\` is exactly what a conformant external Part-21
+  reader would take as the start of an escape sequence it (unlike
+  V1) does implement, so `Part21Writer` rejects it with
+  `Part21EncodingException` rather than emit a value whose meaning
+  could change on the far side of the export boundary.
+  **Acceptance-criterion honesty**:
   kSTEP-ADR-0001 names a lossless roundtrip through an external
   CAD/PLM tool (e.g. FreeCAD) as the real-world bar for Part 21
   export/import. No such tool is available in this development
@@ -369,7 +404,7 @@ Welle 1, below). Concretely, as of this writing:
   to). Tested end-to-end (not just handler-level) through the SDK's own
   `ChannelTransport` in-memory client/server transport
   (`io.modelcontextprotocol:kotlin-sdk-testing`, `@ExperimentalMcpApi`)
-  — a real `Client` drives a real `Server` with all nine tools
+  — a real `Client` drives a real `Server` with all fifteen tools
   registered, including a full multi-tool-call build-and-export
   sequence whose Part 21 output is parsed back with `kstep-step21`'s
   own `Part21Reader` and compared for equality, proving the MCP layer
@@ -454,7 +489,7 @@ documented in code and here rather than faked or approximated: NAUO's
 own `UNIQUE UR2` (`product_definition_occurrence_id`,
 `relating_product_definition`), because `product_definition_occurrence_id`
 is itself a `DERIVE` value chained through `product_definition_occurrence`,
-an entity nowhere modeled among `kstep-core`'s six V1 types; and
+an entity nowhere modeled among `kstep-core`'s twelve AP242 types; and
 `product_definition_formation`'s own `UNIQUE UR1` (`id`, `of_product`),
 because the `EntityStore` already keys every `product_definition_formation`
 by that same `id`, so the composite key can never actually collide
@@ -526,19 +561,24 @@ See <<roadmap,Roadmap>> for what's planned next.
 | Module | Purpose | Current state
 
 | `kstep-core`
-| Core DSL types (schema-independent runtime support for the generated
-  Kotlin DSL): `dev.kstep.core.ValidationResult`/`DslViolation`, and
-  hand-authored named-parameter builders for the six V1 AP242 entities
-  under `dev.kstep.core.ap242`
-| Working: `product`/`personAndOrganization`/`approval`/
+| Core DSL types (`dev.kstep.core.ValidationResult`/`DslViolation`) and
+  — as of M2 Welle 10 — the codegen-generated `dev.kstep.generated.
+  ap242v1.*` entity `data class`es themselves (compiled directly into
+  this module, `internal` constructors), plus one validating
+  named-parameter builder function per entity under `dev.kstep.core.ap242`
+| Working: `applicationContext`/`productContext`/
+  `productDefinitionContext`/`approvalStatus`/`person`/`organization`/
+  `product`/`personAndOrganization`/`approval`/
   `productDefinitionFormation`/`productDefinition`/
-  `nextAssemblyUsageOccurrence` builder functions, each running
-  WHERE-rule, mandatory-reference (`KSTEP-M-001`), and — (M2 Welle 7)
+  `nextAssemblyUsageOccurrence` builder functions (twelve total), each
+  running WHERE-rule, mandatory-reference (`KSTEP-M-001`),
+  aggregation-bound (`KSTEP-A-001`), and — (M2 Welle 7)
   `product.name`/`next_assembly_usage_occurrence.name` — mandatory-
   primitive-attribute (`KSTEP-M-002`) validation and returning a
-  `ValidationResult`. Depends on `kstep-express` for
-  `dev.kstep.express.validation` only (no ANTLR types on its own
-  compile classpath).
+  `ValidationResult`. Depends on `kstep-express` via `api` (not
+  `implementation`): both the generated types it compiles and
+  `dev.kstep.express.validation`'s `WhereRuleSpec`/`WhereRuleValue`
+  appear in this module's own public builder signatures.
 
 | `kstep-express`
 | ANTLR4-generated EXPRESS parser (`dev.kstep.express.ExpressParserFactory`),
@@ -563,7 +603,7 @@ See <<roadmap,Roadmap>> for what's planned next.
 
 | `kstep-step21`
 | STEP Part 21 (ISO 10303-21 physical file exchange format)
-  reader/writer for the six V1 AP242 entities (`dev.kstep.step21`)
+  reader/writer for the twelve AP242 entities (`dev.kstep.step21`)
 | Working: `Part21Writer.write`/`Part21Reader.read`, a hand-rolled
   scanner and two-pass graph resolver (independent of the ANTLR
   EXPRESS grammar — Part 21 is a different sub-format). Verified via a
@@ -598,10 +638,13 @@ See <<roadmap,Roadmap>> for what's planned next.
   below. Depends on `kstep-mcp` and `kstep-script`.
 
 | `kstep-mcp`
-| MCP server exposing the six V1 entity builders and Part-21 export as
-  LLM tool-calling tools (`dev.kstep.mcp`), built on the official
-  `io.modelcontextprotocol:kotlin-sdk-server`
-| Working (M2 Welle 1): nine tools — `build_product`,
+| MCP server exposing the twelve AP242 entity builders and Part-21
+  export as LLM tool-calling tools (`dev.kstep.mcp`), built on the
+  official `io.modelcontextprotocol:kotlin-sdk-server`
+| Working (M2 Welle 1, expanded M2 Welle 10): fifteen tools —
+  `build_application_context`, `build_product_context`,
+  `build_product_definition_context`, `build_approval_status`,
+  `build_person`, `build_organization`, `build_product`,
   `build_person_and_organization`, `build_product_definition_formation`,
   `build_product_definition`, `build_next_assembly_usage_occurrence`,
   `build_approval`, `export_part21`, `list_entities`, `get_entity` —
@@ -779,22 +822,36 @@ failure:
 [source,kotlin]
 ----
 import dev.kstep.core.ValidationResult
+import dev.kstep.core.ap242.applicationContext
 import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productContext
+import dev.kstep.core.getOrThrow
+
+// product.frame_of_reference is a mandatory SET [1:?] OF product_context in the real
+// AP242 schema (M2 Welle 10 — see docs/adr/ADR-0004-core-on-generated-types.adoc);
+// kstep-core does not invent a placeholder context behind the caller's back.
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext {
+    name = "engineering"
+    frameOfReference = appCtx
+    disciplineType = "mechanical"
+}.getOrThrow()
 
 val result = product(id = "BRK-001") {
     name = "Bracket"
     description = "Mounting bracket"
+    frameOfReference = setOf(prodCtx)
 }
 when (result) {
     is ValidationResult.Valid -> println(result.value)
     is ValidationResult.Invalid -> println(result.violations)
 }
 
-// An empty id violates product's WHERE rule (SELF.id <> ''):
-val invalid = product(id = "") { name = "Bracket" }
+// An empty id violates product's WHERE rule (kstep_wr1: SELF.id <> ''):
+val invalid = product(id = "") { name = "Bracket"; frameOfReference = setOf(prodCtx) }
 println((invalid as ValidationResult.Invalid).violations)
-// [DslViolation(code=KSTEP-W-001, entityName=product, ruleLabel=wr1,
-//   expressionText=SELF.id <> '', message=WHERE rule wr1 not satisfied: SELF.id <> '')]
+// [DslViolation(code=KSTEP-W-001, entityName=product, ruleLabel=kstep_wr1,
+//   expressionText=SELF.id <> '', message=WHERE rule kstep_wr1 not satisfied: SELF.id <> '')]
 ----
 
 `WhereRuleValidator.validate` — the lower-level API `kstep-core`'s
@@ -828,17 +885,31 @@ Part 21 physical file, then reading it back:
 
 [source,kotlin]
 ----
+import dev.kstep.core.ap242.applicationContext
 import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productContext
 import dev.kstep.core.ap242.productDefinition
+import dev.kstep.core.ap242.productDefinitionContext
 import dev.kstep.core.ap242.productDefinitionFormation
 import dev.kstep.core.getOrThrow
 import dev.kstep.step21.Part21Header
 import dev.kstep.step21.Part21Reader
 import dev.kstep.step21.Part21Writer
 
-val bracket = product("BRK-001") { name = "Bracket" }.getOrThrow()
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext {
+    name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical"
+}.getOrThrow()
+val defCtx = productDefinitionContext {
+    name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design"
+}.getOrThrow()
+
+val bracket = product("BRK-001") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
 val builtFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
-val definition = productDefinition("BRK-001-D") { formation = builtFormation }.getOrThrow()
+val definition = productDefinition("BRK-001-D") {
+    formation = builtFormation
+    frameOfReference = defCtx
+}.getOrThrow()
 
 val header = Part21Header(
     fileName = "bracket.step",
@@ -854,9 +925,12 @@ println(exported)
 // FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));
 // ENDSEC;
 // DATA;
-// #1=PRODUCT('BRK-001','Bracket','');
-// #2=PRODUCT_DEFINITION_FORMATION('BRK-001-F','',#1);
-// #3=PRODUCT_DEFINITION('BRK-001-D','',#2);
+// #1=APPLICATION_CONTEXT('config control');
+// #2=PRODUCT_CONTEXT('engineering',#1,'mechanical');
+// #3=PRODUCT('BRK-001','Bracket',$,(#2));
+// #4=PRODUCT_DEFINITION_FORMATION('BRK-001-F',$,#3);
+// #5=PRODUCT_DEFINITION_CONTEXT('engineering',#1,'design');
+// #6=PRODUCT_DEFINITION('BRK-001-D',$,#4,#5);
 // ENDSEC;
 // END-ISO-10303-21;
 
@@ -875,7 +949,7 @@ attempted:
 
 [source,kotlin]
 ----
-// A hand-edited file with an empty product id (violates product's WHERE rule):
+// A hand-edited file with an empty product id (violates product's kstep_wr1 WHERE rule):
 val handEdited = """
     ISO-10303-21;
     HEADER;
@@ -884,15 +958,17 @@ val handEdited = """
     FILE_SCHEMA(('S'));
     ENDSEC;
     DATA;
-    #1=PRODUCT('','','');
-    #2=PRODUCT_DEFINITION_FORMATION('PDF-001','',#1);
+    #1=APPLICATION_CONTEXT('cc');
+    #2=PRODUCT_CONTEXT('eng',#1,'mech');
+    #3=PRODUCT('','x','',(#2));
+    #4=PRODUCT_DEFINITION_FORMATION('PDF-001','',#3);
     ENDSEC;
     END-ISO-10303-21;
 """.trimIndent()
 
 val badResult = Part21Reader.read(handEdited)
-println(badResult.violations) // {1=[DslViolation(code=KSTEP-W-001, ...)]}
-println(badResult.skipped)    // {2=[1]}
+println(badResult.violations) // {3=[DslViolation(code=KSTEP-W-001, ...)]}
+println(badResult.skipped)    // {4=[3]}
 ----
 
 `Part21Writer`/`Part21Reader` are called directly here as a library
@@ -912,20 +988,34 @@ import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.testing.ChannelTransport
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 
-val server = buildServer() // registers all nine tools on a fresh EntityStore
+val server = buildServer() // registers all fifteen tools on a fresh EntityStore
 val (clientTransport, serverTransport) = ChannelTransport.createLinkedPair()
 server.createSession(serverTransport)
 
 val client = Client(clientInfo = Implementation(name = "example-client", version = "1.0"))
 client.connect(clientTransport)
 
-val built = client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket"))
-println(built.structuredContent) // {"id":"BRK-001","name":"Bracket","description":"","entityType":"product"}
+// product.frame_of_reference is mandatory (M2 Welle 10) — build a context first.
+client.callTool("build_application_context", mapOf("handle" to "AC", "application" to "cc"))
+client.callTool(
+    "build_product_context",
+    mapOf("handle" to "PC", "name" to "eng", "frame_of_reference_handle" to "AC", "discipline_type" to "mech"),
+)
+
+val built = client.callTool(
+    "build_product",
+    mapOf("id" to "BRK-001", "name" to "Bracket", "frame_of_reference_handles" to listOf("PC")),
+)
+println(built.structuredContent)
+// {"id":"BRK-001","name":"Bracket","description":null,"frame_of_reference_handles":["PC"],"entityType":"product"}
 
 // A validation failure comes back as structured content, not a protocol-level error.
 // Both the empty id (WHERE rule) and the never-set name (mandatory attribute, (M2 Welle 7))
 // are collected in the same response, not just the first one found:
-val invalid = client.callTool("build_product", mapOf("id" to ""))
+val invalid = client.callTool(
+    "build_product",
+    mapOf("id" to "", "frame_of_reference_handles" to listOf("PC")),
+)
 println(invalid.isError) // true
 println(invalid.structuredContent)
 // {"errorKind":"validation_failed","violations":[
@@ -1030,16 +1120,28 @@ println(rebuilt.isError) // null
 
 (M2 Welle 6) Exporting a `*.kstep.kts` script directly to a STEP Part 21
 file via `kstep export`, no hand-written Kotlin caller needed. A script
-ends with `stepFile(fileName = "...") { ... }`; the six `kstep-core`
-builders and `stepFile`/`root` are available without any `import`
+ends with `stepFile(fileName = "...") { ... }`; the twelve `kstep-core`
+builders (M2 Welle 10), the generated `dev.kstep.generated.ap242v1.*`
+types, and `stepFile`/`root` are all available without any `import`
 (`KStepScriptCompilationConfiguration`'s `defaultImports`):
 
 [source,kotlin]
 ----
 // bracket.kstep.kts
-val bracket = product("BRK-001") { name = "Bracket" }.getOrThrow()
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext {
+    name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical"
+}.getOrThrow()
+val defCtx = productDefinitionContext {
+    name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design"
+}.getOrThrow()
+
+val bracket = product("BRK-001") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
 val bracketFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
-val definition = productDefinition("BRK-001-D") { formation = bracketFormation }.getOrThrow()
+val definition = productDefinition("BRK-001-D") {
+    formation = bracketFormation
+    frameOfReference = defCtx
+}.getOrThrow()
 
 stepFile(fileName = "bracket.step") {
     root(definition)
@@ -1064,9 +1166,15 @@ fixture below demonstrates:
 
 [source,kotlin]
 ----
-// hello-invalid.kstep.kts — an empty product id violates product's WHERE rule
+// hello-invalid.kstep.kts — an empty product id violates product's kstep_wr1 WHERE rule
+// (frame_of_reference is set deliberately, so this is the only violation in the response)
+val prodCtx = productContext {
+    name = "engineering"
+    frameOfReference = applicationContext { application = "config control" }.getOrThrow()
+    disciplineType = "mechanical"
+}.getOrThrow()
 stepFile(fileName = "hello-invalid.step") {
-    root(product(id = "") { name = "Nameless" })
+    root(product(id = "") { name = "Nameless"; frameOfReference = setOf(prodCtx) })
 }
 ----
 
@@ -1128,120 +1236,111 @@ focuses on a semantic core that a type-safe DSL benefits from most:
 . A semantic AP242 core: product structure and metadata, without
   B-rep geometry and without PMI (PMI references geometry shape
   aspects and moves with the geometry milestone). The Kotlin type
-  layer for its six core entities (`PRODUCT`, `PRODUCT_DEFINITION` +
-  revision, `PRODUCT_DEFINITION_FORMATION`,
-  `NEXT_ASSEMBLY_USAGE_OCCURRENCE`, `APPROVAL`,
-  `PERSON_AND_ORGANIZATION`) now generates correctly from the fixture
-  and — all six, see <<status,Status>> above — from the real
-  AP242 schema, and `kstep-core` now has a runtime construction/
-  validation API on top of hand-authored equivalents of those six types
-  (see <<status,Status>> above). **(M2 Welle 8 — codegen
-  reconciliation, resolved-this-wave vs. deliberately-deferred:)**
+  layer for its twelve core AP242 entities (six V1 entities —
+  `PRODUCT`, `PRODUCT_DEFINITION` + revision,
+  `PRODUCT_DEFINITION_FORMATION`, `NEXT_ASSEMBLY_USAGE_OCCURRENCE`,
+  `APPROVAL`, `PERSON_AND_ORGANIZATION` — plus six support entities
+  their generated shapes require: `APPLICATION_CONTEXT`,
+  `PRODUCT_CONTEXT`, `PRODUCT_DEFINITION_CONTEXT`, `APPROVAL_STATUS`,
+  `PERSON`, `ORGANIZATION`) now generates correctly from the fixture
+  and from the real AP242 schema (see <<status,Status>> above), and
+  **(M2 Welle 10)** `kstep-core` now builds its runtime construction/
+  validation API — one validating builder function per entity in
+  `dev.kstep.core.ap242` — directly *on top of* those generated types,
+  rather than hand-authoring independent equivalents of them. This
+  resolves the fork M2 Welle 9 left open (extend the hand-authored
+  layer with `LIST`/`EXISTS()` support, vs. rebuild it on the generated
+  types): eleven of the thirteen M2 Welle 8 divergence-table entries
+  (below, kept for historical reference) are resolved outright — the
+  codegen-generated shape *is* the real shape, by construction — and
+  the remaining two (`approval.status`/`person_and_organization.
+  the_person`+`the_organization` simplified to `String`, and the
+  invented `approval.authorized_by`) are resolved the same way: those
+  attributes are now correctly entity-typed, and `authorized_by` —
+  never part of the real entity — is removed, not replaced. Full
+  rationale, consequences (a real ergonomic regression on `product`/
+  `productDefinition`, which now need an explicit context built first;
+  Part-21/MCP breaking changes; the new `KSTEP-A-001` violation code;
+  `EXISTS()` WHERE-rule support), and the alternatives considered are
+  in `docs/adr/ADR-0004-core-on-generated-types.adoc`.
 +
 --
-Resolved this wave: every divergence between `kstep-core`'s hand-authored
-shape and the real AP242 excerpt is now enumerated, documented in each
-type's KDoc (`dev.kstep.core.ap242`), and pinned by
-`dev.kstep.tests.Ap242CoreSchemaConsistencyTest` (re-derives the real
-shape live from `ap242-v1-entities.exp` via `InheritanceResolver` on
-every run, fails the build on any *new*, undocumented drift). The full
-inventory:
+The M2 Welle 8 divergence inventory, for historical reference — every
+row below is now resolved (see ADR-0004), not an open gap:
 
 [cols="2,3,3", options="header"]
 |===
-| Entity | Divergence | Status
+| Entity | Divergence (as of M2 Welle 8) | M2 Welle 10 resolution
 
 | `approval`
 | `status` is entity-typed (`approval_status`) in the real schema; `String` in `kstep-core`
-| accepted, guarded
+| resolved — `status` is now `dev.kstep.generated.ap242v1.ApprovalStatus`
 
 | `approval`
 | `authorized_by` does not exist on the real entity at all — a kSTEP-invented convenience linkage
-| accepted, guarded; removal deferred (see below)
+| resolved — removed entirely, no replacement
 
 | `approval`
 | real entity has no WHERE rule; `kstep-core`'s `wr1` is synthesized
-| documented (WHERE rules are out of the guard's scope, see below)
+| unchanged — kept, relabeled `kstep_wr1` (never a real rule to align to)
 
 | `person_and_organization`
 | `the_person`/`the_organization` are entity-typed (`person`/`organization`) in the real schema; `String` in `kstep-core`
-| accepted, guarded
+| resolved — both now correctly entity-typed and mandatory
 
 | `person_and_organization`
-| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
-| documented
+| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule was synthesized
+| resolved differently — dropped entirely, not relabeled: both attributes are now mandatory entity references, so "at least one set" is no longer a meaningful approximation
 
 | `product`
-| real entity has a mandatory `frame_of_reference : SET [1:?] OF product_context`; `kstep-core` omits it
-| accepted, guarded
+| real entity has a mandatory `frame_of_reference : SET [1:?] OF product_context`; `kstep-core` omitted it
+| resolved — mandatory and non-empty, enforced via `KSTEP-M-001`/`KSTEP-A-001`
 
 | `product`
 | real `WR1` uses `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
-| documented
+| unchanged — kept, relabeled `kstep_wr1`
 
 | `product_definition`
-| real entity has a mandatory `frame_of_reference : product_definition_context`; `kstep-core` omits it
-| accepted, guarded
+| real entity has a mandatory `frame_of_reference : product_definition_context`; `kstep-core` omitted it
+| resolved — mandatory, enforced via `KSTEP-M-001`
 
 | `product_definition`
 | real `WR1` uses `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
-| documented
+| unchanged — kept, relabeled `kstep_wr1`
 
 | `product`, `product_definition`, `product_definition_formation`
-| real `OPTIONAL text description`; `kstep-core` models it as non-null `String` defaulting to `""`
-| accepted, guarded (named convention, "OptionalStringAsEmptyDefault")
+| real `OPTIONAL text description`; `kstep-core` modeled it as non-null `String` defaulting to `""`
+| resolved — genuinely nullable `String?` now, matching the generated type
 
 | `product_definition_formation`
 | real `UNIQUE UR1: id, of_product` not enforced anywhere in `kstep-core`
-| resolved by construction — `id` is the `EntityStore`'s primary key, so `(id, of_product)` cannot collide unless `id` alone does; store id-keying already guarantees UR1, proven by `KStepMcpServerTest` ("product_definition_formation's UNIQUE UR1 needs no enforcement: store id-keying already guarantees it"). Contrast NAUO's `UNIQUE UR1` above, whose fields exclude the store key and so needed a real scan.
+| unchanged — still resolved by construction (`EntityStore` id-keying), see `KStepMcpServerTest`
 
 | `next_assembly_usage_occurrence`
-| real flattened shape inherits an `OPTIONAL text description` (`product_definition_relationship`); `kstep-core` omits it
-| accepted, guarded
+| real flattened shape inherits an `OPTIONAL text description` (`product_definition_relationship`); `kstep-core` omitted it
+| resolved — `description` is now a genuine `String?`
 
 | `next_assembly_usage_occurrence`
-| real inherited `reference_designator` (`assembly_component_usage`) is `OPTIONAL identifier`; `kstep-core` narrows it to non-null `String` defaulting to `""`
-| accepted, guarded
+| real inherited `reference_designator` (`assembly_component_usage`) is `OPTIONAL identifier`; `kstep-core` narrowed it to non-null `String` defaulting to `""`
+| resolved — genuinely `String?` now; the over-constraining synthesized WHERE rule that used to force it non-blank is removed, not relabeled
 
 | `next_assembly_usage_occurrence`
 | real `WR1` is `acyclic_product_definition_relationship(...)` (unsupported); `kstep-core`'s rule is synthesized
-| documented
+| unchanged — no synthesized rule remains for this entity (the old one was the now-removed reference_designator over-constraint above)
 |===
 
-Deliberately deferred, not attempted this wave: entity-typed modeling of
-`kstep-core`'s `status`/`the_person`/`the_organization` (i.e. actually
-building `ApprovalStatus`/`Person`/`Organization`/`ProductContext`/
-`ProductDefinitionContext`/`ApplicationContext` into the hand-authored
-layer, and dropping `authorizedBy`). This needs capabilities the
-hand-authored layer does not have yet — `LIST`/aggregation support
-(`person`'s `middle_names`/`prefix_titles`/`suffix_titles`) and
-`EXISTS()` WHERE-rule evaluation (`person`'s `WR1`) — and would, without
-those, only re-derive by hand what `ExpressKotlinCodeGenerator` already
-generates faithfully (see <<status,Status>> above). It is therefore a
-milestone-scoped architecture decision, not a wave: the real fork is
-whether to rebuild `kstep-core`'s ergonomic layer *on top of* the
-generated `dev.kstep.generated.ap242v1` types (no duplication, but
-couples the ergonomic API to generated shapes and needs a builder/
-validation layer over generated data classes) or to keep hand-authoring
-and extend the hand layer with `LIST` + `EXISTS` support — an explicit
-decision for the project owner, not pre-committed here.
-`authorizedBy` removal, `status`-as-entity modeling, and the Part-21
-`APPROVAL` real-arity alignment (`kstep-step21`'s `Part21EntityKind`,
-currently 3 positional args, matching `ap242-subset.exp`, not the real
-2-attribute `approval`) all travel together in that future wave —
-removing `authorizedBy` alone would leave `status` a bare `String`,
-which matches *neither* the fixture nor the real schema, an incoherent
-half-step.
-
-WHERE-rule divergences are documentation-only, not covered by the drift
-test: every real WHERE rule on these six entities uses
-`SIZEOF`/`USEDIN`/`EXISTS`/`acyclic_...`, all outside
-`WhereRuleValidator`'s supported expression subset, so there is no
-supported real rule to mechanically align a synthesized one to.
-`UNIQUE`/`DERIVE`/`INVERSE` clause enforcement is likewise out of the
-drift test's scope. The test guards attribute shape only (field set,
-primitive-vs-entity-vs-aggregation category, optionality) — where
-silent structural drift would actually hide.
+Deliberately still open (named limitations, not silently dropped —
+see ADR-0004 and <<status,Status>> for `KSTEP-M-002`'s scope): the
+`SIZEOF`/`USEDIN`-based real WHERE rules on `product`,
+`product_definition`, `person_and_organization`, and `application_context`
+remain unsupported and unevaluated; NAUO's real `WR1`
+(`acyclic_product_definition_relationship`) likewise; `DERIVE` attributes
+(`product_definition.name`, `person_and_organization.name`/
+`description`, `application_context.id`/`description`, NAUO's derived
+`product_definition_occurrence_id`) are still not codegen'd or
+evaluated — the generated types simply don't carry them; and NAUO's
+`UNIQUE UR2` remains unenforced (depends on `product_definition_occurrence`,
+an entity not modeled anywhere in `kstep-core`).
 --
 . Validation: EXPRESS `WHERE` rules surfaced as structured errors.
   Done for the supported expression subset (comparisons, `SELF.attribute`
@@ -1303,8 +1402,8 @@ silent structural drift would actually hide.
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and
   the kSTEP DSL as generation targets. **(M2 Welle 1) Split into two
   halves, only the first of which is done**: the MCP server itself
-  (`kstep-mcp` — nine tools over stdio wrapping the six V1 builders and
-  Part-21 export, a bounded session-scoped `EntityStore`, structured
+  (`kstep-mcp` — fifteen tools over stdio wrapping the twelve AP242
+  builders and Part-21 export, a bounded session-scoped `EntityStore`, structured
   tool-call errors, tested end-to-end via the SDK's in-memory
   transport — see <<status,Status>> and Usage above) is complete and
   gives an LLM agent the same "compiler/validator as oracle" structured

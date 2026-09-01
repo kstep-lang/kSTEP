@@ -1,11 +1,17 @@
 package dev.kstep.mcp
 
-import dev.kstep.core.ap242.Approval
-import dev.kstep.core.ap242.NextAssemblyUsageOccurrence
-import dev.kstep.core.ap242.PersonAndOrganization
-import dev.kstep.core.ap242.Product
-import dev.kstep.core.ap242.ProductDefinition
-import dev.kstep.core.ap242.ProductDefinitionFormation
+import dev.kstep.generated.ap242v1.ApplicationContext
+import dev.kstep.generated.ap242v1.Approval
+import dev.kstep.generated.ap242v1.ApprovalStatus
+import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
+import dev.kstep.generated.ap242v1.Organization
+import dev.kstep.generated.ap242v1.Person
+import dev.kstep.generated.ap242v1.PersonAndOrganization
+import dev.kstep.generated.ap242v1.Product
+import dev.kstep.generated.ap242v1.ProductContext
+import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.generated.ap242v1.ProductDefinitionContext
+import dev.kstep.generated.ap242v1.ProductDefinitionFormation
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -34,6 +40,16 @@ import java.util.concurrent.ConcurrentHashMap
  * `ConcurrentHashMap.size()` read followed by a separate `put()` would be a classic TOCTOU
  * race here); plain reads ([get]/[snapshot]) stay lock-free on top of [ConcurrentHashMap].
  *
+ * [maxEntities] alone bounds entity *count*, not entity *size* — as of kSTEP M2 Welle 10, the
+ * six support entity types can each carry several `MAX_STRING_FIELD_LENGTH`-sized strings, and
+ * `person` alone can carry three `MAX_LIST_ITEMS`-sized lists of such strings, so the worst-case
+ * content behind [maxEntities] entities grew roughly 50x over the pre-Welle-10 store (see
+ * kSTEP M2 Welle 10 security review). [maxTotalCharacters] closes that gap: every [put]/
+ * [putIfNoConflict] call additionally checks the running sum of every stored entry's own
+ * caller-controlled string content ([EntityStoreEntry.estimatedCharCount]) against this cap,
+ * inside the same [capacityLock] section as the entity-count check — so the two bounds compose
+ * instead of one silently making the other's stated guarantee false.
+ *
  * [putIfNoConflict] extends the same single-lock guarantee to a caller-supplied UNIQUE-rule
  * scan (see `NextAssemblyUsageOccurrenceTool`'s UR1 check) — the scan and the insert happen
  * inside the same [capacityLock] critical section as [put]'s own checks, so two concurrent
@@ -42,9 +58,17 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class EntityStore(
     private val maxEntities: Int = DEFAULT_MAX_ENTITIES,
+    private val maxTotalCharacters: Long = DEFAULT_MAX_TOTAL_CHARACTERS,
 ) {
     private val entries = ConcurrentHashMap<String, EntityStoreEntry>()
     private val capacityLock = Any()
+
+    // Running sum of estimatedCharCount() over every entry currently in [entries]. Mutated only
+    // inside [capacityLock] (alongside every [entries] write), so it can be a plain var: there is
+    // no concurrent-write race to guard beyond what the lock already covers, and reading it
+    // outside the lock is never done — every caller that needs an authoritative value produces
+    // one from inside a [putIfNoConflict] call.
+    private var totalCharacters: Long = 0L
 
     sealed interface PutOutcome {
         data object Ok : PutOutcome
@@ -52,6 +76,11 @@ class EntityStore(
         data class CapacityExceeded(
             val currentSize: Int,
             val maxEntities: Int,
+        ) : PutOutcome
+
+        data class CharacterBudgetExceeded(
+            val projectedTotalCharacters: Long,
+            val maxTotalCharacters: Long,
         ) : PutOutcome
 
         data class TypeMismatch(
@@ -89,15 +118,27 @@ class EntityStore(
                     PutOutcome.TypeMismatch(id, existing.entityType, entry.entityType)
                 else ->
                     when (val conflictingId = findConflict(entries)) {
-                        null ->
+                        null -> {
+                            // An overwrite (existing != null, same type) can still grow the
+                            // character budget — e.g. a short person re-built under the same id
+                            // with three full 64x4096-character lists — so the budget check
+                            // applies on every put, not only on a genuinely new id the way the
+                            // entity-count check does.
+                            val previousCharCount = existing?.estimatedCharCount() ?: 0L
+                            val projectedTotalCharacters =
+                                totalCharacters - previousCharCount + entry.estimatedCharCount()
                             when {
                                 existing == null && entries.size >= maxEntities ->
                                     PutOutcome.CapacityExceeded(entries.size, maxEntities)
+                                projectedTotalCharacters > maxTotalCharacters ->
+                                    PutOutcome.CharacterBudgetExceeded(projectedTotalCharacters, maxTotalCharacters)
                                 else -> {
                                     entries[id] = entry
+                                    totalCharacters = projectedTotalCharacters
                                     PutOutcome.Ok
                                 }
                             }
+                        }
                         else -> PutOutcome.Conflict(conflictingId)
                     }
             }
@@ -109,16 +150,22 @@ class EntityStore(
 
     /**
      * Finds the store key currently holding [value] by object identity, not structural
-     * equality — used only where an entity type has no natural id of its own
-     * ([PersonAndOrganization], referenced by [Approval.authorizedBy]) and the caller-supplied
+     * equality — used only where an entity type has no natural id of its own (e.g.
+     * [PersonAndOrganization], [ApprovalStatus], the `*_context` types) and the caller-supplied
      * handle string can't otherwise be recovered from the value alone. `O(n)` in store size,
-     * which is fine at this store's capped scale (see [maxEntities]) and its only two call
-     * sites (`build_approval`'s echo, `get_entity`'s field dump).
+     * which is fine at this store's capped scale (see [maxEntities]); its only call site is
+     * [describeEntry]'s `get_entity` field dump — every `build_*` tool's own echo instead
+     * reflects back the handle the caller supplied, since it already has it in hand.
      */
     fun keyOf(value: Any): String? = entries.entries.firstOrNull { it.value.rawValue === value }?.key
 
     companion object {
         const val DEFAULT_MAX_ENTITIES = 512
+
+        // Restores roughly the pre-Welle-10 store-wide worst case (~16 MB of UTF-16 chars — see
+        // this class's KDoc and the kSTEP M2 Welle 10 security review) as an explicit, enforced
+        // cap, rather than leaving it an implicit-and-now-false consequence of maxEntities alone.
+        const val DEFAULT_MAX_TOTAL_CHARACTERS = 8_000_000L
     }
 }
 
@@ -137,3 +184,22 @@ fun EntityStore.findNextAssemblyUsageOccurrence(id: String): NextAssemblyUsageOc
     (get(id) as? EntityStoreEntry.NextAssemblyUsageOccurrenceEntry)?.value
 
 fun EntityStore.findApproval(id: String): Approval? = (get(id) as? EntityStoreEntry.ApprovalEntry)?.value
+
+// The six support-entity find* helpers added in kSTEP M2 Welle 10, alongside the six new
+// build_* tools that store them — same "typed lookup, no unchecked cast" contract as the six
+// V1-entity helpers above.
+fun EntityStore.findApplicationContext(id: String): ApplicationContext? =
+    (get(id) as? EntityStoreEntry.ApplicationContextEntry)?.value
+
+fun EntityStore.findProductContext(id: String): ProductContext? =
+    (get(id) as? EntityStoreEntry.ProductContextEntry)?.value
+
+fun EntityStore.findProductDefinitionContext(id: String): ProductDefinitionContext? =
+    (get(id) as? EntityStoreEntry.ProductDefinitionContextEntry)?.value
+
+fun EntityStore.findApprovalStatus(id: String): ApprovalStatus? =
+    (get(id) as? EntityStoreEntry.ApprovalStatusEntry)?.value
+
+fun EntityStore.findPerson(id: String): Person? = (get(id) as? EntityStoreEntry.PersonEntry)?.value
+
+fun EntityStore.findOrganization(id: String): Organization? = (get(id) as? EntityStoreEntry.OrganizationEntry)?.value

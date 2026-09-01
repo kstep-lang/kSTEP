@@ -267,4 +267,65 @@ class WhereRuleEvaluatorTest :
                 mapOf("level" to WhereRuleValue.IntegerValue(7)),
             ) shouldBe WhereRuleValue.IntegerValue(7)
         }
+
+        // kSTEP M2 Welle 10: EXISTS()/Unset — added specifically for the real person.WR1 rule.
+        "EXISTS evaluates true for a present (non-Unset) attribute value, including an empty string" {
+            WhereRuleEvaluator.evaluate(
+                WhereRuleExpression.Exists("last_name"),
+                mapOf("last_name" to WhereRuleValue.StringValue("")),
+            ) shouldBe true
+        }
+
+        "EXISTS evaluates false for an Unset attribute value" {
+            WhereRuleEvaluator.evaluate(
+                WhereRuleExpression.Exists("last_name"),
+                mapOf("last_name" to WhereRuleValue.Unset),
+            ) shouldBe false
+        }
+
+        "EXISTS(last_name) OR EXISTS(first_name) — person.WR1 — evaluates correctly for all four combinations" {
+            val rule =
+                WhereRuleExpression.Or(
+                    WhereRuleExpression.Exists("last_name"),
+                    WhereRuleExpression.Exists("first_name"),
+                )
+            WhereRuleEvaluator.evaluate(
+                rule,
+                mapOf("last_name" to WhereRuleValue.Unset, "first_name" to WhereRuleValue.Unset),
+            ) shouldBe false
+            WhereRuleEvaluator.evaluate(
+                rule,
+                mapOf("last_name" to WhereRuleValue.StringValue("Doe"), "first_name" to WhereRuleValue.Unset),
+            ) shouldBe true
+            WhereRuleEvaluator.evaluate(
+                rule,
+                mapOf("last_name" to WhereRuleValue.Unset, "first_name" to WhereRuleValue.StringValue("Jane")),
+            ) shouldBe true
+            WhereRuleEvaluator.evaluate(
+                rule,
+                mapOf(
+                    "last_name" to WhereRuleValue.StringValue("Doe"),
+                    "first_name" to WhereRuleValue.StringValue("Jane"),
+                ),
+            ) shouldBe true
+        }
+
+        "EXISTS on an attribute missing entirely from the value bag throws WhereRuleEvaluationException" {
+            shouldThrow<WhereRuleEvaluationException> {
+                WhereRuleEvaluator.evaluate(WhereRuleExpression.Exists("missing"), emptyMap())
+            }
+        }
+
+        "an Unset value used directly as a SELF.attribute (outside EXISTS) throws WhereRuleEvaluationException" {
+            shouldThrow<WhereRuleEvaluationException> {
+                WhereRuleEvaluator.evaluate(
+                    comparison(
+                        ComparisonOperator.EQUAL,
+                        WhereRuleExpression.SelfAttribute("last_name"),
+                        WhereRuleExpression.StringLiteral(""),
+                    ),
+                    mapOf("last_name" to WhereRuleValue.Unset),
+                )
+            }
+        }
     })

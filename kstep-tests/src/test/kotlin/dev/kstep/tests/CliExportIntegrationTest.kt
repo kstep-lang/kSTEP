@@ -17,6 +17,16 @@ private data class CliInvocationResult(
     val stderr: String,
 )
 
+// Prepended to every fixture script below that builds a product/product_definition: as of kSTEP
+// M2 Welle 10 both need a real context, kstep-core no longer invents one (see
+// docs/adr/ADR-0004-core-on-generated-types.adoc).
+private const val CONTEXT_PRELUDE =
+    """
+    val appCtx = applicationContext { application = "config control" }.getOrThrow()
+    val prodCtx = productContext { name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical" }.getOrThrow()
+    val defCtx = productDefinitionContext { name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design" }.getOrThrow()
+    """
+
 /**
  * Subprocess-level, out-of-process integration coverage for `kstep export` (`kstep-cli`'s
  * `Main.kt`) -- deliberately run as a genuine child `java` process rather than calling `main()`
@@ -37,8 +47,8 @@ private data class CliInvocationResult(
  * `writeExport`. This class closes that gap.
  *
  * `Part21LimitExceededException` (the third exception `writeExport` converts) is deliberately
- * not exercised end-to-end here: it only trips at a reachability-walk depth of 64, and the six
- * `kstep-core` V1 entity types have a true max chain depth of 4 (see `Part21Writer`'s own KDoc)
+ * not exercised end-to-end here: it only trips at a reachability-walk depth of 64, and the twelve
+ * `kstep-core` AP242 entity types have a true max chain depth of 6 (see `Part21Writer`'s own KDoc)
  * -- there is no way to reach it through a genuine script without directly faking the writer's
  * internals, which would defeat the point of a black-box subprocess test. The three `catch`
  * branches in `writeExport` are structurally identical (`printError(jsonOutput,
@@ -80,15 +90,16 @@ class CliExportIntegrationTest :
         "export with no --out derives the output path from the script name and prints human-readable success" {
             val script = File(workDir, "bracket-default-out.kstep.kts")
             script.writeText(
-                """
-                val bracket = product("BRK-001") { name = "Bracket" }.getOrThrow()
-                val bracketFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
-                val definition = productDefinition("BRK-001-D") { formation = bracketFormation }.getOrThrow()
+                CONTEXT_PRELUDE +
+                    """
+                    val bracket = product("BRK-001") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val bracketFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
+                    val definition = productDefinition("BRK-001-D") { formation = bracketFormation; frameOfReference = defCtx }.getOrThrow()
 
-                stepFile(fileName = "bracket.step") {
-                    root(definition)
-                }
-                """.trimIndent(),
+                    stepFile(fileName = "bracket.step") {
+                        root(definition)
+                    }
+                    """.trimIndent(),
             )
 
             val result = runCli("export", script.name)
@@ -101,15 +112,16 @@ class CliExportIntegrationTest :
         "\"--out\" overrides the derived output path" {
             val script = File(workDir, "bracket-explicit-out.kstep.kts")
             script.writeText(
-                """
-                val bracket = product("BRK-002") { name = "Bracket" }.getOrThrow()
-                val bracketFormation = productDefinitionFormation("BRK-002-F") { ofProduct = bracket }.getOrThrow()
-                val definition = productDefinition("BRK-002-D") { formation = bracketFormation }.getOrThrow()
+                CONTEXT_PRELUDE +
+                    """
+                    val bracket = product("BRK-002") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val bracketFormation = productDefinitionFormation("BRK-002-F") { ofProduct = bracket }.getOrThrow()
+                    val definition = productDefinition("BRK-002-D") { formation = bracketFormation; frameOfReference = defCtx }.getOrThrow()
 
-                stepFile(fileName = "bracket.step") {
-                    root(definition)
-                }
-                """.trimIndent(),
+                    stepFile(fileName = "bracket.step") {
+                        root(definition)
+                    }
+                    """.trimIndent(),
             )
 
             val result = runCli("export", script.name, "--out", "custom-name.step")
@@ -122,15 +134,16 @@ class CliExportIntegrationTest :
         "\"--output json\" renders the success document with status/outPath/rootCount" {
             val script = File(workDir, "bracket-json-success.kstep.kts")
             script.writeText(
-                """
-                val bracket = product("BRK-003") { name = "Bracket" }.getOrThrow()
-                val bracketFormation = productDefinitionFormation("BRK-003-F") { ofProduct = bracket }.getOrThrow()
-                val definition = productDefinition("BRK-003-D") { formation = bracketFormation }.getOrThrow()
+                CONTEXT_PRELUDE +
+                    """
+                    val bracket = product("BRK-003") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val bracketFormation = productDefinitionFormation("BRK-003-F") { ofProduct = bracket }.getOrThrow()
+                    val definition = productDefinition("BRK-003-D") { formation = bracketFormation; frameOfReference = defCtx }.getOrThrow()
 
-                stepFile(fileName = "bracket.step") {
-                    root(definition)
-                }
-                """.trimIndent(),
+                    stepFile(fileName = "bracket.step") {
+                        root(definition)
+                    }
+                    """.trimIndent(),
             )
 
             val result = runCli("export", "--output", "json", script.name)
@@ -145,11 +158,12 @@ class CliExportIntegrationTest :
         "a WHERE-rule violation renders as \"--output json\"'s validation_failed document" {
             val script = File(workDir, "invalid-empty-id.kstep.kts")
             script.writeText(
-                """
-                stepFile(fileName = "invalid.step") {
-                    root(product(id = "") { name = "Nameless" })
-                }
-                """.trimIndent(),
+                CONTEXT_PRELUDE +
+                    """
+                    stepFile(fileName = "invalid.step") {
+                        root(product(id = "") { name = "Nameless"; frameOfReference = setOf(prodCtx) })
+                    }
+                    """.trimIndent(),
             )
 
             val result = runCli("export", "--output", "json", script.name)
@@ -173,7 +187,7 @@ class CliExportIntegrationTest :
             result.stdout shouldContain "Script failed to compile:"
         }
 
-        "a root that is not one of the six supported entity types renders Part21WriteException as a runtime_error" {
+        "a root that is not one of the twelve supported entity types renders Part21WriteException as a runtime_error" {
             val script = File(workDir, "unsupported-root-type.kstep.kts")
             script.writeText(
                 """
@@ -190,19 +204,20 @@ class CliExportIntegrationTest :
             json["status"]?.jsonPrimitive?.content shouldBe "error"
             json["errorKind"]?.jsonPrimitive?.content shouldBe "runtime_error"
             json["exceptionClass"]?.jsonPrimitive?.content shouldBe "dev.kstep.step21.Part21WriteException"
-            json["message"]?.jsonPrimitive?.content shouldContain "not one of the six supported"
+            json["message"]?.jsonPrimitive?.content shouldContain "not one of the twelve supported"
         }
 
         "a non-ASCII field value renders Part21EncodingException as human-readable runtime-error text" {
             val script = File(workDir, "non-ascii-name.kstep.kts")
             script.writeText(
-                """
-                val bracket = product("BRK-004") { name = "Bräcket" }.getOrThrow()
+                CONTEXT_PRELUDE +
+                    """
+                    val bracket = product("BRK-004") { name = "Bräcket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
 
-                stepFile(fileName = "non-ascii.step") {
-                    root(bracket)
-                }
-                """.trimIndent(),
+                    stepFile(fileName = "non-ascii.step") {
+                        root(bracket)
+                    }
+                    """.trimIndent(),
             )
 
             val result = runCli("export", script.name)

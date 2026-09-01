@@ -1,16 +1,25 @@
 package dev.kstep.step21
 
-import dev.kstep.core.ap242.Approval
-import dev.kstep.core.ap242.NextAssemblyUsageOccurrence
-import dev.kstep.core.ap242.PersonAndOrganization
-import dev.kstep.core.ap242.Product
-import dev.kstep.core.ap242.ProductDefinition
-import dev.kstep.core.ap242.ProductDefinitionFormation
+import dev.kstep.generated.ap242v1.ApplicationContext
+import dev.kstep.generated.ap242v1.Approval
+import dev.kstep.generated.ap242v1.ApprovalStatus
+import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
+import dev.kstep.generated.ap242v1.Organization
+import dev.kstep.generated.ap242v1.Person
+import dev.kstep.generated.ap242v1.PersonAndOrganization
+import dev.kstep.generated.ap242v1.Product
+import dev.kstep.generated.ap242v1.ProductContext
+import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.generated.ap242v1.ProductDefinitionContext
+import dev.kstep.generated.ap242v1.ProductDefinitionFormation
 import java.util.IdentityHashMap
 
 /**
- * Serializes a graph of already-validated `kstep-core` AP242 V1 instances, reachable from one
- * or more `roots`, into a complete, syntactically valid ISO 10303-21 physical exchange file.
+ * Serializes a graph of already-validated `kstep-core` AP242 V1 instances (plus, as of kSTEP M2
+ * Welle 10, the six support entity types the codegen-generated shapes now require —
+ * `application_context`/`product_context`/`product_definition_context`/`approval_status`/
+ * `person`/`organization`), reachable from one or more `roots`, into a complete, syntactically
+ * valid ISO 10303-21 physical exchange file.
  */
 object Part21Writer {
     private const val MAX_WRITE_GRAPH_DEPTH = 64
@@ -51,10 +60,11 @@ object Part21Writer {
     // object graph and root order). Dedup key is object identity (IdentityHashMap), never
     // equals()/hashCode() — two structurally-equal-but-distinct instances must get two
     // distinct #N, only the literal same object reused across multiple referencing sites
-    // collapses to one. Depth-capped (not converted to an explicit work-stack) because the six
-    // V1 types have a true max chain depth of 4 — MAX_WRITE_GRAPH_DEPTH=64 is defense-in-depth
-    // headroom, not a realistic limit, so native recursion cannot practically overflow the JVM
-    // stack here.
+    // collapses to one. Depth-capped (not converted to an explicit work-stack) because the
+    // twelve V1+support types have a true max reference-chain depth of 6 (application_context
+    // -> product_context -> product -> product_definition_formation -> product_definition ->
+    // next_assembly_usage_occurrence) — MAX_WRITE_GRAPH_DEPTH=64 is defense-in-depth headroom,
+    // not a realistic limit, so native recursion cannot practically overflow the JVM stack here.
     private fun visit(
         instance: Any,
         depth: Int,
@@ -78,33 +88,37 @@ object Part21Writer {
 
     private fun referencesOf(instance: Any): List<Any> =
         when (instance) {
-            is Product -> emptyList()
-            is PersonAndOrganization -> emptyList()
+            is ApplicationContext -> emptyList()
+            is ApprovalStatus -> emptyList()
+            is Person -> emptyList()
+            is Organization -> emptyList()
+            is ProductContext -> listOf(instance.frameOfReference)
+            is ProductDefinitionContext -> listOf(instance.frameOfReference)
+            is Product -> instance.frameOfReference.toList()
             is ProductDefinitionFormation -> listOf(instance.ofProduct)
-            is ProductDefinition -> listOf(instance.formation)
+            is ProductDefinition -> listOf(instance.formation, instance.frameOfReference)
             is NextAssemblyUsageOccurrence ->
                 listOf(instance.relatingProductDefinition, instance.relatedProductDefinition)
-            is Approval -> listOf(instance.authorizedBy)
-            else ->
-                throw Part21WriteException(
-                    "object of type '${instance::class.qualifiedName}' reachable from the writer's roots is not " +
-                        "one of the six supported kstep-core AP242 V1 entity types",
-                )
+            is Approval -> listOf(instance.status)
+            is PersonAndOrganization -> listOf(instance.thePerson, instance.theOrganization)
+            else -> unsupportedInstanceType(instance)
         }
 
     private fun entityKindOf(instance: Any): Part21EntityKind =
         when (instance) {
+            is ApplicationContext -> Part21EntityKind.APPLICATION_CONTEXT
+            is ProductContext -> Part21EntityKind.PRODUCT_CONTEXT
+            is ProductDefinitionContext -> Part21EntityKind.PRODUCT_DEFINITION_CONTEXT
+            is ApprovalStatus -> Part21EntityKind.APPROVAL_STATUS
+            is Person -> Part21EntityKind.PERSON
+            is Organization -> Part21EntityKind.ORGANIZATION
             is Product -> Part21EntityKind.PRODUCT
-            is PersonAndOrganization -> Part21EntityKind.PERSON_AND_ORGANIZATION
             is ProductDefinitionFormation -> Part21EntityKind.PRODUCT_DEFINITION_FORMATION
             is ProductDefinition -> Part21EntityKind.PRODUCT_DEFINITION
             is NextAssemblyUsageOccurrence -> Part21EntityKind.NEXT_ASSEMBLY_USAGE_OCCURRENCE
             is Approval -> Part21EntityKind.APPROVAL
-            else ->
-                throw Part21WriteException(
-                    "object of type '${instance::class.qualifiedName}' reachable from the writer's roots is not " +
-                        "one of the six supported kstep-core AP242 V1 entity types",
-                )
+            is PersonAndOrganization -> Part21EntityKind.PERSON_AND_ORGANIZATION
+            else -> unsupportedInstanceType(instance)
         }
 
     private fun writeArgs(
@@ -112,31 +126,70 @@ object Part21Writer {
         identityMap: IdentityHashMap<Any, Int>,
     ): List<String> {
         fun ref(target: Any) = "#${identityMap.getValue(target)}"
+
+        fun refList(targets: Collection<Any>) = "(" + targets.joinToString(",") { ref(it) } + ")"
         return when (instance) {
+            is ApplicationContext -> listOf(quoteString(instance.application))
+            is ProductContext ->
+                listOf(quoteString(instance.name), ref(instance.frameOfReference), quoteString(instance.disciplineType))
+            is ProductDefinitionContext ->
+                listOf(
+                    quoteString(instance.name),
+                    ref(instance.frameOfReference),
+                    quoteString(instance.lifeCycleStage),
+                )
+            is ApprovalStatus -> listOf(quoteString(instance.name))
+            is Person ->
+                listOf(
+                    quoteString(instance.id),
+                    quoteStringOrUnset(instance.lastName),
+                    quoteStringOrUnset(instance.firstName),
+                    stringListOrUnset(instance.middleNames),
+                    stringListOrUnset(instance.prefixTitles),
+                    stringListOrUnset(instance.suffixTitles),
+                )
+            is Organization ->
+                listOf(
+                    quoteStringOrUnset(instance.id),
+                    quoteString(instance.name),
+                    quoteStringOrUnset(instance.description),
+                )
             is Product ->
-                listOf(quoteString(instance.id), quoteString(instance.name), quoteString(instance.description))
-            is PersonAndOrganization -> listOf(quoteString(instance.thePerson), quoteString(instance.theOrganization))
+                listOf(
+                    quoteString(instance.id),
+                    quoteString(instance.name),
+                    quoteStringOrUnset(instance.description),
+                    refList(instance.frameOfReference),
+                )
             is ProductDefinitionFormation ->
-                listOf(quoteString(instance.id), quoteString(instance.description), ref(instance.ofProduct))
+                listOf(quoteString(instance.id), quoteStringOrUnset(instance.description), ref(instance.ofProduct))
             is ProductDefinition ->
-                listOf(quoteString(instance.id), quoteString(instance.description), ref(instance.formation))
+                listOf(
+                    quoteString(instance.id),
+                    quoteStringOrUnset(instance.description),
+                    ref(instance.formation),
+                    ref(instance.frameOfReference),
+                )
             is NextAssemblyUsageOccurrence ->
                 listOf(
                     quoteString(instance.id),
                     quoteString(instance.name),
+                    quoteStringOrUnset(instance.description),
                     ref(instance.relatingProductDefinition),
                     ref(instance.relatedProductDefinition),
-                    quoteString(instance.referenceDesignator),
+                    quoteStringOrUnset(instance.referenceDesignator),
                 )
-            is Approval ->
-                listOf(quoteString(instance.status), quoteString(instance.level), ref(instance.authorizedBy))
-            else ->
-                throw Part21WriteException(
-                    "object of type '${instance::class.qualifiedName}' reachable from the writer's roots is not " +
-                        "one of the six supported kstep-core AP242 V1 entity types",
-                )
+            is Approval -> listOf(ref(instance.status), quoteString(instance.level))
+            is PersonAndOrganization -> listOf(ref(instance.thePerson), ref(instance.theOrganization))
+            else -> unsupportedInstanceType(instance)
         }
     }
+
+    private fun unsupportedInstanceType(instance: Any): Nothing =
+        throw Part21WriteException(
+            "object of type '${instance::class.qualifiedName}' reachable from the writer's roots is not " +
+                "one of the twelve supported kstep-core AP242 V1/support entity types",
+        )
 
     private fun appendInstanceStatement(
         sb: StringBuilder,
@@ -178,6 +231,15 @@ object Part21Writer {
         return "($quoted)"
     }
 
+    // Renders a nullable OPTIONAL LIST OF label attribute (Person.middleNames and friends): the
+    // Part-21 '$' token when unset, or a parenthesized list of quoted strings otherwise — never
+    // an empty '()' standing in for "unset", which would be ambiguous with a genuinely empty
+    // (but present) LIST.
+    private fun stringListOrUnset(items: List<String>?): String =
+        if (items == null) "$" else "(" + items.joinToString(",") { quoteString(it) } + ")"
+
+    private fun quoteStringOrUnset(value: String?): String = if (value == null) "$" else quoteString(value)
+
     // Single-quote doubling ('O''Brien' round-trips O'Brien), matching the reader's manual
     // scan (see Part21Tokenizer's KDoc for why this is hand-written instead of reusing the
     // ANTLR EXPRESS lexer's documented-buggy SimpleStringLiteral rule).
@@ -186,8 +248,27 @@ object Part21Writer {
         return "'" + value.replace("'", "''") + "'"
     }
 
+    // Reverse solidus (\, 0x5C) is deliberately rejected even though it is within the
+    // printable-ASCII range this writer otherwise allows: ISO 10303-21 reserves an unescaped
+    // '\' to introduce a \X\/\X2\/\X4\ non-ASCII escape sequence, which V1 does not implement
+    // (see README). Letting a raw '\' through unescaped would silently change meaning for any
+    // conformant external Part-21 reader that DOES implement the escape mechanism — e.g. a
+    // caller-supplied value containing "\X2\04D0\X0\" would be re-interpreted by such a reader
+    // as a UTF-16 escape rather than the literal ASCII text kSTEP validated and echoed back,
+    // a content-forgery gap across the export boundary. Rejecting it here keeps the writer's
+    // behavior honest with the README's "anything else raises Part21EncodingException rather
+    // than being silently mis-encoded" promise, and forces a caller who genuinely needs a
+    // literal backslash to pick a different representation rather than have kSTEP guess.
     private fun assertEncodable(value: String) {
         for (c in value) {
+            if (c == '\\') {
+                throw Part21EncodingException(
+                    "value '$value' contains a reverse solidus ('\\', code point 0x5c) — V1 does not " +
+                        "implement the ISO 10303-21 \\X\\/\\X2\\/\\X4\\ escape mechanism, so an unescaped " +
+                        "backslash cannot be written without risking misinterpretation by conformant " +
+                        "external Part-21 readers, see README",
+                )
+            }
             if (c.code < 0x20 || c.code > 0x7E) {
                 throw Part21EncodingException(
                     "value '$value' contains an unsupported character (code point 0x${

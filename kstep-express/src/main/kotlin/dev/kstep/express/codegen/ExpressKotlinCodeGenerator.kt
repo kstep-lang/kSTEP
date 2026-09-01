@@ -1,5 +1,6 @@
 package dev.kstep.express.codegen
 
+import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.FileSpec
 import com.squareup.kotlinpoet.FunSpec
 import com.squareup.kotlinpoet.KModifier
@@ -12,6 +13,27 @@ import dev.kstep.express.semantic.ExpressSchema
 import dev.kstep.express.semantic.InheritanceResolver
 import dev.kstep.express.semantic.ResolvedAttribute
 import dev.kstep.express.semantic.ResolvedEntity
+
+/**
+ * Codegen-wide emission options, additive to the "one flat `data class` per instantiable
+ * entity" shape [ExpressKotlinCodeGenerator] always produces. Both fields default to `null`/
+ * `false` — today's plain-`public`-constructor output — so every existing call site (in
+ * particular [ExpressCodeGenTest][dev.kstep.tests.ExpressCodeGenTest], which pins that exact
+ * shape) keeps compiling and passing unchanged.
+ *
+ * Introduced for kSTEP M2 Welle 10: [Ap242V1CodeGen] generates directly into `kstep-core`'s own
+ * source set with [constructorVisibility] `KModifier.INTERNAL` and [consistentCopyVisibility]
+ * `true`, so the only way to construct one of the twelve generated AP242 entities from outside
+ * `kstep-core` is through its validating `dev.kstep.core.ap242` builder function — see that
+ * module's README/ADR-0004 for the full rationale. `@ConsistentCopyVisibility` is required
+ * alongside an `internal` constructor: without it, KotlinPoet's `data class` still generates a
+ * `public copy()` regardless of the primary constructor's own visibility, which would reopen
+ * exactly the unvalidated-construction bypass the `internal` constructor exists to close.
+ */
+data class CodeGenOptions(
+    val constructorVisibility: KModifier? = null,
+    val consistentCopyVisibility: Boolean = false,
+)
 
 /**
  * Generates idiomatic Kotlin `data class`es from an [ExpressSchema], one per *instantiable*
@@ -48,6 +70,7 @@ object ExpressKotlinCodeGenerator {
         schema: ExpressSchema,
         packageName: String,
         resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema),
+        options: CodeGenOptions = CodeGenOptions(),
     ): FileSpec {
         val fileBuilder = FileSpec.builder(packageName, NamingConventions.toClassName(schema.name))
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
@@ -81,7 +104,7 @@ object ExpressKotlinCodeGenerator {
                         "or case); codegen refuses to emit a file with duplicate class declarations",
                 )
             }
-            fileBuilder.addType(generateEntityType(resolved, packageName, definedTypesByLowerName))
+            fileBuilder.addType(generateEntityType(resolved, packageName, definedTypesByLowerName, options))
         }
         return fileBuilder.build()
     }
@@ -105,6 +128,7 @@ object ExpressKotlinCodeGenerator {
         entity: ExpressEntity,
         packageName: String,
         definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
+        options: CodeGenOptions = CodeGenOptions(),
     ): TypeSpec {
         if (entity.supertypes.isNotEmpty()) {
             throw CodeGenException(
@@ -113,7 +137,7 @@ object ExpressKotlinCodeGenerator {
                     "InheritanceResolver.resolve(schema) and pass the resulting ResolvedEntity instead",
             )
         }
-        return generateEntityType(InheritanceResolver.resolveStandalone(entity), packageName, definedTypes)
+        return generateEntityType(InheritanceResolver.resolveStandalone(entity), packageName, definedTypes, options)
     }
 
     // Primary implementation: consumes an already-flattened ResolvedEntity, so it never itself
@@ -122,6 +146,7 @@ object ExpressKotlinCodeGenerator {
         resolved: ResolvedEntity,
         packageName: String,
         definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
+        options: CodeGenOptions = CodeGenOptions(),
     ): TypeSpec {
         val entity = resolved.entity
         if (!resolved.isInstantiable) {
@@ -138,10 +163,14 @@ object ExpressKotlinCodeGenerator {
         }
 
         val constructorBuilder = FunSpec.constructorBuilder()
+        options.constructorVisibility?.let { constructorBuilder.addModifiers(it) }
         val classBuilder =
             TypeSpec
                 .classBuilder(NamingConventions.toClassName(entity.name))
                 .addModifiers(KModifier.DATA)
+        if (options.consistentCopyVisibility) {
+            classBuilder.addAnnotation(ClassName("kotlin", "ConsistentCopyVisibility"))
+        }
 
         // Distinct EXPRESS attribute names can collide once mapped through
         // NamingConventions.toPropertyName (e.g. runs of underscores are collapsed), which

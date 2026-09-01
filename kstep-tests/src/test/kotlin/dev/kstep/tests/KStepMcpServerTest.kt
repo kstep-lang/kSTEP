@@ -1,7 +1,7 @@
 package dev.kstep.tests
 
 import dev.kstep.core.DslViolationCodes
-import dev.kstep.core.ap242.NextAssemblyUsageOccurrence
+import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.mcp.EntityStore
 import dev.kstep.mcp.EntityStoreEntry
 import dev.kstep.mcp.buildServer
@@ -42,17 +42,56 @@ private fun CallToolResult.text(): String = content.joinToString("") { (it as? T
 
 private fun CallToolResult.errorKind(): String? = structuredContent?.get("errorKind")?.jsonPrimitive?.content
 
+/**
+ * Builds a shared `product_context` handle ("PC") and `product_definition_context` handle
+ * ("PDC") on [this] client's server — kSTEP M2 Welle 10: every `build_product`/
+ * `build_product_definition` call now needs a real context, `kstep-core` no longer invents one
+ * (see `docs/adr/ADR-0004`). Every test in this file that builds a product/product_definition
+ * calls this once up front and reuses the same two handles across every product it builds —
+ * the AP242 `frame_of_reference` is context data, not per-product identity, so sharing it is
+ * the realistic usage pattern, not a test shortcut.
+ */
+private suspend fun Client.setupContexts(): Pair<String, String> {
+    callTool("build_application_context", mapOf("handle" to "AC", "application" to "config control")).isError shouldBe
+        null
+    callTool(
+        "build_product_context",
+        mapOf(
+            "handle" to "PC",
+            "name" to "engineering",
+            "frame_of_reference_handle" to "AC",
+            "discipline_type" to "mechanical",
+        ),
+    ).isError shouldBe null
+    callTool(
+        "build_product_definition_context",
+        mapOf(
+            "handle" to "PDC",
+            "name" to "engineering",
+            "frame_of_reference_handle" to "AC",
+            "life_cycle_stage" to "design",
+        ),
+    ).isError shouldBe null
+    return "PC" to "PDC"
+}
+
 @OptIn(ExperimentalMcpApi::class)
 class KStepMcpServerTest :
     StringSpec({
         "a 2-part-plus-assembly product structure roundtrips through MCP tool calls, Part-21 export, and parse" {
             val server = buildServer()
             val client = connectedClient(server)
+            val (pc, pdc) = client.setupContexts()
 
             client
                 .callTool(
                     "build_product",
-                    mapOf("id" to "BRK-001", "name" to "Bracket", "description" to "Mounting bracket"),
+                    mapOf(
+                        "id" to "BRK-001",
+                        "name" to "Bracket",
+                        "description" to "Mounting bracket",
+                        "frame_of_reference_handles" to listOf(pc),
+                    ),
                 ).isError shouldBe null
             client
                 .callTool(
@@ -62,13 +101,18 @@ class KStepMcpServerTest :
             client
                 .callTool(
                     "build_product_definition",
-                    mapOf("id" to "BRK-001-D", "formation_id" to "BRK-001-F"),
+                    mapOf("id" to "BRK-001-D", "formation_id" to "BRK-001-F", "frame_of_reference_handle" to pdc),
                 ).isError shouldBe null
 
             client
                 .callTool(
                     "build_product",
-                    mapOf("id" to "HSG-001", "name" to "Housing", "description" to "Enclosure housing"),
+                    mapOf(
+                        "id" to "HSG-001",
+                        "name" to "Housing",
+                        "description" to "Enclosure housing",
+                        "frame_of_reference_handles" to listOf(pc),
+                    ),
                 ).isError shouldBe null
             client
                 .callTool(
@@ -78,7 +122,7 @@ class KStepMcpServerTest :
             client
                 .callTool(
                     "build_product_definition",
-                    mapOf("id" to "HSG-001-D", "formation_id" to "HSG-001-F"),
+                    mapOf("id" to "HSG-001-D", "formation_id" to "HSG-001-F", "frame_of_reference_handle" to pdc),
                 ).isError shouldBe null
 
             val nauoResult =
@@ -109,6 +153,12 @@ class KStepMcpServerTest :
             val schemaIds =
                 exportResult.structuredContent!!["schemaIdentifiers"]!!.jsonArray.map { it.jsonPrimitive.content }
             schemaIds shouldBe listOf("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF")
+            exportResult.structuredContent!!["rootCount"]!!.jsonPrimitive.int shouldBe 1
+            // The full Part-21 text lives only in `content` — `structuredContent` must not carry
+            // a second copy of it (see kSTEP M2 Welle 10 security review: doubling a multi-root
+            // export's full text into structuredContent as well doubled the tool call's memory
+            // footprint for no caller-facing benefit).
+            exportResult.structuredContent!!.containsKey("part21Text") shouldBe false
 
             val parsed = Part21Reader.read(exportedText)
             parsed.isFullySuccessful shouldBe true
@@ -125,7 +175,12 @@ class KStepMcpServerTest :
         "build_product with an empty id returns a structured validation_failed error, not a crash" {
             val server = buildServer()
             val client = connectedClient(server)
-            val result = client.callTool("build_product", mapOf("id" to "", "name" to "Bracket"))
+            val (pc, _) = client.setupContexts()
+            val result =
+                client.callTool(
+                    "build_product",
+                    mapOf("id" to "", "name" to "Bracket", "frame_of_reference_handles" to listOf(pc)),
+                )
             result.isError shouldBe true
             result.errorKind() shouldBe "validation_failed"
             val violations = result.structuredContent!!["violations"]!!.jsonArray
@@ -133,33 +188,16 @@ class KStepMcpServerTest :
             val violation = violations.single().jsonObject
             violation["code"]!!.jsonPrimitive.content shouldBe DslViolationCodes.WHERE_RULE_NOT_SATISFIED
             violation["entityName"]!!.jsonPrimitive.content shouldBe "product"
-            violation["ruleLabel"]!!.jsonPrimitive.content shouldBe "wr1"
+            violation["ruleLabel"]!!.jsonPrimitive.content shouldBe "kstep_wr1"
         }
 
-        "nextAssemblyUsageOccurrence with valid references but an empty reference_designator returns one violation" {
+        "build_product with an empty frame_of_reference_handles list returns validation_failed (KSTEP-A-001)" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "BRK-001-F", "of_product_id" to "BRK-001"),
-                ).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition",
-                    mapOf("id" to "BRK-001-D", "formation_id" to "BRK-001-F"),
-                ).isError shouldBe null
-
             val result =
                 client.callTool(
-                    "build_next_assembly_usage_occurrence",
-                    mapOf(
-                        "id" to "",
-                        "name" to "bracket usage",
-                        "relating_product_definition_id" to "BRK-001-D",
-                        "related_product_definition_id" to "BRK-001-D",
-                    ),
+                    "build_product",
+                    mapOf("id" to "BRK-001", "name" to "Bracket", "frame_of_reference_handles" to emptyList<String>()),
                 )
             result.isError shouldBe true
             result.errorKind() shouldBe "validation_failed"
@@ -169,7 +207,105 @@ class KStepMcpServerTest :
                 .single()
                 .jsonObject["code"]!!
                 .jsonPrimitive.content shouldBe
-                DslViolationCodes.WHERE_RULE_NOT_SATISFIED
+                DslViolationCodes.AGGREGATION_BOUND_VIOLATED
+        }
+
+        "build_product with an unknown frame_of_reference_handles entry returns unknown_reference, no build attempted" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val result =
+                client.callTool(
+                    "build_product",
+                    mapOf("id" to "BRK-001", "name" to "Bracket", "frame_of_reference_handles" to listOf("nope")),
+                )
+            result.isError shouldBe true
+            result.errorKind() shouldBe "unknown_reference"
+        }
+
+        (
+            "build_product with frame_of_reference_handles omitted entirely returns validation_failed " +
+                "(KSTEP-M-001), distinct from an explicitly-empty list"
+        ) {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val result =
+                client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket"))
+            result.isError shouldBe true
+            result.errorKind() shouldBe "validation_failed"
+            val violations = result.structuredContent!!["violations"]!!.jsonArray
+            violations shouldHaveSize 1
+            violations
+                .single()
+                .jsonObject["code"]!!
+                .jsonPrimitive.content shouldBe
+                DslViolationCodes.MISSING_MANDATORY_REFERENCE
+        }
+
+        (
+            "build_person with an explicitly-empty middle_names/prefix_titles/suffix_titles list returns " +
+                "validation_failed (KSTEP-A-001) for each, distinct from omitting the field entirely"
+        ) {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val result =
+                client.callTool(
+                    "build_person",
+                    mapOf(
+                        "id" to "P1",
+                        "last_name" to "Doe",
+                        "middle_names" to emptyList<String>(),
+                        "prefix_titles" to emptyList<String>(),
+                        "suffix_titles" to emptyList<String>(),
+                    ),
+                )
+            result.isError shouldBe true
+            result.errorKind() shouldBe "validation_failed"
+            val violations = result.structuredContent!!["violations"]!!.jsonArray
+            violations shouldHaveSize 3
+            violations.map { it.jsonObject["code"]!!.jsonPrimitive.content }.shouldContainExactlyInAnyOrder(
+                List(3) { DslViolationCodes.AGGREGATION_BOUND_VIOLATED },
+            )
+        }
+
+        "build_person with middle_names/prefix_titles/suffix_titles omitted entirely succeeds — genuinely OPTIONAL" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client
+                .callTool("build_person", mapOf("id" to "P1", "last_name" to "Doe"))
+                .isError shouldBe null
+        }
+
+        "nextAssemblyUsageOccurrence with valid references and no reference_designator succeeds — genuinely OPTIONAL" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val (pc, pdc) = client.setupContexts()
+            client
+                .callTool(
+                    "build_product",
+                    mapOf("id" to "BRK-001", "name" to "Bracket", "frame_of_reference_handles" to listOf(pc)),
+                ).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition_formation",
+                    mapOf("id" to "BRK-001-F", "of_product_id" to "BRK-001"),
+                ).isError shouldBe null
+            client
+                .callTool(
+                    "build_product_definition",
+                    mapOf("id" to "BRK-001-D", "formation_id" to "BRK-001-F", "frame_of_reference_handle" to pdc),
+                ).isError shouldBe null
+
+            val result =
+                client.callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-1",
+                        "name" to "bracket usage",
+                        "relating_product_definition_id" to "BRK-001-D",
+                        "related_product_definition_id" to "BRK-001-D",
+                    ),
+                )
+            result.isError shouldBe null
         }
 
         "nextAssemblyUsageOccurrence with two unknown references returns both in one structured error" {
@@ -216,8 +352,17 @@ class KStepMcpServerTest :
         "a wrong-type reference id is treated as unknown_reference, not a ClassCastException" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket")).isError shouldBe null
-            val result = client.callTool("build_product_definition", mapOf("id" to "PD-1", "formation_id" to "BRK-001"))
+            val (pc, _) = client.setupContexts()
+            client
+                .callTool(
+                    "build_product",
+                    mapOf("id" to "BRK-001", "name" to "Bracket", "frame_of_reference_handles" to listOf(pc)),
+                ).isError shouldBe null
+            val result =
+                client.callTool(
+                    "build_product_definition",
+                    mapOf("id" to "PD-1", "formation_id" to "BRK-001", "frame_of_reference_handle" to "does-not-exist"),
+                )
             result.isError shouldBe true
             result.errorKind() shouldBe "unknown_reference"
         }
@@ -240,6 +385,92 @@ class KStepMcpServerTest :
             result.errorKind() shouldBe "malformed_input"
         }
 
+        "an oversized frame_of_reference_handles list is rejected as malformed_input, not silently truncated" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val result =
+                client.callTool(
+                    "build_product",
+                    mapOf(
+                        "id" to "BRK-001",
+                        "name" to "Bracket",
+                        "frame_of_reference_handles" to List(100) { "h-$it" },
+                    ),
+                )
+            result.isError shouldBe true
+            result.errorKind() shouldBe "malformed_input"
+        }
+
+        "build_approval_status builds and stores a Valid instance under its handle" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val result =
+                client.callTool("build_approval_status", mapOf("handle" to "AS-1", "name" to "approved"))
+            result.isError shouldBe null
+            result.structuredContent!!["handle"]!!.jsonPrimitive.content shouldBe "AS-1"
+            result.structuredContent!!["name"]!!.jsonPrimitive.content shouldBe "approved"
+            result.structuredContent!!["entityType"]!!.jsonPrimitive.content shouldBe "approval_status"
+        }
+
+        "build_approval_status with name omitted returns validation_failed (KSTEP-M-002)" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val result = client.callTool("build_approval_status", mapOf("handle" to "AS-1"))
+            result.isError shouldBe true
+            result.errorKind() shouldBe "validation_failed"
+            val violations = result.structuredContent!!["violations"]!!.jsonArray
+            violations shouldHaveSize 1
+            violations
+                .single()
+                .jsonObject["code"]!!
+                .jsonPrimitive.content shouldBe
+                DslViolationCodes.MISSING_MANDATORY_ATTRIBUTE
+        }
+
+        "build_approval builds a Valid instance referencing an already-built approval_status by status_handle" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client
+                .callTool("build_approval_status", mapOf("handle" to "AS-1", "name" to "approved"))
+                .isError shouldBe null
+
+            val result =
+                client.callTool("build_approval", mapOf("handle" to "A-1", "status_handle" to "AS-1", "level" to "3"))
+            result.isError shouldBe null
+            result.structuredContent!!["handle"]!!.jsonPrimitive.content shouldBe "A-1"
+            result.structuredContent!!["status_handle"]!!.jsonPrimitive.content shouldBe "AS-1"
+            result.structuredContent!!["level"]!!.jsonPrimitive.content shouldBe "3"
+            result.structuredContent!!["entityType"]!!.jsonPrimitive.content shouldBe "approval"
+        }
+
+        "build_approval with an unknown status_handle returns unknown_reference, no build attempted" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val result =
+                client.callTool("build_approval", mapOf("handle" to "A-1", "status_handle" to "nope", "level" to "3"))
+            result.isError shouldBe true
+            result.errorKind() shouldBe "unknown_reference"
+        }
+
+        "build_approval with level omitted returns validation_failed (KSTEP-M-002)" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client
+                .callTool("build_approval_status", mapOf("handle" to "AS-1", "name" to "approved"))
+                .isError shouldBe null
+
+            val result = client.callTool("build_approval", mapOf("handle" to "A-1", "status_handle" to "AS-1"))
+            result.isError shouldBe true
+            result.errorKind() shouldBe "validation_failed"
+            val violations = result.structuredContent!!["violations"]!!.jsonArray
+            violations shouldHaveSize 1
+            violations
+                .single()
+                .jsonObject["code"]!!
+                .jsonPrimitive.content shouldBe
+                DslViolationCodes.MISSING_MANDATORY_ATTRIBUTE
+        }
+
         "list_entities reflects what has been built, and an empty store reports count 0" {
             val server = buildServer()
             val client = connectedClient(server)
@@ -248,11 +479,18 @@ class KStepMcpServerTest :
             emptyListing.isError shouldBe null
             emptyListing.structuredContent!!["count"]!!.jsonPrimitive.int shouldBe 0
 
-            client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "Bracket")).isError shouldBe null
+            val (pc, _) = client.setupContexts()
+            client
+                .callTool(
+                    "build_product",
+                    mapOf("id" to "BRK-001", "name" to "Bracket", "frame_of_reference_handles" to listOf(pc)),
+                ).isError shouldBe null
+            client.callTool("build_person", mapOf("id" to "PERSON-1", "last_name" to "Doe")).isError shouldBe null
+            client.callTool("build_organization", mapOf("handle" to "ORG-1", "name" to "Acme")).isError shouldBe null
             client
                 .callTool(
                     "build_person_and_organization",
-                    mapOf("handle" to "PO-1", "the_person" to "Jane Doe"),
+                    mapOf("handle" to "PO-1", "the_person_id" to "PERSON-1", "the_organization_handle" to "ORG-1"),
                 ).isError shouldBe null
 
             val listing = client.callTool("list_entities", emptyMap())
@@ -261,16 +499,30 @@ class KStepMcpServerTest :
                     it.jsonObject["id"]!!.jsonPrimitive.content to it.jsonObject["entityType"]!!.jsonPrimitive.content
                 }
             entities shouldContainExactlyInAnyOrder
-                listOf("BRK-001" to "product", "PO-1" to "person_and_organization")
+                listOf(
+                    "AC" to "application_context",
+                    "PC" to "product_context",
+                    "PDC" to "product_definition_context",
+                    "BRK-001" to "product",
+                    "PERSON-1" to "person",
+                    "ORG-1" to "organization",
+                    "PO-1" to "person_and_organization",
+                )
         }
 
         "get_entity returns a full field dump for a known id and a structured error for an unknown id" {
             val server = buildServer()
             val client = connectedClient(server)
+            val (pc, _) = client.setupContexts()
             client
                 .callTool(
                     "build_product",
-                    mapOf("id" to "BRK-001", "name" to "Bracket", "description" to "d"),
+                    mapOf(
+                        "id" to "BRK-001",
+                        "name" to "Bracket",
+                        "description" to "d",
+                        "frame_of_reference_handles" to listOf(pc),
+                    ),
                 ).isError shouldBe null
 
             val found = client.callTool("get_entity", mapOf("id" to "BRK-001"))
@@ -287,14 +539,23 @@ class KStepMcpServerTest :
             val store = EntityStore()
             val server = buildServer(store)
             val client = connectedClient(server)
+            val (pc, _) = client.setupContexts()
 
-            client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "A")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product",
+                    mapOf("id" to "BRK-001", "name" to "A", "frame_of_reference_handles" to listOf(pc)),
+                ).isError shouldBe null
             client
                 .callTool(
                     "build_product_definition_formation",
                     mapOf("id" to "PDF-1", "of_product_id" to "BRK-001"),
                 ).isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "BRK-001", "name" to "B")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product",
+                    mapOf("id" to "BRK-001", "name" to "B", "frame_of_reference_handles" to listOf(pc)),
+                ).isError shouldBe null
 
             val current = (store.get("BRK-001") as EntityStoreEntry.ProductEntry).value
             current.name shouldBe "B"
@@ -307,11 +568,15 @@ class KStepMcpServerTest :
             val store = EntityStore()
             val server = buildServer(store)
             val client = connectedClient(server)
+            val (pc, _) = client.setupContexts()
 
-            client.callTool("build_product", mapOf("id" to "A", "name" to "First")).isError shouldBe null
+            client
+                .callTool(
+                    "build_product",
+                    mapOf("id" to "A", "name" to "First", "frame_of_reference_handles" to listOf(pc)),
+                ).isError shouldBe null
 
-            val collision =
-                client.callTool("build_person_and_organization", mapOf("handle" to "A", "the_person" to "Jane"))
+            val collision = client.callTool("build_organization", mapOf("handle" to "A", "name" to "Acme"))
             collision.isError shouldBe true
             collision.errorKind() shouldBe "id_type_mismatch"
 
@@ -325,12 +590,57 @@ class KStepMcpServerTest :
             val server = buildServer(store)
             val client = connectedClient(server)
 
-            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-3", "name" to "N3")).isError shouldBe null
-            val fourth = client.callTool("build_product", mapOf("id" to "P-4", "name" to "N4"))
+            client.callTool("build_person", mapOf("id" to "P-1", "last_name" to "N1")).isError shouldBe null
+            client.callTool("build_person", mapOf("id" to "P-2", "last_name" to "N2")).isError shouldBe null
+            client.callTool("build_person", mapOf("id" to "P-3", "last_name" to "N3")).isError shouldBe null
+            val fourth = client.callTool("build_person", mapOf("id" to "P-4", "last_name" to "N4"))
             fourth.isError shouldBe true
             fourth.errorKind() shouldBe "store_capacity_exceeded"
+        }
+
+        (
+            "the entity store rejects a put that would exceed its character budget, independent of " +
+                "the entity-count cap"
+        ) {
+            val store = EntityStore(maxTotalCharacters = 10L)
+            val server = buildServer(store)
+            val client = connectedClient(server)
+
+            // "P-1" (3) + "ABCDE" (5) = 8 own characters — under the 10-character budget.
+            client.callTool("build_person", mapOf("id" to "P-1", "last_name" to "ABCDE")).isError shouldBe null
+
+            // "P-2" (3) + "ABCDEFGHIJ" (10) = 13 more own characters; 8 + 13 = 21 > 10.
+            val second = client.callTool("build_person", mapOf("id" to "P-2", "last_name" to "ABCDEFGHIJ"))
+            second.isError shouldBe true
+            second.errorKind() shouldBe "store_character_budget_exceeded"
+
+            // The rejected put must not have been partially applied.
+            (store.get("P-2")) shouldBe null
+        }
+
+        (
+            "a same-id overwrite re-measures the character budget from the new entry, not double-counted " +
+                "against the old one"
+        ) {
+            val store = EntityStore(maxTotalCharacters = 10L)
+            val server = buildServer(store)
+            val client = connectedClient(server)
+
+            // "P-1" (3) + "AB" (2) = 5 own characters.
+            client.callTool("build_person", mapOf("id" to "P-1", "last_name" to "AB")).isError shouldBe null
+
+            // Overwriting the SAME id with "P-1" (3) + "ABCDEFG" (7) = 10 own characters must
+            // succeed: a buggy implementation that added the new size on top of the old one
+            // instead of replacing it (5 + 10 = 15 > 10) would wrongly reject this.
+            client
+                .callTool("build_person", mapOf("id" to "P-1", "last_name" to "ABCDEFG"))
+                .isError shouldBe null
+
+            // The store's running total must now be exactly 10 (not 15, and not back down to
+            // 0) — one more character tips it over the budget.
+            val third = client.callTool("build_person", mapOf("id" to "P-2", "last_name" to "A"))
+            third.isError shouldBe true
+            third.errorKind() shouldBe "store_character_budget_exceeded"
         }
 
         "export_part21 with unknown root ids returns a structured unknown_reference error naming every bad root" {
@@ -356,7 +666,16 @@ class KStepMcpServerTest :
         "export_part21 surfaces a non-ASCII field as a structured export_failed error, not a raw exception" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "BRK-NONASCII", "name" to "Brackét")).isError shouldBe null
+            val (pc, _) = client.setupContexts()
+            client
+                .callTool(
+                    "build_product",
+                    mapOf(
+                        "id" to "BRK-NONASCII",
+                        "name" to "Brackét",
+                        "frame_of_reference_handles" to listOf(pc),
+                    ),
+                ).isError shouldBe null
             val result =
                 client.callTool(
                     "export_part21",
@@ -374,35 +693,32 @@ class KStepMcpServerTest :
         "a second NAUO with the same (reference_designator, relating_product_definition) is rejected" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-1", "of_product_id" to "P-1"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
-                .isError shouldBe null
+            val (pc, pdc) = client.setupContexts()
 
-            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-2", "of_product_id" to "P-2"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATED-A", "formation_id" to "PDF-2"))
-                .isError shouldBe null
-
-            client.callTool("build_product", mapOf("id" to "P-3", "name" to "N3")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-3", "of_product_id" to "P-3"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATED-B", "formation_id" to "PDF-3"))
-                .isError shouldBe null
+            suspend fun buildProductDefinition(
+                id: String,
+                pdfId: String,
+                productId: String,
+            ) {
+                client
+                    .callTool(
+                        "build_product",
+                        mapOf("id" to productId, "name" to "N", "frame_of_reference_handles" to listOf(pc)),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition_formation",
+                        mapOf("id" to pdfId, "of_product_id" to productId),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition",
+                        mapOf("id" to id, "formation_id" to pdfId, "frame_of_reference_handle" to pdc),
+                    ).isError shouldBe null
+            }
+            buildProductDefinition("PD-RELATING", "PDF-1", "P-1")
+            buildProductDefinition("PD-RELATED-A", "PDF-2", "P-2")
+            buildProductDefinition("PD-RELATED-B", "PDF-3", "P-3")
 
             client
                 .callTool(
@@ -435,27 +751,86 @@ class KStepMcpServerTest :
                 "next_assembly_usage_occurrence"
         }
 
+        "two NAUOs that both leave reference_designator unset never conflict under UR1" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            val (pc, pdc) = client.setupContexts()
+
+            suspend fun buildProductDefinition(
+                id: String,
+                pdfId: String,
+                productId: String,
+            ) {
+                client
+                    .callTool(
+                        "build_product",
+                        mapOf("id" to productId, "name" to "N", "frame_of_reference_handles" to listOf(pc)),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition_formation",
+                        mapOf("id" to pdfId, "of_product_id" to productId),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition",
+                        mapOf("id" to id, "formation_id" to pdfId, "frame_of_reference_handle" to pdc),
+                    ).isError shouldBe null
+            }
+            buildProductDefinition("PD-RELATING", "PDF-1", "P-1")
+            buildProductDefinition("PD-RELATED", "PDF-2", "P-2")
+
+            client
+                .callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-1",
+                        "name" to "usage 1",
+                        "relating_product_definition_id" to "PD-RELATING",
+                        "related_product_definition_id" to "PD-RELATED",
+                    ),
+                ).isError shouldBe null
+            val second =
+                client.callTool(
+                    "build_next_assembly_usage_occurrence",
+                    mapOf(
+                        "id" to "NAUO-2",
+                        "name" to "usage 2",
+                        "relating_product_definition_id" to "PD-RELATING",
+                        "related_product_definition_id" to "PD-RELATED",
+                    ),
+                )
+            second.isError shouldBe null
+        }
+
         "two NAUOs differing only in reference_designator both succeed" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-1", "of_product_id" to "P-1"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
-                .isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-2", "of_product_id" to "P-2"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATED", "formation_id" to "PDF-2"))
-                .isError shouldBe null
+            val (pc, pdc) = client.setupContexts()
+
+            suspend fun buildProductDefinition(
+                id: String,
+                pdfId: String,
+                productId: String,
+            ) {
+                client
+                    .callTool(
+                        "build_product",
+                        mapOf("id" to productId, "name" to "N", "frame_of_reference_handles" to listOf(pc)),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition_formation",
+                        mapOf("id" to pdfId, "of_product_id" to productId),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition",
+                        mapOf("id" to id, "formation_id" to pdfId, "frame_of_reference_handle" to pdc),
+                    ).isError shouldBe null
+            }
+            buildProductDefinition("PD-RELATING", "PDF-1", "P-1")
+            buildProductDefinition("PD-RELATED", "PDF-2", "P-2")
 
             client
                 .callTool(
@@ -484,33 +859,32 @@ class KStepMcpServerTest :
         "two NAUOs differing only in relating_product_definition both succeed" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-1", "of_product_id" to "P-1"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATING-A", "formation_id" to "PDF-1"))
-                .isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-2", "of_product_id" to "P-2"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATING-B", "formation_id" to "PDF-2"))
-                .isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-3", "name" to "N3")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-3", "of_product_id" to "P-3"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATED", "formation_id" to "PDF-3"))
-                .isError shouldBe null
+            val (pc, pdc) = client.setupContexts()
+
+            suspend fun buildProductDefinition(
+                id: String,
+                pdfId: String,
+                productId: String,
+            ) {
+                client
+                    .callTool(
+                        "build_product",
+                        mapOf("id" to productId, "name" to "N", "frame_of_reference_handles" to listOf(pc)),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition_formation",
+                        mapOf("id" to pdfId, "of_product_id" to productId),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition",
+                        mapOf("id" to id, "formation_id" to pdfId, "frame_of_reference_handle" to pdc),
+                    ).isError shouldBe null
+            }
+            buildProductDefinition("PD-RELATING-A", "PDF-1", "P-1")
+            buildProductDefinition("PD-RELATING-B", "PDF-2", "P-2")
+            buildProductDefinition("PD-RELATED", "PDF-3", "P-3")
 
             client
                 .callTool(
@@ -539,24 +913,31 @@ class KStepMcpServerTest :
         "rebuilding the same NAUO id with unchanged fields succeeds, not a false self-conflict" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "P-1", "name" to "N1")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-1", "of_product_id" to "P-1"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATING", "formation_id" to "PDF-1"))
-                .isError shouldBe null
-            client.callTool("build_product", mapOf("id" to "P-2", "name" to "N2")).isError shouldBe null
-            client
-                .callTool(
-                    "build_product_definition_formation",
-                    mapOf("id" to "PDF-2", "of_product_id" to "P-2"),
-                ).isError shouldBe null
-            client
-                .callTool("build_product_definition", mapOf("id" to "PD-RELATED", "formation_id" to "PDF-2"))
-                .isError shouldBe null
+            val (pc, pdc) = client.setupContexts()
+
+            suspend fun buildProductDefinition(
+                id: String,
+                pdfId: String,
+                productId: String,
+            ) {
+                client
+                    .callTool(
+                        "build_product",
+                        mapOf("id" to productId, "name" to "N", "frame_of_reference_handles" to listOf(pc)),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition_formation",
+                        mapOf("id" to pdfId, "of_product_id" to productId),
+                    ).isError shouldBe null
+                client
+                    .callTool(
+                        "build_product_definition",
+                        mapOf("id" to id, "formation_id" to pdfId, "frame_of_reference_handle" to pdc),
+                    ).isError shouldBe null
+            }
+            buildProductDefinition("PD-RELATING", "PDF-1", "P-1")
+            buildProductDefinition("PD-RELATED", "PDF-2", "P-2")
 
             val args =
                 mapOf(
@@ -581,7 +962,12 @@ class KStepMcpServerTest :
         "product_definition_formation's UNIQUE UR1 needs no enforcement: store id-keying already guarantees it" {
             val server = buildServer()
             val client = connectedClient(server)
-            client.callTool("build_product", mapOf("id" to "SHARED-PRODUCT", "name" to "Shared")).isError shouldBe null
+            val (pc, _) = client.setupContexts()
+            client
+                .callTool(
+                    "build_product",
+                    mapOf("id" to "SHARED-PRODUCT", "name" to "Shared", "frame_of_reference_handles" to listOf(pc)),
+                ).isError shouldBe null
 
             // Two different ids referencing the SAME of_product both succeed — no
             // unique_constraint_violated is ever returned for product_definition_formation
@@ -625,8 +1011,8 @@ class KStepMcpServerTest :
                 val jobs =
                     (1..n).flatMap { i ->
                         listOf(
-                            async { clientA.callTool("build_product", mapOf("id" to "A-$i", "name" to "N-$i")) },
-                            async { clientB.callTool("build_product", mapOf("id" to "B-$i", "name" to "N-$i")) },
+                            async { clientA.callTool("build_person", mapOf("id" to "A-$i", "last_name" to "N-$i")) },
+                            async { clientB.callTool("build_person", mapOf("id" to "B-$i", "last_name" to "N-$i")) },
                         )
                     }
                 jobs.awaitAll().forEach { it.isError shouldBe null }

@@ -1,8 +1,11 @@
 package dev.kstep.tests
 
+import dev.kstep.core.ap242.applicationContext
 import dev.kstep.core.ap242.nextAssemblyUsageOccurrence
 import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productContext
 import dev.kstep.core.ap242.productDefinition
+import dev.kstep.core.ap242.productDefinitionContext
 import dev.kstep.core.ap242.productDefinitionFormation
 import dev.kstep.core.getOrThrow
 import dev.kstep.step21.Part21Header
@@ -22,10 +25,25 @@ import java.io.File
 class FreeCadValidationExportTest :
     StringSpec({
         "a 3-part assembly (housing containing bracket and screw) exports to a real .step file for FreeCAD import" {
+            val appCtx = applicationContext { application = "config control" }.getOrThrow()
+            val prodCtx =
+                productContext {
+                    name = "engineering"
+                    frameOfReference = appCtx
+                    disciplineType = "mechanical"
+                }.getOrThrow()
+            val defCtx =
+                productDefinitionContext {
+                    name = "engineering"
+                    frameOfReference = appCtx
+                    lifeCycleStage = "design"
+                }.getOrThrow()
+
             val bracket =
                 product("BRK-001") {
                     name = "Bracket"
                     description = "Mounting bracket"
+                    frameOfReference = setOf(prodCtx)
                 }.getOrThrow()
             val bracketFormation =
                 productDefinitionFormation("BRK-001-F") {
@@ -36,12 +54,14 @@ class FreeCadValidationExportTest :
                 productDefinition("BRK-001-D") {
                     description = ""
                     formation = bracketFormation
+                    frameOfReference = defCtx
                 }.getOrThrow()
 
             val screw =
                 product("SCR-001") {
                     name = "Screw"
                     description = "M4x10 fastener"
+                    frameOfReference = setOf(prodCtx)
                 }.getOrThrow()
             val screwFormation =
                 productDefinitionFormation("SCR-001-F") {
@@ -52,12 +72,14 @@ class FreeCadValidationExportTest :
                 productDefinition("SCR-001-D") {
                     description = ""
                     formation = screwFormation
+                    frameOfReference = defCtx
                 }.getOrThrow()
 
             val housing =
                 product("HSG-001") {
                     name = "Housing"
                     description = "Enclosure housing"
+                    frameOfReference = setOf(prodCtx)
                 }.getOrThrow()
             val housingFormation =
                 productDefinitionFormation("HSG-001-F") {
@@ -68,6 +90,7 @@ class FreeCadValidationExportTest :
                 productDefinition("HSG-001-D") {
                     description = ""
                     formation = housingFormation
+                    frameOfReference = defCtx
                 }.getOrThrow()
 
             val bracketUsage =

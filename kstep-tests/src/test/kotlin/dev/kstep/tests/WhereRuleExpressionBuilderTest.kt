@@ -167,10 +167,42 @@ class WhereRuleExpressionBuilderTest :
             shouldThrow<ExpressSyntaxException> { ExpressParserFactory.parseExpression("SELF.name = 'O''Brien'") }
         }
 
-        "EXISTS/SIZEOF and user-defined function calls are unsupported" {
-            shouldThrow<UnsupportedWhereExpressionException> { buildExpr("EXISTS(SELF.x)") }
+        "SIZEOF and user-defined function calls are unsupported" {
             shouldThrow<UnsupportedWhereExpressionException> { buildExpr("SIZEOF(SELF.tags)") }
             shouldThrow<UnsupportedWhereExpressionException> { buildExpr("some_func(SELF.a)") }
+        }
+
+        // kSTEP M2 Welle 10: EXISTS(<attribute>) is now the one supported function call — added
+        // specifically for the real person.WR1 rule (EXISTS(last_name) OR EXISTS(first_name)).
+        "EXISTS(SELF.attribute) builds an Exists node" {
+            buildExpr("EXISTS(SELF.last_name)") shouldBe WhereRuleExpression.Exists("last_name")
+        }
+
+        "EXISTS(attribute) without the SELF. prefix builds the same Exists node" {
+            buildExpr("EXISTS(last_name)") shouldBe WhereRuleExpression.Exists("last_name")
+        }
+
+        "EXISTS(last_name) OR EXISTS(first_name) — the real person.WR1 — builds an Or of two Exists nodes" {
+            buildExpr("EXISTS(last_name) OR EXISTS(first_name)") shouldBe
+                WhereRuleExpression.Or(
+                    WhereRuleExpression.Exists("last_name"),
+                    WhereRuleExpression.Exists("first_name"),
+                )
+        }
+
+        "EXISTS() with two arguments, a non-attribute expression, or a literal is unsupported" {
+            shouldThrow<UnsupportedWhereExpressionException> { buildExpr("EXISTS(SELF.a, SELF.b)") }
+            shouldThrow<UnsupportedWhereExpressionException> { buildExpr("EXISTS(SELF.a + SELF.b)") }
+            shouldThrow<UnsupportedWhereExpressionException> { buildExpr("EXISTS('literal')") }
+        }
+
+        // kSTEP review fix: a qualifier chained directly onto the EXISTS(...) call itself (an
+        // attribute chain off the boolean result, or an index into it) must be rejected exactly
+        // like every other primary's qualifier* is — it was previously dropped silently, so
+        // EXISTS(SELF.a).b parsed as if it had been plain EXISTS(SELF.a).
+        "EXISTS(SELF.attribute) qualified with a further attribute chain or index is unsupported" {
+            shouldThrow<UnsupportedWhereExpressionException> { buildExpr("EXISTS(SELF.a).b") }
+            shouldThrow<UnsupportedWhereExpressionException> { buildExpr("EXISTS(SELF.a)[1]") }
         }
 
         "IN and LIKE relational extensions are unsupported" {

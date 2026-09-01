@@ -40,7 +40,8 @@ object WhereRuleExpressionBuilder {
     private fun unsupported(construct: String): Nothing =
         throw UnsupportedWhereExpressionException(
             "WHERE-rule expression uses '$construct', which is outside the supported subset " +
-                "(comparisons, SELF.attribute references, AND/OR/NOT, string/integer/real literals)",
+                "(comparisons, SELF.attribute references, AND/OR/NOT, string/integer/real literals, " +
+                "EXISTS(<attribute>))",
         )
 
     // expression : simpleExpression (relOpExtended simpleExpression)? — the grammar permits
@@ -244,9 +245,14 @@ object WhereRuleExpressionBuilder {
         }
 
         if (qualifiableFactor.functionCall() != null) {
-            unsupported(
-                "function call '${qualifiableFactor.functionCall()!!.text}' (EXISTS/SIZEOF/user-defined functions)",
-            )
+            if (qualifiers.isNotEmpty()) {
+                unsupported(
+                    "function call qualified with '${qualifiers.joinToString("") { it.text }}' " +
+                        "(e.g. EXISTS(SELF.a).b or EXISTS(SELF.a)[1] — only a bare, unqualified " +
+                        "function call is supported)",
+                )
+            }
+            return buildFunctionCall(qualifiableFactor.functionCall()!!, depth)
         }
         if (qualifiableFactor.generalRef() != null) unsupported("reference '${qualifiableFactor.text}'")
         if (qualifiableFactor.population() !=
@@ -259,6 +265,29 @@ object WhereRuleExpressionBuilder {
                 "",
             ) { it.text }}'",
         )
+    }
+
+    // functionCall : (builtInFunction | functionRef) actualParameterList? — the only
+    // recognized shape is EXISTS(<single attribute reference>); every other built-in
+    // (SIZEOF/HIBOUND/...), every user-defined functionRef, and any EXISTS() call with zero,
+    // two, or more arguments, or with a non-attribute-reference argument, stays unsupported.
+    private fun buildFunctionCall(
+        ctx: ExpressParser.FunctionCallContext,
+        depth: Int,
+    ): WhereRuleExpression {
+        val builtIn = ctx.builtInFunction()
+        val params = ctx.actualParameterList()?.parameter() ?: emptyList()
+        if (builtIn != null && builtIn.EXISTS() != null && params.size == 1) {
+            val argument = buildExpression(params[0].expression(), depth + 1)
+            val attributeName =
+                (argument as? WhereRuleExpression.SelfAttribute)?.name
+                    ?: unsupported(
+                        "EXISTS() argument other than a bare attribute or SELF.attribute reference " +
+                            "('${ctx.text}')",
+                    )
+            return WhereRuleExpression.Exists(attributeName)
+        }
+        unsupported("function call '${ctx.text}' (only EXISTS(<attribute>) is supported)")
     }
 
     private fun buildConstantFactor(

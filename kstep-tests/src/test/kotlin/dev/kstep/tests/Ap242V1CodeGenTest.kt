@@ -1,6 +1,7 @@
 package dev.kstep.tests
 
 import com.squareup.kotlinpoet.ClassName
+import com.squareup.kotlinpoet.KModifier
 import com.squareup.kotlinpoet.STRING
 import dev.kstep.express.codegen.Ap242V1CodeGen
 import io.kotest.core.spec.style.StringSpec
@@ -94,5 +95,34 @@ class Ap242V1CodeGenTest :
                     "ProductDefinitionContext",
                     "ApplicationContext",
                 )
+        }
+
+        // kSTEP M2 Welle 10: generate() defaults to CodeGenOptions() (plain public constructor,
+        // unchanged from every test above — the regression proof that the new option is
+        // opt-in, not a silent behavior change).
+        "generate() with the default CodeGenOptions still emits a plain public constructor" {
+            val outcome = Ap242V1CodeGen.generate()
+            val product = outcome.fileSpec.typeSpecs.single { it.name == "Product" }
+            product.primaryConstructor!!.modifiers shouldBe emptySet()
+        }
+
+        // Ap242V1CodeGen.CORE_MODULE_OPTIONS is what generateExpressKotlin's main() actually uses
+        // to feed kstep-core's own source set (see kstep-express/build.gradle.kts) — this is the
+        // direct proof that option reaches the emitted FileSpec correctly, independent of the
+        // Gradle wiring (already separately verified by kstep-core:compileKotlin succeeding).
+        "generate() with CORE_MODULE_OPTIONS emits an internal constructor and @ConsistentCopyVisibility" {
+            val outcome = Ap242V1CodeGen.generate(options = Ap242V1CodeGen.CORE_MODULE_OPTIONS)
+            val product = outcome.fileSpec.typeSpecs.single { it.name == "Product" }
+            product.primaryConstructor!!.modifiers shouldBe setOf(KModifier.INTERNAL)
+            product.annotations.map { it.typeName.toString() } shouldContainExactlyInAnyOrder
+                listOf("kotlin.ConsistentCopyVisibility")
+        }
+
+        "generate() with CORE_MODULE_OPTIONS still generates the same twelve entities as the default options" {
+            val default = Ap242V1CodeGen.generate()
+            val coreModule = Ap242V1CodeGen.generate(options = Ap242V1CodeGen.CORE_MODULE_OPTIONS)
+            coreModule.generatedEntityNames shouldContainExactlyInAnyOrder default.generatedEntityNames
+            coreModule.fileSpec.typeSpecs.map { it.name } shouldContainExactlyInAnyOrder
+                default.fileSpec.typeSpecs.map { it.name }
         }
     })

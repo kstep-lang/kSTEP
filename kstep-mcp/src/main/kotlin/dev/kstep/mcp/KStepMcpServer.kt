@@ -1,8 +1,14 @@
 package dev.kstep.mcp
 
 import dev.kstep.mcp.tools.registerApprovalTool
+import dev.kstep.mcp.tools.registerBuildApplicationContextTool
+import dev.kstep.mcp.tools.registerBuildApprovalStatusTool
 import dev.kstep.mcp.tools.registerBuildNextAssemblyUsageOccurrenceTool
+import dev.kstep.mcp.tools.registerBuildOrganizationTool
 import dev.kstep.mcp.tools.registerBuildPersonAndOrganizationTool
+import dev.kstep.mcp.tools.registerBuildPersonTool
+import dev.kstep.mcp.tools.registerBuildProductContextTool
+import dev.kstep.mcp.tools.registerBuildProductDefinitionContextTool
 import dev.kstep.mcp.tools.registerBuildProductDefinitionFormationTool
 import dev.kstep.mcp.tools.registerBuildProductDefinitionTool
 import dev.kstep.mcp.tools.registerBuildProductTool
@@ -24,11 +30,13 @@ import kotlinx.io.buffered
 private val logger = KotlinLogging.logger {}
 
 /**
- * Assembles the kSTEP MCP server: the six V1 entity builders as `build_*` tools, `export_part21`
- * (wrapping `kstep-step21`'s `Part21Writer` unmodified), and the `list_entities`/`get_entity`
- * introspection tools — all sharing one [EntityStore], scoped to this [Server] instance for its
- * process lifetime (one store per server, reset only on restart; see [EntityStore]'s own KDoc for
- * why that's the right session boundary given what the `kotlin-sdk` actually exposes here).
+ * Assembles the kSTEP MCP server: all twelve AP242 entity builders (kSTEP M2 Welle 10 — six V1
+ * entities plus six support entities the codegen-generated shapes now require) as `build_*`
+ * tools, `export_part21` (wrapping `kstep-step21`'s `Part21Writer` unmodified), and the
+ * `list_entities`/`get_entity` introspection tools — all sharing one [EntityStore], scoped to
+ * this [Server] instance for its process lifetime (one store per server, reset only on restart;
+ * see [EntityStore]'s own KDoc for why that's the right session boundary given what the
+ * `kotlin-sdk` actually exposes here).
  */
 fun buildServer(store: EntityStore = EntityStore()): Server {
     val server =
@@ -36,6 +44,12 @@ fun buildServer(store: EntityStore = EntityStore()): Server {
             serverInfo = Implementation(name = "kstep-mcp", version = "0.1.0"),
             options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools())),
         )
+    registerBuildApplicationContextTool(server, store)
+    registerBuildProductContextTool(server, store)
+    registerBuildProductDefinitionContextTool(server, store)
+    registerBuildApprovalStatusTool(server, store)
+    registerBuildPersonTool(server, store)
+    registerBuildOrganizationTool(server, store)
     registerBuildProductTool(server, store)
     registerBuildPersonAndOrganizationTool(server, store)
     registerBuildProductDefinitionFormationTool(server, store)
@@ -45,7 +59,7 @@ fun buildServer(store: EntityStore = EntityStore()): Server {
     registerExportPart21Tool(server, store)
     registerListEntitiesTool(server, store)
     registerGetEntityTool(server, store)
-    logger.info { "kSTEP MCP server assembled: 9 tools registered" }
+    logger.info { "kSTEP MCP server assembled: 15 tools registered" }
     return server
 }
 

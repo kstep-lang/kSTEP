@@ -1,6 +1,7 @@
 package dev.kstep.express.codegen
 
 import com.squareup.kotlinpoet.FileSpec
+import com.squareup.kotlinpoet.KModifier
 import dev.kstep.express.semantic.ExpressSchema
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
 import dev.kstep.express.semantic.InheritanceResolver
@@ -89,7 +90,24 @@ object Ap242V1CodeGen {
     // filtered schema would throw "does not resolve to a known entity". Resolving once against
     // the full schema and threading the same resolvedEntities map through both generateEntityType
     // calls and the final generateFile call avoids that.
-    fun generate(packageName: String = DEFAULT_PACKAGE_NAME): Outcome {
+
+    /**
+     * The [CodeGenOptions] used by the `generateExpressKotlin` Gradle task (via [main]): an
+     * `internal` constructor with `@ConsistentCopyVisibility`, since — as of kSTEP M2 Welle 10
+     * — the generated file is compiled directly into `kstep-core`'s own source set and must be
+     * unconstructable from outside it (see `dev.kstep.core.ap242`'s builder functions, the only
+     * sanctioned construction path). [generate]/[generateAndWrite]'s own default stays plain
+     * (`CodeGenOptions()`, public constructor) so callers outside that one wiring — in
+     * particular `Ap242V1CodeGenTest`'s per-entity assertions predating this option — are
+     * unaffected unless they opt in explicitly.
+     */
+    val CORE_MODULE_OPTIONS =
+        CodeGenOptions(constructorVisibility = KModifier.INTERNAL, consistentCopyVisibility = true)
+
+    fun generate(
+        packageName: String = DEFAULT_PACKAGE_NAME,
+        options: CodeGenOptions = CodeGenOptions(),
+    ): Outcome {
         val schema = loadSchema()
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
         val resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema)
@@ -102,7 +120,7 @@ object Ap242V1CodeGen {
                     "target entity '$name' not found in $SCHEMA_RESOURCE_PATH"
                 }
             try {
-                ExpressKotlinCodeGenerator.generateEntityType(resolved, packageName, definedTypesByLowerName)
+                ExpressKotlinCodeGenerator.generateEntityType(resolved, packageName, definedTypesByLowerName, options)
                 generated += name
             } catch (e: CodeGenException) {
                 skipped[name] = e.message ?: "codegen limitation with no message"
@@ -111,15 +129,16 @@ object Ap242V1CodeGen {
 
         val emittedNames = (generated + SUPPORT_ENTITY_NAMES).toSet()
         val filteredSchema = schema.copy(entities = schema.entities.filter { it.name in emittedNames })
-        val fileSpec = ExpressKotlinCodeGenerator.generateFile(filteredSchema, packageName, resolvedEntities)
+        val fileSpec = ExpressKotlinCodeGenerator.generateFile(filteredSchema, packageName, resolvedEntities, options)
         return Outcome(fileSpec, generated, skipped)
     }
 
     fun generateAndWrite(
         outputDir: File,
         packageName: String = DEFAULT_PACKAGE_NAME,
+        options: CodeGenOptions = CodeGenOptions(),
     ): Outcome {
-        val outcome = generate(packageName)
+        val outcome = generate(packageName, options)
         outputDir.mkdirs()
         outcome.fileSpec.writeTo(outputDir)
         return outcome
@@ -160,7 +179,7 @@ private val EXPECTED_SKIPPED = emptySet<String>()
 fun main(args: Array<String>) {
     require(args.size == 1) { "usage: Ap242V1CodeGenKt <outputDir>" }
     val outputDir = File(args[0])
-    val outcome = Ap242V1CodeGen.generateAndWrite(outputDir)
+    val outcome = Ap242V1CodeGen.generateAndWrite(outputDir, options = Ap242V1CodeGen.CORE_MODULE_OPTIONS)
 
     println(
         "generateExpressKotlin: generated ${outcome.generatedEntityNames.size} of " +

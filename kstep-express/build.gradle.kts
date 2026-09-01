@@ -1,3 +1,5 @@
+import org.gradle.api.attributes.Attribute
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.ktlint)
@@ -47,15 +49,17 @@ tasks
 
 // Runs ExpressKotlinCodeGenerator (via dev.kstep.express.codegen.Ap242V1CodeGen) against the
 // real-schema six-V1-entity extraction and writes the generated Kotlin source as a plain build
-// artifact under build/generated/expressKotlin/main. Deliberately NOT added to any sourceSet —
-// as of the SUBTYPE OF inheritance-flattening wave, all six entities' generated classes
-// (including the two, Product/ProductDefinition, that used to reference ungenerated
-// ProductContext/ProductDefinitionContext support types) are now self-contained and compile
-// standalone, but wiring this output into this module's own compileKotlin would still create
-// classes with the same simple names as kstep-core's hand-authored equivalents (Product,
-// ProductDefinition, etc., built to the ValidationResult<T>/Named-Parameters conventions, not
-// this generator's plain data classes) in the same build. Reconciling generated output with
-// kstep-core's hand-authored types remains separate future work (see README's Roadmap).
+// artifact under build/generated/expressKotlin/main. Deliberately NOT added to *this module's
+// own* sourceSet — as of kSTEP M2 Welle 10, the output is instead exposed below as the
+// `ap242GeneratedSources` consumable configuration and consumed by kstep-core, which compiles
+// it directly into its own source set (internal-constructor `CodeGenOptions`, see
+// Ap242V1CodeGen.CORE_MODULE_OPTIONS) so that dev.kstep.core.ap242's builder functions become
+// the only way to construct one of the twelve generated AP242 entities. Wiring the output into
+// *this* module's compileKotlin would still create classes with the same simple names as
+// kstep-core's old hand-authored equivalents once existed; see docs/adr/ADR-0004 for the full
+// rationale and kstep-core/build.gradle.kts for the consumer side.
+val ap242OutputDir = layout.buildDirectory.dir("generated/expressKotlin/main")
+
 val generateExpressKotlin by
     tasks.registering(JavaExec::class) {
         group = "code generation"
@@ -65,17 +69,16 @@ val generateExpressKotlin by
         classpath = sourceSets.main.get().runtimeClasspath
         mainClass.set("dev.kstep.express.codegen.Ap242V1CodeGenKt")
 
-        val outputDir = layout.buildDirectory.dir("generated/expressKotlin/main")
-        outputs.dir(outputDir)
+        outputs.dir(ap242OutputDir)
         // Scoped deletion of exactly this task's own output directory (never a broader path,
         // and never derived from schema/entity-name input) before every run, so a stale file
         // from a previous schema revision can't silently linger alongside fresh output.
         doFirst {
-            val dir = outputDir.get().asFile
+            val dir = ap242OutputDir.get().asFile
             dir.deleteRecursively()
             dir.mkdirs()
         }
-        args(outputDir.get().asFile.absolutePath)
+        args(ap242OutputDir.get().asFile.absolutePath)
     }
 
 // Wiring the task's execution (not its output) into `check` guarantees generateExpressKotlin
@@ -84,4 +87,23 @@ val generateExpressKotlin by
 // ever being run manually and going stale unnoticed.
 tasks.named("check") {
     dependsOn(generateExpressKotlin)
+}
+
+// Exposes generateExpressKotlin's output directory as a Gradle "artifact transfer" consumable
+// configuration, so kstep-core can pull it into its own compileKotlin source set (via a
+// matching `resolvable` configuration, see kstep-core/build.gradle.kts) without kstep-core ever
+// reaching across into kstep-express's `sourceSets`/`tasks` directly — that cross-project
+// `project(":x").sourceSets`/`tasks` access pattern is Gradle-9/Isolated-Projects-hostile and
+// breaks under the configuration cache; a consumable/resolvable configuration pair carries the
+// task dependency automatically and is the supported cross-project-artifact idiom instead.
+val ap242ArtifactTypeAttribute: Attribute<String> = Attribute.of("dev.kstep.artifact", String::class.java)
+val ap242GeneratedSources =
+    configurations
+        .consumable("ap242GeneratedSources") {
+            attributes { attribute(ap242ArtifactTypeAttribute, "ap242-generated-sources") }
+        }.get()
+artifacts {
+    add(ap242GeneratedSources.name, ap242OutputDir) {
+        builtBy(generateExpressKotlin)
+    }
 }

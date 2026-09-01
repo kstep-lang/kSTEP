@@ -4,57 +4,43 @@ import dev.kstep.core.ValidationResult
 import dev.kstep.express.validation.WhereRuleSpec
 import dev.kstep.express.validation.WhereRuleValidator
 import dev.kstep.express.validation.WhereRuleValue
+import dev.kstep.generated.ap242v1.Product
+import dev.kstep.generated.ap242v1.ProductContext
 
 private const val ENTITY_NAME = "product"
-private val WHERE_RULES = listOf(WhereRuleSpec(label = "wr1", expressionText = "SELF.id <> ''"))
+
+// `kstep_wr1`, NOT a real AP242 WR1 — this entity's real schema declares no WHERE rule at all.
+// A kSTEP-only ergonomic guard against a blank id, carried forward unchanged (just relabeled,
+// see docs/adr/ADR-0004) from before this wave's codegen-generated-types rebuild, when it also
+// wasn't real. Kept under the `kstep_` prefix specifically so it is never again mistaken for a
+// genuine schema-derived rule the way an unprefixed `wr1` was before this wave.
+private val WHERE_RULES = listOf(WhereRuleSpec(label = "kstep_wr1", expressionText = "SELF.id <> ''"))
 
 /**
- * `dev.kstep.express` AP242-subset `product` entity — `id`, `name`, `description`, all `STRING`.
- * `id` and `name` are non-`OPTIONAL` (`identifier`/`label`); `description` is `OPTIONAL text`
- * (`ap242-v1-entities.exp` line 138) — an empty `description` is legal EXPRESS, not a gap.
+ * Ergonomic wrapper over the codegen-generated [Product] (kSTEP M2 Welle 10 — `kstep-core` no
+ * longer hand-authors this entity's shape at all, only its validating builder; see
+ * `docs/adr/ADR-0004-core-on-generated-types.adoc`). `id`/`name` are mandatory `identifier`/
+ * `label`; `description` is genuinely `OPTIONAL text`. `frame_of_reference : SET [1:?] OF
+ * product_context` is mandatory AND non-empty — a still-`null` [ProductBuilder.frameOfReference]
+ * is [dev.kstep.core.DslViolationCodes.MISSING_MANDATORY_REFERENCE], an explicitly-assigned
+ * empty set is the distinct [dev.kstep.core.DslViolationCodes.AGGREGATION_BOUND_VIOLATED] — see
+ * that code's KDoc for why the two are not the same violation.
  *
- * **Honesty note (M2 Welle 8 — codegen reconciliation):** the real AP242 `product`
- * (`ap242-v1-entities.exp` lines 135–140) also declares a mandatory
- * `frame_of_reference : SET [1:?] OF product_context`, which `kstep-core` **omits entirely** —
- * an aggregation-of-entity attribute this hand-authored layer does not yet model. `description`
- * is represented as a non-null [String] defaulting to `""` rather than a nullable `String?`, the
- * pervasive "`OPTIONAL text`/`label` as empty-default string" convention used throughout
- * `kstep-core`. `wr1: SELF.id <> ''` is a **synthesized** ergonomic WHERE rule — the real
- * `product` entity has no WHERE rule of its own. All three are pinned by
- * `dev.kstep.tests.Ap242CoreSchemaConsistencyTest`; see the README's Roadmap
- * "codegen reconciliation" entry for the full deferral rationale.
- *
- * The constructor is `internal` so the only way to obtain an instance from outside this module is the
- * [product] builder function, which always runs WHERE-rule validation first — a public constructor (and its
- * generated `copy()`) would let callers construct or mutate an instance that violates its own WHERE rule
- * without ever surfacing a [dev.kstep.core.DslViolation]. `@ConsistentCopyVisibility` keeps the generated
- * `copy()` `internal` too — without it `copy()` defaults to `public` regardless of the constructor's
- * visibility, reopening the exact bypass this constructor closes.
+ * The set is defensively copied into a [LinkedHashSet] when building the generated [Product]:
+ * `LinkedHashSet` (not a plain `HashSet`) to keep iteration order deterministic — see
+ * `Part21Writer`'s "byte-identical output for the same object graph" guarantee, which a
+ * hash-order-dependent `Set` would silently break — and copied (not aliased) for the same
+ * reason [Person]'s `List` properties are: a caller-retained mutable reference must not be able
+ * to retroactively mutate an already-built, supposedly immutable [Product].
  */
-@ConsistentCopyVisibility
-data class Product internal constructor(
-    val id: String,
-    val name: String,
-    val description: String,
-)
-
 class ProductBuilder internal constructor() {
-    // Nullable purely as an internal "was it set" presence sentinel — same rationale as
-    // Approval.authorizedBy, generalized from entity references to a mandatory primitive:
-    // `name` is a non-OPTIONAL `label` with no WHERE rule of its own, so a still-null value at
-    // build() time is a structural violation (KSTEP-M-002), never a legitimate empty value. An
-    // explicitly-assigned empty string, by contrast, is a legal EXPRESS value here and must stay
-    // Valid — see missingMandatoryAttributeViolation's KDoc.
+    // Nullable purely as an internal "was it set" presence sentinel — see Product.name's
+    // long-standing equivalent doc note (predates this wave).
     var name: String? = null
-    var description: String = ""
+    var description: String? = null
+    var frameOfReference: Set<ProductContext>? = null
 }
 
-/**
- * Builds a [Product], running WHERE-rule validation ([WHERE_RULES]) against the built
- * values plus a presence check for the mandatory [ProductBuilder.name] attribute. Never throws
- * for a validation failure — returns [ValidationResult.Invalid] with structured
- * [dev.kstep.core.DslViolation]s instead.
- */
 fun product(
     id: String,
     block: ProductBuilder.() -> Unit = {},
@@ -64,20 +50,32 @@ fun product(
     val structuralViolations =
         buildList {
             if (builder.name == null) add(missingMandatoryAttributeViolation(ENTITY_NAME, "name"))
+            when {
+                builder.frameOfReference == null ->
+                    add(missingMandatoryReferenceViolation(ENTITY_NAME, "frame_of_reference"))
+                builder.frameOfReference!!.isEmpty() ->
+                    add(aggregationBoundViolation(ENTITY_NAME, "frame_of_reference", "[1:?]", 0))
+            }
         }
 
     val attributeValues =
         mapOf(
             "id" to WhereRuleValue.StringValue(id),
             "name" to WhereRuleValue.StringValue(builder.name ?: ""),
-            "description" to WhereRuleValue.StringValue(builder.description),
         )
     val whereRuleViolations =
         WhereRuleValidator.validate(ENTITY_NAME, WHERE_RULES, attributeValues).map { it.toDslViolation() }
 
     val violations = structuralViolations + whereRuleViolations
     return if (violations.isEmpty()) {
-        ValidationResult.Valid(Product(id, builder.name!!, builder.description))
+        ValidationResult.Valid(
+            Product(
+                id = id,
+                name = builder.name!!,
+                description = builder.description,
+                frameOfReference = LinkedHashSet(builder.frameOfReference!!),
+            ),
+        )
     } else {
         ValidationResult.Invalid(violations)
     }

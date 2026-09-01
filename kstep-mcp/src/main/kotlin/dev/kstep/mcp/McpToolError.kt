@@ -214,6 +214,28 @@ fun storeCapacityExceededError(
             },
     )
 
+fun storeCharacterBudgetExceededError(
+    projectedTotalCharacters: Long,
+    maxTotalCharacters: Long,
+): CallToolResult =
+    CallToolResult(
+        content =
+            listOf(
+                TextContent(
+                    text =
+                        "Entity store character budget exceeded (this call would bring the store's total " +
+                            "stored string content to $projectedTotalCharacters/$maxTotalCharacters characters)",
+                ),
+            ),
+        isError = true,
+        structuredContent =
+            buildJsonObject {
+                put("errorKind", "store_character_budget_exceeded")
+                put("projectedTotalCharacters", projectedTotalCharacters)
+                put("maxTotalCharacters", maxTotalCharacters)
+            },
+    )
+
 fun typeMismatchError(
     id: String,
     existingEntityType: String,
@@ -317,8 +339,9 @@ fun internalError(exceptionClassName: String?): CallToolResult =
             },
     )
 
-/** Stores [entry] under [id], mapping an [EntityStore.PutOutcome.CapacityExceeded] to its structured error
- * shape and otherwise handing the newly-stored entity to [onStored] to build the tool's success result.
+/** Stores [entry] under [id], mapping an [EntityStore.PutOutcome.CapacityExceeded] or
+ * [EntityStore.PutOutcome.CharacterBudgetExceeded] to its structured error shape and otherwise handing the
+ * newly-stored entity to [onStored] to build the tool's success result.
  */
 fun storeOrCapacityError(
     store: EntityStore,
@@ -351,6 +374,11 @@ private fun EntityStore.PutOutcome.toCallToolResult(
             storeCapacityExceededError(
                 currentSize,
                 maxEntities,
+            )
+        is EntityStore.PutOutcome.CharacterBudgetExceeded ->
+            storeCharacterBudgetExceededError(
+                projectedTotalCharacters,
+                maxTotalCharacters,
             )
         is EntityStore.PutOutcome.TypeMismatch ->
             typeMismatchError(

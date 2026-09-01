@@ -1,0 +1,156 @@
+= ADR-0004: Rebuild `kstep-core` as an ergonomic wrapper over the codegen-generated AP242 types
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP M2 Welle 10).
+
+== Context
+
+M2 Welle 8 closed the *known* gap between `kstep-core`'s six
+hand-authored AP242 V1 entity shapes (`dev.kstep.core.ap242`) and the
+real AP242 excerpt (`ap242-v1-entities.exp`): every divergence was
+enumerated, documented per-entity, and pinned by
+`Ap242CoreSchemaConsistencyTest` so no *new* drift could sneak in
+unnoticed. It deliberately did not close the gap itself — doing so
+needed capabilities the hand-authored layer did not have yet
+(`LIST`/aggregation-typed attributes, `EXISTS()` WHERE-rule evaluation)
+and would, without those, only have hand-re-derived what
+`ExpressKotlinCodeGenerator` already generates faithfully from the same
+schema excerpt.
+
+M2 Welle 9 restated the resulting fork explicitly: either (a) rebuild
+`kstep-core`'s ergonomic layer *on top of* the codegen-generated
+`dev.kstep.generated.ap242v1` types (no duplication, but couples the
+ergonomic API to generated shapes and needs a builder/validation layer
+over generated data classes), or (b) keep hand-authoring and extend the
+hand layer with `LIST` + `EXISTS` support. Both waves left the decision
+for "the project owner" — an explicit decision this ADR now records.
+
+== Decision
+
+Take path (a). `kstep-core` no longer hand-authors any AP242 entity
+*shape* at all. `dev.kstep.express.codegen.Ap242V1CodeGen`, via a new
+`CodeGenOptions(constructorVisibility = KModifier.INTERNAL,
+consistentCopyVisibility = true)` (`Ap242V1CodeGen.CORE_MODULE_OPTIONS`),
+generates the twelve AP242 entity `data class`es (the six V1 entities
+plus the six support entities their generated shapes require —
+`application_context`, `product_context`, `product_definition_context`,
+`approval_status`, `person`, `organization`) directly into
+`kstep-core`'s own compiled output, via a Gradle
+`consumable`/`resolvable` configuration pair between `kstep-express` and
+`kstep-core` (not a cross-project `sourceSets`/`tasks` reach-through,
+which is Gradle-9/Isolated-Projects-hostile). `kstep-core` then supplies
+exactly one thing on top: a validating, named-parameter builder function
+per entity in `dev.kstep.core.ap242`, returning
+`ValidationResult<T>` as before.
+
+The `internal` constructor plus `@ConsistentCopyVisibility` is load-
+bearing, not decorative: it is what makes the `dev.kstep.core.ap242`
+builder functions the *only* way to construct one of these twelve types
+from outside `kstep-core` — the same invariant the hand-authored types
+held via their own `internal constructor`, now reconstructed at the
+codegen level instead of losing it by switching to generated types.
+
+== Consequences
+
+* *Resolved, not carried forward.* Eleven of the thirteen M2 Welle 8
+  divergence-table entries are gone outright — the codegen-generated
+  shape *is* the real shape, by construction, so there is nothing left
+  to diverge. The two `SimplifiedEntityRefToString` entries
+  (`approval.status`, `person_and_organization.the_person`/
+  `the_organization`) and the invented `approval.authorized_by` are
+  resolved the same way: `status`/`the_person`/`the_organization` are
+  now correctly entity-typed, and `authorized_by` — which never existed
+  on the real entity — is removed, not replaced.
+* *`Ap242CoreSchemaConsistencyTest`'s purpose changed.* Comparing two
+  independently-hand-maintained shapes is no longer meaningful once
+  there is only one shape (the compiler itself now guards it: a schema
+  change that alters a generated constructor breaks every
+  `dev.kstep.core.ap242` builder referencing the old shape). The test
+  now guards a different, still-real risk instead — a builder that
+  quietly stops exposing a generated attribute, or invents an
+  undocumented one — by comparing `{positional builder-function
+  parameters} ∪ {mutable Builder-class properties}` against
+  `ResolvedEntity.flattenedAttributes` for every one of the twelve
+  types. `ACCEPTED_DIVERGENCES` is `emptyList()`.
+* *Real EXPRESS optionality is deliberately not cross-checked* by that
+  same test. Every builder property is nullable regardless of whether
+  the underlying attribute is `OPTIONAL` — the "nullable-as-presence-
+  sentinel" convention this codebase has used since M1, which lets a
+  builder tell "never set" (a structural `KSTEP-M-001`/`KSTEP-M-002`
+  violation) apart from "explicitly set to empty" (legal). That
+  distinction lives in each `build()` function's runtime logic, not in
+  any reflectable type shape; `Ap242DslTest` covers it per entity
+  instead.
+* *Ergonomic regression, accepted deliberately.* `product`/
+  `productDefinition` now require a real `product_context`/
+  `product_definition_context` (and, transitively,
+  `application_context`) to be built first — the real schema's mandatory
+  `frame_of_reference`, which the hand-authored layer used to omit
+  entirely. `kstep-core` does not invent a placeholder context behind a
+  script's back: a caller builds (or reuses) one explicitly. This is the
+  "explicit helper, never a silent default" position the project has
+  held since the `Approval`/`authorizedBy` "a dummy placeholder instance
+  would be worse" precedent.
+* *`KSTEP-A-001` (`AGGREGATION_BOUND_VIOLATED`) is a new violation
+  code*, distinct from `KSTEP-M-001`: `product.frame_of_reference : SET
+  [1:?]` is both mandatory *and* non-empty, and "never set" vs. "set to
+  an explicitly empty set" are different caller mistakes with different
+  fixes. The same `[1:?]` lower bound also governs `person`'s three
+  `OPTIONAL LIST [1:?] OF label` attributes (`middle_names`,
+  `prefix_titles`, `suffix_titles`) — there, "never set" (`null`) is
+  legal (the attribute itself is `OPTIONAL`, so no `KSTEP-M-001`), but
+  an explicitly-assigned *empty* list is still `KSTEP-A-001`: the bound
+  applies once the caller opts in to the aggregation at all.
+* *WHERE-rule support gained `EXISTS(<attribute>)`* — added specifically
+  because `person.WR1: EXISTS(last_name) OR EXISTS(first_name)` is the
+  one genuinely real, evaluable-in-principle WHERE rule across the whole
+  V1 schema slice once `person` itself is modeled; every other real rule
+  still uses `SIZEOF`/`USEDIN`/`acyclic_...`, still outside the
+  supported subset. `WhereRuleValue.Unset` represents "this OPTIONAL
+  attribute was never set" and is meaningful only as an `EXISTS()`
+  operand — using it anywhere else (a bare comparison, an `AND`/`OR`
+  operand) throws, since kSTEP does not model EXPRESS's three-valued
+  logic.
+* *Every kSTEP-synthesized WHERE rule that survives is relabeled
+  `kstep_wr1`*, not `wr1` — so it can never again be mistaken for a
+  genuine schema-derived rule the way an unprefixed `wr1` could before
+  this wave. `next_assembly_usage_occurrence`'s over-constraining
+  synthesized rule (forcing a non-blank `reference_designator`, which
+  the real schema leaves `OPTIONAL`) is dropped entirely, not relabeled.
+  `person_and_organization`'s old "at least one of the two set" rule is
+  also dropped entirely: now that both `the_person`/`the_organization`
+  are correctly modeled as mandatory entity references (not optional-
+  by-convention strings), there is nothing left to approximate — both
+  are simply required.
+* *Breaking changes, no migration path needed.* The Part-21 wire format
+  (`kstep-step21`) and the `kstep-mcp` tool contract both change
+  incompatibly (new/changed argument arity and shapes throughout). No
+  migration path is provided or needed: the project is pre-1.0
+  (`0.1.0-SNAPSHOT`), unreleased, with no persisted `.step` files or
+  deployed MCP clients to preserve compatibility for.
+* *No schema or license-boundary change.* All twelve entities' EXPRESS
+  declarations were already vendored in `ap242-v1-entities.exp` and
+  already declared in `/NOTICE` — this wave's `git diff --stat -- NOTICE
+  kstep-express/src/main/resources` is empty.
+
+== Alternatives considered
+
+* *(b) Extend the hand-authored layer* with `LIST`/aggregation support
+  and `EXISTS()` evaluation, keeping the two shapes (hand-authored,
+  codegen-generated) separate. Rejected: this would have meant building
+  and maintaining, by hand, exactly the attribute-flattening and type-
+  resolution logic `ExpressKotlinCodeGenerator` already implements and
+  already tests against the same schema excerpt — permanent duplicated
+  maintenance burden for a shape the generator already produces
+  correctly, with no offsetting benefit once the generator can emit an
+  `internal` constructor.
+* *Generate into `kstep-express`'s own source set* instead of
+  `kstep-core`'s, with a plain `public` constructor (`CodeGenOptions()`
+  default). Rejected as the final design, though it remains the
+  cheaper fallback if `kstep-core`'s `internal`-constructor wiring ever
+  needs to be backed out: it would let anyone construct an entity
+  bypassing the validating builder entirely, dropping the "no
+  unvalidated instance can exist" invariant this codebase has held for
+  every hand-authored type since M1.

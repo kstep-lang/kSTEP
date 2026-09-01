@@ -1,11 +1,29 @@
 package dev.kstep.tests
 
-import dev.kstep.core.ap242.Approval
-import dev.kstep.core.ap242.NextAssemblyUsageOccurrence
-import dev.kstep.core.ap242.PersonAndOrganization
-import dev.kstep.core.ap242.Product
-import dev.kstep.core.ap242.ProductDefinition
-import dev.kstep.core.ap242.ProductDefinitionFormation
+import dev.kstep.core.ap242.ApplicationContextBuilder
+import dev.kstep.core.ap242.ApprovalBuilder
+import dev.kstep.core.ap242.ApprovalStatusBuilder
+import dev.kstep.core.ap242.NextAssemblyUsageOccurrenceBuilder
+import dev.kstep.core.ap242.OrganizationBuilder
+import dev.kstep.core.ap242.PersonAndOrganizationBuilder
+import dev.kstep.core.ap242.PersonBuilder
+import dev.kstep.core.ap242.ProductBuilder
+import dev.kstep.core.ap242.ProductContextBuilder
+import dev.kstep.core.ap242.ProductDefinitionBuilder
+import dev.kstep.core.ap242.ProductDefinitionContextBuilder
+import dev.kstep.core.ap242.ProductDefinitionFormationBuilder
+import dev.kstep.core.ap242.applicationContext
+import dev.kstep.core.ap242.approval
+import dev.kstep.core.ap242.approvalStatus
+import dev.kstep.core.ap242.nextAssemblyUsageOccurrence
+import dev.kstep.core.ap242.organization
+import dev.kstep.core.ap242.person
+import dev.kstep.core.ap242.personAndOrganization
+import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productContext
+import dev.kstep.core.ap242.productDefinition
+import dev.kstep.core.ap242.productDefinitionContext
+import dev.kstep.core.ap242.productDefinitionFormation
 import dev.kstep.express.codegen.Ap242V1CodeGen
 import dev.kstep.express.codegen.NamingConventions
 import dev.kstep.express.semantic.AggregationType
@@ -21,38 +39,58 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import kotlin.reflect.KClass
+import kotlin.reflect.KFunction
+import kotlin.reflect.KMutableProperty1
 import kotlin.reflect.KType
-import kotlin.reflect.full.primaryConstructor
+import kotlin.reflect.full.memberProperties
 
 /**
- * M2 Welle 8 (codegen-reconciliation debt resolution) — the drift-prevention guard three prior
- * waves deferred. `kstep-core`'s six hand-authored AP242 types (`dev.kstep.core.ap242`) are a
- * deliberately ergonomic approximation of the real AP242 excerpt
- * (`ap242-v1-entities.exp`), not a faithful rendering of it — see each type's "Honesty note"
- * KDoc for the per-entity rationale, and the README's Roadmap "codegen reconciliation" entry for
- * the full picture and the deferred entity-typed reconciliation wave this test's allowlist is
- * scoped against.
+ * M2 Welle 10 (`kstep-core` rebuilt as an ergonomic wrapper over the codegen-generated AP242
+ * types) — this test's **purpose changed** from what it was M2 Welle 8–9: `kstep-core` no longer
+ * hand-authors any of the twelve entities' *shapes* at all (`dev.kstep.generated.ap242v1.*`,
+ * compiled from `ap242-v1-entities.exp` via `ExpressKotlinCodeGenerator`, is now the only place
+ * the shape is declared) — a form-drift guard comparing two independently-hand-maintained shapes
+ * is no longer meaningful, because there is only one shape left; the Kotlin compiler itself
+ * already guards it (a schema change that adds/removes/retypes an attribute changes the
+ * generated constructor, and every `dev.kstep.core.ap242` builder referencing the old shape
+ * simply stops compiling).
  *
- * This test does **not** hand-write an expected shape and hope it stays right. It re-derives
- * the real shape live from [Ap242V1CodeGen.loadSchema] + [InheritanceResolver] every run (the
- * same source of truth `dev.kstep.express.codegen.ExpressKotlinCodeGenerator` itself codegens
- * against — see `Ap242V1CodeGenTest`, which proves that generator output *is* schema-faithful),
- * compares it against `kstep-core`'s actual shape via Kotlin reflection on each data class's
- * primary constructor, and fails loudly on any difference that is not explicitly named in
- * [ACCEPTED_DIVERGENCES] below. Any *new* undocumented drift — a field silently dropped, a type
- * silently narrowed, a field silently invented — fails this test. Removing an *existing*,
- * already-accepted divergence (e.g. deleting `Approval.authorizedBy`) requires a deliberate edit
- * to [ACCEPTED_DIVERGENCES], not just a code change — that is the point: the gap is now bounded
- * and guarded, not open-ended.
+ * What the compiler does **not** catch is a different, still-real drift risk this test now
+ * guards instead: a builder that quietly stops exposing one of the generated attributes as a
+ * settable `var` (or drops the positional identity parameter), or one that invents an extra
+ * property with no counterpart in the real schema at all — both leave the entity impossible (or
+ * silently wrong) to build correctly through the DSL without breaking compilation anywhere.
+ * Concretely, for every one of the twelve entities:
  *
- * **Deliberately out of scope** (documented as a limitation, not silently ignored): WHERE-rule
- * *content* is never compared here — every real WHERE rule on these six entities uses
- * `SIZEOF`/`USEDIN`/`EXISTS`/`acyclic_...`, all outside
- * `dev.kstep.express.validation.WhereRuleValidator`'s supported expression subset, so there is
- * no supported real rule to mechanically align a synthesized one to (see each type's KDoc).
- * `UNIQUE`/`DERIVE`/`INVERSE` clause enforcement is likewise out of scope — this test guards
- * **attribute shape** only (field set, primitive-vs-entity-vs-aggregation category,
- * optionality), which is where silent structural drift would actually hide.
+ * > `{positional parameters of the builder function} ∪ {mutable ("var") properties of its
+ * > Builder class}`, mapped through [NamingConventions.toPropertyName], must be **exactly** the
+ * > same *name set* as `ResolvedEntity.flattenedAttributes`, and each shared name's coarse
+ * > *category* (primitive string / entity reference / aggregation) must match.
+ *
+ * **Deliberately out of scope, and why:** real EXPRESS *optionality* is NOT cross-checked here.
+ * Every `dev.kstep.core.ap242` builder property is nullable regardless of whether the real
+ * attribute is `OPTIONAL` — this is the deliberate, pervasive "nullable-as-presence-sentinel"
+ * convention (see e.g. `ProductBuilder.name`'s KDoc): a still-`null` *mandatory* attribute at
+ * `build()` time is a structural [dev.kstep.core.DslViolationCodes.MISSING_MANDATORY_ATTRIBUTE]/
+ * `_REFERENCE` violation, while a still-`null` genuinely-*optional* one is legitimate and passed
+ * straight through to the generated constructor — but both are represented by the exact same
+ * nullable Kotlin type at the builder level. The distinction lives in each `build()` function's
+ * *runtime logic* (which attributes it structurally checks), not in any reflectable type shape,
+ * so it cannot be mechanically verified here without re-executing every builder against every
+ * attribute — which [Ap242DslTest] already does, per entity, for the mandatory-attribute cases
+ * that matter most (every entity has at least one dedicated "X never set fails with M-00x" test).
+ * `UNIQUE`/`DERIVE`/`INVERSE` clause enforcement, and WHERE-rule *content* beyond what
+ * [Ap242DslTest] already exercises, remain out of scope here too, unchanged from prior waves.
+ *
+ * [ACCEPTED_DIVERGENCES] — the M2 Welle 8/9 allowlist of hand-authored-vs-real shape gaps — is
+ * now `emptyList()`: eleven of the thirteen entries it used to carry are resolved outright (the
+ * codegen-generated shape *is* the real shape, by construction); the remaining two
+ * (`SimplifiedEntityRefToString` for `approval.status`/`person_and_organization.the_person`+
+ * `the_organization` — now correctly entity-typed — and the invented `approval.authorized_by`
+ * — now removed entirely) are gone, not carried forward. The type is kept (rather than deleted)
+ * so a future, *genuine* divergence — e.g. a deliberate ergonomic simplification introduced on
+ * purpose — has a documented place to go, per the same "explicit allowlist, not silent drift"
+ * philosophy this test has followed since M2 Welle 8.
  */
 class Ap242CoreSchemaConsistencyTest :
     StringSpec({
@@ -60,46 +98,22 @@ class Ap242CoreSchemaConsistencyTest :
         val resolvedEntities = InheritanceResolver.resolve(schema)
         val definedTypes = schema.definedTypes.associateBy { it.name.lowercase() }
 
-        "kstep-core's Approval matches the real approval shape modulo the documented allowlist" {
-            expectedShape("approval", resolvedEntities, definedTypes) shouldBe actualShape(Approval::class)
+        ENTITY_WRAPPERS.forEach { (entityName, wrapper) ->
+            "kstep-core's $entityName wrapper exposes exactly the real attribute set, correctly categorized" {
+                expectedShape(entityName, resolvedEntities, definedTypes) shouldBe actualShape(wrapper)
+            }
         }
 
-        "kstep-core's PersonAndOrganization matches the real person_and_organization shape modulo the allowlist" {
-            expectedShape("person_and_organization", resolvedEntities, definedTypes) shouldBe
-                actualShape(PersonAndOrganization::class)
+        "the allowlist is empty — every M2 Welle 8/9 divergence is resolved by building on the generated types" {
+            ACCEPTED_DIVERGENCES shouldBe emptyList()
         }
 
-        "kstep-core's Product matches the real product shape modulo the documented allowlist" {
-            expectedShape("product", resolvedEntities, definedTypes) shouldBe actualShape(Product::class)
-        }
-
-        "kstep-core's ProductDefinition matches the real product_definition shape modulo the allowlist" {
-            expectedShape("product_definition", resolvedEntities, definedTypes) shouldBe
-                actualShape(ProductDefinition::class)
-        }
-
-        "kstep-core's ProductDefinitionFormation matches the real shape modulo the documented allowlist" {
-            expectedShape("product_definition_formation", resolvedEntities, definedTypes) shouldBe
-                actualShape(ProductDefinitionFormation::class)
-        }
-
-        "kstep-core's NextAssemblyUsageOccurrence matches the real flattened shape modulo the allowlist" {
-            expectedShape("next_assembly_usage_occurrence", resolvedEntities, definedTypes) shouldBe
-                actualShape(NextAssemblyUsageOccurrence::class)
-        }
-
-        "the allowlist only names entities among the six V1 targets, and every one of the six has an entry" {
-            val entitiesInAllowlist = ACCEPTED_DIVERGENCES.map { it.entity }.toSet()
-            entitiesInAllowlist shouldBe Ap242V1CodeGen.TARGET_ENTITY_NAMES.toSet()
-        }
-
-        "an allowlist entry for a divergence that no longer exists makes the affected comparison fail loudly" {
+        "an extra, undocumented property in a builder makes the affected comparison fail loudly" {
             // Meta-test proving the guard actually bites, without mutating any real kstep-core
             // class: a synthetic "actual" shape with one extra, undocumented field must NOT
-            // compare equal to the real approval's expected shape.
-            val expected = expectedShape("approval", resolvedEntities, definedTypes)
-            val mutatedActual =
-                expected + ("fabricatedField" to AttrShape(AttrCategory.PRIMITIVE_STRING, isOptional = false))
+            // compare equal to the real product's expected shape.
+            val expected = expectedShape("product", resolvedEntities, definedTypes)
+            val mutatedActual = expected + ("fabricatedField" to AttrCategory.PRIMITIVE_STRING)
             (expected == mutatedActual) shouldBe false
         }
 
@@ -110,144 +124,40 @@ class Ap242CoreSchemaConsistencyTest :
         }
     })
 
-/** One attribute's shape, name-independent -- paired with a name in the maps below. */
-private data class AttrShape(
-    val category: AttrCategory,
-    val isOptional: Boolean,
-)
-
 private enum class AttrCategory { PRIMITIVE_STRING, ENTITY_REF, AGGREGATION }
 
-/**
- * Every divergence this wave accepts between `kstep-core`'s hand-authored shape and the real
- * AP242 excerpt, keyed by EXPRESS entity name + EXPRESS attribute name (not the Kotlin property
- * name, so entries read directly against `ap242-v1-entities.exp`). Each carries a human-readable
- * [AcceptedDivergence.reason] so the allowlist doubles as the consolidated divergence inventory
- * -- see the README Roadmap "codegen reconciliation" entry for the long-form version of the same
- * inventory.
- */
+/** Kept as a documented, currently-empty extension point — see the class KDoc's final paragraph. */
 private sealed interface AcceptedDivergence {
     val entity: String
     val attribute: String
     val reason: String
-
-    /** Real attribute is an [AttrCategory.ENTITY_REF]; `kstep-core` models it as a bare String. */
-    data class SimplifiedEntityRefToString(
-        override val entity: String,
-        override val attribute: String,
-        override val reason: String,
-    ) : AcceptedDivergence
-
-    /** Present in `kstep-core`'s constructor, absent from the real schema entirely. */
-    data class InventedAttribute(
-        override val entity: String,
-        override val attribute: String,
-        val kotlinName: String,
-        val category: AttrCategory,
-        val isOptional: Boolean,
-        override val reason: String,
-    ) : AcceptedDivergence
-
-    /** Present in the real schema, absent from `kstep-core`'s constructor entirely. */
-    data class OmittedAttribute(
-        override val entity: String,
-        override val attribute: String,
-        override val reason: String,
-    ) : AcceptedDivergence
-
-    /** Real attribute is `OPTIONAL`; `kstep-core` models it as non-nullable. */
-    data class OptionalityNarrowed(
-        override val entity: String,
-        override val attribute: String,
-        override val reason: String,
-    ) : AcceptedDivergence
-
-    /**
-     * The pervasive `kstep-core` convention: a real `OPTIONAL text`/`label` modeled as a
-     * non-null `String` defaulting to `""`, rather than a nullable `String?`. Kept distinct from
-     * [OptionalityNarrowed] (same shape effect) purely so this very common, uniform pattern is
-     * documented once as a named convention instead of repeating as undifferentiated noise.
-     */
-    data class OptionalStringAsEmptyDefault(
-        override val entity: String,
-        override val attribute: String,
-        override val reason: String,
-    ) : AcceptedDivergence
 }
 
-private val ACCEPTED_DIVERGENCES: List<AcceptedDivergence> =
-    listOf(
-        AcceptedDivergence.SimplifiedEntityRefToString(
-            entity = "approval",
-            attribute = "status",
-            reason = "real 'status' is entity-typed (approval_status); kstep-core models it as String",
-        ),
-        AcceptedDivergence.InventedAttribute(
-            entity = "approval",
-            attribute = "authorized_by",
-            kotlinName = "authorizedBy",
-            category = AttrCategory.ENTITY_REF,
-            isOptional = false,
-            reason =
-                "kSTEP-invented convenience linkage to person_and_organization, carried over from the " +
-                    "ap242-subset.exp parser/codegen test fixture; not present on the real AP242 'approval' " +
-                    "at all. Scheduled for removal together with entity-typed 'status' modeling -- see README " +
-                    "Roadmap 'codegen reconciliation' entry (removing it alone would mint a third, " +
-                    "still-incoherent shape).",
-        ),
-        AcceptedDivergence.SimplifiedEntityRefToString(
-            entity = "person_and_organization",
-            attribute = "the_person",
-            reason = "real 'the_person' is entity-typed (person); kstep-core models it as String",
-        ),
-        AcceptedDivergence.SimplifiedEntityRefToString(
-            entity = "person_and_organization",
-            attribute = "the_organization",
-            reason = "real 'the_organization' is entity-typed (organization); kstep-core models it as String",
-        ),
-        AcceptedDivergence.OmittedAttribute(
-            entity = "product",
-            attribute = "frame_of_reference",
-            reason =
-                "real 'product' has a mandatory SET [1:?] OF product_context; kstep-core has no " +
-                    "aggregation-of-entity attribute support yet",
-        ),
-        AcceptedDivergence.OptionalStringAsEmptyDefault(
-            entity = "product",
-            attribute = "description",
-            reason = "OPTIONAL text modeled as non-null String defaulting to \"\"",
-        ),
-        AcceptedDivergence.OmittedAttribute(
-            entity = "product_definition",
-            attribute = "frame_of_reference",
-            reason =
-                "real 'product_definition' has a mandatory product_definition_context reference; " +
-                    "kstep-core omits it",
-        ),
-        AcceptedDivergence.OptionalStringAsEmptyDefault(
-            entity = "product_definition",
-            attribute = "description",
-            reason = "OPTIONAL text modeled as non-null String defaulting to \"\"",
-        ),
-        AcceptedDivergence.OptionalStringAsEmptyDefault(
-            entity = "product_definition_formation",
-            attribute = "description",
-            reason = "OPTIONAL text modeled as non-null String defaulting to \"\"",
-        ),
-        AcceptedDivergence.OmittedAttribute(
-            entity = "next_assembly_usage_occurrence",
-            attribute = "description",
-            reason =
-                "real flattened shape inherits an OPTIONAL text 'description' from " +
-                    "product_definition_relationship; kstep-core omits it",
-        ),
-        AcceptedDivergence.OptionalityNarrowed(
-            entity = "next_assembly_usage_occurrence",
-            attribute = "reference_designator",
-            reason =
-                "real inherited 'reference_designator' (assembly_component_usage) is OPTIONAL identifier; " +
-                    "kstep-core models it as non-null String defaulting to \"\"",
-        ),
+private val ACCEPTED_DIVERGENCES: List<AcceptedDivergence> = emptyList()
+
+/** One entity's (Builder class, top-level builder function) pair, reflected below. */
+private data class EntityWrapper(
+    val builderClass: KClass<*>,
+    val builderFunction: KFunction<*>,
+)
+
+private val ENTITY_WRAPPERS: Map<String, EntityWrapper> =
+    mapOf(
+        "application_context" to EntityWrapper(ApplicationContextBuilder::class, ::applicationContext),
+        "product_context" to EntityWrapper(ProductContextBuilder::class, ::productContext),
+        "product_definition_context" to
+            EntityWrapper(ProductDefinitionContextBuilder::class, ::productDefinitionContext),
+        "approval_status" to EntityWrapper(ApprovalStatusBuilder::class, ::approvalStatus),
+        "person" to EntityWrapper(PersonBuilder::class, ::person),
+        "organization" to EntityWrapper(OrganizationBuilder::class, ::organization),
+        "product" to EntityWrapper(ProductBuilder::class, ::product),
+        "product_definition_formation" to
+            EntityWrapper(ProductDefinitionFormationBuilder::class, ::productDefinitionFormation),
+        "product_definition" to EntityWrapper(ProductDefinitionBuilder::class, ::productDefinition),
+        "next_assembly_usage_occurrence" to
+            EntityWrapper(NextAssemblyUsageOccurrenceBuilder::class, ::nextAssemblyUsageOccurrence),
+        "approval" to EntityWrapper(ApprovalBuilder::class, ::approval),
+        "person_and_organization" to EntityWrapper(PersonAndOrganizationBuilder::class, ::personAndOrganization),
     )
 
 /** Classifies a real [ExpressType] into the coarse category this drift test compares on. */
@@ -276,101 +186,60 @@ private fun realCategoryOf(
                 "Ap242CoreSchemaConsistencyTest: real AP242 excerpt now uses a type category ('$type') this " +
                     "drift test does not yet classify -- extend realCategoryOf before trusting the comparison " +
                     "again (this usually means ap242-v1-entities.exp grew a non-STRING primitive attribute " +
-                    "on one of the six V1 entities)",
+                    "on one of the twelve entities)",
             )
     }
 
-/** Classifies a `kstep-core` reflected [KType] into the same coarse category. */
+/** Classifies a `kstep-core` reflected [KType] (builder parameter or property) into the same coarse category. */
 private fun actualCategoryOf(kType: KType): AttrCategory {
     val classifier = kType.classifier
     return when {
         classifier == String::class -> AttrCategory.PRIMITIVE_STRING
         classifier == List::class || classifier == Set::class -> AttrCategory.AGGREGATION
-        classifier is KClass<*> && classifier.qualifiedName?.startsWith("dev.kstep.core.ap242.") == true ->
+        classifier is KClass<*> && classifier.qualifiedName?.startsWith("dev.kstep.generated.ap242v1.") == true ->
             AttrCategory.ENTITY_REF
         else ->
             error(
-                "Ap242CoreSchemaConsistencyTest: kstep-core attribute type '$kType' is not classified by " +
+                "Ap242CoreSchemaConsistencyTest: kstep-core wrapper type '$kType' is not classified by " +
                     "actualCategoryOf -- extend it before trusting the comparison again",
             )
     }
 }
 
-/**
- * The real shape for [entityName], derived live from [resolvedEntities] (already-flattened
- * SUBTYPE OF attributes, see [InheritanceResolver]), transformed by [ACCEPTED_DIVERGENCES] into
- * the shape `kstep-core` is expected to actually have. Keyed by Kotlin property name (matching
- * [actualShape]'s keys) via [NamingConventions.toPropertyName] -- the same converter
- * `ExpressKotlinCodeGenerator` itself uses, so a hand-authored name that ever disagreed with the
- * converter would surface here as an unexpected-omission + unexpected-extra pair, not a silent
- * false negative.
- */
+/** The real, expected shape for [entityName]: Kotlin property name -> coarse category, no allowlist transform. */
 private fun expectedShape(
     entityName: String,
     resolvedEntities: Map<String, ResolvedEntity>,
     definedTypes: Map<String, ExpressDefinedType>,
-): Map<String, AttrShape> {
+): Map<String, AttrCategory> {
     val resolved =
         requireNotNull(resolvedEntities[entityName]) {
-            "Ap242CoreSchemaConsistencyTest: no resolved entity '$entityName' -- check TARGET_ENTITY_NAMES / " +
+            "Ap242CoreSchemaConsistencyTest: no resolved entity '$entityName' -- check ENTITY_WRAPPERS / " +
                 "ap242-v1-entities.exp are still in sync"
         }
-    val divergencesForEntity = ACCEPTED_DIVERGENCES.filter { it.entity == entityName }
-    val omitted = divergencesForEntity.filterIsInstance<AcceptedDivergence.OmittedAttribute>().map { it.attribute }
-    val simplified =
-        divergencesForEntity.filterIsInstance<AcceptedDivergence.SimplifiedEntityRefToString>().map { it.attribute }
-    val narrowed =
-        (
-            divergencesForEntity.filterIsInstance<AcceptedDivergence.OptionalityNarrowed>() +
-                divergencesForEntity.filterIsInstance<AcceptedDivergence.OptionalStringAsEmptyDefault>()
-        ).map { it.attribute }
-    val invented = divergencesForEntity.filterIsInstance<AcceptedDivergence.InventedAttribute>()
-
-    val result = mutableMapOf<String, AttrShape>()
-    resolved.flattenedAttributes.forEach { resolvedAttribute ->
+    return resolved.flattenedAttributes.associate { resolvedAttribute ->
         val attribute = resolvedAttribute.attribute
-        if (attribute.name in omitted) return@forEach
-
-        var category = realCategoryOf(attribute.declaredType, definedTypes)
-        if (attribute.name in simplified) {
-            require(category == AttrCategory.ENTITY_REF) {
-                "Ap242CoreSchemaConsistencyTest: allowlist claims '$entityName.${attribute.name}' is a " +
-                    "SimplifiedEntityRefToString divergence, but its real category is $category, not " +
-                    "ENTITY_REF -- the allowlist is stale, update it"
-            }
-            category = AttrCategory.PRIMITIVE_STRING
-        }
-
-        var isOptional = attribute.isOptional
-        if (attribute.name in narrowed) {
-            require(isOptional) {
-                "Ap242CoreSchemaConsistencyTest: allowlist claims '$entityName.${attribute.name}' narrows " +
-                    "optionality, but the real attribute is already non-OPTIONAL -- the allowlist is stale, " +
-                    "update it"
-            }
-            isOptional = false
-        }
-
         val kotlinName = NamingConventions.toPropertyName(attribute.name)
-        result[kotlinName] = AttrShape(category, isOptional)
+        kotlinName to realCategoryOf(attribute.declaredType, definedTypes)
     }
-    invented.forEach { divergence ->
-        result[divergence.kotlinName] = AttrShape(divergence.category, divergence.isOptional)
-    }
-    return result
 }
 
-/** `kstep-core`'s actual shape for [kClass], read from its primary constructor via reflection. */
-private fun actualShape(kClass: KClass<*>): Map<String, AttrShape> {
-    val constructor =
-        requireNotNull(kClass.primaryConstructor) {
-            "Ap242CoreSchemaConsistencyTest: ${kClass.qualifiedName} has no primary constructor"
-        }
-    return constructor.parameters.associate { parameter ->
-        val name =
-            requireNotNull(parameter.name) {
-                "Ap242CoreSchemaConsistencyTest: ${kClass.qualifiedName} has an unnamed constructor parameter"
-            }
-        name to AttrShape(actualCategoryOf(parameter.type), parameter.type.isMarkedNullable)
-    }
+/**
+ * `kstep-core`'s actual exposed attribute set for [wrapper]: every positional (non-`block`)
+ * parameter of the builder function, plus every mutable property of the Builder class — the
+ * union is exactly what a script author can set before calling `.getOrThrow()`/pattern-matching
+ * the [dev.kstep.core.ValidationResult].
+ */
+private fun actualShape(wrapper: EntityWrapper): Map<String, AttrCategory> {
+    val identityParams =
+        wrapper.builderFunction.parameters
+            .filter { it.name != null && it.name != "block" }
+            .associate { requireNotNull(it.name) to actualCategoryOf(it.type) }
+
+    val mutableProperties =
+        wrapper.builderClass.memberProperties
+            .filterIsInstance<KMutableProperty1<Any, *>>()
+            .associate { it.name to actualCategoryOf(it.returnType) }
+
+    return identityParams + mutableProperties
 }

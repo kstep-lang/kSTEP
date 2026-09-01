@@ -4,40 +4,28 @@ import dev.kstep.core.ValidationResult
 import dev.kstep.express.validation.WhereRuleSpec
 import dev.kstep.express.validation.WhereRuleValidator
 import dev.kstep.express.validation.WhereRuleValue
+import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.generated.ap242v1.ProductDefinitionContext
+import dev.kstep.generated.ap242v1.ProductDefinitionFormation
 
 private const val ENTITY_NAME = "product_definition"
-private val WHERE_RULES = listOf(WhereRuleSpec(label = "wr1", expressionText = "SELF.id <> ''"))
+
+// `kstep_wr1`, NOT a real AP242 WR1 — see Product.kt's equivalent doc note. The real WR1
+// (`SIZEOF(USEDIN(...)) <= 1`) stays outside the supported WHERE-expression subset.
+private val WHERE_RULES = listOf(WhereRuleSpec(label = "kstep_wr1", expressionText = "SELF.id <> ''"))
 
 /**
- * `dev.kstep.express` AP242-subset `product_definition` entity — `id`/`description`/`STRING`,
- * `formation`/`product_definition_formation`.
- *
- * **Honesty note (M2 Welle 8 — codegen reconciliation):** the real AP242 `product_definition`
- * (`ap242-v1-entities.exp` lines 142–152) also declares a mandatory
- * `frame_of_reference : product_definition_context`, which `kstep-core` **omits entirely**, plus
- * a `DERIVE name : label` this class does not surface (derived attributes have no `kstep-core`
- * representation at all yet, an unrelated, broader gap). `description` follows the pervasive
- * "`OPTIONAL text` as empty-default `String`" convention (see [Product]'s equivalent note) rather
- * than a nullable `String?`. `wr1: SELF.id <> ''` is a **synthesized** ergonomic WHERE rule — the
- * real rule (`WR1: SIZEOF(USEDIN(...)) <= 1`) is outside the supported WHERE-expression subset.
- * All pinned by `dev.kstep.tests.Ap242CoreSchemaConsistencyTest`; see the README's Roadmap
- * "codegen reconciliation" entry for the full deferral rationale.
- *
- * The constructor is `internal` — see [Product]'s equivalent doc note for why: only the
- * [productDefinition] builder function may produce an instance, so it always passes through
- * WHERE-rule and missing-reference validation first. `@ConsistentCopyVisibility` keeps the
- * generated `copy()` `internal` too.
+ * Ergonomic wrapper over the codegen-generated [ProductDefinition] (kSTEP M2 Welle 10 — see
+ * [Product]'s equivalent doc note). `id` is mandatory; `description` is genuinely `OPTIONAL
+ * text`. `formation : product_definition_formation` and `frame_of_reference :
+ * product_definition_context` are both mandatory single references (not aggregations, unlike
+ * [Product.frameOfReference]) — a still-`null` value for either is
+ * [dev.kstep.core.DslViolationCodes.MISSING_MANDATORY_REFERENCE].
  */
-@ConsistentCopyVisibility
-data class ProductDefinition internal constructor(
-    val id: String,
-    val description: String,
-    val formation: ProductDefinitionFormation,
-)
-
 class ProductDefinitionBuilder internal constructor() {
-    var description: String = ""
+    var description: String? = null
     var formation: ProductDefinitionFormation? = null
+    var frameOfReference: ProductDefinitionContext? = null
 }
 
 fun productDefinition(
@@ -49,19 +37,25 @@ fun productDefinition(
     val structuralViolations =
         buildList {
             if (builder.formation == null) add(missingMandatoryReferenceViolation(ENTITY_NAME, "formation"))
+            if (builder.frameOfReference == null) {
+                add(missingMandatoryReferenceViolation(ENTITY_NAME, "frame_of_reference"))
+            }
         }
 
-    val attributeValues =
-        mapOf(
-            "id" to WhereRuleValue.StringValue(id),
-            "description" to WhereRuleValue.StringValue(builder.description),
-        )
+    val attributeValues = mapOf("id" to WhereRuleValue.StringValue(id))
     val whereRuleViolations =
         WhereRuleValidator.validate(ENTITY_NAME, WHERE_RULES, attributeValues).map { it.toDslViolation() }
 
     val violations = structuralViolations + whereRuleViolations
     return if (violations.isEmpty()) {
-        ValidationResult.Valid(ProductDefinition(id, builder.description, builder.formation!!))
+        ValidationResult.Valid(
+            ProductDefinition(
+                id = id,
+                description = builder.description,
+                formation = builder.formation!!,
+                frameOfReference = builder.frameOfReference!!,
+            ),
+        )
     } else {
         ValidationResult.Invalid(violations)
     }

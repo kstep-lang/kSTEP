@@ -13,4 +13,7 @@ internal sealed interface Part21Value {
     data class ListValue(
         val items: List<Part21Value>,
     ) : Part21Value
+
+    /** The Part-21 `$` token — an explicitly-unset value for an OPTIONAL attribute position. */
+    data object Unset : Part21Value
 }

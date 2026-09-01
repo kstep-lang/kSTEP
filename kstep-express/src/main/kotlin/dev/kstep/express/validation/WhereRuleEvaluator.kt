@@ -67,11 +67,30 @@ object WhereRuleEvaluator {
                 val operand = requireBoolean(evaluateValue(expression.operand, attributeValues, depth + 1))
                 WhereRuleValue.BooleanValue(!operand)
             }
-            is WhereRuleExpression.SelfAttribute ->
-                attributeValues[expression.name]
-                    ?: throw WhereRuleEvaluationException(
-                        "attribute '${expression.name}' referenced by SELF is not present in the supplied value bag",
+            is WhereRuleExpression.SelfAttribute -> {
+                val value =
+                    attributeValues[expression.name]
+                        ?: throw WhereRuleEvaluationException(
+                            "attribute '${expression.name}' referenced by SELF is not present in the supplied value bag",
+                        )
+                if (value is WhereRuleValue.Unset) {
+                    throw WhereRuleEvaluationException(
+                        "attribute '${expression.name}' is Unset (an EXPRESS-optional attribute that was never " +
+                            "set) and cannot be used directly in a WHERE-rule expression — only " +
+                            "EXISTS(${expression.name}) may reference an Unset attribute",
                     )
+                }
+                value
+            }
+            is WhereRuleExpression.Exists -> {
+                val value =
+                    attributeValues[expression.attribute]
+                        ?: throw WhereRuleEvaluationException(
+                            "attribute '${expression.attribute}' referenced by EXISTS() is not present in the " +
+                                "supplied value bag",
+                        )
+                WhereRuleValue.BooleanValue(value !is WhereRuleValue.Unset)
+            }
             is WhereRuleExpression.StringLiteral -> WhereRuleValue.StringValue(expression.value)
             is WhereRuleExpression.IntegerLiteral -> WhereRuleValue.IntegerValue(expression.value)
             is WhereRuleExpression.RealLiteral -> WhereRuleValue.RealValue(expression.value)
