@@ -1,11 +1,11 @@
-package dev.kstep.viewer.mesh
+package dev.kstep.render.mesh
 
 import kotlin.math.sqrt
 
 /**
  * A plain 3D vector. `internal`: this package's public surface is [IsometricProjection] and
- * [ProjectedTriangle] only -- see [dev.kstep.viewer.mesh]'s package-boundary test
- * (`MeshPackageComposeBoundaryTest`) in `kstep-viewer`'s test source set.
+ * [ProjectedTriangle] only -- see [dev.kstep.render.mesh]'s package-boundary test
+ * (`MeshPackageComposeBoundaryTest`) in `kstep-render`'s test source set.
  */
 internal data class Vec3(
     val x: Double,

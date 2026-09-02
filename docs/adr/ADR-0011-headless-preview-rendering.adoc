@@ -1,0 +1,432 @@
+= ADR-0011: Headless preview rendering (`kstep render`)
+:toc:
+
+== Status
+
+Accepted, implemented. Adds `kstep render <script.kstep.kts>`: a headless
+SVG/PNG/text preview of a `*.kstep.kts` script, with no window, no display
+server, and no Compose Desktop dependency anywhere on `kstep-cli`'s
+classpath. Camera configurability, multi-shape scene composition, PDF/TikZ
+output, and editor integrations (Obsidian/Asciidoctor) are all deliberately
+deferred -- see Folge-Wellen below.
+
+== Context
+
+ADR-0010 (Viewer-Welle 1) gave kSTEP a way to *look at* a shape -- but only
+interactively, in a Compose Desktop window. That is useless for the two
+places kSTEP's own documentation and vault conventions actually need a
+rendered diagram: an Obsidian note (`obsidian-kuml`'s pattern: run a CLI,
+capture an SVG, embed it) and an Asciidoctor `[kuml]`-macro-style build
+step. Both need a CLI command that writes a file and exits -- no window,
+no event loop.
+
+`kstep-script`'s `KStepModel` also had no channel for geometry at all: a
+script could build an `OcctShape` via `OcctKernel`, but nothing let it
+register that shape on the object the script returns. Without that,
+"does this script contain geometry" is not even a decidable question.
+
+=== The two rules everything else follows from
+
+**Container-Regel**: the requested/resolved output *format* is always
+honored. What varies is the *content* painted into it: a real isometric
+render when geometry is present and renderable, or the identical
+text/validation summary otherwise -- rendered into the SAME container
+(an SVG text card, a PNG text card, or a `.txt` file), never silently
+switched to a different file type. This is what lets a tool like
+`obsidian-kuml`'s renderer assume "I asked for `.svg`, `svg.includes("<svg")`
+will be true" unconditionally.
+
+**Geometry-detection definition**: a script "contains geometry" iff its
+`KStepModel.shapes` (a new field, populated only via the new `shape(...)`
+builder function) is non-empty. Registering a shape via `shape(...)` is
+deliberately independent of `root(...)`: `kstep-core`'s twelve AP242 V1/
+support entity types have no geometric member today, so a `ShapeAssignment`
+can never legitimately end up in `roots` -- and `kstep export`'s
+`Part21Writer.write` behavior is therefore completely unchanged by a script
+that also calls `shape(...)`.
+
+== Decision
+
+=== New module: `kstep-render`
+
+`kstep-viewer`'s mesh/rasterizer code cannot be reused by `kstep-cli`
+as-is: `kstep-viewer` depends on `compose.desktop.currentOs` via
+`implementation` (Gradle's runtime-transitive default), and
+`KStepScriptCompilationConfiguration` uses
+`dependenciesFromCurrentContext(wholeClasspath = true)` -- every jar on
+`kstep-cli`'s runtime classpath also becomes visible inside every
+`*.kstep.kts` script's compile classpath. Depending on `kstep-viewer` from
+`kstep-cli` would therefore drag Compose/Skiko (tens of MB) into every
+`kstep export`/`kstep render` invocation's script-compile step, silently,
+via a dependency edge nothing about "rendering a static SVG" implies.
+
+So `dev.kstep.viewer.mesh` (three files: `Vec3`, `ProjectedTriangle`,
+`IsometricProjection`) moved into a new module, `kstep-render`, renamed to
+`dev.kstep.render.mesh` -- package and module name match, as everywhere
+else in this repo. `kstep-render` depends only on `kstep-geometry`
+(`api`, since `TriangleMesh` appears in `IsometricProjection.project`'s
+signature) plus `kotlin-logging-jvm`. No Compose, no new external
+dependency at all -- verified with
+`./gradlew :kstep-cli:dependencies --configuration runtimeClasspath | grep -iE "skiko|compose|androidx"`
+(empty output).
+
+`kstep-viewer`'s former test-only `internal object TriangleRasterizer`
+(plain AWT `Graphics2D`, no Compose) was promoted into `kstep-render`'s
+`main` source set as a public `dev.kstep.render.image.TriangleRasterizer`
+-- the SAME rasterizer `kstep-viewer`'s own former tests used, now shared
+with `kstep render --format png` instead of duplicated.
+
+`kstep-viewer` now depends on `kstep-render` and imports
+`dev.kstep.render.mesh.IsometricProjection` from there; its own `mesh`
+package, `TriangleRasterizer` test copy, and the tests that lived
+alongside them (`ViewerRasterTest`, `ViewerOcctPipelineTest`,
+`IsometricProjectionTest`, `MeshPackageComposeBoundaryTest`) all moved into
+`kstep-render` too -- content unchanged beyond the package name (see
+Stolperfallen for the one regression this move risked).
+
+=== New writers: `TriangleSvgWriter`, `TextCardRenderer`, `SvgEscaping`
+
+Two new renderer pairs, both consuming/producing exactly the types the
+existing pipeline already has:
+
+* `dev.kstep.render.svg.TriangleSvgWriter` -- `List<ProjectedTriangle> ->`
+  a deterministic, self-contained SVG document (no timestamp, coordinates
+  rounded to 2 decimals, so two renders of the same input are
+  byte-identical). Paints triangles in **input order** -- it does not
+  re-sort; `IsometricProjection.project` already returns them
+  painter's-algorithm-ordered, and re-sorting here would reverse that
+  (see ADR-0010's Stolperfalle 15, which applies identically here). Each
+  polygon gets a same-colored fill *and* a 1px stroke, mirroring
+  `TriangleRasterizer`'s identical antialiasing-seam fix (ADR-0010
+  Stolperfalle 14).
+* `dev.kstep.render.text.TextCardRenderer` -- `List<String> ->` either an
+  SVG or a `BufferedImage` "text card": the ONE renderer both the
+  "summary" (no geometry) and "notice" (geometry present but not
+  renderable this run) content types share, so a script without geometry
+  and a script whose geometry fell back to text both land in the
+  identical visual container family as a real geometry render, satisfying
+  the Container-Regel. Truncates at `RenderLimits.MAX_CARD_LINES`/
+  `MAX_CARD_LINE_CHARS` (a DoS guard on generated file size, see
+  Security).
+* `dev.kstep.render.svg.SvgEscaping` (`internal`) -- escapes
+  `& < > " '`, drops other ASCII control characters, replaces non-ASCII
+  with `?`. Every interpolated string this module emits (file names,
+  entity/violation text, exception messages -- **never** a script's raw
+  source code) goes through this first. See Security.
+
+`dev.kstep.render.RenderLimits` centralizes the size/DoS bounds
+(`MIN_DIMENSION_PX`/`MAX_DIMENSION_PX` = 16/4096,
+`MAX_TOTAL_PIXELS` = 8,000,000, card-text caps) so `kstep-cli` and this
+module's own writers validate against the same numbers.
+
+=== `KStepModel.shapes` / `shape(...)`
+
+```kotlin
+data class KStepModel(
+    val header: Part21Header,
+    val roots: List<Any>,
+    val violations: List<DslViolation>,
+    val shapes: List<ShapeAssignment> = emptyList(),   // NEW, additive, defaulted
+) {
+    val isValid: Boolean get() = violations.isEmpty()
+    val hasGeometry: Boolean get() = shapes.isNotEmpty()
+}
+```
+
+`KStepModelBuilder` gains `fun shape(assignment: ShapeAssignment)` and a
+convenience `fun shape(productDefinition: ProductDefinition, shape:
+OcctShape, shapeName: String = "")`. `kstep-script` now depends on
+`kstep-shape` (`api`, for the same "must be visible inside a script's
+compile classpath" reason `kstep-core`/`kstep-step21` already are), which
+transitively brings `kstep-geometry` along too -- so `defaultImports` grew
+`dev.kstep.geometry.*` and `dev.kstep.shape.*`, and a script can call
+`OcctKernel.makeBox(...)` and `shape(definition, box)` with no explicit
+import, exactly like the twelve AP242 builder functions already work.
+
+`kstep export` is deliberately **not** changed to merge registered shapes
+into the exported Part-21 file this wave -- `Part21Writer` has no entity
+type for geometry, and wiring `Ap242ShapeExporter` in is Folge-Welle R-1's
+job, not this one's. Instead, `writeExport` now warns on stderr and adds
+`"shapeCount"` to the `--output json` success document whenever
+`model.shapes` is non-empty, so a script author sees the geometry was
+*not* silently dropped, without `export`'s existing output contract
+changing shape for the (today: 100%) of scripts that carry no geometry.
+
+=== `kstep render` CLI surface
+
+```
+kstep render <script.kstep.kts> [options]
+
+  -f, --format <auto|svg|png|text>  Preview container (default: auto)
+  -o, --out <file>                  Output path (default: derived from the script name)
+  -w, --width <px>                  Image width, 16..4096 (default: 1024)
+      --height <px>                 Image height, 16..4096 (default: 768)
+      --with-step                   Include the Part-21 text in the preview
+      --require-geometry            Fail (exit 1) instead of silently falling back to text
+      --output json                 Emit the result as a JSON document instead of text
+```
+
+Hand-rolled flag loop, matching `resolveExportCommand`'s existing style
+(no argument-parsing library) -- any malformed combination resolves to
+`ShowUsage(1)`, never a partially-filled `CliCommand.Render`.
+
+`--format auto` resolves, in order: (1) an explicit `--format` other than
+`auto`; (2) the extension of an explicit `--out` (`.svg`/`.png`/`.txt`);
+(3) content-driven -- `svg` if a real geometry render succeeded, `text`
+otherwise. Because this can only be decided *after* the script has been
+evaluated (and, for geometry, after triangulation has been attempted), the
+output file is never created/truncated before that point.
+
+=== Content/exit-code matrix
+
+[cols="3,1,1,1", options="header"]
+|===
+| Case | `content` | Exit | File written
+
+| Product-structure-only script (no `shape(...)` calls)
+| `summary`
+| 0
+| yes
+
+| Geometry present, OCCT available, triangulation succeeds
+| `geometry`
+| 0
+| yes
+
+| Script threw `OcctUnavailableException` (OCCT missing, thrown from
+  `OcctKernel.makeBox`/etc. *before* `stepFile` ever ran)
+| `notice`
+| 0 (1 with `--require-geometry`)
+| yes
+
+| Geometry present, but `triangulate()` throws (OCCT unavailable at that
+  point, the shape was already closed by the script, or a genuine OCCT
+  geometry failure)
+| `notice`
+| 0 (1 with `--require-geometry`)
+| yes
+
+| Validation failure / compile error / other script `RuntimeError`
+| --
+| 1
+| no
+|===
+
+The first "geometry present" row above and the `notice` rows might look
+like they overlap, but they are two structurally different failure points
+(see the finding below) and both must degrade the same way.
+
+=== Finding: two distinct "OCCT is unavailable" cases
+
+A script that calls `OcctKernel.makeBox(...)` **eagerly** (every fixture
+in this wave does, matching the natural way to write such a script) needs
+OCCT to construct the `OcctShape` at all -- `makeBox` itself throws
+`OcctUnavailableException` immediately if the native bridge is missing,
+*before* `stepFile { ... }` ever runs, so `KStepScriptHost` never produces
+a `KStepModel` in the first place; it maps straight to
+`KStepScriptOutcome.RuntimeError` with
+`exceptionClass = "dev.kstep.geometry.OcctUnavailableException"`.
+
+This is NOT the same failure point as "a `KStepModel` exists, it has
+`shapes`, but `OcctShape.triangulate()` fails" (covered by `resolveContent`'s
+own `try`/`catch` around the triangulate call). `RenderCommand.kt`
+therefore special-cases exactly this one `exceptionClass` in `runRender`'s
+top-level `when`, routing it to the identical Notice-fallback path
+(`PreviewSummary.noticeLines` with `model = null` -- the one place a
+`Notice` legitimately has no backing model) instead of `kstep export`'s
+generic error rendering. Every other `RuntimeError` still goes through the
+unchanged, shared `printExportError` path. A script that wants to run
+cleanly on a machine without OCCT and still produce a `summary` (not a
+`notice`) instead should self-guard:
+`if (OcctKernel.availability() is OcctAvailability.Available) shape(...)`
+-- see `hello-box-guarded.kstep.kts`.
+
+=== Fixtures
+
+`kstep-tests/src/test/resources/`:
+
+* `hello-box.kstep.kts` -- eager `OcctKernel.makeBox`, the primary
+  geometry-preview fixture.
+* `hello-box-guarded.kstep.kts` -- the self-guarded/portable pattern above.
+* `hello-box-closed.kstep.kts` -- registers a shape the script already
+  closed itself (`box.close()` before `shape(...)`), exercising the
+  `shape_closed_by_script` fallback reason.
+
+== Security
+
+[cols="2,3,2", options="header"]
+|===
+| Category | Measure | Verified by
+
+| SVG/XML injection
+| Every interpolated string (file name, violation text, exception
+  message -- never a script's own source) passes through `SvgEscaping`
+  first. A script's `name`/`description` field values ARE attacker-
+  reachable text and are escaped like everything else.
+| `SvgEscapingTest`, `CliRenderIntegrationTest`'s injection case
+  (`</text><script>alert(1)</script>` embedded in a product name)
+
+| DoS -- image size
+| `--width`/`--height` bounded to
+  [`RenderLimits.MIN_DIMENSION_PX`, `MAX_DIMENSION_PX`] = [16, 4096]
+  *and* `width * height <= RenderLimits.MAX_TOTAL_PIXELS` (8,000,000,
+  ~32 MB raster buffer) -- checked before any allocation.
+| `CliRenderIntegrationTest`'s out-of-range-width case
+
+| DoS -- triangle count
+| Already bounded natively by `OcctKernel.MAX_TRIANGLES` (130,000, see
+  ADR-0010); this wave adds no new unbounded path.
+| Inherited, not re-verified here
+
+| DoS -- text volume
+| Entity listing capped at 200 rows
+  (`PreviewSummary`'s `MAX_ENTITY_LINES`); text-card lines capped at
+  `RenderLimits.MAX_CARD_LINES`/`MAX_CARD_LINE_CHARS`.
+| `PreviewSummaryTest`'s 100-part-pair case, `TextCardRendererTest`
+
+| Resource leak
+| `RenderCommand.kt`'s `renderSuccess` closes every `model.shapes[i].shape`
+  on every path out of it (`runCatching`, so a close failure never masks
+  the command's real exit code) -- a plain `finally` for the normal-return
+  path, plus an explicit call right before each of `finishRender`'s two
+  `exitProcess(1)` failure paths, since `System.exit` halts the JVM
+  without unwinding the stack to run a `finally` further up it.
+  `OcctShape`'s `Cleaner` (ADR-0005) remains the safety net, not the
+  primary path.
+| Review
+
+| No new native code
+| This wave does not touch `kstep_occt_bridge.cpp` -- no new JNI surface.
+| Diff review
+
+| Supply chain
+| Zero new external dependencies; `gradle/libs.versions.toml` unchanged.
+  ImageIO/AWT/`javax.xml` are JDK-bundled.
+| Diff review
+
+| Trust boundary unchanged
+| `*.kstep.kts` remains trusted, locally-invoked Kotlin
+  (`wholeClasspath = true`, no sandbox -- see `KStepScriptHost`'s own
+  KDoc). `render` adds a second OUTPUT form of the same trusted
+  evaluation; it does not widen what code is allowed to run.
+| Inherited from `KStepScriptHost`
+|===
+
+== Stolperfallen
+
+1. **Compose leaking into the CLI's script-compile classpath.** `implementation`
+   is runtime-transitive, and `wholeClasspath = true` forwards every
+   runtime jar into every script's own compile step. This is the entire
+   reason `kstep-render` exists as a separate module rather than
+   `kstep-cli` depending on `kstep-viewer` directly. Verified, not
+   assumed: `./gradlew :kstep-cli:dependencies --configuration
+   runtimeClasspath | grep -iE "skiko|compose|androidx"` -- empty.
+2. **`MeshPackageComposeBoundaryTest` scanning zero files after the
+   package move and staying trivially green.** Fixed by asserting
+   `kotlinFiles.size >= 3` before checking for Compose imports, not just
+   after the move -- an empty `File.walkTopDown()` result must fail loudly,
+   not pass by accident.
+3. **Two rasterizer copies drifting apart.** After promoting
+   `TriangleRasterizer` into `kstep-render`'s `main` source set, the old
+   `kstep-viewer/src/test/.../TriangleRasterizer.kt` copy and its two test
+   files were deleted outright, not left alongside the new one.
+4. **`java.awt.headless` set too late.** `kstep-cli`'s
+   `applicationDefaultJvmArgs` now includes `-Djava.awt.headless=true`
+   (alongside the existing `-XX:TieredStopAtLevel=1`), and test
+   subprocesses (`CliProcessRunner`) run via `java -cp ...` directly, which
+   does NOT go through the generated start script -- headless mode is not
+   needed for correctness here (no `GraphicsEnvironment` probing happens
+   for the plain `BufferedImage`/`Graphics2D` path this module uses), but
+   is set defensively anyway, matching `kstep-render`'s own test property.
+5. **kotlin-logging's one-time startup banner landing on STDOUT.**
+   `io.github.oshai:kotlin-logging-jvm` prints
+   `"kotlin-logging: initializing... active logger factory: ..."` via a
+   plain `System.out.println` inside `KotlinLogging`'s static initializer,
+   gated by `KotlinLoggingConfiguration.logStartupMessage` (default
+   `true`), the very first time ANY `KotlinLogging.logger{}` call anywhere
+   in the process actually resolves a logger. `kstep export`'s happy path
+   never triggered this (`KStepScriptHost`'s logger only fires on an
+   unexpected host failure) -- but `kstep render` does, on every
+   successful render, because `OcctNativeLibrary.load()` logs at INFO on
+   every native-bridge load. Left unfixed, this banner would have
+   corrupted `kstep render`'s single-line `Wrote <path>` stdout contract
+   (and any `--output json` document) with an extra leading line. Fixed
+   by setting `KotlinLoggingConfiguration.logStartupMessage = false` as
+   the literal first statement of `main()` -- it MUST run before anything
+   else in the process touches `KotlinLogging.logger{}`, so it cannot be
+   pushed later or scoped to just the `render` command.
+6. **Variable name shadowing inside a `*.kstep.kts` builder lambda.**
+   `val formation = productDefinitionFormation(...).getOrThrow()` followed
+   by `productDefinition(...) { formation = formation; ... }` inside the
+   SAME script silently self-assigns: unqualified `formation` on the
+   right-hand side resolves to the builder receiver's own `formation`
+   property (currently unset), not the outer local `val`, because the
+   lambda receiver's members shadow the enclosing scope for an unqualified
+   reference. The result is not a compile error -- it is a runtime
+   `KSTEP-M-001` ("required attribute 'formation' ... was never set"),
+   which surfaced as several confusing early test failures in this wave.
+   Every fixture and inline test script in this wave uses a distinct local
+   name (`prodFormation`) specifically to avoid this trap -- the existing
+   `hello-assembly.kstep.kts`/`CliExportIntegrationTest` fixtures already
+   did (`bracketFormation`), which is what eventually pointed at the fix.
+7. **Backface-culled triangle counts assumed from the wrong shape.** An
+   OCCT box triangulates to 12 total triangles (2 per face x 6 faces), and
+   the fixed isometric view direction always culls exactly half (3 of 6
+   faces face away from the viewer) -- 6 visible, not 12. An early draft
+   of this wave's tests asserted `>= 12` visible triangles/polygons for a
+   single-box render; fixed to `>= 6` (see `IsometricProjectionTest`'s
+   identical unit-cube assertion, unchanged since ADR-0010).
+8. **`AWT`'s `(shade * 255.0).toInt()` truncates, it does not round.**
+   `shade = 0.5` -> gray = 127 (`0x7f`), not 128 (`0x80`) -- an off-by-one
+   that only matters for tests asserting an exact hex color string
+   (`TriangleSvgWriterTest`), not for the rendered image's visual
+   correctness.
+
+== Folge-Wellen
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| R-1
+| `kstep export` actually merges registered geometry via
+  `Ap242ShapeExporter.export(header, assignment)`, replacing today's
+  stderr warning.
+
+| R-2
+| Camera configurability for the preview specifically: `--view
+  <iso\|front\|top\|right\|back\|left\|bottom>` / `--azimuth`/`--elevation`.
+  Requires parametrizing `IsometricProjection.VIEW_DIRECTION`/`UP` (today
+  fixed `internal val`s) and handling the `UP`-parallel-to-view-direction
+  degenerate case.
+
+| R-3
+| Multi-shape scenes: render every `model.shapes` entry together
+  (placement via `ITEM_DEFINED_TRANSFORMATION`), not just the first with
+  a warning.
+
+| R-4
+| Additional vector output formats (PDF, LaTeX/TikZ) built on
+  `TriangleSvgWriter`'s already-vector triangle list.
+
+| R-5
+| `obsidian-kstep` Obsidian plugin: a ` ```kstep ``` ` code-fence renderer,
+  subprocess-driven exactly like `obsidian-kuml`'s `KumlCliRenderer.ts`
+  (temp-in/temp-out, `--format svg`, `-o`, a timeout, stderr filtering).
+  This wave is what makes that a thin wrapper rather than a new design.
+
+| R-6
+| `kstep-asciidoc`: a `[kstep]` Asciidoctor macro, mirroring
+  `kuml-dev/kUML`'s `kuml-asciidoc` extension.
+
+| R-7
+| Robustness pass on `kstep export`: catch `IOException` on write and
+  report cleanly instead of a raw stack trace (a pre-existing gap this
+  wave did not introduce, noticed while building `render`'s equivalent
+  path).
+
+| R-8
+| Silhouette/edge overlay and smooth shading in the headless path too
+  (mirrors ADR-0010's V-3/V-4), plus a `--deflection` mesh-quality knob
+  (mirrors V-8).
+|===

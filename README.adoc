@@ -565,6 +565,28 @@ scan before either lands.
   not under `kstep-script` itself, matching this project's established
   single-shared-test-module convention (see Building below) — and double
   as the README usage examples below.
+* Headless preview rendering (see
+  `docs/adr/ADR-0011-headless-preview-rendering.adoc`): `kstep-cli`
+  gained `kstep render <script.kstep.kts> [-f svg|png|text] [-o <file>]
+  [-w <px>] [--height <px>] [--with-step] [--require-geometry] [--output
+  json]`, writing a headless SVG/PNG/text preview of a script with no
+  window and no display server. A new module, `kstep-render`, carries the
+  mesh/projection/rasterizer code Viewer-Welle 1 introduced (moved out of
+  `kstep-viewer`, which now depends on it) plus two new writers,
+  `TriangleSvgWriter` (a deterministic vector render) and
+  `TextCardRenderer` (the shared SVG/PNG text-card renderer both a
+  no-geometry script and a not-renderable-this-run script fall back
+  into) — all with zero Compose Multiplatform dependency, verified via
+  `./gradlew :kstep-cli:dependencies --configuration runtimeClasspath`.
+  `KStepModel` gained a `shapes: List<ShapeAssignment>` field and a
+  `shape(...)` builder function (`kstep-script` now depends on
+  `kstep-shape`), so a script can register an `OcctShape` for preview
+  independently of `root(...)` — `kstep export`'s `Part21Writer` output is
+  completely unaffected. Never a silently-swapped file type: the
+  requested/resolved container (SVG/PNG/`.txt`) is always honored, only
+  the content varies. See the ADR for the full content/exit-code matrix
+  and the two distinct "OCCT is unavailable" failure points this wave had
+  to fall back from cleanly.
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -758,27 +780,53 @@ See <<roadmap,Roadmap>> for what's planned next.
   the Part-21-level-merge-vs-XCAF decision, and the injection/DoS security
   analysis.
 
+| `kstep-render`
+| Headless, Compose-free mesh projection + SVG/PNG/text-card rendering --
+  headless-preview-rendering wave (`dev.kstep.render.mesh`/`.image`/`.svg`/
+  `.text`)
+| Working: `dev.kstep.render.mesh.IsometricProjection` (moved here from
+  `kstep-viewer`, package renamed to match) turns a `TriangleMesh` into a
+  backface-culled, flat-shaded, painter's-algorithm-sorted, canvas-fit
+  `List<ProjectedTriangle>` -- consumed identically by
+  `dev.kstep.render.image.TriangleRasterizer` (plain AWT, promoted from a
+  `kstep-viewer` test-only class), the new
+  `dev.kstep.render.svg.TriangleSvgWriter` (a deterministic, byte-
+  reproducible vector render -- same coordinates rounded to 2 decimals,
+  input order preserved, never re-sorted), and the new
+  `dev.kstep.render.text.TextCardRenderer` (renders a plain
+  `List<String>` as an SVG or `BufferedImage` "text card" -- the ONE
+  renderer both a no-geometry and a not-renderable-this-run `kstep
+  render` result share). `dev.kstep.render.svg.SvgEscaping` escapes every
+  interpolated string these writers emit. `RenderLimits` centralizes the
+  size/DoS bounds both this module's writers and `kstep-cli`'s `render`
+  command validate against. Zero Compose dependency (enforced by the same
+  automated package-boundary test `kstep-viewer` used to carry, now
+  covering this whole module) -- this is the entire reason the module
+  exists separately from `kstep-viewer`: `kstep-cli` depends on it
+  directly, and `KStepScriptCompilationConfiguration`'s
+  `wholeClasspath = true` would otherwise forward Compose/Skiko into
+  every `*.kstep.kts` script's own compile step. See
+  docs/adr/ADR-0011-headless-preview-rendering.adoc. Depends only on
+  `kstep-geometry` (`api`) and `kotlin-logging-jvm` -- no new external
+  dependency.
+
 | `kstep-viewer`
 | Static isometric OCCT shape viewer -- Viewer-Welle 1
-  (`dev.kstep.viewer.mesh`/`dev.kstep.viewer.ui`)
-| Working: `dev.kstep.geometry.occt.OcctBridge.nativeShapeTriangles` (new
-  in `kstep-geometry`) triangulates a shape's surface
-  (`BRepMesh_IncrementalMesh`) into an `OcctShape.triangulate(): TriangleMesh`
-  -- a flat, index-free triangle soup in world coordinates with corrected
-  winding. `dev.kstep.viewer.mesh.IsometricProjection.project(...)` turns
-  that into a list of `ProjectedTriangle`s (backface-culled, flat-shaded,
-  painter's-algorithm-sorted, fit to canvas) with zero Compose dependency
-  (enforced by an automated package-boundary test) -- both a real Compose
-  Desktop window (`ShapeCanvas`, opened via `./gradlew :kstep-viewer:run`,
-  never part of `check`) and a headless AWT test rasterizer consume the
-  exact same call. See docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc
-  for the DoS measurements behind `OcctKernel.MAX_TRIANGLES`, the two
-  classic OCCT triangulation pitfalls (`REVERSED`-face winding,
-  `TopLoc_Location` transforms) this wave's own regression tests exist to
-  catch, and why a camera-aligned light makes flat shading invisible on an
-  axis-aligned box. Depends on `kstep-geometry` and Compose Multiplatform
-  (`org.jetbrains.compose` 1.11.1) -- see Building below for the scoped
-  `google()` repository this pulls in.
+  (`dev.kstep.viewer.ui`, mesh code now in `kstep-render`)
+| Working: a real Compose Desktop window (`ShapeCanvas`, opened via
+  `./gradlew :kstep-viewer:run`, never part of `check`) consumes
+  `dev.kstep.render.mesh.IsometricProjection.project(...)` from
+  `kstep-render` (see that module's row above -- this code lived here
+  until the headless-preview-rendering wave moved it out so `kstep-cli`
+  could reuse it without a Compose dependency). See
+  docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc for the DoS
+  measurements behind `OcctKernel.MAX_TRIANGLES`, the two classic OCCT
+  triangulation pitfalls (`REVERSED`-face winding, `TopLoc_Location`
+  transforms) this wave's own regression tests exist to catch, and why a
+  camera-aligned light makes flat shading invisible on an axis-aligned
+  box. Depends on `kstep-geometry`, `kstep-render`, and Compose
+  Multiplatform (`org.jetbrains.compose` 1.11.1) -- see Building below
+  for the scoped `google()` repository this pulls in.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
@@ -948,6 +996,19 @@ listed. `BRepMesh_IncrementalMesh` (Viewer-Welle 1, `kstep-viewer`'s
 triangulation) lives in `TKMesh`, from the same
 `libocct-modeling-algorithms-dev` package too — still no additional
 `apt-get` package required.
+
+=== Building — headless preview rendering (`kstep render`)
+
+`kstep-render` (headless-preview-rendering wave — see
+docs/adr/ADR-0011-headless-preview-rendering.adoc) depends only on
+`kstep-geometry` — no Compose, no `google()` repository entry, no extra
+setup beyond the optional OCCT bridge above (and `kstep render` still
+renders a clean product-structure/fallback preview without it — see
+Usage below). `kstep-cli`'s `render` subcommand depends on `kstep-render`
+directly, deliberately NOT on `kstep-viewer` — verify that stays true
+after any dependency change with
+`./gradlew :kstep-cli:dependencies --configuration runtimeClasspath |
+grep -iE "skiko|compose|androidx"` (must be empty).
 
 === Building — optional desktop viewer
 
@@ -1474,6 +1535,60 @@ stack trace on stdout/stderr. Both fixture scripts above are the actual
 `kstep-tests` test resources (`hello-assembly.kstep.kts` is the
 3-part-assembly variant of the first example), not just README prose —
 see the `kstep-tests` Modules row above.
+
+Rendering a headless SVG/PNG/text preview of a `*.kstep.kts` script via
+`kstep render` (see docs/adr/ADR-0011-headless-preview-rendering.adoc) —
+no window, no display server. `shape(...)` (also available with no
+`import`, alongside `root(...)`) registers geometry for the preview
+independently of `root(...)`:
+
+[source,kotlin]
+----
+// hello-box.kstep.kts
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext {
+    name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical"
+}.getOrThrow()
+val defCtx = productDefinitionContext {
+    name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design"
+}.getOrThrow()
+
+val part = product("BOX-001") { name = "Box"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+val prodFormation = productDefinitionFormation("BOX-001-F") { ofProduct = part }.getOrThrow()
+val definition = productDefinition("BOX-001-D") {
+    formation = prodFormation
+    frameOfReference = defCtx
+}.getOrThrow()
+
+// OcctKernel/shape(...) need no import -- see defaultImports above.
+val box = OcctKernel.makeBox(10.0, 20.0, 30.0)
+
+stepFile(fileName = "hello-box.step") {
+    root(definition)
+    shape(definition, box)
+}
+----
+
+[source,shell]
+----
+kstep render hello-box.kstep.kts
+# Wrote hello-box.svg  -- an isometric render, since OCCT is available and the box triangulated
+
+kstep render hello-box.kstep.kts --format png -w 1200 --height 900 -o box.png
+kstep render hello-box.kstep.kts --format text --with-step
+----
+
+On a machine without the native OCCT bridge (or if triangulation fails
+for any other reason), the SAME `hello-box.kstep.kts` script above still
+renders successfully — `content` falls back to a text card explaining
+why, painted into whatever container was requested (never a silently
+different file type), with the fixed OCCT-dev-packages `apt-get` command
+from Building below included in the card. Pass `--require-geometry` to
+turn that silent fallback into a hard failure (exit 1) instead — e.g. for
+a CI step that must guarantee a real render happened. A script without
+any `shape(...)` call at all (like `bracket.kstep.kts` above) renders a
+product-structure summary card the same way, `content = summary`, exit 0
+— `kstep render` never requires geometry to succeed.
 
 [#roadmap]
 == Roadmap (V1 scope)

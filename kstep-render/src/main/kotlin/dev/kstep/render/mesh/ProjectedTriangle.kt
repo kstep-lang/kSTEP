@@ -1,4 +1,4 @@
-package dev.kstep.viewer.mesh
+package dev.kstep.render.mesh
 
 /**
  * A projected, visible triangle in canvas coordinates (origin top-left, y grows downward --

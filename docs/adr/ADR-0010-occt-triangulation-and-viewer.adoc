@@ -12,6 +12,15 @@ overlay, smooth shading, multi-shape scenes, picking, STEP import, a
 mesh-quality knob, and packaging are all deliberately deferred -- see
 Folge-Wellen below.
 
+NOTE: The mesh/projection/rasterizer code this ADR introduced
+(`dev.kstep.viewer.mesh`, the AWT `TriangleRasterizer`) moved out of
+`kstep-viewer` into its own module, `kstep-render`, in ADR-0011
+(headless preview rendering, `kstep render`) -- `kstep-viewer` now
+depends on `kstep-render` rather than owning that code itself. This
+ADR's description of that code's *design* (backface culling, flat
+shading, painter's algorithm, the antialiasing-seam fix) is otherwise
+unchanged and still accurate.
+
 == Context
 
 `kstep-geometry` (ADR-0005, extended by ADR-0008/ADR-0009) can build,

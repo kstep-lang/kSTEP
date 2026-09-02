@@ -13,7 +13,7 @@ import io.kotest.core.spec.style.StringSpec
  * legitimately hand the `Canvas` draw scope a zero-sized `size` -- e.g. a modifier that
  * (temporarily) collapses to 0 width/height before the surrounding layout settles -- and
  * [ShapeCanvas] must draw nothing for that frame instead of forwarding that size into
- * [dev.kstep.viewer.mesh.IsometricProjection.project], whose own `require` throws
+ * [dev.kstep.render.mesh.IsometricProjection.project], whose own `require` throws
  * `IllegalArgumentException` for a non-positive canvas size (see `IsometricProjectionTest`) and
  * would otherwise take the whole window down with it (see ADR-0010).
  *

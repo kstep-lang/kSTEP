@@ -2,6 +2,9 @@ package dev.kstep.script
 
 import dev.kstep.core.DslViolation
 import dev.kstep.core.ValidationResult
+import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.geometry.OcctShape
+import dev.kstep.shape.ShapeAssignment
 import dev.kstep.step21.Part21Header
 
 /**
@@ -11,6 +14,13 @@ import dev.kstep.step21.Part21Header
  * validation, in which case [violations] carries every collected [DslViolation] instead and
  * [roots] only ever contains the entities that *did* validate successfully.
  *
+ * [shapes] is the separate, additive geometry channel introduced in kSTEP's
+ * headless-preview-rendering wave (see docs/adr/ADR-0011-headless-preview-rendering.adoc): a
+ * [dev.kstep.shape.ShapeAssignment] registered via [KStepModelBuilder.shape] never becomes a
+ * `roots` entry on its own (only an explicit `root(...)` call does that — see [hasGeometry]'s
+ * KDoc for why that distinction matters), so `kstep export`'s `Part21Writer.write` behavior is
+ * completely unchanged by a script that also calls `shape(...)`.
+ *
  * A script's last expression must evaluate to this type (built via the top-level [stepFile]
  * DSL entry point) — see [KStepScriptHost] for how the host extracts it, defaults a blank
  * [Part21Header.timestamp], and what happens when the last expression is something else.
@@ -19,8 +29,19 @@ data class KStepModel(
     val header: Part21Header,
     val roots: List<Any>,
     val violations: List<DslViolation>,
+    val shapes: List<ShapeAssignment> = emptyList(),
 ) {
     val isValid: Boolean get() = violations.isEmpty()
+
+    /**
+     * `true` iff this model registered at least one [ShapeAssignment] via
+     * [KStepModelBuilder.shape] — the definition `kstep render` uses to decide whether a script
+     * "contains geometry" (see docs/adr/ADR-0011-headless-preview-rendering.adoc). Deliberately
+     * NOT satisfied by a [ShapeAssignment] reachable only via `roots` (which cannot happen today
+     * anyway — no `kstep-core` AP242 entity type wraps geometry) nor by the mere presence of
+     * `kstep-geometry` on the classpath.
+     */
+    val hasGeometry: Boolean get() = shapes.isNotEmpty()
 }
 
 /**
@@ -39,10 +60,34 @@ data class KStepModel(
 class KStepModelBuilder internal constructor() {
     private val validRoots = mutableListOf<Any>()
     private val collectedViolations = mutableListOf<DslViolation>()
+    private val registeredShapes = mutableListOf<ShapeAssignment>()
 
     /** Registers an already-validated entity (typically the result of a builder's `getOrThrow()`). */
     fun root(entity: Any) {
         validRoots += entity
+    }
+
+    /**
+     * Registers a [ShapeAssignment] on [KStepModel.shapes] — the geometry channel `kstep render`
+     * reads (see [KStepModel.hasGeometry]). Deliberately does NOT also add [assignment] (or its
+     * [ShapeAssignment.shape]) to `roots`: `Part21Writer.write` has no entity type for geometry
+     * today, so a script that wants both a Part-21 export AND a rendered preview must call both
+     * `root(...)` (for its AP242 product structure) and `shape(...)` (for the preview) — see
+     * `kstep export`'s stderr warning when `shapes` is non-empty, added alongside this in the
+     * same wave.
+     */
+    fun shape(assignment: ShapeAssignment) {
+        registeredShapes += assignment
+    }
+
+    /** Convenience overload: builds a [ShapeAssignment] from its two required parts inline,
+     *  matching [ShapeAssignment]'s own constructor shape. */
+    fun shape(
+        productDefinition: ProductDefinition,
+        shape: OcctShape,
+        shapeName: String = "",
+    ) {
+        registeredShapes += ShapeAssignment(productDefinition, shape, shapeName)
     }
 
     /** Registers a raw [ValidationResult]: an [ValidationResult.Invalid] contributes its
@@ -80,7 +125,12 @@ class KStepModelBuilder internal constructor() {
     }
 
     internal fun build(header: Part21Header): KStepModel =
-        KStepModel(header = header, roots = validRoots.toList(), violations = collectedViolations.toList())
+        KStepModel(
+            header = header,
+            roots = validRoots.toList(),
+            violations = collectedViolations.toList(),
+            shapes = registeredShapes.toList(),
+        )
 }
 
 /**

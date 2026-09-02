@@ -16,6 +16,11 @@ application {
 
 dependencies {
     implementation(project(":kstep-geometry"))
+    // Mesh/rasterizer/SVG code moved out of this module into kstep-render in kSTEP's
+    // headless-preview-rendering wave (see docs/adr/ADR-0011-headless-preview-rendering.adoc) --
+    // ShapeCanvas now consumes dev.kstep.render.mesh.IsometricProjection from there instead of
+    // owning the projection math itself.
+    implementation(project(":kstep-render"))
     implementation(libs.kotlin.logging.jvm)
     implementation(compose.desktop.currentOs)
     implementation(libs.compose.material3)
@@ -26,12 +31,9 @@ dependencies {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
-    // ViewerRasterTest/ViewerOcctPipelineTest rasterize via java.awt.image.BufferedImage +
-    // Graphics2D -- plain JDK, no display server required.
+    // ViewerCanvasZeroSizeTest exercises Compose's ImageComposeScene -- plain JDK, no display
+    // server required, but still benefits from a headless AWT/Graphics2D environment.
     systemProperty("java.awt.headless", "true")
-    // Same OCCT-required guard as kstep-tests -- ViewerOcctPipelineTest is OCCT-gated the same
-    // way OcctFeatureOperationsTest is; see README 'Building'.
-    systemProperty("kstep.occt.require", providers.gradleProperty("kstep.occt.require").getOrElse("false"))
 }
 
 // No compose.desktop { application { nativeDistributions { ... } } } in this wave --

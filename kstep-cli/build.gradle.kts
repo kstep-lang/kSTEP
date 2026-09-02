@@ -11,10 +11,14 @@ kotlin {
 application {
     mainClass.set("dev.kstep.cli.MainKt")
     // Kotlin scripting's per-invocation compile step (kstep-script's KStepScriptHost, used by
-    // `kstep export`) is the dominant cost of that command's runtime -- capping the JIT tiering
-    // level shortens that one-shot compile without needing steady-state peak throughput, the
-    // same tradeoff kUML's CLI makes for its own script-heavy commands.
-    applicationDefaultJvmArgs = listOf("-XX:TieredStopAtLevel=1")
+    // `kstep export`/`kstep render`) is the dominant cost of that command's runtime -- capping
+    // the JIT tiering level shortens that one-shot compile without needing steady-state peak
+    // throughput, the same tradeoff kUML's CLI makes for its own script-heavy commands.
+    // -Djava.awt.headless=true: `kstep render --format png` rasterizes via
+    // java.awt.image.BufferedImage/Graphics2D -- this CLI never opens a window, and setting this
+    // BEFORE GraphicsEnvironment is ever touched avoids it probing for (and potentially failing
+    // on) a display server on a headless machine.
+    applicationDefaultJvmArgs = listOf("-XX:TieredStopAtLevel=1", "-Djava.awt.headless=true")
 }
 
 dependencies {
@@ -32,9 +36,24 @@ dependencies {
     // runtimeClasspath (and so into installDist's lib/) -- expected, not a regression, see
     // kstep-script's own KDoc and the wave's plan for why.
     implementation(project(":kstep-script"))
-    // Renders `kstep export --output json`'s structured result/error document. kstep-mcp
-    // already depends on this transitively (via mcp-kotlin-sdk-server), but only as
-    // `implementation`, so kstep-cli needs its own explicit declaration to use it directly --
-    // same reasoning as the kotlinx-coroutines-core dependency above.
+    // `kstep render` (headless-preview-rendering wave, see
+    // docs/adr/ADR-0011-headless-preview-rendering.adoc): RenderCommand.kt calls
+    // OcctKernel.availability()/OcctShape.triangulate directly (not just transitively through
+    // kstep-script's api chain), and TriangleSvgWriter/TriangleRasterizer/TextCardRenderer/
+    // RenderLimits from kstep-render -- both declared explicitly here for the same reason
+    // kotlinx-coroutines-core is above (this module uses them directly, not just transitively).
+    implementation(project(":kstep-geometry"))
+    implementation(project(":kstep-render"))
+    // Main.kt sets KotlinLoggingConfiguration.logStartupMessage = false as its very first
+    // statement -- see that assignment's KDoc for why. Declared explicitly here (not just
+    // transitively via kstep-script/kstep-geometry's own `implementation` deps, which do NOT
+    // expose it to this module's compile classpath) because Main.kt references the type
+    // directly.
+    implementation(libs.kotlin.logging.jvm)
+    // Renders `kstep export --output json`/`kstep render --output json`'s structured
+    // result/error document. kstep-mcp already depends on this transitively (via
+    // mcp-kotlin-sdk-server), but only as `implementation`, so kstep-cli needs its own explicit
+    // declaration to use it directly -- same reasoning as the kotlinx-coroutines-core dependency
+    // above.
     implementation(libs.kotlinx.serialization.json)
 }

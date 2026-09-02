@@ -40,6 +40,7 @@ include(
     "kstep-geometry",
     "kstep-constraints",
     "kstep-shape",
+    "kstep-render",
     "kstep-viewer",
     "kstep-tests",
 )

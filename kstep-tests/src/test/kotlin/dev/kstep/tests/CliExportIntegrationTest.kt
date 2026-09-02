@@ -9,13 +9,6 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
-import java.util.concurrent.TimeUnit
-
-private data class CliInvocationResult(
-    val exitCode: Int,
-    val stdout: String,
-    val stderr: String,
-)
 
 // Prepended to every fixture script below that builds a product/product_definition: as of kSTEP
 // M2 Welle 10 both need a real context, kstep-core no longer invents one (see
@@ -58,34 +51,9 @@ private const val CONTEXT_PRELUDE =
 class CliExportIntegrationTest :
     StringSpec({
         val workDir = File("build/cli-integration-test").apply { mkdirs() }
+        val runner = CliProcessRunner(workDir)
 
-        fun runCli(vararg args: String): CliInvocationResult {
-            val javaBin = File(File(System.getProperty("java.home"), "bin"), "java").absolutePath
-            val classpath = System.getProperty("java.class.path")
-            val stdoutFile = File.createTempFile("kstep-cli-stdout", ".txt")
-            val stderrFile = File.createTempFile("kstep-cli-stderr", ".txt")
-            try {
-                val process =
-                    ProcessBuilder(javaBin, "-cp", classpath, "dev.kstep.cli.MainKt", *args)
-                        .directory(workDir)
-                        .redirectOutput(stdoutFile)
-                        .redirectError(stderrFile)
-                        .start()
-                val finished = process.waitFor(120, TimeUnit.SECONDS)
-                if (!finished) {
-                    process.destroyForcibly()
-                    error("kstep export subprocess did not finish within 120s (args=${args.toList()})")
-                }
-                return CliInvocationResult(
-                    exitCode = process.exitValue(),
-                    stdout = stdoutFile.readText(),
-                    stderr = stderrFile.readText(),
-                )
-            } finally {
-                stdoutFile.delete()
-                stderrFile.delete()
-            }
-        }
+        fun runCli(vararg args: String): CliInvocationResult = runner.run(*args)
 
         "export with no --out derives the output path from the script name and prints human-readable success" {
             val script = File(workDir, "bracket-default-out.kstep.kts")

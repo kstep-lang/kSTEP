@@ -8,6 +8,7 @@ import dev.kstep.step21.Part21EncodingException
 import dev.kstep.step21.Part21LimitExceededException
 import dev.kstep.step21.Part21WriteException
 import dev.kstep.step21.Part21Writer
+import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -31,6 +32,14 @@ Usage:
   kstep export <script.kstep.kts> [opts]   Export a *.kstep.kts script to a STEP Part 21 file
       --out <file.step>                    Output path (default: derived from the script name)
       --output json                        Emit the result as a JSON document instead of text
+  kstep render <script.kstep.kts> [opts]   Render a headless SVG/PNG/text preview of a script
+      -f, --format <auto|svg|png|text>     Preview container (default: auto)
+      -o, --out <file>                     Output path (default: derived from the script name)
+      -w, --width <px>                     Image width, 16..4096 (default: 1024)
+          --height <px>                    Image height, 16..4096 (default: 768)
+          --with-step                      Include the Part-21 text in the preview
+          --require-geometry               Fail (exit 1) instead of silently falling back to text
+          --output json                    Emit the result as a JSON document instead of text
   kstep help                                Show this message
 """
 
@@ -40,6 +49,17 @@ sealed interface CliCommand {
     data class Export(
         val scriptPath: String,
         val outPath: String?,
+        val jsonOutput: Boolean,
+    ) : CliCommand
+
+    data class Render(
+        val scriptPath: String,
+        val format: RenderFormat,
+        val outPath: String?,
+        val width: Int,
+        val height: Int,
+        val withStep: Boolean,
+        val requireGeometry: Boolean,
         val jsonOutput: Boolean,
     ) : CliCommand
 
@@ -58,6 +78,7 @@ fun resolveCommand(args: Array<String>): CliCommand =
         args.size == 1 && args[0] == "mcp" -> CliCommand.StartMcpServer
         args.size == 1 && (args[0] == "help" || args[0] == "--help") -> CliCommand.ShowUsage(exitCode = 0)
         args[0] == "export" -> resolveExportCommand(args.drop(1))
+        args[0] == "render" -> resolveRenderCommand(args.drop(1))
         else -> CliCommand.ShowUsage(exitCode = 1)
     }
 
@@ -95,10 +116,96 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
     return CliCommand.Export(scriptPath = resolvedScriptPath, outPath = outPath, jsonOutput = jsonOutput)
 }
 
+private const val DEFAULT_RENDER_WIDTH = 1024
+private const val DEFAULT_RENDER_HEIGHT = 768
+
+// Same "any malformed combination -> ShowUsage(1), never a partially-filled command" discipline
+// as resolveExportCommand above -- deliberately no argument-parsing library (see that function's
+// KDoc). Numeric --width/--height values that fail to parse as Int also resolve to ShowUsage(1)
+// here (range validation against RenderLimits happens later, in RenderCommand.kt, once a
+// concrete Int is in hand) rather than throwing a NumberFormatException out of command
+// resolution.
+private fun resolveRenderCommand(rest: List<String>): CliCommand {
+    var scriptPath: String? = null
+    var format: RenderFormat = RenderFormat.AUTO
+    var outPath: String? = null
+    var width = DEFAULT_RENDER_WIDTH
+    var height = DEFAULT_RENDER_HEIGHT
+    var withStep = false
+    var requireGeometry = false
+    var jsonOutput = false
+    var i = 0
+    while (i < rest.size) {
+        when (rest[i]) {
+            "-f", "--format" -> {
+                val value = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                format = RenderFormat.parse(value) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "-o", "--out" -> {
+                outPath = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "-w", "--width" -> {
+                width = rest.getOrNull(i + 1)?.toIntOrNull() ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--height" -> {
+                height = rest.getOrNull(i + 1)?.toIntOrNull() ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--with-step" -> {
+                withStep = true
+                i += 1
+            }
+            "--require-geometry" -> {
+                requireGeometry = true
+                i += 1
+            }
+            "--output" -> {
+                val value = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                if (value != "json") return CliCommand.ShowUsage(1)
+                jsonOutput = true
+                i += 2
+            }
+            else -> {
+                val arg = rest[i]
+                if (arg.startsWith("--") || scriptPath != null) return CliCommand.ShowUsage(1)
+                scriptPath = arg
+                i += 1
+            }
+        }
+    }
+    val resolvedScriptPath = scriptPath ?: return CliCommand.ShowUsage(1)
+    return CliCommand.Render(
+        scriptPath = resolvedScriptPath,
+        format = format,
+        outPath = outPath,
+        width = width,
+        height = height,
+        withStep = withStep,
+        requireGeometry = requireGeometry,
+        jsonOutput = jsonOutput,
+    )
+}
+
 fun main(args: Array<String>) {
+    // kotlin-logging prints a one-line "kotlin-logging: initializing... active logger factory:
+    // ..." banner to STDOUT (not stderr) the very first time ANY KotlinLogging.logger{} call
+    // anywhere in the process actually resolves a logger (a static-initializer side effect --
+    // see KotlinLoggingConfiguration.logStartupMessage in the kotlin-logging-jvm library, default
+    // true). `kstep export`'s happy path never triggered this (KStepScriptHost only logs on an
+    // unexpected host failure), but `kstep render` does on every successful geometry render
+    // (OcctNativeLibrary.load logs at INFO on every native-bridge load) -- and this CLI's stdout
+    // contract (`Wrote <path>` / a single `--output json` document, nothing else) must stay
+    // exactly that, not a library banner plus the real output. MUST run before any other code in
+    // this process touches KotlinLogging.logger{} (i.e. first thing in main()), or the banner has
+    // already printed by the time this assignment runs.
+    KotlinLoggingConfiguration.logStartupMessage = false
     when (val command = resolveCommand(args)) {
         CliCommand.StartMcpServer -> runBlocking { runStdioServer() }
         is CliCommand.Export -> runExport(command)
+        is CliCommand.Render -> runRender(command)
         is CliCommand.ShowUsage -> {
             println(USAGE_TEXT)
             if (command.exitCode != 0) exitProcess(command.exitCode)
@@ -150,12 +257,24 @@ private fun writeExport(
         }
     val outPath = command.outPath ?: deriveOutputPath(command.scriptPath)
     File(outPath).writeText(text)
+    val shapeCount = outcome.model.shapes.size
+    if (shapeCount > 0) {
+        // Geometry registered via shape(...) (kSTEP's headless-preview-rendering wave, see
+        // docs/adr/ADR-0011-headless-preview-rendering.adoc) is NOT merged into the exported
+        // Part-21 file this wave -- Part21Writer has no entity type for it yet (Ap242ShapeExporter
+        // merging is Folge-Welle R-1). Warn rather than silently dropping it.
+        System.err.println(
+            "kstep export: model carries $shapeCount geometric shape(s); geometry merging is not " +
+                "wired into 'export' yet -- see 'kstep render' for a preview.",
+        )
+    }
     if (command.jsonOutput) {
         println(
             buildJsonObject {
                 put("status", "success")
                 put("outPath", outPath)
                 put("rootCount", outcome.model.roots.size)
+                put("shapeCount", shapeCount)
             }.toString(),
         )
     } else {
@@ -172,9 +291,28 @@ private fun Exception.toRuntimeError(): KStepScriptOutcome.RuntimeError =
 private fun printError(
     jsonOutput: Boolean,
     outcome: KStepScriptOutcome,
+): Nothing = printExportError(jsonOutput, outcome, command = "export")
+
+/**
+ * Shared script-outcome error reporting for both `export` and `render` -- see
+ * `RenderCommand.kt`'s own `printError` delegate. [command] is added to the `--output json`
+ * document (`"command":"export"`/`"command":"render"`) so a consumer parsing the JSON can tell
+ * which subcommand produced a given error document without also having to remember which CLI
+ * invocation it came from.
+ */
+internal fun printExportError(
+    jsonOutput: Boolean,
+    outcome: KStepScriptOutcome,
+    command: String,
 ): Nothing {
     if (jsonOutput) {
-        println(errorJson(outcome).toString())
+        val base = errorJson(outcome)
+        println(
+            buildJsonObject {
+                base.forEach { (key, value) -> put(key, value) }
+                put("command", command)
+            }.toString(),
+        )
     } else {
         println(errorText(outcome))
     }

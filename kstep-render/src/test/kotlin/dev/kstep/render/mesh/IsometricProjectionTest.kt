@@ -1,4 +1,4 @@
-package dev.kstep.viewer.mesh
+package dev.kstep.render.mesh
 
 import dev.kstep.geometry.TriangleMesh
 import io.kotest.assertions.throwables.shouldThrow
@@ -12,8 +12,11 @@ private const val CANVAS_HEIGHT = 600.0
 /**
  * Runs without OCCT -- always active -- against a hand-written, closed unit-cube mesh (12
  * triangles, correct outward winding, verified by hand per triangle -- see this file's own
- * comment on [unitCubeMesh]). Complements `OcctTriangulationTest`'s real-OCCT coverage by
+ * comment on [unitCubeMesh]). Complements `RenderOcctPipelineTest`'s real-OCCT coverage by
  * pinning [IsometricProjection]'s pure math independently of the native bridge.
+ *
+ * Moved from `kstep-viewer` in kSTEP's headless-preview-rendering wave (see
+ * docs/adr/ADR-0011-headless-preview-rendering.adoc) -- content unchanged, only the package.
  */
 class IsometricProjectionTest :
     StringSpec({
@@ -60,7 +63,6 @@ class IsometricProjectionTest :
             return TriangleMesh(coords)
         }
 
-        // P-1
         "all projected coordinates lie within the canvas bounds" {
             val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             triangles.isNotEmpty() shouldBe true
@@ -70,27 +72,19 @@ class IsometricProjectionTest :
             }
         }
 
-        // P-2: exactly three of the cube's six faces (top, right, back -- +Z/+X/+Y) face the
-        // fixed isometric viewer; the other three (bottom, left, front) are culled.
+        // exactly three of the cube's six faces (top, right, back -- +Z/+X/+Y) face the fixed
+        // isometric viewer; the other three (bottom, left, front) are culled.
         "exactly half the cube's triangles survive backface culling" {
             val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             triangles.size shouldBe 6
         }
 
-        // P-3
         "the result is sorted descending by depth" {
             val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             val depths = triangles.map { it.depth }
             depths shouldBe depths.sortedDescending()
         }
 
-        // P-4: range check, plus the actual "flat shading varies per face" proof. Earlier during
-        // this wave's implementation, [IsometricProjection.LIGHT_DIRECTION] did not exist and
-        // shading used `-VIEW_DIRECTION` as the light -- that made a cube's three visible faces
-        // shade IDENTICALLY (their normals are each exactly 1/sqrt(3) from -VIEW_DIRECTION),
-        // discovered by actually rendering a box and looking at the PNG (see
-        // docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc). This test pins the fix: with an
-        // offset LIGHT_DIRECTION, the cube's three visible faces now DO shade distinctly.
         "shade values are within range and vary across the cube's three visible faces" {
             val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             triangles.forEach { t -> (t.shade in IsometricProjection.AMBIENT..1.0) shouldBe true }
@@ -98,8 +92,6 @@ class IsometricProjectionTest :
             (distinctShades.size >= 3) shouldBe true
         }
 
-        // Companion, isolated from the cube fixture: two triangles at deliberately different
-        // orientations must produce different shade values.
         "flat shading genuinely varies with a triangle's normal" {
             val headOn = doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0) // normal (1,1,1)
             val shallow = doubleArrayOf(2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 2.0, 0.0, 1.0) // normal (1,0,0)
@@ -110,13 +102,11 @@ class IsometricProjectionTest :
             shades.size shouldBe 2
         }
 
-        // P-5
         "an empty mesh projects to an empty list" {
             IsometricProjection.project(TriangleMesh(DoubleArray(0)), CANVAS_WIDTH, CANVAS_HEIGHT) shouldBe emptyList()
         }
 
         "a degenerate (zero-area) triangle is silently discarded" {
-            // Three collinear points -- zero cross-product length.
             val degenerate = TriangleMesh(doubleArrayOf(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0))
             IsometricProjection.project(degenerate, CANVAS_WIDTH, CANVAS_HEIGHT) shouldBe emptyList()
         }
@@ -127,7 +117,6 @@ class IsometricProjectionTest :
             shouldThrow<IllegalArgumentException> { IsometricProjection.project(unitCubeMesh(), -1.0, CANVAS_HEIGHT) }
         }
 
-        // P-6
         "fit-to-canvas fills most of at least one canvas axis" {
             val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             val xs = triangles.flatMap { listOf(it.ax, it.bx, it.cx) }

@@ -1,4 +1,4 @@
-package dev.kstep.viewer.mesh
+package dev.kstep.render.mesh
 
 import dev.kstep.geometry.TriangleMesh
 import kotlin.math.max
@@ -6,14 +6,20 @@ import kotlin.math.min
 
 /**
  * Pure data transformation `TriangleMesh -> List<ProjectedTriangle>`. Knows nothing about
- * Compose (see this file's package -- `dev.kstep.viewer.mesh` -- and
+ * Compose (see this file's package -- `dev.kstep.render.mesh` -- and
  * `MeshPackageComposeBoundaryTest`'s automated import check) -- which is exactly why it is
- * testable without a window, and why both the Compose canvas AND the headless AWT test
- * rasterizer consume the SAME list from THIS function, instead of two similar paths.
+ * testable without a window, and why both the Compose canvas AND the headless AWT
+ * rasterizer/SVG writer consume the SAME list from THIS function, instead of several similar
+ * paths.
  *
  * [project] is a pure, stateless function -- no object-level mutable state -- so it is safe to
- * call concurrently (e.g. from a Compose recomposition on one thread while a test calls it on
+ * call concurrently (e.g. from a Compose recomposition on one thread while a render call runs on
  * another).
+ *
+ * Moved from `kstep-viewer` into this module in kSTEP's headless-preview-rendering wave (see
+ * docs/adr/ADR-0011-headless-preview-rendering.adoc) -- `kstep-viewer` now depends on
+ * `kstep-render` instead of owning this package itself, so `kstep-cli`'s `render` command can
+ * reuse the identical projection math without pulling Compose Desktop onto its classpath.
  */
 object IsometricProjection {
     /**

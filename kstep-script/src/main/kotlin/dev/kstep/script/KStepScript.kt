@@ -81,6 +81,14 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
         "dev.kstep.generated.ap242v1.*",
         // Part21Header, Part21Writer, Part21Reader and their exception types
         "dev.kstep.step21.*",
+        // OcctKernel, OcctShape, OcctAvailability, TriangleMesh, ProfilePoint and their
+        // exception types -- added in kSTEP's headless-preview-rendering wave (see
+        // docs/adr/ADR-0011-headless-preview-rendering.adoc) so a script can build geometry
+        // (`OcctKernel.makeBox(...)`) and register it via `shape(...)` without an explicit
+        // import.
+        "dev.kstep.geometry.*",
+        // ShapeAssignment -- the type `shape(...)` registers on KStepModel.shapes.
+        "dev.kstep.shape.*",
         // stepFile { } / KStepModel / KStepModelBuilder
         "dev.kstep.script.*",
     )

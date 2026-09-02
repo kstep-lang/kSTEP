@@ -1,6 +1,7 @@
 package dev.kstep.tests
 
 import dev.kstep.cli.CliCommand
+import dev.kstep.cli.RenderFormat
 import dev.kstep.cli.USAGE_TEXT
 import dev.kstep.cli.resolveCommand
 import io.kotest.core.spec.style.StringSpec
@@ -112,5 +113,92 @@ class CliMainTest :
 
         "USAGE_TEXT documents the export subcommand" {
             USAGE_TEXT shouldContain "kstep export"
+        }
+
+        "\"render <path>\" with no flags resolves to Render with defaults" {
+            resolveCommand(arrayOf("render", "a.kstep.kts")) shouldBe
+                CliCommand.Render(
+                    scriptPath = "a.kstep.kts",
+                    format = RenderFormat.AUTO,
+                    outPath = null,
+                    width = 1024,
+                    height = 768,
+                    withStep = false,
+                    requireGeometry = false,
+                    jsonOutput = false,
+                )
+        }
+
+        "\"render\" parses -f/-o/-w/--height/--with-step/--require-geometry/--output json together" {
+            resolveCommand(
+                arrayOf(
+                    "render",
+                    "a.kstep.kts",
+                    "-f",
+                    "png",
+                    "-o",
+                    "b.png",
+                    "-w",
+                    "800",
+                    "--height",
+                    "600",
+                    "--with-step",
+                    "--require-geometry",
+                    "--output",
+                    "json",
+                ),
+            ) shouldBe
+                CliCommand.Render(
+                    scriptPath = "a.kstep.kts",
+                    format = RenderFormat.PNG,
+                    outPath = "b.png",
+                    width = 800,
+                    height = 600,
+                    withStep = true,
+                    requireGeometry = true,
+                    jsonOutput = true,
+                )
+        }
+
+        "\"render\" accepts the long --format/--out flag spellings too" {
+            resolveCommand(arrayOf("render", "a.kstep.kts", "--format", "svg", "--out", "b.svg")) shouldBe
+                CliCommand.Render(
+                    scriptPath = "a.kstep.kts",
+                    format = RenderFormat.SVG,
+                    outPath = "b.svg",
+                    width = 1024,
+                    height = 768,
+                    withStep = false,
+                    requireGeometry = false,
+                    jsonOutput = false,
+                )
+        }
+
+        "\"render\" with no script path resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("render")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"render <path> --format bogus\" resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("render", "a.kstep.kts", "--format", "bogus")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"render <path> --width notanumber\" resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("render", "a.kstep.kts", "--width", "notanumber")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"render <path> --out\" with no value resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("render", "a.kstep.kts", "--out")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"render <path> --bogus\" (an unknown flag) resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("render", "a.kstep.kts", "--bogus")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"render\" with two positional script paths resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("render", "a.kstep.kts", "b.kstep.kts")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "USAGE_TEXT documents the render subcommand" {
+            USAGE_TEXT shouldContain "kstep render"
         }
     })

@@ -8,12 +8,14 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import dev.kstep.geometry.TriangleMesh
-import dev.kstep.viewer.mesh.IsometricProjection
+import dev.kstep.render.mesh.IsometricProjection
 
 /**
  * Renders [mesh] as a static isometric projection, painter's-algorithm-ordered and flat-shaded.
- * Uses the exact same [IsometricProjection.project] call as `ViewerRasterTest`'s headless
- * rasterizer -- no second, Compose-only projection path to drift out of sync with it.
+ * Uses the exact same [IsometricProjection.project] call as `kstep-render`'s headless
+ * rasterizer/SVG writer (moved there from this module in kSTEP's headless-preview-rendering
+ * wave, see docs/adr/ADR-0011-headless-preview-rendering.adoc) -- no second, Compose-only
+ * projection path to drift out of sync with it.
  */
 @Composable
 fun ShapeCanvas(
