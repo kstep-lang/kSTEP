@@ -1,0 +1,389 @@
+= ADR-0008: OCCT feature operations -- extrude and fillet (Geometrie Welle 5a)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Geometrie Welle 5a). Covers the two feature
+operations named in ADR-0005's "Geometrie Welle 5" row -- profile extrusion
+and edge fillet -- without a parametric feature-history/replay model, which
+is split off as **Geometrie Welle 5b** (see Folge-Wellen below and
+ADR-0005's own Folge-Wellen table, updated alongside this ADR).
+
+== Context
+
+ADR-0005 shipped `kstep-geometry`'s foundation: `OcctKernel.makeBox(...)`,
+B-Rep topology/volume readback, and AP242 STEP export. Its own Folge-Wellen
+table names "Geometrie Welle 5" as *"Feature-model / parametric history
+(sketch -> extrude -> fillet, replayable)"*. This wave builds exactly the
+non-history fragment of that: a profile-to-solid extrude operation and an
+edge-rounding fillet operation, both usable standalone or chained together.
+The replayable feature-tree/undo-redo half of that original description is
+deliberately out of scope here -- see Geometrie Welle 5b below for why it
+needs its own design work (a stable, geometric edge-identity scheme, not the
+opaque per-construction map indices this wave uses).
+
+Both operations were prototyped and run for real against a system-installed
+OCCT 7.9.2 before any of this module's code was written, specifically to
+settle two open questions before implementation: whether Extrude alone (or
+Fillet alone) would be a sufficient wave, and how each operation's cost
+scales, which determines every DoS-guard constant below.
+
+=== Why both operations together, not split into two waves
+
+Fillet alone has no interesting input beyond the box `OcctKernel.makeBox`
+already produces -- it would not exercise a profile-construction code path
+at all. Extrude alone exercises none of fillet's shape-consumes-shape
+lifetime handling or its edge-addressing scheme. Chained together they are
+exactly *profile -> solid -> rounded solid*, which is the honest minimum
+"feature stack" this milestone's name promises, and both operations are
+individually small (roughly 70 lines of shim code each) and were both
+run successfully end to end during prototyping (see Decision's measurement
+tables) before this wave's real implementation began.
+
+=== DoS-guard measurements
+
+Every constant below was measured, not estimated, against the real,
+system-installed OCCT 7.9.2 on the machine this wave was implemented on:
+
+[cols="2,2,4", options="header"]
+|===
+| Operation | Scaling observed | Measurement points
+
+| Profile construction (`BRepBuilderAPI_MakePolygon` ->
+  `BRepBuilderAPI_MakeFace` -> `BRepPrimAPI_MakePrism`)
+| Linear in point count
+| n=1000 -> 16 ms; n=50 000 -> 1057 ms
+
+| Mandatory `BRepCheck_Analyzer` post-check (run on every extrude AND every
+  fillet result, see Decision below)
+| Superlinear in face count
+| 202 faces -> 27.6 ms; 1002 faces -> 311.5 ms
+
+| `BRepFilletAPI_MakeFillet` (single edge)
+| Roughly quadratic in the INPUT shape's face count
+| 6 faces -> 3.4 ms; 102 -> 105 ms; 202 -> 318 ms; 402 -> 1082 ms;
+  802 -> 4115 ms; 2002 -> 28 828 ms
+
+| `BRepFilletAPI_MakeFillet` (edge count `k`, fixed 600-face input)
+| Weak lever compared to input face count
+| k=10, k=50, k=200 all ~705 ms
+|===
+
+The extrude path stays comfortably sub-second all the way to
+`MAX_PROFILE_POINTS = 512` (roughly 5x headroom under one second, the same
+"measure, then leave headroom" method `PlaneGcsSolver.MAX_POINTS` uses --
+see ADR-0006). Fillet's roughly-quadratic cost in face count is this
+module's dominant DoS lever, and is far more punishing: at 2002 faces a
+single fillet call already costs almost 29 seconds. `MAX_FILLET_INPUT_FACES`
+is therefore set much lower, at 200 faces (the last directly-measured point
+with comfortable headroom), independently of `MAX_PROFILE_POINTS` -- see
+Decision below for the resulting, intentional consequence that a solid
+extruded from a large profile cannot always be filleted.
+
+`MAX_FILLET_EDGES = 64` is a hard cap for defense in depth (unbounded array
+size is itself a native-side concern, independent of per-edge cost), even
+though the measurement above shows edge count is a comparatively weak cost
+lever next to input face count.
+
+== Decision
+
+=== Public Kotlin surface
+
+* `ProfilePoint(x: Double, y: Double)` -- a 2D point in the XY plane at
+  z = 0, deliberately not 3D. A 3D point list would let a caller specify a
+  non-planar polygon, which `BRepBuilderAPI_MakeFace` rejects with error
+  code 2 (`NotPlanar`) only *after* the wire has already been built
+  (verified against OCCT 7.9.2); restricting to 2D input makes that failure
+  mode structurally unreachable instead of merely handled after the fact.
+* `OcctKernel.extrudeProfile(profile: List<ProfilePoint>, height: Double):
+  OcctShape` -- `BRepBuilderAPI_MakePolygon` -> `BRepBuilderAPI_MakeFace` ->
+  `BRepPrimAPI_MakePrism`. The polygon is closed automatically; the caller
+  must not repeat the first point as the last.
+* `OcctKernel.fillet(shape: OcctShape, edgeIndices: Collection<Int>, radius:
+  Double): OcctShape` (plus a single-`Int` convenience overload) --
+  `BRepFilletAPI_MakeFillet`, returning a brand-new, independently owned and
+  closeable `OcctShape`. `shape` itself is neither modified nor consumed.
+
+=== Edge addressing: 0-based, opaque, non-durable
+
+Edge indices are 0-based positions into the same
+`TopExp::MapShapes(TopAbs_EDGE)` ordering that
+`ShapeTopology.edges` already counts (idiomatic-Kotlin choice over OCCT's
+own 1-based indexing; the native shim converts). That ordering is
+reproducible for a fixed construction sequence -- five identical rebuilds of
+the same profile produced identical per-index edge lengths during
+prototyping -- but it is NOT a geometrically meaningful or durable
+identifier, and is NOT guaranteed stable across a change to *how* the shape
+was built. Treat it as an opaque, shape-specific address only. Giving edges
+a stable, geometric identity across rebuilds is exactly the problem
+Geometrie Welle 5b (parametric history/replay) has to solve, and is
+deliberately not attempted here.
+
+=== `OcctShape.withHandle`
+
+`OcctKernel.fillet` needs `OcctShape`'s private native handle. Rather than
+expose it as a bare `internal val` (which would let a caller read it once
+and reuse it later, outside both `checkOpen()` and the `Cleaner`
+use-after-free fence), `OcctShape` gained one new `internal` method:
+
+[source,kotlin]
+----
+internal fun <T> withHandle(block: (Long) -> T): T {
+    checkOpen()
+    return try {
+        block(handle)
+    } finally {
+        Reference.reachabilityFence(this)
+    }
+}
+----
+
+This centralizes the two invariants every existing native call site in
+`OcctShape` already applied by hand (`checkOpen()` first,
+`reachabilityFence` around the call) for the one new call site that needs
+the raw handle from outside the class. `topology`/`volume`/`writeStepFile`
+are deliberately left untouched rather than refactored onto `withHandle` --
+that would be a real improvement but is scope creep against code that was
+already security-reviewed in ADR-0005; noted here as a fair follow-up
+cleanup, not performed.
+
+=== Native shim: the `registerShape()`-under-`g_mutex` deadlock trap
+
+`registerShape()` itself takes `g_mutex` (a plain, non-recursive
+`std::mutex`). The naively obvious fillet implementation -- "lock, find the
+shape, build the fillet, register the result, unlock" -- is a guaranteed
+self-deadlock. `nativeFilletEdges` instead: finds the shape and runs
+`BRepFilletAPI_MakeFillet` entirely inside the locked critical section,
+copies the result into a **local** `TopoDS_Shape` (not yet registered, not
+visible to any other thread), releases the lock, runs the mandatory
+`BRepCheck_Analyzer`/volume post-check on that local value, and only then
+calls `registerShape(std::move(result))` -- after the lock is gone. Every
+`throwJava()` call in both new functions also runs strictly outside the
+lock, for the same reason `throwUnknownHandle()` already documented in
+ADR-0005: `FindClass` can trigger arbitrary Java class-loading code, which
+must never run while this thread holds `g_mutex`, or a concurrent Cleaner
+action calling `nativeReleaseShape()` could deadlock against it.
+
+=== Two mandatory post-checks, not one
+
+Both `nativeExtrudeProfile` and `nativeFilletEdges` run **both**
+`BRepCheck_Analyzer::IsValid()` and `GProp_GProps::Mass() > 0.0` on their
+result before registering it -- neither check alone catches every
+degenerate case (measured): a collinear or self-crossing ("bowtie") input
+polygon reaches OCCT successfully with `IsDone()==true` but
+`BRepCheck`-invalid and zero volume; a 2-point-equivalent degenerate input
+is `BRepCheck`-valid with zero volume. Only running both catches all three
+shapes of failure.
+
+=== Native-side revalidation, not trust in the Kotlin caller
+
+`OcctBridge` is a public object (see ADR-0005's rationale, repeated in
+`OcctBridge.kt`'s own KDoc) specifically so test code can reach the raw
+native methods directly, bypassing `OcctKernel`'s Kotlin-side validation
+entirely via reflection. Every bound declared as an `OcctKernel` constant
+(`MIN_PROFILE_POINTS`/`MAX_PROFILE_POINTS`/`MAX_ABS_COORDINATE`/
+`MAX_FILLET_EDGES`/`MIN_FILLET_RADIUS`/`MAX_FILLET_RADIUS`, plus the
+existing `MIN_DIMENSION`/`MAX_DIMENSION` reused for `height`) is therefore
+re-enforced natively as a hand-synchronized plain-constant pair, the same
+pattern ADR-0007 already uses for `NativeConstraintKind`.
+`MAX_FILLET_INPUT_FACES` is checked natively only (inside the same locked
+critical section that performs the fillet), not duplicated as a
+Kotlin-side pre-check -- reading `shape.topology` first from Kotlin would
+mean a second JNI round trip with a check-then-act gap where the shape
+could be closed concurrently between the two calls; the native side
+re-derives the face count from the very same locked lookup it uses to
+fillet, making the check and the operation atomic.
+
+=== Exception-mapping regression: do not reinterpret Kotlin-side-shaped failures as OCCT failures
+
+Both `extrudeProfile`'s and `fillet`'s native calls are wrapped in a
+`try`/`catch`, matching `makeBox`'s existing pattern -- but
+`IllegalArgumentException` (native-side range/face-count/degenerate-profile
+validation) is caught and rethrown *unmodified*, ahead of a general
+`catch (e: RuntimeException)` that wraps everything else (including the
+native "unknown handle" `IllegalStateException`, mirroring
+`OcctShape.writeStepFile`'s existing wrapping for a lost concurrent-close
+race, and "fillet/prism did not complete") into `OcctGeometryException`.
+Both `IllegalArgumentException` and `IllegalStateException` are
+`RuntimeException` subtypes, so ordering the catch clauses correctly is
+what makes this distinction real rather than accidental -- see
+`OcctFeatureOperationsTest`'s dedicated regression case for `fillet`'s
+ordering.
+
+**This was a real bug in this wave's first implementation, not just a
+theoretical risk**: `extrudeProfile`'s catch block initially wrapped *every*
+`RuntimeException` -- including the native side's own degenerate-profile
+`IllegalArgumentException` (collinear points, a self-crossing "bowtie"
+polygon) -- into `OcctGeometryException`, exactly the reinterpretation this
+section warns against. `./gradlew clean check -Pkstep.occt.require=true`
+caught it immediately: the collinear-profile case in
+`OcctFeatureOperationsTest` (`shouldThrow<IllegalArgumentException> { ... }`)
+failed with an `AssertionError` wrapping an actual `OcctGeometryException`
+wrapping the real `IllegalArgumentException` cause. Fixed by giving
+`extrudeProfile` the same two-catch-clause structure `fillet` already had.
+Left here as a recorded, not hypothetical, illustration of why this
+ordering matters and why a real end-to-end test run (not just a code
+review) is what actually caught it.
+
+== Consequences
+
+* The native shim grows from 6 to 8 exported JNI functions. ADR-0005's
+  "re-evaluate the binding strategy at roughly 50 functions" (Geometrie
+  Welle 9) stays far away.
+* `DoubleArrayGuard`/`IntArrayGuard` (RAII wrappers around
+  `Get/ReleaseDoubleArrayElements`/`Get/ReleaseIntArrayElements`) now exist
+  in **two** native bridges verbatim (`kstep_planegcs_bridge.cpp` and, as of
+  this wave, `kstep_occt_bridge.cpp`). A third copy is the trigger point for
+  pulling both into a shared header across the two Gradle modules -- not
+  done in this wave, named here so it is not silently forgotten.
+* A solid extruded from a profile near `MAX_PROFILE_POINTS` (512 points,
+  hence up to roughly 1026 faces for a suitably convoluted profile) cannot
+  necessarily be filleted -- `MAX_FILLET_INPUT_FACES` (200) is deliberately
+  stricter, and the resulting `IllegalArgumentException` names the limit
+  explicitly rather than leaving a caller to guess why a fillet a moment
+  ago worked and now does not.
+* Composability is real, not just designed-for: a `makeBox`-produced shape
+  (Geometrie Welle 1) and an `extrudeProfile`-produced shape both fillet
+  successfully through the same code path, and a fillet result can itself
+  be filleted again (see `OcctFeatureOperationsTest`'s chaining case).
+
+=== Security
+
+[cols="2,4", options="header"]
+|===
+| Concern | Handling in this wave
+
+| SSRF
+| Not applicable -- `kstep-geometry` still has zero network code anywhere in
+  the module.
+
+| DoS
+| See the measurement table under Context above.
+  `MAX_PROFILE_POINTS=512`, `MAX_FILLET_INPUT_FACES=200`,
+  `MAX_FILLET_EDGES=64` -- each guard constant's KDoc in `OcctKernel.kt`
+  carries its own measurement summary, not just a bare number.
+
+| Cryptography
+| Not applicable -- no change to the native load-path trust boundary (the OS
+  package manager), unchanged from ADR-0005.
+
+| Resource leaks
+| `fillet` produces TWO independently `AutoCloseable` shapes (the caller's
+  original, untouched, and the new result) -- every test closes both, via
+  `use { }` or explicit `close()`. `DoubleArrayGuard`/`IntArrayGuard` (RAII)
+  release every input array on every path, including early-return error
+  paths, mirroring `kstep_planegcs_bridge.cpp`'s identical guards.
+  `registerShape()` is never called while `g_mutex` is held (see Decision
+  above) -- the one new deadlock-shaped risk this wave introduced, and the
+  one this section exists to record as closed.
+
+| Native input validation
+| Null checks, length checks before any array-element access, every index
+  range-checked before the first `Add()` call, `std::isfinite` on every
+  double. Every Kotlin-side bound is independently re-checked natively (see
+  Decision above); `OcctFeatureOperationsTest`'s native-direct test case
+  (T-19) proves the native side holds even when `OcctKernel`'s own
+  validation is bypassed via reflection.
+
+| Exception safety
+| `BRepFilletAPI_MakeFillet::Build()` throws `Standard_Failure` for an
+  unsuitable edge or an empty edge set (both measured); every exported
+  function keeps the standard three-level `catch` cascade
+  (`Standard_Failure` / `std::exception` / `...`) -- an uncaught C++
+  exception crossing the JNI boundary is undefined behavior, not a
+  catchable Java exception.
+
+| Logging
+| No new log call sites in the native shim. Kotlin side stays
+  `kotlin-logging`-only, unchanged.
+
+| License
+| `BRepFilletAPI_MakeFillet` lives in `TKFillet`
+  (`nm -D --defined-only /usr/lib/x86_64-linux-gnu/libTKFillet.so \|
+  grep BRepFilletAPI_MakeFillet` -- 82 symbols; zero in
+  TKPrim/TKTopAlgo/TKBRep/TKOffset), which is the only new toolkit this wave
+  links against. `dpkg -S /usr/lib/x86_64-linux-gnu/libTKFillet.so` resolves
+  to `libocct-modeling-algorithms-dev` -- the exact same package ADR-0005
+  already documents as the source of `TKPrim`/`TKTopAlgo`. Nothing new is
+  vendored; the link stays dynamic. NOTICE needs no update -- its existing
+  OCCT paragraph already covers `libocct-*-7.9` generically, not toolkit by
+  toolkit.
+|===
+
+=== Stolperfallen (recorded so a future wave does not rediscover them)
+
+* `registerShape()` takes `g_mutex` itself -- calling it while already
+  holding `g_mutex` is a guaranteed self-deadlock (non-recursive
+  `std::mutex`). Always copy the result to a local, release the lock, then
+  register.
+* `BRepFilletAPI_MakeFillet::Add()` accepts a foreign/unsuitable edge
+  without complaint; only `Build()` throws. `Build()` with zero edges added
+  also throws. Both measured.
+* `BRepBuilderAPI_MakePolygon`/`BRepPrimAPI_MakePrism`'s `.Shape()`/`.Wire()`
+  accessors throw `Standard_Failure` ("BRep_API: command not done") when
+  called before `IsDone()` is true -- always check first.
+* OCCT does NOT throw for a nonsensical fillet radius -- `r <= 0`, `r =
+  1e-12`, `r = 1e12`, and `r = NaN` all measured to return
+  `IsDone()==false` silently; `r = 1e-7` (right at `MIN_FILLET_RADIUS`)
+  measured `IsDone()==true` with an unchanged volume. Both shapes of
+  failure need explicit handling, not a single blanket check.
+* The geometrically valid maximum fillet radius is not numerically
+  predictable in Kotlin -- on a 20x30x40 solid, r=15 succeeds and r=25
+  fails; the limit is a function of the actual local geometry. Left
+  entirely to OCCT's own `IsDone()`, surfaced as `OcctGeometryException`.
+* `BRepBuilderAPI_MakePolygon` silently drops a consecutive point within
+  `Precision::Confusion()` (1e-7) of its predecessor instead of raising any
+  error -- not just a bit-for-bit duplicate. Measured on OCCT 7.9.2 two
+  ways: a 4-point profile with an exact duplicate quietly became a
+  triangle, AND a 5-point profile whose first two points are `d` apart
+  quietly became the same 4-point box for every `d` in `1e-12 .. 1e-7`
+  (both `BRepCheck_Analyzer::IsValid()` and `Mass() > 0.0` report the
+  reduced shape as perfectly valid, so neither mandatory post-check catches
+  it), while `d = 2e-7` correctly keeps all 5 points. An initial version of
+  the native shim only rejected the bit-exact case (`==`); that missed the
+  `1e-12 .. 1e-7` band entirely and was corrected to a distance check
+  against the same `Precision::Confusion()` tolerance OCCT itself applies,
+  before ever calling `MakePolygon` -- mirrored on the Kotlin side
+  (`OcctKernel.PROFILE_POINT_COINCIDENCE_TOLERANCE`) so a caller never
+  reaches native code with a profile that would be silently reinterpreted.
+* A degenerate profile (collinear points, or a self-crossing "bowtie"
+  polygon) can reach `IsDone()==true` while still being geometrically
+  invalid or zero-volume -- `BRepCheck_Analyzer::IsValid()` and
+  `GProp_GProps::Mass() > 0.0` together, not either alone, catch every
+  measured degenerate shape.
+* Fillet's cost is roughly quadratic in the *input* shape's face count
+  (measured: 28.8 s at 2002 faces) -- that is this wave's real DoS vector,
+  not the extrude path.
+
+== Folge-Wellen (updates to ADR-0005's table)
+
+ADR-0005's "Geometrie Welle 5" row is superseded by this ADR for the
+non-history extrude/fillet foundation. The remaining scope continues as:
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| Geometrie Welle 5b
+| Parametric feature history: a feature tree, replay, undo/redo. The core
+  problem this wave deliberately leaves open: a stable, *geometric* edge
+  identity, replacing this wave's construction-order-dependent map indices.
+
+| Geometrie Welle 5a-Nachzügler
+| Chamfer (`BRepFilletAPI_MakeChamfer`, structurally identical to fillet),
+  variable-radius fillet, extrusion along an arbitrary direction (not just
+  +Z), holes/pockets via boolean subtraction (depends on Geometrie Welle 2's
+  boolean operations).
+
+| Consolidation
+| `DoubleArrayGuard`/`IntArrayGuard` now exist in two native bridges
+  verbatim. Pull into a shared header across `kstep-geometry` and
+  `kstep-constraints` at the third copy.
+|===
+
+Geometrie Welle 2 (additional primitives, boolean operations, STEP import),
+Geometrie Welle 3 (`.kstep.kts` DSL surface, `kstep-cli`/`kstep-mcp`
+wiring), Geometrie Welle 4 (merging OCCT geometry with kSTEP's own AP242
+product structure), and Geometrie Welle 9 (binding-strategy re-evaluation at
+roughly 50 shim functions -- still 8 after this wave) remain unchanged from
+ADR-0005 and are not repeated here.

@@ -154,6 +154,31 @@ class OcctShape internal constructor(
         return absolute
     }
 
+    /**
+     * Runs [block] with this shape's native handle, with the two invariants every existing native
+     * call site in this class already upholds applied centrally: [checkOpen] first, and a
+     * [Reference.reachabilityFence] around the call so the [Cleaner] cannot free the native shape
+     * mid-call (see [topologyValue]'s KDoc for the full use-after-free rationale).
+     *
+     * `internal`: only [OcctKernel] (same module) uses this, for operations that consume an
+     * existing shape and produce a new one ([OcctKernel.fillet]). It deliberately does NOT expose
+     * the raw handle as a property -- a bare `internal val handle` would let a caller read it once
+     * and use it later, outside both guarantees above.
+     *
+     * Note the close() race is still resolved on the native side, not here: a concurrent close()
+     * between [checkOpen] and the native call leaves the native lookup to reject an unknown handle
+     * with `IllegalStateException` -- never a dereference of freed memory. See
+     * `kstep_occt_bridge.cpp`'s `g_mutex` note.
+     */
+    internal fun <T> withHandle(block: (Long) -> T): T {
+        checkOpen()
+        return try {
+            block(handle)
+        } finally {
+            Reference.reachabilityFence(this)
+        }
+    }
+
     /** Idempotent: a second/later call is a silent no-op, matching [AutoCloseable]'s contract. */
     override fun close() {
         if (closed) return

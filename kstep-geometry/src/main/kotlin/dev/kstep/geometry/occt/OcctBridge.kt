@@ -38,4 +38,35 @@ object OcctBridge {
     ): Int
 
     external fun nativeReleaseShape(handle: Long)
+
+    /**
+     * Extrudes a closed planar polygon (XY plane, z = 0) into a solid via
+     * `BRepBuilderAPI_MakePolygon` -> `BRepBuilderAPI_MakeFace` -> `BRepPrimAPI_MakePrism`.
+     *
+     * @param profileXy flat x,y pairs: `[x0, y0, x1, y1, ...]`. Length must be even and in
+     *   `[2*OcctKernel.MIN_PROFILE_POINTS, 2*OcctKernel.MAX_PROFILE_POINTS]`. The polygon is
+     *   closed by the native side -- the caller must NOT repeat the first point at the end.
+     * @param height signed extrusion distance along +Z. Negative is allowed and yields a positive
+     *   volume (verified against OCCT 7.9.2).
+     * @return a fresh native shape handle.
+     */
+    external fun nativeExtrudeProfile(
+        profileXy: DoubleArray,
+        height: Double,
+    ): Long
+
+    /**
+     * Fillets one or more edges of an existing shape via `BRepFilletAPI_MakeFillet`, returning a
+     * NEW shape handle; the input shape is left untouched and still owned by its caller.
+     *
+     * @param edgeIndices 0-based indices into the same `TopExp::MapShapes(TopAbs_EDGE)` ordering
+     *   that backs [dev.kstep.geometry.ShapeTopology.edges]. Converted to OCCT's 1-based map
+     *   indexing natively.
+     * @param radius fillet radius, same units as the shape.
+     */
+    external fun nativeFilletEdges(
+        handle: Long,
+        edgeIndices: IntArray,
+        radius: Double,
+    ): Long
 }

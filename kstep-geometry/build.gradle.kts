@@ -140,6 +140,13 @@ val compileOcctBridge =
                     "-lTKGeomAlgo",
                     "-lTKTopAlgo",
                     "-lTKPrim",
+                    // BRepFilletAPI_MakeFillet lives in TKFillet -- verified with
+                    // `nm -D --defined-only /usr/lib/x86_64-linux-gnu/libTKFillet.so | grep BRepFilletAPI_MakeFillet`
+                    // (82 symbols; zero in TKPrim/TKTopAlgo/TKBRep/TKOffset). BRepPrimAPI_MakePrism is already
+                    // covered by TKPrim, BRepBuilderAPI_MakePolygon/MakeFace and BRepCheck_Analyzer by TKTopAlgo --
+                    // so TKFillet is the ONLY new toolkit Geometrie Welle 5a needs (see
+                    // docs/adr/ADR-0008-occt-feature-operations.adoc).
+                    "-lTKFillet",
                     "-lTKXSBase",
                     "-lTKDESTEP",
                     // Ubuntu's g++ defaults to --enable-new-dtags, which makes -Wl,-rpath below

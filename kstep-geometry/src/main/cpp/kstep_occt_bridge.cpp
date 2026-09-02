@@ -30,16 +30,23 @@
 // error into a JVM crash instead of a catchable exception -- the opposite of invariant 1 above.
 #include <jni.h>
 
+#include <cmath>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <Precision.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
 #include <Standard_Failure.hxx>
@@ -47,7 +54,13 @@
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Wire.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 
 namespace {
 
@@ -125,6 +138,86 @@ jlong registerShape(TopoDS_Shape&& shape) {
     g_shapes[handle] = heapShape;
     return handle;
 }
+
+// ------------------------------------------------------------------------------------------
+// Geometrie Welle 5a (extrude + fillet) additions below. See
+// docs/adr/ADR-0008-occt-feature-operations.adoc.
+// ------------------------------------------------------------------------------------------
+
+// Mirror dev.kstep.geometry.OcctKernel's Kotlin-side constants of the same name. This file is
+// reachable directly (dev.kstep.geometry.occt.OcctBridge is a public object, per this file's own
+// header comment and OcctBridge.kt's KDoc), so every bound enforced on the Kotlin side is
+// re-enforced here independently -- see OcctFeatureOperationsTest's T-19 for the regression test
+// that these native checks hold even when OcctKernel's own validation is bypassed via reflection.
+// Kept as plain constants, not shared with Kotlin, the same hand-synchronized-pair pattern
+// ADR-0007 already uses for NativeConstraintKind -- see that ADR's Decision section.
+constexpr int kMinProfilePoints = 3;
+constexpr int kMaxProfilePoints = 512;
+constexpr double kMaxAbsCoordinate = 1e7;
+constexpr double kMinDimension = 1e-7;
+constexpr double kMaxDimension = 1e7;
+constexpr int kMaxFilletInputFaces = 200;
+constexpr int kMaxFilletEdges = 64;
+constexpr double kMinFilletRadius = 1e-7;
+constexpr double kMaxFilletRadius = 1e7;
+
+/**
+ * RAII wrapper around JNIEnv::GetDoubleArrayElements/ReleaseDoubleArrayElements. Always releases
+ * with JNI_ABORT (discard any temporary copy, no write-back) -- every array this bridge reads
+ * through this guard is input-only. `elements()` returns nullptr if the underlying array itself
+ * was nullptr, OR if the JVM reports an OutOfMemoryError (in which case that error is already
+ * pending on `env`) -- the caller must check for nullptr and return immediately in that case.
+ * Copied verbatim (module-appropriate namespace only) from
+ * kstep-constraints/src/main/cpp/kstep_planegcs_bridge.cpp's identical guard -- see that file for
+ * the original. A third copy (this bridge's second RAII-guard pair after that one) is the trigger
+ * point named in ADR-0008 for pulling both into a shared header across the two Gradle modules.
+ */
+class DoubleArrayGuard {
+public:
+    DoubleArrayGuard(JNIEnv* env, jdoubleArray array) : env_(env), array_(array), elements_(nullptr) {
+        if (array_ != nullptr) {
+            elements_ = env_->GetDoubleArrayElements(array_, nullptr);
+        }
+    }
+    ~DoubleArrayGuard() {
+        if (elements_ != nullptr) {
+            env_->ReleaseDoubleArrayElements(array_, elements_, JNI_ABORT);
+        }
+    }
+    DoubleArrayGuard(const DoubleArrayGuard&) = delete;
+    DoubleArrayGuard& operator=(const DoubleArrayGuard&) = delete;
+
+    jdouble* elements() const { return elements_; }
+
+private:
+    JNIEnv* env_;
+    jdoubleArray array_;
+    jdouble* elements_;
+};
+
+/** Same as DoubleArrayGuard, for jintArray/GetIntArrayElements. */
+class IntArrayGuard {
+public:
+    IntArrayGuard(JNIEnv* env, jintArray array) : env_(env), array_(array), elements_(nullptr) {
+        if (array_ != nullptr) {
+            elements_ = env_->GetIntArrayElements(array_, nullptr);
+        }
+    }
+    ~IntArrayGuard() {
+        if (elements_ != nullptr) {
+            env_->ReleaseIntArrayElements(array_, elements_, JNI_ABORT);
+        }
+    }
+    IntArrayGuard(const IntArrayGuard&) = delete;
+    IntArrayGuard& operator=(const IntArrayGuard&) = delete;
+
+    jint* elements() const { return elements_; }
+
+private:
+    JNIEnv* env_;
+    jintArray array_;
+    jint* elements_;
+};
 
 }  // namespace
 
@@ -416,6 +509,320 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeReleaseShape(JNIEnv* env, jobject 
     // No JNI exception path in this function (TopoDS_Shape's destructor cannot throw), but `env`
     // is still part of the required JNI signature.
     (void)env;
+}
+
+// ------------------------------------------------------------------------------------------
+// Geometrie Welle 5a: extrude + fillet. See docs/adr/ADR-0008-occt-feature-operations.adoc for
+// the full design rationale, the DoS measurements behind every constant above, and the
+// deadlock/exception-safety pitfalls the two functions below exist to avoid.
+// ------------------------------------------------------------------------------------------
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
+    JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble height) {
+    // GetArrayLength(env, nullptr) is undefined behavior -- OcctBridge is public precisely so
+    // out-of-module callers (including test code, via reflection) can reach this method directly
+    // with hostile input that OcctKernel.extrudeProfile's own Kotlin-side validation would never
+    // let through -- see this method's KDoc in OcctBridge.kt and nativeWriteStep's identical null
+    // check above for the same rationale.
+    if (profileXy == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", "nativeExtrudeProfile: profileXy must not be null");
+        return 0;
+    }
+
+    // Length checked BEFORE any GetDoubleArrayElements call, per this file's own convention.
+    jsize length = env->GetArrayLength(profileXy);
+    if (length % 2 != 0) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            "nativeExtrudeProfile: profileXy length must be even (x,y pairs), got " + std::to_string(length));
+        return 0;
+    }
+    jsize pointCount = length / 2;
+    if (pointCount < kMinProfilePoints || pointCount > kMaxProfilePoints) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            "nativeExtrudeProfile: profile must have between " + std::to_string(kMinProfilePoints) + " and " +
+                std::to_string(kMaxProfilePoints) + " points, got " + std::to_string(pointCount));
+        return 0;
+    }
+
+    DoubleArrayGuard guard(env, profileXy);
+    const jdouble* xy = guard.elements();
+    if (xy == nullptr) {
+        return 0;  // OutOfMemoryError already pending
+    }
+
+    for (jsize i = 0; i < pointCount; ++i) {
+        double x = xy[i * 2];
+        double y = xy[i * 2 + 1];
+        if (!std::isfinite(x) || !std::isfinite(y) || std::abs(x) > kMaxAbsCoordinate ||
+            std::abs(y) > kMaxAbsCoordinate) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeExtrudeProfile: profile[" + std::to_string(i) + "] must be finite and within +/-" +
+                    std::to_string(kMaxAbsCoordinate) + ", got (" + std::to_string(x) + ", " + std::to_string(y) +
+                    ")");
+            return 0;
+        }
+    }
+    if (!std::isfinite(height) || std::abs(height) <= kMinDimension || std::abs(height) > kMaxDimension) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            "nativeExtrudeProfile: height magnitude must be finite and within (" + std::to_string(kMinDimension) +
+                ", " + std::to_string(kMaxDimension) + "], got " + std::to_string(height));
+        return 0;
+    }
+    // MakePolygon silently drops a consecutive point within Precision::Confusion() (1e-7) of its
+    // predecessor -- not just an exact bit-for-bit duplicate (measured against OCCT 7.9.2: a
+    // 4-point profile with one duplicate quietly became a triangle, with no error at all; the same
+    // is true for a "duplicate" that is merely 1e-8 apart, well inside OCCT's own confusion
+    // tolerance) -- reject that up front, using the SAME tolerance OCCT itself applies internally,
+    // rather than let a caller's profile be silently reinterpreted into a different polygon.
+    // Ordinary subtraction already treats -0.0 and 0.0 as equal (their difference is exactly 0.0),
+    // so that case is still caught here as one instance of the general distance check, with no
+    // special-casing needed.
+    const double confusionSquared = Precision::SquareConfusion();
+    for (jsize i = 0; i < pointCount; ++i) {
+        jsize next = (i + 1) % pointCount;
+        double dx = xy[i * 2] - xy[next * 2];
+        double dy = xy[i * 2 + 1] - xy[next * 2 + 1];
+        if (dx * dx + dy * dy <= confusionSquared) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeExtrudeProfile: profile has coincident (or near-coincident, within " +
+                    std::to_string(Precision::Confusion()) + ") consecutive points at index " + std::to_string(i));
+            return 0;
+        }
+    }
+
+    try {
+        BRepBuilderAPI_MakePolygon polygonMaker;
+        for (jsize i = 0; i < pointCount; ++i) {
+            polygonMaker.Add(gp_Pnt(xy[i * 2], xy[i * 2 + 1], 0.0));
+        }
+        polygonMaker.Close();
+        if (!polygonMaker.IsDone()) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeExtrudeProfile: failed to close polygon");
+            return 0;
+        }
+        TopoDS_Wire wire = polygonMaker.Wire();
+
+        BRepBuilderAPI_MakeFace faceMaker(wire, Standard_True);
+        if (!faceMaker.IsDone()) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeExtrudeProfile: failed to build a planar face from the profile (BRepBuilderAPI_FaceError=" +
+                    std::to_string(static_cast<int>(faceMaker.Error())) + ") -- profile may be non-planar or self-intersecting");
+            return 0;
+        }
+        TopoDS_Face face = faceMaker.Face();
+
+        BRepPrimAPI_MakePrism prismMaker(face, gp_Vec(0.0, 0.0, height));
+        prismMaker.Build();
+        if (!prismMaker.IsDone()) {
+            throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakePrism did not complete");
+            return 0;
+        }
+        // Same explicit-copy rationale as nativeMakeBox above: Shape() returns `const&`, which
+        // does not bind to registerShape's `TopoDS_Shape&&` parameter directly.
+        TopoDS_Shape result(prismMaker.Shape());
+
+        // Mandatory post-check, the actual security value of this function: a degenerate profile
+        // (collinear points, or a self-crossing "bowtie" polygon) reaches OCCT successfully and
+        // produces a shape with IsDone()==true, but BRepCheck_Analyzer reports it invalid and/or
+        // its volume is zero -- measured against OCCT 7.9.2. Neither check alone catches every
+        // case (a 2-point-equivalent degenerate profile can be BRepCheck-valid with zero volume),
+        // so both run.
+        BRepCheck_Analyzer analyzer(result);
+        if (!analyzer.IsValid()) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeExtrudeProfile: resulting solid failed OCCT's own validity check "
+                "(collinear or self-intersecting profile?)");
+            return 0;
+        }
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(result, props);
+        if (!(props.Mass() > 0.0)) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeExtrudeProfile: resulting solid has zero volume (degenerate profile?)");
+            return 0;
+        }
+
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env,
+            "java/lang/IllegalStateException",
+            std::string("OCCT error extruding profile: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error extruding profile: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error extruding profile");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble radius) {
+    if (edgeIndices == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", "nativeFilletEdges: edgeIndices must not be null");
+        return 0;
+    }
+    jsize indexCount = env->GetArrayLength(edgeIndices);
+    if (indexCount < 1 || indexCount > kMaxFilletEdges) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            "nativeFilletEdges: edgeIndices must have between 1 and " + std::to_string(kMaxFilletEdges) +
+                " entries, got " + std::to_string(indexCount));
+        return 0;
+    }
+    if (!std::isfinite(radius) || radius < kMinFilletRadius || radius > kMaxFilletRadius) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            "nativeFilletEdges: radius must be finite and within [" + std::to_string(kMinFilletRadius) + ", " +
+                std::to_string(kMaxFilletRadius) + "], got " + std::to_string(radius));
+        return 0;
+    }
+
+    IntArrayGuard guard(env, edgeIndices);
+    const jint* indices = guard.elements();
+    if (indices == nullptr) {
+        return 0;  // OutOfMemoryError already pending
+    }
+
+    try {
+        bool found = false;
+        bool tooManyFaces = false;
+        int faceCount = 0;
+        bool badIndex = false;
+        jint offendingIndex = 0;
+        int edgeCount = 0;
+        bool built = false;
+        // Result lives here, on the stack, as a plain local -- deliberately NOT registered while
+        // g_mutex is held. registerShape() itself takes g_mutex (see its definition above), and
+        // g_mutex is a plain, non-recursive std::mutex: calling registerShape() from inside the
+        // critical section below would be a guaranteed self-deadlock. See
+        // docs/adr/ADR-0008-occt-feature-operations.adoc's "Stolperfallen" for this exact trap.
+        TopoDS_Shape result;
+        {
+            // Lookup AND every OCCT call that dereferences `shape` happen inside this one critical
+            // section, exactly like every other reader in this file -- see the use-after-free note
+            // on g_mutex's declaration above. A Standard_Failure thrown by Build() unwinds through
+            // this block's closing brace, correctly releasing the lock via lock_guard's destructor
+            // (RAII), before reaching the catch cascade below.
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape != nullptr) {
+                found = true;
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+                faceCount = faces.Extent();
+                if (faceCount > kMaxFilletInputFaces) {
+                    tooManyFaces = true;
+                } else {
+                    TopTools_IndexedMapOfShape edges;
+                    TopExp::MapShapes(*shape, TopAbs_EDGE, edges);
+                    edgeCount = edges.Extent();
+                    // Every index validated BEFORE the first Add() -- never partially build a
+                    // fillet operation against a shape whose edge indices we have not fully
+                    // checked yet.
+                    for (jsize i = 0; i < indexCount && !badIndex; ++i) {
+                        jint idx = indices[i];
+                        if (idx < 0 || idx >= edgeCount) {
+                            badIndex = true;
+                            offendingIndex = idx;
+                        }
+                    }
+                    if (!badIndex) {
+                        BRepFilletAPI_MakeFillet filletMaker(*shape);
+                        for (jsize i = 0; i < indexCount; ++i) {
+                            // 0-based (Kotlin/caller-facing) -> OCCT's 1-based
+                            // TopTools_IndexedMapOfShape indexing.
+                            filletMaker.Add(radius, TopoDS::Edge(edges(indices[i] + 1)));
+                        }
+                        filletMaker.Build();  // can throw Standard_Failure -- see the try below
+                        if (filletMaker.IsDone()) {
+                            result = TopoDS_Shape(filletMaker.Shape());
+                            built = true;
+                        }
+                    }
+                }
+            }
+        }  // g_mutex released here
+
+        // Every throwJava() call below runs OUTSIDE the lock -- FindClass() can trigger arbitrary
+        // Java class-loading code, which must never run while this thread still holds a plain,
+        // non-recursive std::mutex it might then need to re-acquire (e.g. a Cleaner action
+        // concurrently running nativeReleaseShape()) -- see throwUnknownHandle()'s own comment
+        // above for the identical rationale.
+        if (!found) {
+            throwUnknownHandle(env, handle);
+            return 0;
+        }
+        if (tooManyFaces) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeFilletEdges: input shape has " + std::to_string(faceCount) + " faces, exceeding the limit of " +
+                    std::to_string(kMaxFilletInputFaces));
+            return 0;
+        }
+        if (badIndex) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeFilletEdges: edge index " + std::to_string(offendingIndex) + " is out of range for a shape with " +
+                    std::to_string(edgeCount) + " edges");
+            return 0;
+        }
+        if (!built) {
+            throwJava(
+                env,
+                "java/lang/IllegalStateException",
+                "BRepFilletAPI_MakeFillet did not complete (radius too large for the local geometry?)");
+            return 0;
+        }
+
+        // Same mandatory post-check as nativeExtrudeProfile, run on the local (not-yet-registered)
+        // result -- cost measured well within the DoS budget at kMaxFilletInputFaces (see
+        // docs/adr/ADR-0008-occt-feature-operations.adoc).
+        BRepCheck_Analyzer analyzer(result);
+        if (!analyzer.IsValid()) {
+            throwJava(
+                env, "java/lang/IllegalStateException", "nativeFilletEdges: resulting solid failed OCCT's own validity check");
+            return 0;
+        }
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(result, props);
+        if (!(props.Mass() > 0.0)) {
+            throwJava(env, "java/lang/IllegalStateException", "nativeFilletEdges: resulting solid has zero volume");
+            return 0;
+        }
+
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("OCCT error building fillet: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error building fillet: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error building fillet");
+    }
+    return 0;
 }
 
 }  // extern "C"

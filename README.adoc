@@ -678,7 +678,19 @@ See <<roadmap,Roadmap>> for what's planned next.
   topology (`ShapeTopology`: solids/shells/faces/edges/vertices, via
   `TopExp::MapShapes`, not `TopExp_Explorer`) and volume, and
   `writeStepFile(...)` exports a real AP242 (or AP203/AP214IS) STEP file
-  through OCCT's own `STEPControl_Writer`. Depends on nothing but
+  through OCCT's own `STEPControl_Writer`. (Geometrie Welle 5a)
+  `OcctKernel.extrudeProfile(profile, height)` extrudes a closed 2D
+  `ProfilePoint` polygon in the XY plane into a solid
+  (`BRepBuilderAPI_MakePolygon` -> `BRepBuilderAPI_MakeFace` ->
+  `BRepPrimAPI_MakePrism`), and `OcctKernel.fillet(shape, edgeIndices,
+  radius)` rounds one or more edges of an existing shape
+  (`BRepFilletAPI_MakeFillet`), returning a brand-new, independently
+  closeable `OcctShape` -- the input shape is left untouched. Both
+  operations compose with `makeBox` and with each other (a fillet result
+  can itself be filleted again); see
+  docs/adr/ADR-0008-occt-feature-operations.adoc for the DoS-guard
+  measurements, edge-addressing caveats, and the native-side deadlock trap
+  its own implementation had to avoid. Depends on nothing but
   `kotlin-logging-jvm` -- deliberately not on `kstep-core` yet (see
   docs/adr/ADR-0005-occt-jni-bridge.adoc). The native shim
   (`src/main/cpp/kstep_occt_bridge.cpp`) is compiled by Gradle against a
@@ -686,7 +698,7 @@ See <<roadmap,Roadmap>> for what's planned next.
   entirely -- not failed -- when the OCCT dev headers are absent, in which
   case `OcctKernel.availability()` reports `OcctAvailability.Unavailable`
   at runtime with a human-readable reason. No OCCT binary/header/source is
-  vendored in this repository; see NOTICE and the ADR for the full license
+  vendored in this repository; see NOTICE and the ADRs for the full license
   and provenance discussion, and Building below for the required
   `apt-get install`.
 
@@ -764,6 +776,21 @@ See <<roadmap,Roadmap>> for what's planned next.
   `-Pkstep.occt.require=true`) and `OcctBoxValidationExportTest`
   (analogous to `FreeCadValidationExportTest`, but writing a real
   `MANIFOLD_SOLID_BREP`-bearing STEP file for manual STEP-viewer import);
+  (Geometrie Welle 5a) `OcctFeatureOperationsTest` (extrude/fillet
+  acceptance chain: rectangular and L-shaped profile extrusion including
+  negative height, single- and multi-edge fillet with exact measured
+  volumes, chained fillet-of-a-fillet, composition with a `makeBox`-built
+  shape, STEP export of a filleted solid, source-shape independence after
+  `fillet`, radius-too-large and unsuitable-edge `OcctGeometryException`
+  cases, out-of-range-index and closed-shape rejection, the
+  `IllegalArgumentException`-vs-`OcctGeometryException` exception-mapping
+  regression case, degenerate-profile rejection, ungated Kotlin-side
+  validation, `!available`-gated `OcctUnavailableException` cases, raw
+  native-method null/length hardening, the `MAX_FILLET_INPUT_FACES` guard,
+  a use-after-free concurrency stress case, and edge-index-ordering
+  determinism across rebuilds) and `OcctFeatureValidationExportTest`
+  (analogous to `OcctBoxValidationExportTest`, writing a real
+  extruded-then-filleted STEP file for manual STEP-viewer import);
   (Geometrie Welle 6, pulled forward) `PlaneGcsBridgeSmokeTest` (the full
   `kstep-constraints` distance-only acceptance chain: a real two-point
   distance solve, a real 3-4-5 right-triangle solve, a deliberately
@@ -824,11 +851,12 @@ reason).
 
 === Building — optional OCCT geometry bridge
 
-`kstep-geometry` (Geometrie Welle 1, see
-docs/adr/ADR-0005-occt-jni-bridge.adoc) links against a system-installed
-OpenCASCADE Technology (OCCT) library. This is entirely optional:
-`./gradlew clean check` stays green with or without it, and no OCCT
-binary/header/source is vendored in this repository. To get real
+`kstep-geometry` (Geometrie Welle 1, extended by Geometrie Welle 5a for
+extrude/fillet — see docs/adr/ADR-0005-occt-jni-bridge.adoc and
+docs/adr/ADR-0008-occt-feature-operations.adoc) links against a
+system-installed OpenCASCADE Technology (OCCT) library. This is entirely
+optional: `./gradlew clean check` stays green with or without it, and no
+OCCT binary/header/source is vendored in this repository. To get real
 end-to-end geometry coverage (as opposed to only the graceful-degradation
 path), install the OCCT dev packages first — on Ubuntu/Debian:
 
@@ -844,11 +872,15 @@ Without those packages installed, `kstep-geometry`'s `compileOcctBridge`
 Gradle task is skipped (not failed), and
 `dev.kstep.geometry.OcctKernel.availability()` reports
 `OcctAvailability.Unavailable` at runtime with a human-readable reason;
-`OcctBridgeSmokeTest`'s OCCT-dependent cases then skip cleanly instead of
-failing. `-Pkstep.occt.require=true` turns that into a hard test failure
-instead — pass it only on a machine where OCCT is expected to actually be
-present. This wave supports linux-x86-64 only; see the ADR's Folge-Wellen
-for the planned macOS/Windows follow-up.
+`OcctBridgeSmokeTest`/`OcctFeatureOperationsTest`'s OCCT-dependent cases
+then skip cleanly instead of failing. `-Pkstep.occt.require=true` turns
+that into a hard test failure instead — pass it only on a machine where
+OCCT is expected to actually be present. This wave supports linux-x86-64
+only; see the ADRs' Folge-Wellen for the planned macOS/Windows follow-up.
+`BRepFilletAPI_MakeFillet` (Geometrie Welle 5a) lives in `TKFillet`, from
+the same `libocct-modeling-algorithms-dev` package as `TKPrim`/`TKTopAlgo`
+above — no additional `apt-get` package is required beyond the four already
+listed.
 
 === Building — optional PlaneGCS constraint solver
 
@@ -1584,7 +1616,13 @@ an entity not modeled anywhere in `kstep-core`).
   primitives and boolean ops, STEP *import*, a `.kstep.kts` geometry DSL,
   merging OCCT shape data with kSTEP's own AP242 product-structure Part 21
   output, a feature/parametric-history model, multi-platform support, a
-  desktop viewer). **(Geometrie Welle 6, pulled forward, done)**
+  desktop viewer). **(Geometrie Welle 5a, done)** `OcctKernel` now also
+  offers `extrudeProfile(...)` (2D-profile-to-solid extrusion) and
+  `fillet(...)` (edge rounding), both composable with `makeBox` and with
+  each other — see the `kstep-geometry` row above and
+  `docs/adr/ADR-0008-occt-feature-operations.adoc` for the DoS-guard
+  measurements and the parametric-history half (Geometrie Welle 5b) this
+  wave deliberately leaves open. **(Geometrie Welle 6, pulled forward, done)**
   `kstep-constraints` now exists: a PlaneGCS 2D geometric constraint-solver
   bridge, initially solving point systems under distance constraints — see
   the `kstep-constraints` row above and

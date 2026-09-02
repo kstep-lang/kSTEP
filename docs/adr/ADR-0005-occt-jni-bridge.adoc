@@ -458,7 +458,11 @@ exercised either way).
 
 | Geometrie Welle 5
 | Feature-model / parametric history (sketch -> extrude -> fillet,
-  replayable).
+  replayable). Superseded by ADR-0008: the non-history foundation (profile
+  extrusion + edge fillet) is done as **Geometrie Welle 5a** -- see
+  docs/adr/ADR-0008-occt-feature-operations.adoc. The replayable
+  feature-tree/undo-redo half continues as **Geometrie Welle 5b**, per that
+  ADR's own Folge-Wellen table.
 
 | Geometrie Welle 6
 | **Pulled forward and implemented** as its own module, `kstep-constraints`
