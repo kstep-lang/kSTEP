@@ -7,3 +7,8 @@ indent_size = 4
 max_line_length = 120
 insert_final_newline = true
 ktlint_standard_no-wildcard-imports = enabled
+# kstep-viewer (Viewer-Welle 1): Compose's own convention is PascalCase for @Composable
+# functions (they read as a type/widget, not an action) -- this ktlint property is the
+# standard, documented way to exempt just those from function-naming's lowerCamelCase rule.
+# Harmless repo-wide: no non-Compose module in this repo declares an @Composable function.
+ktlint_function_naming_ignore_when_annotated_with = Composable

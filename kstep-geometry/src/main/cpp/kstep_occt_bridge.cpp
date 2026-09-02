@@ -36,16 +36,23 @@
 #include <string>
 #include <unordered_map>
 
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <Poly_Triangle.hxx>
+#include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
@@ -53,6 +60,7 @@
 #include <Standard_Version.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -60,7 +68,10 @@
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+
+#include <vector>
 
 namespace {
 
@@ -161,6 +172,28 @@ constexpr int kMaxFilletEdges = 64;
 constexpr double kMinFilletRadius = 1e-7;
 constexpr double kMaxFilletRadius = 1e7;
 
+// ------------------------------------------------------------------------------------------
+// Viewer-Welle 1 (triangulation) additions below. See
+// docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc.
+// ------------------------------------------------------------------------------------------
+
+// Speicher-Guard fuer den JNI-Rueckgabe-Array (9 Doubles je Dreieck = 72 B). Gemessen (OCCT
+// 7.9.2, siehe ADR-0010): der teuerste ueber kSTEPs oeffentliche API erreichbare Shape -- ein
+// 198-Eck-Prisma (200 Faces = kMaxFilletInputFaces) mit 64 Fillets (= kMaxFilletEdges) --
+// ergibt 6 332 Dreiecke in 52,6 ms. 130 000 sind ~20x davon (9,4 MB), dieselbe
+// "messen, dann Kopffreiheit lassen"-Methode wie kMaxProfilePoints. Die ZEIT-Schranke ist
+// nicht dieser Wert, sondern transitiv kMaxFilletInputFaces/kMaxProfilePoints -- mirrors
+// dev.kstep.geometry.OcctKernel.MAX_TRIANGLES (hand-synchronized pair, same pattern
+// ADR-0007's NativeConstraintKind already uses).
+constexpr jint kMaxTriangles = 130000;
+
+// Kein Qualitaetsparameter an der API-Grenze -- die Abweichung wird nativ aus der
+// Bounding-Box-Diagonale abgeleitet. Ein Aufrufer mit deflection=1e-9 WAERE der DoS.
+constexpr double kMeshDeflectionFactor = 0.005;
+constexpr double kMinMeshDeflection = 1e-5;
+constexpr double kMaxMeshDeflection = 1e3;
+constexpr double kMeshAngularDeflection = 0.5;
+
 /**
  * RAII wrapper around JNIEnv::GetDoubleArrayElements/ReleaseDoubleArrayElements. Always releases
  * with JNI_ABORT (discard any temporary copy, no write-back) -- every array this bridge reads
@@ -217,6 +250,41 @@ private:
     JNIEnv* env_;
     jintArray array_;
     jint* elements_;
+};
+
+/**
+ * Ruft BRepTools::Clean(shape) im Destruktor -- also auf JEDEM Pfad, auch bei einer
+ * Standard_Failure aus BRepMesh_IncrementalMesh heraus.
+ *
+ * Grund: BRepMesh_IncrementalMesh MUTIERT die Eingabe-Shape (die Triangulierung wird in der
+ * TShape abgelegt). Ohne dieses Aufraeumen bliebe ein in g_shapes registrierter, nach aussen
+ * "unveraenderlicher" Shape nach jedem Viewer-Aufruf dauerhaft groesser, und niemand saehe es
+ * -- genau der "Resource-Leak bei nativen Meshes" der CLAUDE.md-Sicherheits-Pruefliste. Preis:
+ * erneutes Meshen bei jedem Aufruf (gemessen 0,3-0,9 ms fuer Box/Fillet). Fuer eine statische
+ * Einzeldarstellung ist das kein Preis.
+ *
+ * OCCTs Clean() entfernt polygonale Repraesentationen NICHT, wenn sie die einzige
+ * Repraesentation der Shape sind (BRepTools.hxx) -- ein rein tesselierter Shape wird also nicht
+ * beschaedigt. In kSTEP kann dieser Fall heute ohnehin nicht auftreten (es gibt nur den
+ * STEP-Writer-Pfad, keinen Importer).
+ */
+class TriangulationCleanupGuard {
+public:
+    explicit TriangulationCleanupGuard(const TopoDS_Shape* shape) : shape_(shape) {}
+    ~TriangulationCleanupGuard() {
+        if (shape_ != nullptr) {
+            try {
+                BRepTools::Clean(*shape_);
+            } catch (...) {
+                // Destruktor darf nie werfen.
+            }
+        }
+    }
+    TriangulationCleanupGuard(const TriangulationCleanupGuard&) = delete;
+    TriangulationCleanupGuard& operator=(const TriangulationCleanupGuard&) = delete;
+
+private:
+    const TopoDS_Shape* shape_;
 };
 
 }  // namespace
@@ -823,6 +891,207 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error building fillet");
     }
     return 0;
+}
+
+// ------------------------------------------------------------------------------------------
+// Viewer-Welle 1: OCCT triangulation. See docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc
+// for the design rationale, the DoS measurements behind kMaxTriangles, and the two classic OCCT
+// pitfalls (REVERSED-face winding, TopLoc_Location transforms) this function's regression tests
+// specifically prove it avoids.
+// ------------------------------------------------------------------------------------------
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobject /*self*/, jlong handle) {
+    try {
+        bool found = false;
+        bool tooManyTriangles = false;
+        bool meshingIncomplete = false;
+        int totalFaces = 0;
+        int unmeshedFaces = 0;
+        long long triangleCount = 0;
+        std::vector<double> coords;
+        {
+            // Lookup AND every OCCT call that dereferences `shape` happen inside this one
+            // critical section, exactly like every other reader in this file -- see the
+            // use-after-free note on g_mutex's declaration above.
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape != nullptr) {
+                found = true;
+
+                // Registers BRepTools::Clean(*shape) to run when this scope exits (success,
+                // early "no faces" return, or a Standard_Failure unwind alike) -- see the class
+                // KDoc above. Constructed BEFORE meshing, still under g_mutex, so the cleanup
+                // itself runs against the same shape under the same lock that protects every
+                // other reader/writer of it. No registerShape() call anywhere in this function
+                // -- nativeShapeTriangles produces no new shape, so the self-deadlock trap
+                // ADR-0008 documents for registerShape-inside-the-critical-section simply does
+                // not apply here; noted so a future edit does not add one inside this block.
+                TriangulationCleanupGuard cleanup(shape);
+
+                Bnd_Box box;
+                BRepBndLib::Add(*shape, box, Standard_True);
+                if (!box.IsVoid()) {
+                    double xMin = 0.0, yMin = 0.0, zMin = 0.0, xMax = 0.0, yMax = 0.0, zMax = 0.0;
+                    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+                    double dx = xMax - xMin;
+                    double dy = yMax - yMin;
+                    double dz = zMax - zMin;
+                    double diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    double deflection = diagonal * kMeshDeflectionFactor;
+                    if (deflection < kMinMeshDeflection) {
+                        deflection = kMinMeshDeflection;
+                    } else if (deflection > kMaxMeshDeflection) {
+                        deflection = kMaxMeshDeflection;
+                    }
+
+                    // isRelative=false, isInParallel=false -- deterministic, reproducible
+                    // triangle counts (see nativeShapeTriangles's Kotlin-side KDoc and T-8's
+                    // "two consecutive calls produce identical output" regression test).
+                    BRepMesh_IncrementalMesh mesher(*shape, deflection, Standard_False, kMeshAngularDeflection, Standard_False);
+                    // IsDone()==false means the algorithm did not complete for (at least) one
+                    // face -- surfaced below as meshingIncomplete, same "check status, don't just
+                    // trust Shape()/the output" rule this file already applies to every other OCCT
+                    // *Maker (BRepBuilderAPI_MakePolygon/MakeFace, BRepPrimAPI_MakePrism,
+                    // BRepFilletAPI_MakeFillet, all above). Left unchecked, a face that fails to
+                    // mesh has BRep_Tool::Triangulation(...) return IsNull() below and is silently
+                    // `continue`d past -- a "holey" triangle soup returned as if it were a complete,
+                    // valid result, with no exception anywhere.
+                    bool meshDone = mesher.IsDone();
+
+                    TopTools_IndexedMapOfShape faces;
+                    // TopExp::MapShapes, never TopExp_Explorer -- see nativeShapeCounts's
+                    // identical rationale above (a shared face visited twice would double-count
+                    // its triangles and corrupt the signed-volume regression tests).
+                    TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+                    totalFaces = faces.Extent();
+
+                    // Pass 1: count only, so kMaxTriangles is enforced BEFORE any coordinate is
+                    // extracted and BEFORE `coords` is sized. Also tallies unmeshedFaces (a face
+                    // whose triangulation is null despite the shape having faces at all) --
+                    // together with `meshDone`, this is what meshingIncomplete below is built
+                    // from, so a partially-failed mesh fails loudly instead of returning silently
+                    // corrupt data.
+                    for (int i = 1; i <= faces.Extent() && !tooManyTriangles; ++i) {
+                        const TopoDS_Face& face = TopoDS::Face(faces(i));
+                        TopLoc_Location loc;
+                        const auto& tri = BRep_Tool::Triangulation(face, loc);
+                        if (tri.IsNull()) {
+                            ++unmeshedFaces;
+                            continue;
+                        }
+                        triangleCount += tri->NbTriangles();
+                        if (triangleCount > kMaxTriangles) {
+                            tooManyTriangles = true;
+                        }
+                    }
+                    // Gated on totalFaces > 0: a shape with zero faces at all (a wire/edge/vertex
+                    // compound) is the pre-existing "empty result is valid, non-exceptional" case
+                    // documented below -- meshDone can reasonably be false for a face-less shape
+                    // with nothing to mesh, and that must NOT be reinterpreted as a failure.
+                    meshingIncomplete = totalFaces > 0 && (!meshDone || unmeshedFaces > 0);
+
+                    if (!tooManyTriangles && triangleCount > 0) {
+                        coords.reserve(static_cast<size_t>(triangleCount) * 9);
+                        for (int i = 1; i <= faces.Extent(); ++i) {
+                            const TopoDS_Face& face = TopoDS::Face(faces(i));
+                            TopLoc_Location loc;
+                            const auto& tri = BRep_Tool::Triangulation(face, loc);
+                            if (tri.IsNull()) {
+                                continue;
+                            }
+                            const gp_Trsf& trsf = loc.Transformation();
+                            bool identity = loc.IsIdentity();
+                            // REVERSED faces must have their winding flipped, or the resulting
+                            // normal points inward -- see this function's KDoc and ADR-0010's
+                            // measured -8000-vs-24000 regression case.
+                            bool reversed = (face.Orientation() == TopAbs_REVERSED);
+                            for (int t = 1; t <= tri->NbTriangles(); ++t) {
+                                int n1 = 0, n2 = 0, n3 = 0;
+                                tri->Triangle(t).Get(n1, n2, n3);
+                                if (reversed) {
+                                    std::swap(n2, n3);
+                                }
+                                gp_Pnt p1 = tri->Node(n1);
+                                gp_Pnt p2 = tri->Node(n2);
+                                gp_Pnt p3 = tri->Node(n3);
+                                if (!identity) {
+                                    p1.Transform(trsf);
+                                    p2.Transform(trsf);
+                                    p3.Transform(trsf);
+                                }
+                                coords.push_back(p1.X());
+                                coords.push_back(p1.Y());
+                                coords.push_back(p1.Z());
+                                coords.push_back(p2.X());
+                                coords.push_back(p2.Y());
+                                coords.push_back(p2.Z());
+                                coords.push_back(p3.X());
+                                coords.push_back(p3.Y());
+                                coords.push_back(p3.Z());
+                            }
+                        }
+                    }
+                }
+                // TriangulationCleanupGuard::~TriangulationCleanupGuard runs here (end of scope,
+                // still under g_mutex), discarding the triangulation this block just extracted
+                // coordinates from.
+            }
+        }  // g_mutex released here
+
+        // Every throwJava() call below runs OUTSIDE the lock -- see throwUnknownHandle()'s own
+        // comment above for the identical FindClass-can-run-arbitrary-Java-code rationale.
+        if (!found) {
+            throwUnknownHandle(env, handle);
+            return nullptr;
+        }
+        if (tooManyTriangles) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeShapeTriangles: shape triangulates to more than " + std::to_string(kMaxTriangles) +
+                    " triangles (got at least " + std::to_string(triangleCount) + ")");
+            return nullptr;
+        }
+        if (meshingIncomplete) {
+            // IllegalStateException, not OcctGeometryException's usual RuntimeException wrapping
+            // on the Kotlin side -- mirrors BRepPrimAPI_MakePrism's/BRepFilletAPI_MakeFillet's
+            // identical "did not complete" IllegalStateException above, both of which are also
+            // reached only via the general RuntimeException catch in OcctShape.triangulate() (this
+            // is NOT the tooManyTriangles DoS guard, so it deliberately does not reuse
+            // IllegalArgumentException -- see that function's ordering comment for why the
+            // distinction matters).
+            throwJava(
+                env,
+                "java/lang/IllegalStateException",
+                "nativeShapeTriangles: BRepMesh_IncrementalMesh did not fully triangulate the shape (" +
+                    std::to_string(unmeshedFaces) + " of " + std::to_string(totalFaces) +
+                    " face(s) have no triangulation) -- refusing to return a partial triangle mesh");
+            return nullptr;
+        }
+
+        // An empty array (0 triangles, e.g. a shape with no faces) is a valid, non-exceptional
+        // result -- see this function's Kotlin-side KDoc.
+        jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(coords.size()));
+        if (result == nullptr) {
+            return nullptr;  // OutOfMemoryError already pending, thrown by the JVM itself
+        }
+        if (!coords.empty()) {
+            env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(coords.size()), coords.data());
+        }
+        return result;
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env,
+            "java/lang/IllegalStateException",
+            std::string("OCCT error triangulating shape: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("Native error triangulating shape: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error triangulating shape");
+    }
+    return nullptr;
 }
 
 }  // extern "C"

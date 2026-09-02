@@ -91,6 +91,26 @@ object OcctKernel {
     /** See [MIN_FILLET_RADIUS]. */
     const val MAX_FILLET_RADIUS: Double = 1e7
 
+    /** Maximum triangle count [OcctShape.triangulate] returns. Mirrors `kMaxTriangles` in
+     *  kstep_occt_bridge.cpp (hand-synchronized pair, the same pattern ADR-0007's
+     *  `NativeConstraintKind` already uses -- see that ADR's Decision section). Measured (OCCT
+     *  7.9.2, see docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc): the most expensive shape
+     *  reachable through this module's own public API (a 198-face prism with 64 fillets --
+     *  [MAX_FILLET_INPUT_FACES]/[MAX_FILLET_EDGES] at their limits) triangulates to 6 332
+     *  triangles in 52.6 ms; 130 000 is roughly 20x that (a 9.4 MB return array). The time bound
+     *  is transitively [MAX_FILLET_INPUT_FACES]/[MAX_PROFILE_POINTS], not this value -- this
+     *  constant is a pure memory guard on the JNI return array.
+     *
+     *  Untested by construction, not by oversight: the "6 332 is the most expensive shape
+     *  reachable through this module's own public API" measurement above means this guard's
+     *  `tooManyTriangles` branch (`kstep_occt_bridge.cpp`'s `nativeShapeTriangles`) cannot
+     *  actually be exercised by any [makeBox]/[extrudeProfile]/[fillet] call this module exposes
+     *  -- reaching it would require either a native-only test harness this repo does not have, or
+     *  lowering this constant to an artificially small value just to trip it, which would test the
+     *  wrong number. Left as pure defense-in-depth, mirroring the equally-untested
+     *  `mesher.IsDone()`/unmeshed-face guard right next to it in the same native function. */
+    const val MAX_TRIANGLES: Int = 130_000
+
     /**
      * Whether the native bridge is available on this JVM, and diagnostic detail either way.
      * Resolved once per process and cached -- see [OcctNativeLibrary.availability].

@@ -155,6 +155,37 @@ class OcctShape internal constructor(
     }
 
     /**
+     * Triangulates this shape's surface and returns the result as a [TriangleMesh].
+     *
+     * DELIBERATELY NOT cached (unlike [topology]/[volume]): the native triangulation is
+     * discarded again right after extraction (`BRepTools::Clean`, see
+     * [dev.kstep.geometry.occt.OcctBridge.nativeShapeTriangles]'s KDoc) -- a JVM-side cache would
+     * just rebuild, for this [OcctShape]'s entire remaining lifetime, the memory `Clean` was
+     * meant to give back.
+     *
+     * @throws IllegalStateException if this shape is already [close]d.
+     * @throws IllegalArgumentException if the shape exceeds the native triangle-count guard
+     *   ([OcctKernel.MAX_TRIANGLES]).
+     * @throws OcctGeometryException if OCCT itself fails to triangulate the shape.
+     */
+    fun triangulate(): TriangleMesh =
+        withHandle { h ->
+            val coords =
+                try {
+                    OcctBridge.nativeShapeTriangles(h)
+                } catch (e: IllegalArgumentException) {
+                    // Native DoS-/range-check failure must surface as-is, not be reinterpreted as
+                    // a geometry failure -- same rule as OcctKernel.fillet's identical ordering.
+                    // IllegalArgumentException IS a RuntimeException, so this catch MUST come
+                    // before the general RuntimeException catch below.
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to triangulate shape (handle=$handle)", e)
+                }
+            TriangleMesh(coords)
+        }
+
+    /**
      * Runs [block] with this shape's native handle, with the two invariants every existing native
      * call site in this class already upholds applied centrally: [checkOpen] first, and a
      * [Reference.reachabilityFence] around the call so the [Cleaner] cannot free the native shape

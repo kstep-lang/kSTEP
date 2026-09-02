@@ -147,6 +147,14 @@ val compileOcctBridge =
                     // so TKFillet is the ONLY new toolkit Geometrie Welle 5a needs (see
                     // docs/adr/ADR-0008-occt-feature-operations.adoc).
                     "-lTKFillet",
+                    // BRepMesh_IncrementalMesh lives in TKMesh -- verified with
+                    // `nm -D --defined-only /usr/lib/x86_64-linux-gnu/libTKMesh.so | grep BRepMesh_IncrementalMesh`
+                    // (19 symbols; zero in TKBRep/TKTopAlgo/TKPrim/TKMath/TKG3d). BRepTools::Clean and
+                    // BRep_Tool::Triangulation are already covered by TKBRep, BRepBndLib by TKTopAlgo,
+                    // Poly_Triangulation by TKMath -- TKMesh is the ONLY new toolkit Viewer-Welle 1
+                    // needs (see docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc).
+                    // `-Wl,--no-undefined` below re-verifies this at every build.
+                    "-lTKMesh",
                     "-lTKXSBase",
                     "-lTKDESTEP",
                     // Ubuntu's g++ defaults to --enable-new-dtags, which makes -Wl,-rpath below

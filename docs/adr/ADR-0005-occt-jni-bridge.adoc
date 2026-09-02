@@ -481,7 +481,15 @@ exercised either way).
   named under Context above become live.
 
 | Geometrie Welle 8
-| Desktop viewer (Compose Desktop + OCCT visualization).
+| **Implemented (its non-history foundation) as Viewer-Welle 1**, its own
+  module `kstep-viewer` -- see docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc.
+  `BRepMesh_IncrementalMesh` triangulation added to this bridge
+  (`nativeShapeTriangles`, the sole new toolkit `TKMesh`), a pure isometric
+  projection with backface culling/flat shading/painter's algorithm, and a
+  static Compose Desktop window. Camera interaction, a real CAD-silhouette
+  edge overlay, smooth shading, multi-shape scenes, picking, STEP import,
+  a quality knob, and packaging are all deliberately deferred -- see that
+  ADR's own Folge-Wellen table (V-2..V-10).
 
 | Geometrie Welle 9
 | Re-evaluate the binding strategy once the shim exceeds roughly 50

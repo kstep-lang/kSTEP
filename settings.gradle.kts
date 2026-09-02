@@ -14,6 +14,19 @@ rootProject.name = "kSTEP"
 dependencyResolutionManagement {
     repositories {
         mavenCentral()
+        // Compose Multiplatform 1.11.1 (kstep-viewer, Viewer-Welle 1) pulls real androidx.*
+        // artifacts (androidx.compose.runtime:runtime-saveable, androidx.lifecycle:
+        // lifecycle-common/-runtime, androidx.savedstate:savedstate-compose) that do NOT exist
+        // on Maven Central -- verified 2026-09-02: with only mavenCentral() above,
+        // kstep-viewer's runtimeClasspath resolution fails hard on those coordinates. Scoped to
+        // androidx.* only, so this repository does not become a second, unscoped artifact
+        // source for every module in this build -- same content{} pattern kUML uses for its own
+        // third-party repositories. See docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc.
+        google {
+            content {
+                includeGroupByRegex("androidx\\..*")
+            }
+        }
     }
 }
 
@@ -27,5 +40,6 @@ include(
     "kstep-geometry",
     "kstep-constraints",
     "kstep-shape",
+    "kstep-viewer",
     "kstep-tests",
 )

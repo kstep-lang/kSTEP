@@ -758,6 +758,28 @@ See <<roadmap,Roadmap>> for what's planned next.
   the Part-21-level-merge-vs-XCAF decision, and the injection/DoS security
   analysis.
 
+| `kstep-viewer`
+| Static isometric OCCT shape viewer -- Viewer-Welle 1
+  (`dev.kstep.viewer.mesh`/`dev.kstep.viewer.ui`)
+| Working: `dev.kstep.geometry.occt.OcctBridge.nativeShapeTriangles` (new
+  in `kstep-geometry`) triangulates a shape's surface
+  (`BRepMesh_IncrementalMesh`) into an `OcctShape.triangulate(): TriangleMesh`
+  -- a flat, index-free triangle soup in world coordinates with corrected
+  winding. `dev.kstep.viewer.mesh.IsometricProjection.project(...)` turns
+  that into a list of `ProjectedTriangle`s (backface-culled, flat-shaded,
+  painter's-algorithm-sorted, fit to canvas) with zero Compose dependency
+  (enforced by an automated package-boundary test) -- both a real Compose
+  Desktop window (`ShapeCanvas`, opened via `./gradlew :kstep-viewer:run`,
+  never part of `check`) and a headless AWT test rasterizer consume the
+  exact same call. See docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc
+  for the DoS measurements behind `OcctKernel.MAX_TRIANGLES`, the two
+  classic OCCT triangulation pitfalls (`REVERSED`-face winding,
+  `TopLoc_Location` transforms) this wave's own regression tests exist to
+  catch, and why a camera-aligned light makes flat shading invisible on an
+  axis-aligned box. Depends on `kstep-geometry` and Compose Multiplatform
+  (`org.jetbrains.compose` 1.11.1) -- see Building below for the scoped
+  `google()` repository this pulls in.
+
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
 | Smoke test for the EXPRESS parser; semantic-model, naming-convention,
@@ -922,7 +944,29 @@ only; see the ADRs' Folge-Wellen for the planned macOS/Windows follow-up.
 `BRepFilletAPI_MakeFillet` (Geometrie Welle 5a) lives in `TKFillet`, from
 the same `libocct-modeling-algorithms-dev` package as `TKPrim`/`TKTopAlgo`
 above — no additional `apt-get` package is required beyond the four already
-listed.
+listed. `BRepMesh_IncrementalMesh` (Viewer-Welle 1, `kstep-viewer`'s
+triangulation) lives in `TKMesh`, from the same
+`libocct-modeling-algorithms-dev` package too — still no additional
+`apt-get` package required.
+
+=== Building — optional desktop viewer
+
+`kstep-viewer` (Viewer-Welle 1 — see
+docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc) depends on both the
+optional OCCT bridge above and Compose Multiplatform. Resolving Compose's
+dependencies requires a `google()` Maven repository entry (scoped to
+`androidx.*` coordinates only — see `settings.gradle.kts` and that ADR's
+Context section for why `mavenCentral()` alone fails), already wired into
+this repository; no extra setup is needed beyond a normal
+`./gradlew clean check`. Without the OCCT dev packages installed, opening
+the real viewer window shows an explanatory `UnavailableNotice` (with the
+exact `apt-get install` command above) instead of a blank canvas or a
+crash.
+
+`./gradlew :kstep-viewer:run` opens a real, on-screen window showing a
+static isometric box — never wired into `check`, and requires an actual
+display (or `Xvfb`) to run; every test in this module stays headless
+(`java.awt.headless=true`).
 
 === Building — optional PlaneGCS constraint solver
 

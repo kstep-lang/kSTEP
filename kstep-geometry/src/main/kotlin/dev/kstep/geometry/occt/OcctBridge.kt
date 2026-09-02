@@ -69,4 +69,29 @@ object OcctBridge {
         edgeIndices: IntArray,
         radius: Double,
     ): Long
+
+    /**
+     * Triangulates the surface of the shape (`BRepMesh_IncrementalMesh`) and returns an
+     * index-free triangle soup: 9 [Double]s per triangle, vertices in world coordinates,
+     * winding normalized to point outward.
+     *
+     * DELIBERATELY WITHOUT a quality parameter: the linear deflection is derived natively from
+     * the shape's bounding-box diagonale (x 0.005, clamped to `[1e-5, 1e3]`). The only input is
+     * therefore the already-hardened handle -- a caller cannot force a `deflection=1e-9` DoS. A
+     * quality knob is Folge-Welle V-8's job, once something actually needs it.
+     *
+     * The triangulation is discarded again natively via `BRepTools::Clean` (RAII) right after
+     * extraction, so the shape does not grow with every call -- this makes the call repeatable
+     * and idempotent, but not free (re-meshed every time).
+     *
+     * @return length `9 * triangleCount`; empty if OCCT produced no triangulation at all.
+     * @throws IllegalArgumentException if the shape would triangulate to more than
+     *   [dev.kstep.geometry.OcctKernel.MAX_TRIANGLES] triangles.
+     * @throws IllegalStateException if `handle` is unknown, or if `BRepMesh_IncrementalMesh`
+     *   did not fully triangulate the shape (its own `IsDone()` is `false`, or at least one face
+     *   ends up with no triangulation) -- checked explicitly so a partially-meshed shape fails
+     *   loudly instead of silently returning an incomplete triangle soup. Both cases are wrapped
+     *   by [dev.kstep.geometry.OcctShape.triangulate] into [dev.kstep.geometry.OcctGeometryException].
+     */
+    external fun nativeShapeTriangles(handle: Long): DoubleArray
 }

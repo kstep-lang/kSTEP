@@ -9,6 +9,10 @@ kotlin-logging = "8.0.4"
 slf4j-simple = "2.0.18"
 kotlinx-coroutines = "1.11.0"
 kotlinx-serialization = "1.11.0"
+# kstep-viewer (Viewer-Welle 1) -- see docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc.
+compose-multiplatform = "1.11.1"
+# material3 has followed its own version cadence since CMP 1.10, hence the separate ref.
+compose-material3 = "1.9.0"
 
 [libraries]
 antlr4 = { module = "org.antlr:antlr4", version.ref = "antlr" }
@@ -27,8 +31,11 @@ kotlin-scripting-common = { module = "org.jetbrains.kotlin:kotlin-scripting-comm
 kotlin-scripting-jvm = { module = "org.jetbrains.kotlin:kotlin-scripting-jvm", version.ref = "kotlin" }
 kotlin-scripting-jvm-host = { module = "org.jetbrains.kotlin:kotlin-scripting-jvm-host", version.ref = "kotlin" }
 kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
+compose-material3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "compose-material3" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint-plugin" }
+compose-multiplatform = { id = "org.jetbrains.compose", version.ref = "compose-multiplatform" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

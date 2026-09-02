@@ -1,0 +1,575 @@
+= ADR-0010: OCCT triangulation and a static isometric viewer (Viewer-Welle 1)
+:toc:
+
+== Status
+
+Accepted, implemented. Covers the non-history foundation of ADR-0005's
+"Geometrie Welle 8" row (desktop viewer): native triangle extraction from
+OCCT, a pure isometric projection (backface culling, flat shading,
+painter's algorithm), and a static Compose Desktop window plus a headless
+AWT test rasterizer. Camera interaction, a real CAD-silhouette edge
+overlay, smooth shading, multi-shape scenes, picking, STEP import, a
+mesh-quality knob, and packaging are all deliberately deferred -- see
+Folge-Wellen below.
+
+== Context
+
+`kstep-geometry` (ADR-0005, extended by ADR-0008/ADR-0009) can build,
+read back, and export OCCT shapes, but has no way to *show* one. This wave
+closes that gap end to end: a real B-Rep solid, triangulated by OCCT,
+turned into pixels a human can look at.
+
+Every design decision below was settled by actually running code against
+this machine's real, system-installed OCCT 7.9.2 install and a real
+Compose Desktop dependency resolution -- not estimated. Two findings from
+that process changed the plan this ADR started from; both are called out
+explicitly below because a plan that only worked on paper would have
+shipped a subtly broken viewer.
+
+=== Toolkit/symbol verification
+
+`nm -D --defined-only` against the installed OCCT `.so` files settled which
+new link flag this wave actually needs:
+
+[cols="2,2,3", options="header"]
+|===
+| Symbol | Toolkit | Already linked?
+
+| `BRepMesh_IncrementalMesh` (19 symbols)
+| `libTKMesh.so`
+| **No -- `-lTKMesh` is the only new toolkit this wave adds.**
+
+| `BRepTools::Clean`, `BRep_Tool::Triangulation`
+| `libTKBRep.so`
+| Yes
+
+| `BRepBndLib::Add` (4 symbols)
+| `libTKTopAlgo.so`
+| Yes
+
+| `Poly_Triangulation`/`Poly_Triangle` (59 symbols)
+| `libTKMath.so`
+| Yes
+|===
+
+An earlier draft of this plan guessed `BRepBndLib` might need its own new
+toolkit; it does not -- it is already covered by `TKTopAlgo`, which
+`kstep_occt_bridge.cpp` links for `BRepCheck_Analyzer` (ADR-0008).
+`-Wl,--no-undefined` (already part of `compileOcctBridge`, see
+`kstep-geometry/build.gradle.kts`) re-verifies this at every build: a
+missing toolkit fails the LINK step, not a later `UnsatisfiedLinkError` at
+first native call.
+
+=== DoS-guard measurement: `MAX_TRIANGLES`
+
+Measured against real OCCT 7.9.2, `deflection = bboxDiagonal * 0.005`,
+angular deflection `0.5`, serial (`isInParallel = false`):
+
+[cols="3,1,1,1,1", options="header"]
+|===
+| Shape | Faces | Triangles | Nodes | Mesh time
+
+| `makeBox(10,20,30)`
+| 6
+| 12
+| 24
+| 0.7 ms
+
+| Extruded prism (20x30x40)
+| 6
+| 12
+| 24
+| 0.4 ms
+
+| Prism + one fillet (r=5)
+| 7
+| 40
+| 54
+| 0.9 ms
+
+| 198-gon prism (`MAX_FILLET_INPUT_FACES` boundary)
+| 200
+| 788
+| 1188
+| 21.0 ms
+
+| 512-gon prism (`MAX_PROFILE_POINTS` boundary)
+| 514
+| 2044
+| 3072
+| 58.6 ms
+
+| **198-gon prism + 64 fillets** (both `MAX_FILLET_INPUT_FACES` and
+  `MAX_FILLET_EDGES` at their limits -- the most expensive shape reachable
+  through this module's own public API)
+| 596
+| **6332**
+| --
+| 52.6 ms
+|===
+
+`MAX_TRIANGLES = 130_000` follows the same "measure, then leave headroom"
+method `PlaneGcsSolver.MAX_POINTS` (ADR-0006) and `MAX_PROFILE_POINTS`
+(ADR-0008) already use: roughly 20x the measured worst case (a 9.4 MB
+`double[]` at 9 doubles/triangle x 8 bytes). Crucially, `MAX_TRIANGLES` is
+a *memory* guard on the JNI return array only -- the real *time* DoS
+bound is transitively `MAX_FILLET_INPUT_FACES`/`MAX_PROFILE_POINTS`
+(ADR-0008), both already enforced before triangulation ever runs. A
+caller cannot reach a shape anywhere near 130,000 triangles through this
+module's public API at all; the constant exists purely so a future,
+larger-limit caller fails predictably instead of allocating an unbounded
+array.
+
+=== The two classic OCCT triangulation bugs, and why a box alone cannot catch either
+
+Two mistakes were deliberately made and measured before writing the real
+implementation, to prove the test plan would actually catch them:
+
+[cols="2,1,1,1", options="header"]
+|===
+| Shape | Correct (signed volume) | Without REVERSED-swap | Without TopLoc transform
+
+| `makeBox(10,20,30)`
+| 6000.000000
+| **6000.000000** (unchanged!)
+| **6000.000000** (unchanged!)
+
+| Extruded prism (20x30x40)
+| 24000.000000
+| **-8000.000000**
+| **16000.000000**
+
+| Prism + fillet (r=5)
+| 23778.823269
+| **-7926.274423**
+| **15852.548846**
+|===
+
+The box is blind to both bugs: all six of its faces have an identity
+`TopLoc_Location` (so a missing `TopLoc` transform is a no-op), and its
+three `REVERSED` faces all pass through the origin, so their tetrahedron
+contribution to the divergence-theorem signed-volume sum is exactly zero
+regardless of winding. **A test plan that only checked the box would have
+been green under both bugs.** This is why `OcctTriangulationTest`'s
+signed-volume regression cases (T-5/T-6) run on the extruded prism and the
+filleted solid, never the box alone -- see that test's own KDoc.
+
+Accuracy of the "correct" column: box error is below `1e-10` relative (a
+`1e-9` relative tolerance is comfortably tight); the fillet solid's
+23778.823269 against `OcctShape.volume`'s exact 23785.398163397
+(ADR-0008's own T-5 fixture) is a `2.77e-4` relative error -- expected,
+since a triangulated mesh approximates the fillet's true cylindrical
+surface -- 36x inside the `1e-2` relative tolerance the tests actually
+use.
+
+=== Compose dependency resolution requires a scoped `google()` repository
+
+Verified 2026-09-02 with a standalone probe module (`kotlin.jvm 2.4.10` +
+`org.jetbrains.compose 1.11.1` + `org.jetbrains.kotlin.plugin.compose
+2.4.10`, Gradle 9.6.1, `jvmToolchain(21)`):
+
+* **`mavenCentral()` alone** (kSTEP's repository set before this wave) --
+  `BUILD FAILED`. Missing coordinates include
+  `androidx.compose.runtime:runtime-saveable:1.11.2`,
+  `androidx.lifecycle:lifecycle-common:2.9.4`,
+  `androidx.lifecycle:lifecycle-runtime:2.9.4`,
+  `androidx.savedstate:savedstate-compose:1.4.0`. Compose Multiplatform's
+  own `org.jetbrains.androidx.*` artifacts pull in real `androidx.*`
+  coordinates that simply do not exist on Maven Central.
+* **With `google()` added** -- resolves cleanly (45 files).
+* **With `google()` scoped to `includeGroupByRegex("androidx\\..*")`** --
+  resolves identically (45 files). **This is the variant this wave ships**
+  (`settings.gradle.kts`): it minimizes the supply-chain surface added to
+  the whole build (every other module keeps resolving exclusively from
+  Maven Central) rather than making Google's Maven repository an
+  unscoped second source for the entire multi-module build. Same
+  `content {}` pattern kUML uses for its own third-party repositories.
+
+`pluginManagement` needed no change -- `gradlePluginPortal()` +
+`mavenCentral()` already resolve the `org.jetbrains.compose`/
+`org.jetbrains.kotlin.plugin.compose` Gradle plugins.
+
+=== A camera-aligned light makes flat shading invisible -- found by actually looking at the rendered PNG
+
+The first working version of `IsometricProjection` used
+`shade = AMBIENT + (1-AMBIENT) * max(0, normal . -VIEW_DIRECTION)` --
+i.e. the key light shone exactly along the camera's own view direction.
+Every automated assertion passed (including a since-corrected version of
+`IsometricProjectionTest`'s shading test, which wrongly *expected* this
+outcome without having rendered anything yet). Only opening the actual PNG
+(`kstep-viewer/build/sample-output/viewer/box-isometric.png`) revealed the
+defect: a flat, uniform-gray hexagon, with the three visible faces of the
+cube indistinguishable except for their thin edge outlines.
+
+The cause is exact, not approximate: for an axis-aligned box under this
+module's fixed isometric `VIEW_DIRECTION = normalize(-1,-1,-1)`, the three
+visible faces' normals -- `(1,0,0)`, `(0,1,0)`, `(0,0,1)` -- are each
+*exactly* `1/sqrt(3)` from `-VIEW_DIRECTION`. A light source exactly
+co-located with the camera therefore always lights all three visible
+faces of any axis-aligned solid identically, regardless of the solid's
+dimensions. This is a real, general property of camera-aligned lighting,
+not a bug in the math -- but it defeats the entire visual point of flat
+shading for the single most common isometric-viewer subject (a box).
+
+**Fix**: a separate `LIGHT_DIRECTION = normalize(-0.2, -0.4, -1.0)`,
+offset from `VIEW_DIRECTION` -- a standard technique in isometric CAD/game
+rendering (a "key light" from above, not from the eye). `VIEW_DIRECTION`
+still drives backface culling and depth sorting; only the shading
+computation's light vector changed. Re-rendering the same box afterward
+shows three genuinely different, plausible-looking face shades (top
+brightest, then the two side faces darker in proportion to their angle
+from the light) -- see the PNGs this wave's test suite writes on every
+run. `IsometricProjectionTest`'s shading test now pins this fix with a
+comment naming the earlier, wrongly-passing version, so a future revert
+of `LIGHT_DIRECTION` back to `VIEW_DIRECTION` fails loudly instead of
+silently reintroducing a flat-looking viewer.
+
+This is the concrete reason CLAUDE.md's renderer-validation routine
+requires an actual look at generated images before writing the word
+"verified" -- a fully green, unmodified test suite had already shipped
+this defect once.
+
+=== Module naming: `kstep-viewer`, not `kstep-desktop`
+
+Chosen (design-team decision, see CLAUDE.md's UI/UX-Design-Team convention)
+over `kstep-desktop` specifically to avoid ever being confused with
+`kuml-dev/kUML`'s existing `kuml-desktop` module, which is a full editor
+(menus, file management, multi-diagram workspace). `kstep-viewer` is,
+and for the foreseeable Folge-Wellen remains, a *viewer* -- it shows a
+shape; it does not edit one. The name says so on its own, so this
+distinction never needs to be re-explained in a future PR description.
+
+== Decision
+
+=== Native: `nativeShapeTriangles`
+
+`kstep_occt_bridge.cpp` gains one exported function,
+`Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv*,
+jobject, jlong handle)`, following every existing convention in that
+file: handle lookup and every OCCT call that dereferences the shape
+happen inside one `g_mutex`-held critical section; every `throwJava()`
+call happens strictly after that section ends (`FindClass` can trigger
+arbitrary Java class-loading code, which must never run while this thread
+holds `g_mutex` -- see the file's own `throwUnknownHandle` comment); no
+C++ exception ever crosses the JNI boundary.
+
+Pipeline, per call:
+
+1. `Bnd_Box`/`BRepBndLib::Add(*shape, box, /*useTriangulation=*/true)` --
+   an empty (`IsVoid()`) box yields an empty result, not an error.
+2. `deflection = clamp(bboxDiagonal * 0.005, 1e-5, 1e3)`. **No quality
+   parameter crosses the API boundary at all** -- the only input to this
+   whole function is the already-hardened `handle`, so a caller cannot
+   force `deflection = 1e-9` as a CPU-time DoS. A quality knob is
+   Folge-Welle V-8's job, once something actually needs one.
+3. `BRepMesh_IncrementalMesh(*shape, deflection, /*isRelative=*/false,
+   0.5, /*isInParallel=*/false)` -- serial and non-relative, for
+   deterministic, reproducible triangle counts (pinned by
+   `OcctTriangulationTest`'s T-8, "repeated triangulation of the same
+   shape is idempotent").
+4. `TopExp::MapShapes(*shape, TopAbs_FACE, faces)` -- `MapShapes`, never
+   `TopExp_Explorer`, exactly like every other reader in this file (a
+   shared face visited twice would double-export its triangles and
+   silently double the signed-volume regression tests' expected result).
+5. **Pass 1 (count only)**: sums `Poly_Triangulation::NbTriangles()`
+   across every face's `BRep_Tool::Triangulation(face, loc)`
+   (`IsNull()` faces skipped), enforcing `MAX_TRIANGLES` **before** a
+   single coordinate is extracted or `std::vector<double>` sized.
+6. **Pass 2 (extract)**, only if pass 1 stayed under the limit: per face,
+   `const gp_Trsf& trsf = loc.Transformation()`; per triangle,
+   `Poly_Triangle::Get(n1, n2, n3)` (1-based node indices); if
+   `face.Orientation() == TopAbs_REVERSED`, `std::swap(n2, n3)` (see
+   Context above for why this is load-bearing); each node's `gp_Pnt` is
+   transformed by `trsf` unless `loc.IsIdentity()`; `X()/Y()/Z()`
+   appended to the flat output buffer.
+
+`TriangulationCleanupGuard`, a small RAII class constructed immediately
+after the successful handle lookup (still under `g_mutex`), calls
+`BRepTools::Clean(*shape)` in its destructor -- on every exit path,
+including a `Standard_Failure` unwind out of step 3. Without it, every
+triangulate-then-discard call would permanently grow the registered
+shape's stored triangulation, a silent native memory leak indistinguishable
+from a slow leak in production (CLAUDE.md's "Resource-Leak bei nativen
+Meshes" security checklist item, made concrete). The cost is re-meshing on
+every call (0.3-0.9 ms measured for a box/fillet) -- acceptable for a
+static single-shape viewer; a future animated/interactive viewer
+(Folge-Welle V-2+) may want to revisit this trade-off if per-frame
+re-meshing becomes the bottleneck. `BRepTools::Clean` does not remove a
+polygon-only representation if it is a shape's *only* representation
+(`BRepTools.hxx`) -- not relevant to kSTEP today (there is still no STEP
+*importer*, so every shape reaching this function was always B-Rep to
+start with), but noted for Folge-Welle V-7.
+
+No `registerShape()` call anywhere in this function -- it produces no new
+shape, so ADR-0008's documented self-deadlock trap (`registerShape()`
+takes `g_mutex` itself; calling it from inside an already-`g_mutex`-held
+critical section deadlocks against a non-recursive `std::mutex`) does not
+apply here. Called out explicitly in the source comment so a future edit
+does not add one inside this function's critical section by analogy with
+`nativeFilletEdges`.
+
+`kstep-geometry/build.gradle.kts` gains exactly one new link flag,
+`-lTKMesh`, placed with a comment mirroring the existing `-lTKFillet`
+block's style and citing the `nm` verification above.
+
+=== JVM: `TriangleMesh`, `OcctShape.triangulate()`, `OcctKernel.MAX_TRIANGLES`
+
+`TriangleMesh` (new file, `dev.kstep.geometry`) wraps the flat
+`DoubleArray` the native call returns: 9 doubles per triangle, index-free
+(flat shading needs no shared vertices, and a single index-free array
+lets `MAX_TRIANGLES` bound one quantity instead of two). A plain class,
+not a `data class` -- `DoubleArray`'s reference `equals()`/`hashCode()`
+would make a generated `data class` pair silently wrong (two meshes with
+identical coordinates comparing unequal). `init { require(size % 9 == 0)
+}` enforces the one real invariant instead.
+
+`OcctShape.triangulate(): TriangleMesh` follows `OcctKernel.fillet`'s
+established exception-mapping order exactly: `IllegalArgumentException`
+(native DoS/range-check failure) is re-thrown as-is; any other
+`RuntimeException` is wrapped in `OcctGeometryException`.
+**Deliberately not cached** (unlike `topology`/`volume`, both `by lazy`):
+the native triangulation is discarded again right after extraction (see
+`TriangulationCleanupGuard` above) -- a JVM-side cache would just rebuild,
+for this `OcctShape`'s entire remaining lifetime, the exact memory
+`BRepTools::Clean` was meant to give back.
+
+`OcctKernel.MAX_TRIANGLES = 130_000` is the Kotlin-side half of the
+hand-synchronized constant pair with `kMaxTriangles` in
+`kstep_occt_bridge.cpp` -- the same pattern ADR-0007's
+`NativeConstraintKind` already establishes for this codebase. No shared
+source of truth between the two languages exists (or is planned) for this
+kind of constant; keeping both comments cross-reference each other and
+this ADR is the whole mitigation.
+
+=== `kstep-viewer`: mesh math vs. Compose UI, split by package
+
+`dev.kstep.viewer.mesh` (`Vec3`, `ProjectedTriangle`, `IsometricProjection`)
+contains **zero** Compose imports -- enforced by
+`MeshPackageComposeBoundaryTest`, a real automated check (reads every
+`.kt` file under that package's directory and asserts no line starts with
+`import androidx.compose.`/`import org.jetbrains.compose.`), not just a
+review intention. This is what makes `IsometricProjectionTest` runnable
+with no window at all, and what lets both the real Compose canvas
+(`ShapeCanvas`) and the headless AWT test rasterizer (`TriangleRasterizer`,
+test-sourceset-only this wave) call the exact same
+`IsometricProjection.project(...)` -- one implementation, two consumers,
+instead of two similar paths that could silently drift apart.
+
+`IsometricProjection.project(mesh, canvasWidth, canvasHeight)`:
+
+1. Screen basis: `right = normalize(UP x VIEW_DIRECTION)`,
+   `trueUp = normalize(VIEW_DIRECTION x right)` (`UP = (0,0,1)`). Degenerate
+   fallbacks (`Vec3(1,0,0)`/`Vec3(0,1,0)`) guard a hypothetical future
+   change to `VIEW_DIRECTION`/`UP` that made them parallel -- not
+   reachable with today's fixed constants, but fails safe instead of
+   propagating NaNs if it ever became reachable.
+2. Per triangle: compute the face normal; skip degenerate (near-zero-area)
+   triangles; backface-cull (`normal . VIEW_DIRECTION >= 0` means facing
+   away from the viewer); shade via `LIGHT_DIRECTION` (see Context above);
+   project each vertex to 2D (`x = v . right`, `y = -(v . trueUp)`, the
+   negation because canvas Y grows downward while `trueUp` is a
+   world-space "up"); track the running 2D bounding box of every surviving
+   vertex; depth = `centroid . VIEW_DIRECTION` (larger = farther away).
+3. Fit-to-canvas: `scale` is the smaller of the two axis-fit ratios against
+   `canvasWidth/Height * (1 - 2*MARGIN_FRACTION)`, falling back to `1.0`
+   or a single-axis ratio if the projected bounding box is degenerate on
+   one or both axes (an all-collinear or single-point mesh).
+4. Sort descending by depth (a painter's algorithm: farthest triangles
+   drawn first, nearest last, so nearer triangles correctly overpaint
+   farther ones for a non-convex solid like a filleted prism).
+
+`ShapeCanvas` (Compose) and `TriangleRasterizer` (AWT, test-only) both
+draw each triangle as a filled path in the grayscale `shade` color,
+**then stroke the same path in the same color at 1px** -- closing the
+antialiasing seam between coplanar neighboring triangles (visible as thin
+white hairline cracks otherwise; the fix is the same one atomic idea in
+both rendering paths, per this package's "one implementation, two
+consumers" design above). This trades one visible artifact for a smaller
+one, not a fully clean result: the same antialiased 1px stroke, drawn a
+second time directly on top of the already-filled interior, doubles the
+edge's coverage where two same-shaded coplanar triangles share it --
+visible on close inspection as a faint darker line along each face's
+internal triangle diagonals (see e.g.
+`kstep-viewer/build/sample-output/viewer/occt-box-isometric.png`). Left
+as a known, accepted trade-off for this wave (silhouette-crack-free beats
+diagonal-seam-free) -- see Folge-Wellen V-9 for the GPU rendering path
+this whole `Canvas`/`Path`-fill approach is expected to eventually
+replace outright.
+
+`UnavailableNotice` shows the OCCT-unavailable reason plus the exact
+`apt-get install` line from README's "Building -- optional OCCT geometry
+bridge" section -- never a blank window (Atkinson's rule: every reachable
+state must be a state the user can read, not a silent gap).
+
+`Main.kt`'s `main()` opens a real window only via `./gradlew
+:kstep-viewer:run` -- the Gradle `application` plugin's own `run` task
+**is** the opt-in mechanism (kSTEP already uses it identically for
+`kstep-cli`), never wired into `check`.
+
+== Security
+
+Mirrors CLAUDE.md's Kotlin-project security checklist, applied to this
+wave's actual surface:
+
+[cols="2,4", options="header"]
+|===
+| Item | This wave's mitigation
+
+| DoS -- memory
+| `MAX_TRIANGLES = 130_000`, measured (6332 real worst case x ~20),
+  enforced in a count-only first pass, strictly before `NewDoubleArray`.
+
+| DoS -- time
+| No quality parameter crosses the API boundary; deflection is derived
+  natively from the bbox diagonal and clamped to `[1e-5, 1e3]`; the real
+  time bound is transitively `MAX_FILLET_INPUT_FACES`/`MAX_PROFILE_POINTS`
+  (ADR-0008), both already enforced upstream of any call this function
+  could ever see.
+
+| DoS -- determinism
+| `isInParallel = false`, `isRelative = false` -- pinned by T-8's
+  "repeated triangulation of the same shape is idempotent".
+
+| Resource leak (native)
+| `TriangulationCleanupGuard` (RAII) runs `BRepTools::Clean` on every
+  exit path of the critical section, including exception unwind.
+
+| Resource leak (JNI)
+| `NewDoubleArray`'s `nullptr` return (OOM already pending) is checked;
+  no `Get*ArrayElements` call anywhere in this function (only a return
+  array is populated), so there is no release path to forget.
+
+| Use-after-free
+| Lookup and every dereference happen inside one `g_mutex`-held critical
+  section, exactly like every other reader in this file; JVM-side
+  `OcctShape.withHandle` (`checkOpen` + `reachabilityFence`) unchanged.
+
+| No C++ exception crosses the JNI boundary
+| Full `Standard_Failure`/`std::exception`/`catch (...)` cascade; the
+  guard's own destructor is itself `try { } catch (...) { }`-wrapped.
+
+| Logging
+| No coordinates or geometry data in any exception message -- only counts
+  and the handle. JVM side: `kotlin-logging`, no `println`.
+
+| Supply chain
+| `google()` scoped to `includeGroupByRegex("androidx\\..*")`, not an
+  unscoped second repository for the whole build; Compose/material3
+  versions pinned exactly (`1.11.1`/`1.9.0`); the Compose compiler plugin
+  follows the existing `kotlin` version ref, no separate pin to drift.
+
+| No forced display
+| Every test runs with `java.awt.headless=true`; the only code path that
+  opens a real window is `:kstep-viewer:run`, never part of `check`.
+|===
+
+== Stolperfallen
+
+1. **Forgetting the `REVERSED` winding swap** -- normals point inward,
+   backface culling discards exactly the wrong half of the mesh. Measured:
+   prism volume -8000 instead of 24000 (see Context above).
+2. **Forgetting the `TopLoc_Location` transform** -- individual faces land
+   at the wrong position ("holes" in the rendered solid, or a wrong
+   signed volume). Measured: prism volume 16000 instead of 24000.
+   `loc.IsIdentity()` is a fast path, never a substitute for the check.
+3. **Testing only a box** -- both bugs above are completely invisible on
+   `makeBox`'s output (see Context above); the prism and the filleted
+   solid are what actually prove this function correct.
+4. **`registerShape()` inside the `g_mutex` section** -- guaranteed
+   self-deadlock (ADR-0008); not applicable here (this function creates no
+   shape), but noted so a future edit does not add one by analogy.
+5. **`throwJava()` while still holding `g_mutex`** -- `FindClass` can run
+   arbitrary Java class-loading code, including a concurrently-firing
+   `Cleaner` action calling back into `nativeReleaseShape`, which would
+   then deadlock against the same non-recursive mutex.
+6. **Calling `BRepTools::Clean` only at the end of the success path**
+   instead of via RAII -- the very exception path this cleanup exists to
+   protect would then leak exactly what it was supposed to prevent.
+7. **`TopExp_Explorer` instead of `TopExp::MapShapes`** -- a shared face
+   would be visited (and its triangles exported) once per parent
+   reference, silently doubling triangle counts and corrupting every
+   signed-volume regression test.
+8. **`mavenCentral()` alone for Compose** -- hard resolution failure (see
+   Context above); `google()`, scoped, is required.
+9. **A camera-aligned light** -- mathematically valid, visually useless
+   for the single most common isometric-viewer subject (an axis-aligned
+   box); see Context above for the exact mechanism and the fix
+   (`LIGHT_DIRECTION` offset from `VIEW_DIRECTION`).
+10. **Mixing the Gradle `application` plugin's `run` task with
+    `compose.desktop { application { ... } }`** -- this wave uses only the
+    former, deliberately, to avoid two competing `run` tasks; the latter's
+    `nativeDistributions` block is Folge-Welle V-10's job.
+11. **`data class` over a `DoubleArray`** (`TriangleMesh`) -- silently
+    broken `equals()`/`hashCode()`. A plain class with an `init` `require`
+    avoids it.
+12. **Catching `RuntimeException` before `IllegalArgumentException`** in
+    `OcctShape.triangulate()` -- `IllegalArgumentException` never reaches
+    its own catch clause, since it *is* a `RuntimeException`; the general
+    catch must come second, exactly like `OcctKernel.fillet`'s existing
+    rule.
+13. **Caching `triangulate()`'s result** (e.g. `by lazy`) -- would rebuild,
+    for the rest of that `OcctShape`'s lifetime, the memory
+    `BRepTools::Clean` just freed. Deliberately uncached.
+14. **Antialiasing seams between coplanar neighboring triangles** -- fixed
+    identically in both rendering paths: fill, then a same-color 1px
+    stroke. Not fully clean either way: the same stroke overlapping the
+    already-filled interior along a shared edge is itself faintly visible
+    as a slightly darker diagonal line where two same-shaded triangles
+    meet -- a known, accepted trade-off (see Context above), not a
+    regression to chase down again.
+15. **Painter's-algorithm sort direction reversed** -- would show interior
+    faces through a non-convex solid (the filleted prism, specifically).
+    `depth = centroid . VIEW_DIRECTION`, drawn **descending** (farthest
+    first).
+16. **ktlint's `function-naming` rule vs. Compose's own PascalCase
+    `@Composable` convention** -- resolved via the documented
+    `ktlint_function_naming_ignore_when_annotated_with = Composable`
+    `.editorconfig` property, not a suppression comment per call site.
+17. **`nm` verification after any signature change** -- `OcctBridge` is a
+    plain Kotlin `object` (no `@JvmStatic`, no `companion object`), so
+    every native method is a JVM *instance* method:
+    `Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv*,
+    jobject, jlong)`, never a `..._00024Companion_...` name.
+
+== Folge-Wellen
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| V-2
+| Camera: arcball orbit, pan, zoom, a "fit" command.
+
+| V-3
+| A real CAD-silhouette edge overlay via
+  `BRep_Tool::PolygonOnTriangulation` over each `TopoDS_Edge` -- needs a
+  second native function.
+
+| V-4
+| Shading: smooth per-vertex normals
+  (`Poly_Triangulation::HasNormals()`/`Normals()`), material colors.
+
+| V-5
+| Multi-shape scenes / a scene graph, wired into `kstep-shape`'s assembly
+  structure.
+
+| V-6
+| Selection and picking -- needs an additional per-triangle face-index
+  array from the bridge.
+
+| V-7
+| Loading and displaying an actual STEP *file* (today only the writer path
+  exists at all).
+
+| V-8
+| A mesh-quality knob (deflection, with a floor relative to the bounding
+  box diagonal), plus meshing progress/cancellation.
+
+| V-9
+| A GPU rendering path (Skiko/Vulkan directly), once the `Canvas`
+  `Path`-fill approach hits a real performance ceiling.
+
+| V-10
+| Packaging (`nativeDistributions`/jpackage) and Windows/macOS builds of
+  the native bridge itself (today linux-x86-64 only, see ADR-0005).
+|===
