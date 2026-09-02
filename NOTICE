@@ -62,6 +62,21 @@ attribution pattern followed here. This is not a legal opinion; it is
 a documented precedent, offered so a future maintainer or auditor can
 evaluate the same evidence rather than trusting an unverified claim.
 
+This product's kstep-geometry module optionally links, at build time, against
+a system-installed Open CASCADE Technology (OCCT) library (Ubuntu package
+libocct-*-7.9, version 7.9.2) via a small JNI shim
+(kstep-geometry/src/main/cpp/kstep_occt_bridge.cpp). OCCT is Copyright
+Open Cascade S.A.S. and contributors, licensed under the GNU Lesser General
+Public License version 2.1, with the Open CASCADE Exception 1.0 (see
+https://dev.opencascade.org/resources/licensing for the full license text
+and https://dev.opencascade.org/doc/occt-7.9.0/overview/html/occt_lgpl_exception.html
+for the exception text). No OCCT binary, header, or source is vendored in
+this repository; the JNI shim dynamically links against the system OCCT
+installation present on the build machine, and compilation is skipped
+entirely when that installation is absent (see
+docs/adr/ADR-0005-occt-jni-bridge.adoc). This product does not currently
+bundle or redistribute any OCCT binary.
+
 BSD 2-Clause License (Ribose Inc.)
 -----------------------------------
 Copyright (c) 2020, Ribose Inc.

@@ -67,7 +67,11 @@ model, Kotlin code generation, `WHERE`-rule evaluation, the `kstep-core`
 runtime DSL surface, STEP Part 21 export/import, and `DERIVE`/`INVERSE`/
 `UNIQUE` clause capture, six waves) and has started **M2 (AI Layer)**
 with an MCP server exposing the M1 DSL as LLM tool-calling tools (M2
-Welle 1, below). Concretely, as of this writing:
+Welle 1, below). Separately, the long-planned geometry milestone has now
+started too (**Geometrie Welle 1** — a new `kstep-geometry` module bridging
+to OpenCASCADE Technology (OCCT) via JNI; see the `kstep-geometry` row
+below and `docs/adr/ADR-0005-occt-jni-bridge.adoc`). Concretely, as of
+this writing:
 
 * An ANTLR4-based parser for the EXPRESS schema language (ISO 10303-11)
   exists and successfully parses a hand-written AP242-subset fixture in
@@ -661,6 +665,27 @@ See <<roadmap,Roadmap>> for what's planned next.
   `unique_constraint_violated` structured error on conflict (tool count
   stays at nine — no new tool added).
 
+| `kstep-geometry`
+| OCCT (Open CASCADE Technology) JNI bridge -- the start of the geometry
+  milestone (`dev.kstep.geometry`, native/JNI internals in
+  `dev.kstep.geometry.occt`)
+| Working (Geometrie Welle 1): `OcctKernel.makeBox(dx, dy, dz)` builds a
+  real OCCT box; the resulting `OcctShape` exposes its unique B-Rep
+  topology (`ShapeTopology`: solids/shells/faces/edges/vertices, via
+  `TopExp::MapShapes`, not `TopExp_Explorer`) and volume, and
+  `writeStepFile(...)` exports a real AP242 (or AP203/AP214IS) STEP file
+  through OCCT's own `STEPControl_Writer`. Depends on nothing but
+  `kotlin-logging-jvm` -- deliberately not on `kstep-core` yet (see
+  docs/adr/ADR-0005-occt-jni-bridge.adoc). The native shim
+  (`src/main/cpp/kstep_occt_bridge.cpp`) is compiled by Gradle against a
+  *system-installed* OCCT (linux-x86-64 only in this wave) and skipped
+  entirely -- not failed -- when the OCCT dev headers are absent, in which
+  case `OcctKernel.availability()` reports `OcctAvailability.Unavailable`
+  at runtime with a human-readable reason. No OCCT binary/header/source is
+  vendored in this repository; see NOTICE and the ADR for the full license
+  and provenance discussion, and Building below for the required
+  `apt-get install`.
+
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
 | Smoke test for the EXPRESS parser; semantic-model, naming-convention,
@@ -696,7 +721,16 @@ See <<roadmap,Roadmap>> for what's planned next.
   self-roundtrip via `Part21Reader`), and new `CliMainTest` cases for
   `resolveCommand`'s `export` argument parsing (`--out`, `--output json`,
   every malformed-flag combination, and `USAGE_TEXT`'s new `kstep export`
-  entry)
+  entry); (Geometrie Welle 1) `OcctBridgeSmokeTest` (the full
+  `kstep-geometry` acceptance chain: OCCT version reporting, box topology
+  and volume, AP242/AP203 STEP export, closed-shape rejection, cleanup
+  idempotency, an unknown-native-handle rejection that doesn't crash the
+  JVM, and dimension validation -- every OCCT-dependent case skips cleanly
+  when `OcctKernel.availability()` reports `Unavailable`, except the
+  suite's own first case, which instead hard-fails under
+  `-Pkstep.occt.require=true`) and `OcctBoxValidationExportTest`
+  (analogous to `FreeCadValidationExportTest`, but writing a real
+  `MANIFOLD_SOLID_BREP`-bearing STEP file for manual STEP-viewer import)
 |===
 
 == Building
@@ -729,6 +763,34 @@ every other module's pattern (the two `*.kstep.kts` test fixtures are
 resources under `kstep-tests/src/test/resources`, loaded via
 `getResourceAsStream` — not under `kstep-script` itself, for the same
 reason).
+
+=== Building — optional OCCT geometry bridge
+
+`kstep-geometry` (Geometrie Welle 1, see
+docs/adr/ADR-0005-occt-jni-bridge.adoc) links against a system-installed
+OpenCASCADE Technology (OCCT) library. This is entirely optional:
+`./gradlew clean check` stays green with or without it, and no OCCT
+binary/header/source is vendored in this repository. To get real
+end-to-end geometry coverage (as opposed to only the graceful-degradation
+path), install the OCCT dev packages first — on Ubuntu/Debian:
+
+[source,shell]
+----
+sudo apt-get install --no-install-recommends \
+  libocct-foundation-dev libocct-modeling-data-dev \
+  libocct-modeling-algorithms-dev libocct-data-exchange-dev
+./gradlew clean check -Pkstep.occt.require=true
+----
+
+Without those packages installed, `kstep-geometry`'s `compileOcctBridge`
+Gradle task is skipped (not failed), and
+`dev.kstep.geometry.OcctKernel.availability()` reports
+`OcctAvailability.Unavailable` at runtime with a human-readable reason;
+`OcctBridgeSmokeTest`'s OCCT-dependent cases then skip cleanly instead of
+failing. `-Pkstep.occt.require=true` turns that into a hard test failure
+instead — pass it only on a machine where OCCT is expected to actually be
+present. This wave supports linux-x86-64 only; see the ADR's Folge-Wellen
+for the planned macOS/Windows follow-up.
 
 kSTEP logs through kotlin-logging
 (`io.github.oshai:kotlin-logging-jvm`), an idiomatic Kotlin wrapper
@@ -1418,8 +1480,18 @@ an entity not modeled anywhere in `kstep-core`).
   above. **(M2 Welle 4, done)** `build_next_assembly_usage_occurrence`
   now enforces NAUO's real `UNIQUE UR1` rule against the `EntityStore`'s
   current entries — see <<status,Status>> and Usage above.
-. Later: geometry via an OpenCascade (OCCT) bridge, additional STEP
-  Application Protocols as needed.
+. Geometry via an OpenCascade (OCCT) bridge. **(Geometrie Welle 1,
+  started)** `kstep-geometry` now exists: box construction, real B-Rep
+  topology/volume readback, and AP242/AP203/AP214IS STEP export, all
+  through a hand-written JNI shim against a system-installed OCCT — see
+  the `kstep-geometry` row above and
+  `docs/adr/ADR-0005-occt-jni-bridge.adoc` for the full binding-choice
+  rationale, license findings, and the named follow-up waves (further
+  primitives and boolean ops, STEP *import*, a `.kstep.kts` geometry DSL,
+  merging OCCT shape data with kSTEP's own AP242 product-structure Part 21
+  output, a feature/parametric-history model, PlaneGCS, multi-platform
+  support, a desktop viewer). Additional STEP Application Protocols beyond
+  AP242 remain a separate, not-yet-started later item.
 
 == License and attribution
 
@@ -1447,3 +1519,15 @@ Kotlin SDK] (`io.modelcontextprotocol:kotlin-sdk-server`, maintained by
 Anthropic in collaboration with JetBrains), which is MIT licensed —
 compatible with kSTEP's Apache 2.0 license, not vendored or modified,
 pulled in as a normal Gradle dependency.
+
+`kstep-geometry`'s native JNI shim
+(`kstep-geometry/src/main/cpp/kstep_occt_bridge.cpp`) is compiled, at
+build time only, against a system-installed
+https://dev.opencascade.org[Open CASCADE Technology (OCCT)] library
+(Ubuntu package `libocct-*-7.9`), licensed under LGPL-2.1-only with the
+Open CASCADE Exception 1.0 — see
+https://dev.opencascade.org/resources/licensing. No OCCT binary, header,
+or source is vendored in this repository, and this product does not
+currently bundle or redistribute any OCCT binary; see link:NOTICE[NOTICE]
+and `docs/adr/ADR-0005-occt-jni-bridge.adoc` for the full license and
+provenance discussion.

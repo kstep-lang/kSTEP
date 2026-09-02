@@ -1,0 +1,490 @@
+= ADR-0005: OCCT JNI bridge as the foundation of the geometry milestone
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Geometrie Welle 1 -- run as its own track,
+alongside the M1/M2 numbering, per this ADR's own open question below on
+milestone naming; not yet decided whether a future M3 absorbs it).
+
+== Context
+
+Per kSTEP-ADR-0001 (V1 scope reduction, recorded in the project vault, not this
+repository), V1 deliberately excludes B-Rep geometry and PMI, leaving V1's
+Part 21 output with no shape a STEP viewer can render at all. README's
+Roadmap has carried "Later: geometry via an OpenCascade (OCCT) bridge" since
+M1 as the named follow-up. This ADR starts that follow-up.
+
+Three questions had to be answered before any code: which JVM binding to
+use, which OCCT distribution to build against, and how much of "geometry"
+this first wave should actually cover.
+
+=== Binding choice
+
+No maintained, published JVM binding for OCCT >= 7.8 exists:
+
+[cols="2,4,1", options="header"]
+|===
+| Option | Finding | Verdict
+
+| JavaCPP Presets (bytedeco)
+| No OpenCASCADE/OCCT module in the presets repository at all.
+| Does not exist
+
+| occjava (jCAE / OntoBREP)
+| SWIG-generated wrapper, last commits 2016, no Maven Central artifact, built
+  against OCE/OCCT 6.x-7.0, LGPL-2.1. Would need a full SWIG regeneration
+  against 7.9.2 and vendoring LGPL Java sources into an Apache-2.0 repo.
+| Rejected
+
+| jpad-occt (Aircraft-Design-UniNa)
+| Binds OCCT 7.3.0, Windows-only, academic side project.
+| Rejected
+
+| OCCT-samples-kotlin (Open-Cascade-SAS)
+| Official, but an Android JNI *viewer sample*, not a general-purpose binding
+  library.
+| Not a binding
+
+| JavaCPP as a custom preset
+| Technically possible, but JavaCPP's C++ parser has to digest OCCT's
+  template-heavy, CDL-descended headers (`opencascade::handle<T>`,
+  `Standard_Transient`) -- untested risk large enough to sink a foundation
+  wave on its own, plus a heavy build-time codegen step.
+| Deferred to a later wave (see Folgewellen)
+
+| Panama/FFM (`java.lang.foreign`) + jextract
+| FFM is final only from JDK 22; kSTEP's CLI distribution policy stays on
+  JDK 21 deliberately (`--enable-preview` is not acceptable). jextract also
+  only understands a C ABI -- OCCT's C++ API would still need an
+  `extern "C"` shim underneath, i.e. the same work as JNI plus a JDK bump.
+| Deferred to a later wave
+
+| *A dedicated, thin JNI C++ shim against the system OCCT*
+| ~250 lines of `extern "C"` functions, `g++ -shared` against the distro's
+  `libTK*.so`. Full control, no third-party dependency, clean license story
+  (dynamic linking against an unmodified system library), scope entirely
+  ours to set.
+| *Chosen*
+|===
+
+Every alternative would still have needed hand-building or hand-generating
+something against OCCT 7.9; a hand-written shim is the one option that (a)
+runs on OCCT 7.9.2 today, (b) runs on JDK 21, (c) pulls no LGPL source into
+this repository, and (d) is small enough for a foundation wave. Because the
+Kotlin surface (`OcctKernel`/`OcctShape`) fully encapsulates the JNI layer,
+switching the underlying binding technology later (JavaCPP custom preset,
+Panama/FFM once the CLI JDK baseline moves) stays possible without touching
+any caller.
+
+=== OCCT distribution and license
+
+Built against the Ubuntu package `libocct-*-7.9` (`7.9.2+dfsg-4`) via the
+matching `-dev` packages:
+
+[source,shell]
+----
+sudo apt-get install --no-install-recommends \
+  libocct-foundation-dev libocct-modeling-data-dev \
+  libocct-modeling-algorithms-dev libocct-data-exchange-dev
+----
+
+Headers land under `/usr/include/opencascade/`, libraries under
+`/usr/lib/x86_64-linux-gnu/`. No `pkg-config` file ships for OCCT on this
+distro; a CMake config exists but is unused here (`cmake` is not installed
+and a single translation unit does not need it) -- `kstep-geometry`'s
+`compileOcctBridge` Gradle task invokes `g++` directly instead.
+
+**Toolkit naming**: OCCT 7.8 merged the STEP data-exchange toolkits into
+`TKDESTEP` -- the old `TKSTEP`/`TKSTEPBase`/`TKSTEPAttr` names from earlier
+OCCT releases no longer exist in 7.9.2. `-lTKDESTEP` is what
+`compileOcctBridge` links against.
+
+**License**: OCCT upstream is LGPL-2.1-only plus the Open CASCADE Exception
+1.0 (confirmed via Debian's own `debian/copyright`). The Ubuntu `+dfsg`
+repack strips only `*.bat` files, iOS/MFC/Qt-FuncDemo samples,
+`.gitattributes`/`.github`, and `adm/vcpkg` -- none of it used here, so the
+repack is functionally and legally irrelevant to kSTEP.
+
+kSTEP's own code -- both Kotlin and the C++ shim -- stays Apache-2.0. The
+shim is a "work that uses the Library" in LGPL terms: it calls OCCT, it does
+not modify or embed it, and the link is dynamic (`.so` resolved at runtime
+via `dlopen`-equivalent `System.load`), which structurally satisfies
+LGPL-2.1 SS6's "user must be able to relink against a modified Library"
+requirement.
+
+**Nothing is vendored.** No OCCT binary, header, or source snippet is
+committed to this repository. `compileOcctBridge` links against whatever
+OCCT the *build machine* has installed via its system package manager; a
+build without OCCT installed simply skips native compilation (see
+Decision). This wave therefore has no distribution/redistribution
+obligation at all -- the NOTICE entry added alongside this ADR exists purely
+for build-time-dependency transparency, not because anything is shipped.
+
+**Deliberately out of scope for this wave, flagged for a later one:** the
+moment any `installDist`/DMG/MSI/container image starts *bundling* an OCCT
+`.so`/`.dylib`/`.dll`, the LGPL SS6 obligations (license text alongside the
+binary, a documented way to relink) become live and need their own review.
+This wave produces no such artifact.
+
+=== Scope of this wave
+
+The full scope named in the assignment stays in: box construction, reading
+its B-Rep topology/volume back into Kotlin, and exporting it through OCCT's
+own STEP writer. The STEP-writer code is only ~15 lines more than a
+"load + no-op" minimum, and this wave's real risk was never code volume --
+it was environment (are the OCCT packages even installed, is there JNI
+lifecycle correctness) and JNI pitfalls (exception safety across the
+boundary, correct topology counting, correct native symbol names). Cutting
+scope down to "just load the library" would not have reduced that risk, and
+would have halved the wave's evidentiary value.
+
+**In (Definition of Done):**
+
+. New module `kstep-geometry` with the C++ JNI shim and a Kotlin surface.
+. Gradle compiles the shim reproducibly with `g++` against system OCCT.
+. Kotlin loads the native library through a closed, hardened resolution
+  path (`OcctNativeLibrary`).
+. `OcctKernel.makeBox(...)` produces a real `TopoDS_Shape` inside OCCT.
+. The B-Rep is readable from Kotlin: unique topology counts
+  (1 solid / 1 shell / 6 faces / 12 edges / 8 vertices for a rectangular
+  box) and volume.
+. `OcctShape.writeStepFile(...)` writes a real, non-empty AP242 STEP file
+  via `STEPControl_Writer`.
+. A real, running smoke test in `kstep-tests`;
+  `./gradlew clean check -Pkstep.occt.require=true` green on a machine with
+  OCCT installed.
+. This ADR, plus NOTICE and README updates.
+
+**Deliberately out (named as its own follow-up wave below, not silently
+dropped):** additional primitives, boolean operations, STEP *import* via
+OCCT, a feature/parametric-history model, a PlaneGCS constraint solver, a
+desktop viewer, merging OCCT geometry with kSTEP's own AP242 product-
+structure Part 21 output into a single file, a `.kstep.kts` DSL surface for
+geometry, `kstep-cli`/`kstep-mcp` wiring, macOS/Windows/aarch64 support, and
+shipping OCCT binaries in any distributed artifact.
+
+== Decision
+
+Ship `kstep-geometry` (package `dev.kstep.geometry`, native/JNI internals in
+`dev.kstep.geometry.occt`) exactly as scoped above, built as follows:
+
+* **Module boundary**: `kstep-geometry` depends on nothing but
+  `kotlin-logging-jvm` -- deliberately *not* on `kstep-core`. Geometry stays
+  independent of the semantic AP242 core in this wave, keeping the module
+  graph acyclic; merging the two (a single STEP file carrying both product
+  structure and shape) is real, separately-scoped design work, named below
+  as Geometrie Welle 4, not a side effect of this wave.
+* **Graceful degradation, not a hard build dependency**: `compileOcctBridge`
+  (a Gradle `Exec` task) only runs `onlyIf { nativeBuildable }` --
+  `nativeBuildable` requires linux-x86-64, the OCCT headers actually present
+  at the configured include directory, and a `g++` on `PATH`. Absent any of
+  those, the task is skipped, no native library resource ends up in the
+  module's jar, and `dev.kstep.geometry.OcctKernel.availability()` reports
+  `OcctAvailability.Unavailable` with a human-readable reason at runtime --
+  `./gradlew clean check` stays green either way. `-Pkstep.occt.require=true`
+  (read by `kstep-tests`' `OcctBridgeSmokeTest`) turns "OCCT unavailable"
+  into a hard test failure, for environments (e.g. a future dedicated CI
+  lane) that must guarantee real end-to-end coverage rather than accept a
+  silent skip.
+* **Native library loading**: `OcctNativeLibrary` never uses
+  `System.loadLibrary` (which consults the partially environment-controlled
+  `java.library.path`). It uses `System.load` against exactly one of two
+  resolved, canonicalized, absolute paths: an opt-in
+  `kstep.occt.bridge.library` system property (validated absolute,
+  `toRealPath()`-canonicalized, must be a regular file), or the classpath
+  resource bundled by `compileOcctBridge`'s output, extracted into a
+  freshly created, owner-only-permission temp directory under a constant
+  file name. See Security below for why each of those details is there.
+* **JNI symbol naming**: `OcctBridge` is a plain Kotlin `object`, not
+  `@JvmStatic`/`companion object` -- every native method is therefore a JVM
+  *instance* method
+  (`Java_dev_kstep_geometry_occt_OcctBridge_<name>(JNIEnv*, jobject, ...)`).
+  `OcctBridge` is public, not `internal`, specifically so
+  `OcctBridgeSmokeTest` (a different Gradle module) can drive one scenario
+  `OcctKernel`'s own API can never reach on its own: calling a native
+  function with a handle the native side never registered, to prove that a
+  garbage handle is rejected in Kotlin-catchable Java exception, not a JVM
+  crash.
+* **Topology counting**: `TopExp::MapShapes` (an indexed, de-duplicating
+  map), never `TopExp_Explorer` -- see Stolperfallen below for why the
+  latter over-counts.
+* **STEP schema selection**: `Interface_Static::SetCVal("write.step.schema",
+  ...)` is process-global OCCT state, so schema-set and `Write()` are one
+  critical section under the same native mutex that also guards the shape
+  handle registry -- documented as a real, accepted serialization point,
+  not treated as a bug. The `STEPControl_Writer` inside that critical
+  section must be constructed *before* `SetCVal()` is called, not after:
+  `"write.step.schema"` is not yet a registered `Interface_Static`
+  parameter until some `STEPControl_Writer` has been constructed at least
+  once in the process (its constructor is what pulls in the STEP schema
+  modules that register it) -- based on OCCT 7.9.2's documented
+  `Interface_Static` registration model (`SetCVal` returning `false`, a
+  no-op, when called first, and `true` once a writer already exists), and
+  now empirically confirmed against a real OCCT 7.9.2 install -- see the
+  "Update 2026-09-02" note under "Environment note" below. See
+  `kstep_occt_bridge.cpp`'s `nativeWriteStep` for where this ordering is
+  enforced.
+
+== Consequences
+
+* Geometry now has a real, if narrow, foothold: a box, its topology/volume,
+  and a real STEP file with an actual `MANIFOLD_SOLID_BREP` -- the first
+  artifact in this repository a STEP viewer can meaningfully render.
+* Every future geometry primitive/operation costs one more pair of native
+  symbol + Kotlin wrapper. That per-function cost is accepted for this
+  wave; Geometrie Welle 9 below names the point (roughly 50+ shim
+  functions) at which switching to a generated binding approach
+  (JavaCPP custom preset, or Panama/FFM once the CLI JDK baseline allows
+  it) should be re-evaluated.
+* `kstep-geometry` has zero network surface (no URL/HTTP/socket code
+  anywhere in the module) -- SSRF is structurally not applicable and is
+  recorded as such rather than silently unaddressed.
+* Any environment that wants a hard guarantee OCCT actually ran (not just
+  "the build didn't fail") must opt in explicitly via
+  `-Pkstep.occt.require=true`; the default `./gradlew clean check` proves
+  the Kotlin-side contract (validation, exception mapping, closed-shape
+  handling) but not the native path, on a machine without OCCT installed.
+
+=== Security
+
+[cols="2,4", options="header"]
+|===
+| Concern | Handling in this wave
+
+| SSRF
+| Not applicable -- no network code anywhere in `kstep-geometry`.
+
+| DoS
+| Box dimensions are validated (finite, `> 1e-7`, `<= 1e7`) in
+  `OcctKernel.makeBox` *before* any native call. No unbounded loops, no
+  user-driven recursion, no file-reading code paths (STEP *import* is
+  explicitly out of scope this wave).
+
+| Cryptography
+| Not applicable. Deliberately no home-grown integrity check of the loaded
+  `.so` (that would be security theater without a real signing
+  infrastructure behind it) -- the trust boundary is the OS package
+  manager, documented here rather than pretended away.
+
+| Resource leaks
+| `OcctShape : AutoCloseable`, `close()` idempotent; native handle registry
+  guarded by a C++ `std::mutex`; a `java.lang.ref.Cleaner` safety net that
+  captures only the raw handle (never `this`, or it could never become
+  collectible); every test uses `use { }`; `GetStringUTFChars`/
+  `ReleaseStringUTFChars` paired on every path in the native shim, including
+  early-return error paths.
+
+| Logging
+| `kotlin-logging` only, no `println`. Only load source, OCCT version, and
+  an active override are logged -- never user-supplied path contents beyond
+  what the caller already controls directly (target paths the caller
+  itself chose).
+
+| Native load path
+| Two-way closed resolution (system property, `toRealPath()`-canonicalized
+  and regular-file-checked; or a compile-time-constant classpath resource).
+  `System.loadLibrary`/`java.library.path` never consulted. No relative
+  path, no CWD dependency, no environment variable used as a path
+  component.
+
+| Path traversal / predictable extraction path
+| The classpath resource path and the extracted file name are both `const
+  val` -- no runtime input ever reaches either. Extraction targets a
+  freshly created, owner-only (`0700`, where POSIX permissions are
+  supported), single-use temp directory, never a fixed/predictable path.
+
+| Unauthorized code execution via the override
+| The override is a JVM system property -- settable only by whoever starts
+  the JVM, not by any request-scoped or network-sourced input -- and every
+  use is logged at INFO so an unexpected override is visible, not silent.
+|===
+
+=== Stolperfallen (recorded so a future wave does not rediscover them)
+
+* `TKSTEP` does not exist in OCCT 7.9 -- it is `TKDESTEP` since the 7.8
+  data-exchange toolkit merge. `-lTKSTEP` fails the link with "cannot find
+  -lTKSTEP".
+* `TopExp_Explorer` counts a sub-shape once per parent that references it
+  -- a box would report 24 edges and 24 vertices instead of the true 12 and
+  8. `TopExp::MapShapes` (an indexed, de-duplicating map) is mandatory for
+  a correct unique count.
+* A C++ exception crossing the JNI boundary is undefined behavior (typically
+  a process abort), not a catchable Java exception -- every exported native
+  function wraps its body in `catch (const Standard_Failure&)`,
+  `catch (const std::exception&)`, and a final `catch (...)`.
+* `OSD::SetSignal()` is never called -- it installs signal handlers that
+  collide with the JVM's own, turning a recoverable OCCT error into a JVM
+  crash.
+* `Interface_Static` is global, non-thread-safe OCCT state; schema-set and
+  `Write()` are serialized under the same native mutex as the shape
+  registry.
+* `-Wl,--no-undefined` is set deliberately -- without it, a missing symbol
+  only surfaces as `UnsatisfiedLinkError` at first native call, far harder
+  to diagnose than a build-time link failure.
+* `-std=c++17` is required by OCCT 7.9's own compiler-capability checks.
+* A green `./gradlew clean check` on a machine without OCCT installed does
+  not, by itself, prove anything about the native path -- see
+  `-Pkstep.occt.require=true` above.
+
+== Rejected alternatives
+
+See "Binding choice" under Context above for the full comparison table;
+summarized, every published/generated JVM binding for OCCT was either
+non-existent (JavaCPP), unmaintained and license-incompatible-to-vendor
+(occjava), platform-restricted (jpad-occt), or not actually a general
+binding at all (OCCT-samples-kotlin). JavaCPP-as-custom-preset and
+Panama/FFM were both judged real future options, not dead ends -- see
+Geometrie Welle 9 below.
+
+== Environment note (this implementation run)
+
+The machine this wave was implemented on did not have the OCCT dev packages
+installed, and the implementing agent had no passwordless `sudo` to install
+them. Per the plan's own documented fallback for exactly this situation,
+the wave still implemented the *complete* scope above -- the module, the
+shim, every Kotlin type, both tests -- and verified the graceful-degradation
+path end-to-end (`./gradlew clean check` green with OCCT absent,
+`compileOcctBridge` cleanly skipped, `OcctKernel.availability()` reporting
+`Unavailable` with a clear reason, `OcctBridgeSmokeTest`'s OCCT-gated cases
+skipped rather than failed). A run with `-Pkstep.occt.require=true` on that
+same machine fails as expected (OCCT unavailable), confirming the guard
+itself works.
+
+**Update 2026-09-02, morning (retracted)**: an earlier revision of this
+ADR added a note here claiming the native code path had already been
+exercised end-to-end on a machine with the OCCT dev packages installed.
+That claim was made without evidence and was withdrawn the same day.
+Independently re-checked at the time: `/usr/include/opencascade` did not
+exist on any machine that had worked on this wave, `apt-cache policy
+libocct-foundation-dev` showed nothing installed, no `.so` for any OCCT
+toolkit existed anywhere on the host, and every `./gradlew clean check`
+run (including a fresh `--no-build-cache --rerun-tasks` run) still logged
+`compileOcctBridge` as `SKIPPED`. Several source comments elsewhere in
+this codebase (`kstep_occt_bridge.cpp`, `kstep-geometry/build.gradle.kts`,
+`OcctBridgeSmokeTest.kt`) that had been changed at the same time as the
+false claim, asserting specific OCCT runtime behavior as "verified
+2026-09-02", were reworded back to unverified-assumption language.
+
+**Update 2026-09-02, later the same day (superseded, this time with
+evidence)**: the environment changed after the retraction above. Per
+`/var/log/apt/history.log`, `Requested-By: irakli`,
+`End-Date: 2026-09-02 07:11:33`:
+
+----
+apt-get install --no-install-recommends libocct-foundation-dev
+  libocct-modeling-data-dev libocct-modeling-algorithms-dev
+  libocct-data-exchange-dev
+----
+
+-- exactly the command this ADR's "Building" prerequisite and README
+document. Independently re-verified afterward, from a clean checkout of
+this branch, run by an agent with no stake in the earlier false claim:
+
+* `./gradlew clean check --no-build-cache --rerun-tasks`: `BUILD
+  SUCCESSFUL` in 38s, 76/76 tasks actually executed (not
+  up-to-date/from-cache). `:kstep-geometry:compileOcctBridge` appears in
+  the task log with no `SKIPPED`/`UP-TO-DATE` annotation, and
+  `kstep-geometry/build/native/linux-x86-64/libkstep_occt_bridge.so`
+  (58512 bytes) exists afterward.
+* The g++ invocation that task runs (`-std=c++17 -Wall -Wextra
+  -Wl,--no-undefined -Wl,--disable-new-dtags`, full flags in
+  `build.gradle.kts`) compiles the 357-line shim and links it against
+  the full OCCT toolkit list with zero warnings and zero link errors.
+* `nm -D --defined-only` on the resulting `.so` shows exactly the six
+  expected `Java_dev_kstep_geometry_occt_OcctBridge_*` instance-method
+  symbols -- confirming the plain-`object`-not-`companion` JNI naming
+  discussed above actually holds.
+* `readelf -d` on the `.so` shows `(RPATH)`, not `(RUNPATH)`, confirming
+  `--disable-new-dtags` took effect as intended (the transitive-resolution
+  *advantage* of RPATH over RUNPATH remains untested on this machine --
+  see the still-open item under `build.gradle.kts` below).
+* `OcctBridgeSmokeTest`: 15 tests, 2 skipped, 0 failures. The 2 skips are
+  exactly the two `enabled = !available` guard cases (there is no
+  `available`-gated case left to skip); all 11 real-OCCT cases, including
+  both the AP242 and AP203 schema-selection assertions, pass.
+  `OcctBoxValidationExportTest`: 1/1 pass. Repo-wide: 333 tests, 2 skipped,
+  0 failures, 0 errors.
+* `./gradlew clean check -Pkstep.occt.require=true --no-build-cache
+  --rerun-tasks` (the hard-verification flag named in the Environment
+  note above) is also green: `BUILD SUCCESSFUL` in 37s, 333/2/0/0.
+* The SetCVal-ordering assumption discussed above is now empirically
+  supported, not just documented reasoning: the AP203 export at
+  `kstep-tests/build/occt-bridge-smoke-test/box-ap203.step` carries
+  `FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));` and contains zero occurrences
+  of the substring `AP242` -- the requested schema took effect, which is
+  only reachable if `SetCVal` returned `true` (a `false` return throws
+  `IllegalStateException` before the write, per `nativeWriteStep`).
+
+The Environment note and the first retraction above remain the accurate
+description of this wave's state up to 07:11 on 2026-09-02; from that
+timestamp on, the native path has actually been compiled, linked, and
+run, repeatably, on this host. Two things stay genuinely open and are
+*not* closed by the above -- see `kstep_occt_bridge.cpp` and
+`build.gradle.kts` for exactly which claims still carry that caveat:
+whether `registerShape(maker.Shape())` would fail to compile without the
+explicit `TopoDS_Shape(...)` copy (the copy is present in the code, so
+the alternative has never actually been attempted), and whether
+`-Wl,--disable-new-dtags`/`DT_RPATH` provides any real advantage over
+`DT_RUNPATH` for *transitive* dependency resolution against a non-default
+`-Pkstep.occt.libDir` (OCCT's `.so`s live in `/usr/lib/x86_64-linux-gnu`,
+the linker's own default search path, on every machine this has run on
+so far, so the RPATH-vs-RUNPATH distinction has not actually been
+exercised either way).
+
+== Folge-Wellen (the rest of the geometry milestone)
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| Geometrie Welle 2
+| Cylinder, cone, sphere primitives; boolean ops
+  (`BRepAlgoAPI_Fuse`/`Cut`/`Common`); `STEPControl_Reader` for STEP
+  *import*, turning this wave's write-only smoke test into a real
+  write-read roundtrip. Shim grows to roughly 15 functions.
+
+| Geometrie Welle 3
+| A `.kstep.kts` DSL surface for geometry (`kstep-script` integration),
+  `kstep render part.kstep.kts --out part.step` in `kstep-cli`, MCP tools
+  in `kstep-mcp`.
+
+| Geometrie Welle 4
+| Merging OCCT geometry with kSTEP's own AP242 product-structure Part 21
+  writer into a single file (`PRODUCT`/`PRODUCT_DEFINITION` +
+  `SHAPE_REPRESENTATION` in one document) -- needs its own ADR;
+  `STEPCAFControl_Writer`/XCAF vs. a Part-21-level merge is an open design
+  question.
+
+| Geometrie Welle 5
+| Feature-model / parametric history (sketch -> extrude -> fillet,
+  replayable).
+
+| Geometrie Welle 6
+| PlaneGCS constraint-solver adapter -- its own native bridge, its own
+  license review (LGPL-2.1-or-later).
+
+| Geometrie Welle 7
+| macOS (arm64/x86-64) and Windows support; shipping native libraries in a
+  distributed artifact -- this is where the LGPL SS6 bundling obligations
+  named under Context above become live.
+
+| Geometrie Welle 8
+| Desktop viewer (Compose Desktop + OCCT visualization).
+
+| Geometrie Welle 9
+| Re-evaluate the binding strategy once the shim exceeds roughly 50
+  functions: JavaCPP custom preset, or Panama/FFM once the CLI JDK
+  baseline allows moving past JDK 21.
+|===
+
+== Open question: milestone numbering
+
+kSTEP's existing milestones are M1 (done) and M2 (in progress). This wave
+is tracked as its own "Geometrie Welle N" sequence rather than folded into
+either -- it does not depend on M2's remaining scope, and M2's own Wellen
+numbering continues independently. Whether a future M3 should formally
+absorb the Geometrie-Welle track (with Desktop-Viewer/Ecosystem milestones
+renumbering to M4/M5 accordingly) is left for the project owner to decide;
+this ADR and its commit/doc references use "Geometrie Welle N" throughout
+so that decision can be made later without rewriting history.

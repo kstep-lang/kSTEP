@@ -24,5 +24,6 @@ include(
     "kstep-script",
     "kstep-cli",
     "kstep-mcp",
+    "kstep-geometry",
     "kstep-tests",
 )
