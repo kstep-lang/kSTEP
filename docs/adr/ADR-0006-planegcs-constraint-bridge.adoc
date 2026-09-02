@@ -1,0 +1,672 @@
+= ADR-0006: PlaneGCS constraint-solver bridge (Geometrie Welle 6, pulled forward)
+:toc:
+
+== Status
+
+Accepted, implemented. Tracked as "Geometrie Welle 6 (pulled forward)" --
+ADR-0005's own Folge-Wellen table already named a future "Geometrie Welle
+6: PlaneGCS constraint-solver adapter -- its own native bridge, its own
+license review" as the eventual home for this work. This wave brings that
+forward, ahead of Geometrie Wellen 2-5, because it stands on its own (no
+dependency on `kstep-geometry`'s box/topology/STEP-export work) and its own
+foundation-risk profile (native build, JNI memory safety, a second license
+review) benefited from being retired early rather than accumulated debt
+under a stale "Welle 6" label. ADR-0005's Folge-Wellen table is updated
+alongside this ADR to point here.
+
+== Context
+
+kSTEP's geometry milestone eventually needs a 2D sketch layer -- lines,
+circles, arcs, and the dimensional/geometric constraints (distance,
+coincidence, tangency, parallelism, ...) that let a sketch be
+under/over/exactly determined the way every mechanical CAD tool's sketcher
+works. That needs a constraint solver. Two real candidates exist in the
+open-source CAD ecosystem:
+
+[cols="2,4,1", options="header"]
+|===
+| Option | Finding | Verdict
+
+| SolveSpace's constraint solver
+| GPL-3.0 (whole project). Vendoring or dynamically linking GPL-3.0 code
+  into any part of kSTEP would put the *combined work* under GPL-3.0 --
+  incompatible with kSTEP's Apache-2.0 licensing goal for its own code.
+| Rejected (license)
+
+| PlaneGCS (FreeCAD Sketcher's solver, standalone via the Salusoft89
+  WASM-bindings fork)
+| LGPL-2.0-or-later (see "Source and license" below) -- a permissive-enough
+  copyleft that dynamic linking (or, as here, vendoring the *solver*
+  sources into a build that produces a *separately loadable* `.so`, called
+  only via JNI) does not require kSTEP's own Kotlin code to become LGPL.
+  Actively maintained as a standalone extraction from FreeCAD, with a
+  documented, scriptable resync process against upstream
+  (`update_freecad.sh`) and its own automated test suite.
+| *Chosen*
+|===
+
+No third option was found: there is no other actively maintained,
+extractable, permissively-licensed 2D geometric constraint solver in the
+open-source CAD space at the time of this wave.
+
+=== Why a native build, given a WASM port already exists
+
+The Salusoft89 repository's primary purpose is producing a WASM/Emscripten
+build for browser use (`planegcs/CMakeLists.txt`'s `add_executable(planegcs
+bindings.cpp)` target, `-s EXPORT_ES6=1` etc.). kSTEP is a JVM application,
+not a browser one -- the WASM artifact is not directly usable here. What
+*is* directly reusable is the underlying solver source itself
+(`GCS.cpp`/`Geo.cpp`/`Constraints.cpp`/`SubSystem.cpp`/`qp_eq.cpp`), which
+this wave compiles natively with a JNI shim instead, exactly mirroring how
+`kstep-geometry`'s OCCT bridge is a hand-written JNI shim rather than a
+generated binding (see ADR-0005). A future browser-facing kSTEP surface
+could reuse Salusoft89's own WASM build directly without needing this
+native bridge at all -- named as Geometrie Welle 9 (C-Welle 9) below.
+
+=== Source and license
+
+* Upstream repository: https://github.com/Salusoft89/planegcs
+* Commit vendored: `ee9b156da9827a91a56a888a53520f63d5cffaa6`
+* Tag at that commit: `1.2.0`
+* Commit date: 2026-07-06T16:56:38+10:00
+* FreeCAD upstream commit this fork was patched from (per the upstream
+  repository's own `planegcs/commit.txt`): `5f8eac49f31626354ee69bf40616bac801ca5560`
+
+**License correction: LGPL-2.0-or-later, not LGPL-2.1-or-later.** Every one
+of the ten vendored solver files (`GCS.cpp`/`.h`, `Geo.cpp`/`.h`,
+`Constraints.cpp`/`.h`, `SubSystem.cpp`/`.h`, `qp_eq.cpp`/`.h`, `Util.h`)
+and both vendored FreeCAD support headers (`FCConfig.h`, `FCGlobal.h`)
+carry, word for word, in their own header comment:
+
+[quote]
+____
+This library is free software; you can redistribute it and/or modify it
+under the terms of the GNU Library General Public License as published by
+the Free Software Foundation; either version 2 of the License, or (at your
+option) any later version.
+____
+
+"GNU Library General Public License ... version 2" is the historical name
+of what is now called LGPL-2.0 (the license was renamed "Lesser" GPL
+starting with version 2.1). This reading is independently confirmed by the
+upstream repository's own `package.json`, which declares
+`"license": "LGPL-2.0-or-later"` -- not a typo. The repository-wide
+`LICENSE` file (also vendored here, byte-for-byte, at
+`kstep-constraints/src/main/cpp/third_party/planegcs/LICENSE`) is
+nonetheless the LGPL-2.1 full text -- that is the license of the
+Salusoft89 *wrapper* code (`CMakeLists.txt`, `update_freecad.sh`, the WASM
+bindings, none of which are vendored here), not of the solver core itself.
+
+**Practical consequence: none.** "or later" makes the solver core usable
+under LGPL-2.1 or LGPL-3.0 terms as well as LGPL-2.0 -- the original
+decision above (PlaneGCS over the GPL-3.0 SolveSpace solver) is unaffected
+either way. This correction matters only for accuracy: `kstep-dev`'s own
+vault notes and ADR-0005's Folge-Wellen table both previously said
+"LGPL-2.1-or-later"; ADR-0005's table is corrected alongside this ADR, and
+the project vault is expected to follow separately (out of scope for a
+code-repository commit).
+
+=== Vendoring decision
+
+Unlike OCCT (available as a system package on the build machine, dynamically
+linked, nothing vendored -- see ADR-0005), PlaneGCS ships no distribution
+package at all: it exists only as source. Three options were considered:
+
+[cols="1,4", options="header"]
+|===
+| Option | Verdict
+
+| **(a) Vendor the solver sources into this repository**
+  (`kstep-constraints/src/main/cpp/third_party/planegcs/`, commit pinned,
+  original license headers intact, `PROVENANCE.adoc` with per-file SHA-256,
+  NOTICE entry)
+| *Chosen.* Reproducible without network access during a build, every
+  change visible in the repository's own diff history, and follows the
+  precedent this repository already established for `Express.g4`
+  (`kuml-dev` -- pardon, `kstep-dev`'s own `lutaml/express-grammar`
+  vendoring, see NOTICE's existing BSD-2-Clause entry): a small,
+  gap-driven third-party excerpt, pinned and documented, is an accepted
+  pattern here, not a new one.
+
+| (b) `git clone` at build time
+| Rejected: makes the build depend on network access and a specific
+  upstream repository staying reachable and unchanged -- not reproducible
+  offline, and silently drifts if upstream force-pushes or deletes the
+  commit.
+
+| (c) `git submodule`
+| Rejected: a plain `git clone` of this repository (without
+  `--recursive`/a follow-up `git submodule update --init`) produces a
+  checkout that cannot build `kstep-constraints` at all -- the same
+  network-at-checkout-time problem as (b), just deferred to clone time
+  instead of build time.
+|===
+
+**Legal consequence of (a) that a future maintainer must understand:** the
+built `libkstep_planegcs_bridge.so` contains compiled LGPL-2.0-or-later
+code and is therefore itself an LGPL work. LGPL section 6 (the
+dynamic-linking/relinking obligation) is satisfied structurally: the exact
+source this `.so` was built from is vendored in this same repository, at a
+documented, verifiable commit (see `PROVENANCE.adoc`), so anyone receiving
+the built library already has (or can trivially obtain, via this
+repository) everything needed to modify the LGPL portion and relink. The
+Kotlin/JVM side of `kstep-constraints` (and every other kSTEP module)
+remains Apache-2.0 -- it only calls into the `.so` dynamically via JNI
+(`System.load`), which is exactly the kind of "work that uses the Library"
+LGPL distinguishes from a derivative work of the library itself. This
+repository as a whole therefore remains Apache-2.0-licensed, with one
+clearly delineated, clearly marked LGPL-2.0-or-later subtree
+(`kstep-constraints/src/main/cpp/third_party/planegcs/`).
+
+This is a genuine departure from ADR-0005, which could truthfully state "No
+OCCT binary, header, or source is vendored in this repository." That
+sentence does not hold for `kstep-constraints` -- and is not repeated here.
+
+=== Scope of this wave
+
+**In (Definition of Done):**
+
+. New module `kstep-constraints` (`dev.kstep.constraints`, native/JNI
+  internals in `dev.kstep.constraints.planegcs`) -- see "Why
+  `kstep-constraints`, not `kstep-sketch`" below.
+. PlaneGCS solver sources vendored unmodified, commit pinned, license
+  documented (`PROVENANCE.adoc`, this ADR, NOTICE).
+. Gradle compiles the vendored sources plus a hand-written JNI shim into
+  `libkstep_planegcs_bridge.so` (linux-x86-64 only, matching
+  `kstep-geometry`'s own platform scope this milestone) -- skipped, not
+  failed, when Eigen/Boost dev headers or a C++ compiler are absent.
+. A closed, hardened native-library loading path in Kotlin
+  (`PlaneGcsNativeLibrary`), structurally identical to `kstep-geometry`'s
+  `OcctNativeLibrary`.
+. A narrow, *stateless* public Kotlin API (`PlaneGcsSolver.solveDistances`):
+  a 2D point system solved under point-to-point distance constraints.
+. A real, running end-to-end smoke test in `kstep-tests`
+  (`PlaneGcsBridgeSmokeTest`): the JVM loads the `.so`, solves a real
+  two-point-distance problem and a real 3-4-5 right triangle, and confirms
+  a deliberately conflicting system fails cleanly rather than crashing.
+. This ADR, plus NOTICE, README, and ADR-0005 cross-reference updates.
+
+**Deliberately out (named as Folge-Wellen below, not silently dropped):**
+constraint types other than point-to-point distance (coincidence,
+horizontal/vertical, point-on-line, parallel, perpendicular, angle); sketch
+entities (lines, circles, arcs) as opposed to bare points; an incremental,
+handle-based solver system for interactive dragging; PlaneGCS's own
+diagnosis API (`diagnose()`, DOF count, conflicting/redundant-constraint
+reporting); any coupling to `kstep-geometry` or `kstep-core`; a
+`.kstep.kts` DSL surface, `kstep-cli`/`kstep-mcp` wiring; macOS/Windows
+support; a viewer; and the WASM path.
+
+=== Why `kstep-constraints`, not `kstep-sketch`
+
+The obvious candidate name for "the module that lets you draw a
+constrained sketch" is `kstep-sketch`. This wave deliberately does not use
+that name, for four reasons:
+
+. **No sketch layer exists yet.** This module has no sketch entities
+  (lines, circles, arcs), no sketch DSL, no plane/coordinate-system
+  semantics, and no coupling to `kstep-geometry` at all. Calling it
+  `kstep-sketch` today would be exactly the kind of premature/misleading
+  module name ADR-0005's own "Scope of this wave" discipline exists to
+  avoid.
+. **The project vault already names this layer the "constraint-solver
+  adapter"** in its own architecture diagram, distinct from a later sketch
+  layer built on top of it.
+. **It leaves room for a later, honestly-named `kstep-sketch`** that
+  depends on *both* `kstep-constraints` (this module) and
+  `kstep-geometry` (for turning a solved sketch into an OCCT wire/face).
+  Had this wave claimed the `kstep-sketch` name for a bare point-and-
+  distance solver, that later module would either have had to bloat this
+  one retroactively or invent a second, confusing name.
+. **Symmetry with `kstep-geometry`**: both modules are named after the
+  *capability* they provide (a geometry kernel; a constraint-solving
+  kernel), not after an eventual end-user feature.
+
+=== Design decision: stateless one-shot API, not a handle registry
+
+`kstep-geometry`'s OCCT bridge keeps a `TopoDS_Shape*` alive across
+multiple JNI calls via a handle registry
+(`std::unordered_map<jlong, TopoDS_Shape*>`) guarded by a `std::mutex` --
+necessary there because an `OcctShape` is a long-lived Kotlin object the
+caller builds once and queries repeatedly. That design cost real
+correctness work during ADR-0005's own review/security loops: a
+use-after-free class of bug (a reader dereferencing a handle that a
+concurrent `close()` had already freed) and a `FindClass`-under-held-mutex
+deadlock risk, both fixed and documented in `kstep_occt_bridge.cpp`'s own
+comments.
+
+This wave avoids that whole problem class structurally rather than
+re-solving it: `PlaneGcsBridge.nativeSolveP2PDistances` is a single call
+that builds a `GCS::System` on the C++ stack, solves, writes the result
+back, and destroys everything on return. There is no handle, no registry,
+no mutex, and nothing a caller could forget to `close()`. This is possible
+because PlaneGCS itself has no global mutable state relevant here
+(`debugMode` is a per-`System` instance field; no vendored source calls
+`getenv`/`fopen`/`socket`/`system()` -- independently grepped, zero
+matches) and `GCS::System::~System()` (via `clear()` ->
+`deleteAllContent(clist)`) frees every `Constraint` object the system
+itself allocated.
+
+An incremental, handle-based `ConstraintSystem` (needed once interactive
+dragging is in scope, where re-solving from scratch on every mouse-move
+event would be wasteful) is deliberately left to a later wave -- see
+Folge-Wellen, C-Welle 4 -- which can then build the registry/mutex
+machinery with the benefit of ADR-0005's already-paid-for lessons, rather
+than this foundation wave paying that cost before it is actually needed.
+
+== Decision
+
+Ship `kstep-constraints` exactly as scoped above:
+
+* **Module boundary**: depends only on `kotlin-logging-jvm`, matching
+  `kstep-geometry`'s own minimal dependency footprint. No dependency on
+  `kstep-geometry` or `kstep-core` in this wave.
+* **Graceful degradation**: `compilePlaneGcsBridge` (a Gradle `Exec` task,
+  structured identically to `kstep-geometry`'s `compileOcctBridge`) only
+  runs `onlyIf { nativeBuildable }` -- linux-x86-64, Eigen headers present
+  (`Eigen/QR` under the configured include directory), Boost headers
+  present (`boost/graph/adjacency_list.hpp`), and `g++` on `PATH`. Absent
+  any of those, the task is skipped, no `.so` classpath resource ends up
+  in the module's jar, and `PlaneGcsSolver.availability()` reports
+  `PlaneGcsAvailability.Unavailable` at runtime with a human-readable
+  reason -- `./gradlew clean check` stays green either way.
+  `-Pkstep.planegcs.require=true` (read by `kstep-tests`'
+  `PlaneGcsBridgeSmokeTest`) turns "bridge unavailable" into a hard test
+  failure.
+* **No linking against an external shared library at all.** Eigen and
+  Boost are both used here in a strictly header-only capacity (verified
+  against every `#include` across the vendored sources), so
+  `compilePlaneGcsBridge` needs no `-L`/`-l`/`-rpath` flags whatsoever --
+  a genuine simplification relative to `kstep-geometry`'s OCCT bridge,
+  which links against a list of `libTK*.so` toolkits.
+* **`-std=c++20`, not `-std=c++17`** (unlike `kstep-geometry`'s OCCT
+  bridge): PlaneGCS's own sources use `<numbers>`, and upstream's own
+  `CMakeLists.txt` sets `CMAKE_CXX_STANDARD 20` for the same reason.
+* **Native library loading**: `PlaneGcsNativeLibrary` is structurally
+  identical to `OcctNativeLibrary` -- never `System.loadLibrary`; only
+  `System.load` against a `toRealPath()`-canonicalized, regular-file-
+  checked override property, or a classpath resource extracted into a
+  freshly created, owner-only-permission temp directory under a constant
+  file name.
+* **JNI symbol naming**: `PlaneGcsBridge` is a plain Kotlin `object`, not
+  `@JvmStatic`/`companion object`, for the same reason as `OcctBridge` --
+  see `PlaneGcsBridge.kt`'s KDoc. Public, not `internal`, so
+  `PlaneGcsBridgeSmokeTest` (a different Gradle module) can drive raw
+  native calls with hostile input (null arrays, mismatched lengths,
+  out-of-range indices) `PlaneGcsSolver`'s own validating API can never
+  construct on its own.
+* **A kSTEP-authored `Console.h` replaces the upstream, Emscripten-only
+  one** -- see "Stolperfallen" and Security below.
+
+== Consequences
+
+* kSTEP now has a real, if narrow, 2D constraint-solving foothold: a point
+  system solvable under distance constraints, with the numeric behavior
+  independently verified against a real build during this wave (see
+  "Environment note" below) -- not merely assumed from reading the source.
+* Every future constraint type (coincidence, parallel, tangent, ...) costs
+  one more native parameter/array pair, plus one Kotlin data type -- the
+  same per-feature-cost tradeoff ADR-0005 already accepted for OCCT
+  primitives, made here for the same reasons.
+* `kstep-constraints` has zero persistent native state and zero network
+  surface -- SSRF and use-after-free are both structurally not applicable,
+  recorded as such below rather than silently unaddressed.
+* This repository now has a documented, deliberate LGPL-2.0-or-later
+  subtree (see "Vendoring decision" above) -- distinct from the rest of
+  the repository's Apache-2.0 licensing, and distinct from
+  `kstep-geometry`'s "nothing vendored" position. Any future packaging
+  work (a distributed artifact bundling this `.so`) must account for LGPL
+  section 6 explicitly at that point, the same way ADR-0005 flags it for
+  OCCT under Geometrie Welle 7/8.
+
+=== Security
+
+[cols="2,4", options="header"]
+|===
+| Concern | Handling in this wave
+
+| SSRF
+| Not applicable -- independently grepped
+  (`getenv\|system(\|popen\|fopen\|socket\|curl`) across every vendored
+  PlaneGCS source file: zero real matches (the pattern's own apparent
+  hits are all substring artifacts of `extractSubsystem(...)`, not actual
+  calls). No network code anywhere in this module.
+
+| Debug file writes in vendored code
+| **Real finding**: `third_party/planegcs/GCS.cpp:283` opens
+  `GCS_debug.txt` in the process's current working directory;
+  `GCS.cpp:2577` opens `subsystemfile.txt` the same way. Both are gated
+  behind `#ifdef _DEBUG_TO_FILE` / `#ifdef _GCS_EXTRACT_SOLVER_SUBSYSTEM_`
+  respectively -- neither macro is ever defined by
+  `kstep-constraints/build.gradle.kts`, and that build file documents this
+  explicitly so a future "let's turn debug on" change does not
+  reintroduce the finding silently.
+
+| Format-string exposure in vendored code
+| **Real finding**: PlaneGCS calls `Console::Log(str.c_str())` with a
+  *runtime* string in the format-string position in multiple places
+  (`GCS.cpp:306`, `:2090`, `:2105`, `:2117`, `:2154`, `:2217`, `:2336`,
+  `:2389`, `:2546`, `:2560`). Upstream's own Emscripten `Console::Log`
+  (not vendored here) is a thin `vsprintf` wrapper -- a textbook
+  format-string vulnerability if a solver diagnostic string ever contains
+  `%`. kSTEP's own replacement `Console.h`
+  (`kstep-constraints/src/main/cpp/Console.h`) never calls any
+  printf-family function at all, so this class of bug cannot manifest
+  regardless of what any caller passes. `GCS::System::debugMode` is also
+  explicitly set to `GCS::NoDebug` by the bridge (see next row), so in
+  normal operation `Console::Log` is never even reached -- defense in
+  depth, not the only mitigation.
+
+| `debugMode` constructor default
+| **Real finding**: `GCS::System()`'s constructor default is
+  `debugMode(Minimal)` (`GCS.cpp:484`), *not* `NoDebug` -- relying on the
+  default would have left `Console::Log` reachable on every solve. The
+  bridge sets `system.debugMode = GCS::NoDebug` explicitly.
+
+| DoS
+| **Revised twice during this wave** after two successive sets of caps were
+  each found not to protect what they claimed.
++
+*Round 1.* Original values were `MAX_POINTS` (4096), `MAX_CONSTRAINTS`
+  (8192), `MAX_ITERATIONS` (10000). A single `solveDistances` call at
+  exactly `MAX_POINTS` (4096 points, 4095 chained distance constraints, well
+  under `MAX_CONSTRAINTS`, default `maxIterations`=100) did not return
+  within 10 minutes and had to be killed -- `solveDistances` is a single,
+  non-interruptible JNI call with no timeout parameter, so a caller that
+  trusted the documented bounds as safe had no way to abort it. Direct JNI
+  timing runs against the built `libkstep_planegcs_bridge.so` (chain
+  topology, `n` points / `n-1` distance constraints, default
+  `maxIterations`) showed PlaneGCS's dense-QR-based solver scaling worse
+  than cubically in point count: ~200ms at n=512, 1.3s at n=1000, 2.9s at
+  n=1200, 7.5s at n=1500, 21s at n=2000. Caps were lowered to `MAX_POINTS`
+  (512), `MAX_CONSTRAINTS` (1024), `MAX_ITERATIONS` (1000), documented as
+  keeping the worst measured combination under 1.3s.
++
+*Round 2.* That measurement turned out to cover only topologies that were
+  not PlaneGCS's actual worst case: a chain, a ring, and a conflicting
+  *chain* -- none of them a densely, redundantly interconnected point set.
+  A follow-up review measured a **dense, randomly-connected, mutually
+  inconsistent** graph (every point tangled into several conflicting
+  distance constraints with other points, so no local partial solution
+  satisfies its neighborhood) directly against the round-1 caps: n=512
+  points, 1024 constraints (random target distances, independent of the
+  randomly-placed start coordinates, so essentially never satisfiable) took
+  **47s at the default `maxIterations` of 100**, and over three minutes at
+  the round-1 `MAX_ITERATIONS` cap of 1000 -- roughly two orders of
+  magnitude past the "under 1.3s" claim the round-1 KDoc made for exactly
+  this combination, and also evidence that `maxIterations` is *not* a weak
+  cost driver on this topology the way it was on the round-1 shapes
+  (roughly 4x wall time between the default and the full 1000-budget run,
+  not "essentially flat" as round-1 claimed).
++
+Point count remains this module's real DoS lever, but the round-1 cap was
+  roughly 8x too high once measured against its actual worst case. Direct
+  JNI timing runs of the dense-random-inconsistent-graph topology
+  (`m = 2n` constraints, `maxIterations` at the full 1000 budget -- i.e.
+  already the most expensive point on every axis at once) scale roughly
+  cubically in `n`: 103ms at n=32, 250ms at n=48, ~500ms at n=64, 870ms at
+  n=80, 1.5s at n=96, 3.7s at n=128 (largest of three independent seeds at
+  each size). Caps are now `MAX_POINTS` (64), `MAX_CONSTRAINTS` (128,
+  keeping the same 2x ratio, this time verified at exactly that ratio
+  rather than assumed), `MAX_ITERATIONS` unchanged at 1000 (still 10x
+  PlaneGCS's own default; lowering it further would shrink the margin for
+  legitimately slow-but-convergent systems without addressing the actual
+  cost driver, point count). At the new caps, five distinct adversarial
+  topologies (the dense random inconsistent graph; a fully-connected
+  46-point cluster all constrained to the same unsatisfiable distance; a
+  chain with both endpoints fixed to an impossible total length; a "band"
+  graph; a chain with a huge coordinate scatter collapsing to a tiny
+  target distance), each run across ten independent random seeds at
+  exactly `MAX_POINTS`/`MAX_CONSTRAINTS`/`MAX_ITERATIONS`, produced a worst
+  observed run of 557ms -- comfortably under the one-second target, with
+  roughly 2x headroom left deliberately unused rather than trimming the
+  cap to the exact edge of what was measured. See
+  `PlaneGcsSolver.MAX_POINTS`'s KDoc for the same measurements with full
+  context, and its explicit caveat: this is an empirical bound over the
+  topologies this wave constructed, not a mathematical worst-case proof --
+  a caller needing a hard wall-clock guarantee should still enforce its
+  own timeout around the calling thread rather than trusting this constant
+  alone. `sketchSizeMultiplier` is deliberately left at its `GCS::System()`
+  default (`false`) -- if set `true`, the effective iteration budget
+  becomes `maxIter` multiplied by the system's parameter count, which
+  would make `MAX_ITERATIONS` far less predictable. A future
+  incremental/handle-based solver (see "Folge-Wellen" below) is the
+  intended path for sketches larger than 64 points, not raising this
+  one-shot cap.
+
+| Cryptography
+| Not applicable.
+
+| Resource leaks / use-after-free
+| Structurally not applicable to the persistent-state class of bug
+  ADR-0005 had to fix for OCCT: this bridge holds no state across calls
+  (see "Design decision" above). The one remaining native-memory hazard --
+  `GCS::Point` holding a raw `double*` into a `std::vector<double>` that
+  must never reallocate after those pointers are taken -- is addressed by
+  constructing that vector at its final size exactly once and never
+  resizing it afterward (`kstep_planegcs_bridge.cpp`, flagged inline as
+  the file's single most important invariant). JNI array pins
+  (`Get*ArrayElements`/`Release*ArrayElements`) are RAII-wrapped and
+  released on every path, including every early-return validation
+  failure.
+
+| JNI robustness
+| Every array argument is null-checked, then length-checked, then
+  content-checked (every coordinate finite; every constraint distance
+  finite and positive; every `fixedFlags` entry restricted to exactly 0 or
+  1), then constraint-index-range-checked -- all natively, before any
+  `GCS::System` is built or solved. `PlaneGcsBridge` is public specifically
+  so a caller using `java.lang.reflect.Method` can smuggle a real `null`,
+  a malformed array, or an out-of-range value past Kotlin's own
+  compile-time non-null parameter checks and past
+  `PlaneGcsSolver.solveDistances`'s own Kotlin-side `validate()` (neither
+  of which run for a caller going straight at `external fun` declarations),
+  and `PlaneGcsBridgeSmokeTest` exercises exactly that. No C++ exception
+  ever crosses the JNI boundary (`catch (const std::exception&)` +
+  `catch (...)` around the whole native solve function, translated to a
+  Java `RuntimeException`).
+
+| Native load path
+| Identical closed resolution to `kstep-geometry`'s `OcctNativeLibrary` --
+  see ADR-0005's own Security table, which applies verbatim here
+  (`System.loadLibrary`/`java.library.path` never consulted; compile-time-
+  constant resource path and extracted file name; freshly created,
+  owner-only temp directory).
+
+| Logging
+| `kotlin-logging` only (`io.github.oshai:kotlin-logging-jvm`), matching
+  every other kSTEP module. No caller-supplied geometry values are logged
+  -- only load source and the vendored-commit diagnostic string.
+
+| License provenance
+| Pinned commit (`ee9b156da9827a91a56a888a53520f63d5cffaa6`), tag
+  (`1.2.0`), and upstream FreeCAD commit
+  (`5f8eac49f31626354ee69bf40616bac801ca5560`) are documented in
+  `PROVENANCE.adoc` (with a per-file SHA-256 table) and additionally baked
+  into the compiled `.so` itself as `KSTEP_PLANEGCS_COMMIT`, which
+  `PlaneGcsBridgeSmokeTest` checks against the documented commit at
+  runtime -- a build that silently swapped the vendored sources without
+  updating the documentation would fail that test.
+|===
+
+=== Stolperfallen (recorded so a future wave does not rediscover them)
+
+* `-std=c++17` fails to compile the vendored sources -- PlaneGCS needs
+  `<numbers>`, hence C++20.
+* Upstream's own `headers/Console.h` is Emscripten-only
+  (`#include <emscripten.h>`, `EM_JS`) and was deliberately *not* vendored
+  -- kSTEP's own native `Console.h` replaces it, and this module's own
+  `src/main/cpp` include path must come *before* the vendored
+  `third_party/planegcs`/`headers` paths so `#include <Console.h>`
+  resolves to kSTEP's shim rather than failing to find one at all.
+* `FCGlobal.h` is required even though no vendored `.cpp` includes it
+  directly -- `FCConfig.h:267`'s own `#include <FCGlobal.h>` pulls it in
+  transitively. Verified by removing it and observing the resulting
+  `fatal error: FCGlobal.h: No such file or directory`.
+* `GCS::System()`'s constructor default is `debugMode(Minimal)`, not
+  `NoDebug` -- see Security above.
+* A `std::vector<double>` reallocation after `GCS::Point` objects have
+  already taken raw pointers into it dangles those pointers immediately --
+  the bridge constructs its parameter storage at final size exactly once.
+* The 3-4-5 right-triangle test's free vertex converges to
+  `(~0, +/-4)` depending on its starting guess -- both signs are equally
+  valid solutions to the same constraint system, so the test asserts
+  `abs(y)`, not the raw signed value, to avoid a false regression signal
+  on a legitimate solver-behavior change.
+* A convergence tolerance of `1e-9` is too tight for the triangle case:
+  this wave's own verification run observed a real residual of roughly
+  `6e-11` against `convergence=1e-10` -- `1e-6` is used there instead. The
+  simpler two-point-distance case converges tighter in practice and keeps
+  its `1e-9` tolerance.
+* `PlaneGcsBridge`'s JNI symbol naming follows the same plain-`object`
+  (not `companion object`) convention as `OcctBridge` -- verify with
+  `nm -D --defined-only` after any signature change.
+* `./gradlew clean` is required before every build in this repository's
+  own convention (see CLAUDE.md) -- the native `.so` rebuild costs
+  roughly 20-35 seconds per full `clean check` run on the machine this
+  wave was implemented on; budgeted for, not optimized away.
+
+== Rejected alternatives
+
+See "Context" above for the SolveSpace-vs-PlaneGCS comparison (rejected on
+license grounds: GPL-3.0 would make the combined work GPL-3.0) and
+"Vendoring decision" for the `git clone`-at-build-time and `git submodule`
+alternatives to vendoring (both rejected for reproducibility: a build or a
+plain checkout would depend on network access to a specific external
+repository).
+
+== Environment note (this implementation run)
+
+Every claim below states the exact command run and the actual output
+observed -- ADR-0005 records a previously retracted, unevidenced "verified"
+claim as a standing warning against exactly this kind of shortcut, and this
+ADR deliberately does not repeat that mistake.
+
+Verified before implementation began (planning-phase environment check,
+not itself a substitute for the implementation's own verification below):
+`cmake`/`g++`/`git` present; `libeigen3-dev` and `libboost-dev`/
+`libboost1.90-dev` installed (headers under `/usr/include/eigen3` and
+`/usr/include/boost` respectively); network access to `github.com`
+confirmed by cloning the upstream PlaneGCS repository at the pinned commit;
+all five vendored `.cpp` files compile individually with `g++ -std=c++20`;
+a full single-invocation shared-library build (five vendored `.cpp` files
+plus a throwaway hand-written probe `main()`, not this wave's actual JNI
+shim) completed in roughly 19 seconds and ran two real solves: a
+two-point-distance system converging to `(5.0, 0.0)` with native status
+`0` (`GCS::Success`), and a 3-4-5 triangle converging to
+`C=(~6e-11, 4.000000000058)` with status `0`; a deliberately conflicting
+system (the same two points required to be both 5 and 2 apart
+simultaneously) returned status `2` (`GCS::Failed`) without crashing.
+
+Verified during this wave's actual implementation, independently of the
+planning-phase check above:
+
+* A standalone `g++ -shared -std=c++20 ...` invocation of the actual
+  vendored sources plus this wave's real `kstep_planegcs_bridge.cpp`
+  (not a throwaway probe) compiled cleanly on the first attempt, producing
+  a 943368-byte `.so`. `nm -D --defined-only` on that library showed
+  exactly the two expected symbols,
+  `Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativePlaneGcsSourceCommit`
+  and
+  `Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances`,
+  confirming the plain-`object`-not-`companion` JNI naming convention
+  holds for this module too.
+* `./gradlew clean check -Pkstep.planegcs.require=true --no-build-cache
+  --rerun-tasks`: `:kstep-constraints:compilePlaneGcsBridge`,
+  `:kstep-constraints:processResources`, `:kstep-constraints:classes`, and
+  `:kstep-constraints:jar` all ran (not skipped) and succeeded, confirming
+  the real Gradle `Exec` task (not just the standalone manual compile
+  above) builds the shared object end to end.
+* `PlaneGcsBridgeSmokeTest` in `kstep-tests` ran against the real,
+  Gradle-built `.so` under `-Pkstep.planegcs.require=true` -- see the
+  addendum immediately below for the exact test/pass/fail counts, added
+  once that run completed, so this section states only what was actually
+  observed, not what was expected to happen.
+
+**Addendum -- the actual `-Pkstep.planegcs.require=true` run.**
+`./gradlew clean check -Pkstep.planegcs.require=true --no-build-cache
+--rerun-tasks`: `BUILD SUCCESSFUL in 2m 16s`, 90/90 tasks actually
+executed (not up-to-date/from-cache; the first attempt at this run failed
+on an unrelated `ktlint` indentation nit in this module's own
+`build.gradle.kts`, fixed, then this run repeated from a clean state).
+`:kstep-constraints:compilePlaneGcsBridge` appears with no
+`SKIPPED`/`UP-TO-DATE` annotation, and
+`kstep-constraints/build/native/linux-x86-64/libkstep_planegcs_bridge.so`
+(943368 bytes) exists afterward. `readelf -d` on that file shows exactly
+four `NEEDED` entries -- `libstdc++.so.6`, `libm.so.6`, `libgcc_s.so.1`,
+`libc.so.6` -- and no `RPATH`/`RUNPATH` entry at all, confirming the
+"no external shared-library link" claim under "Decision" above. Per-suite
+JUnit XML results:
+
+* `kstep-constraints`'s own `PlaneGcsNativeLibraryResolveLibraryPathTest`:
+  4 tests, 0 skipped, 0 failures, 0 errors.
+* `kstep-tests`'s `PlaneGcsBridgeSmokeTest`: 13 tests, 2 skipped (exactly
+  the two `enabled = !available` guard cases -- there is no
+  `available`-gated case left to skip once the bridge is confirmed
+  present), 0 failures, 0 errors. Every native-solve assertion passed
+  against the real, Gradle-compiled library -- including the two-point
+  distance case, the 3-4-5 triangle, the deliberately conflicting system,
+  the already-satisfied-constraint stability case, both concurrency cases
+  (8x50 and 16x20 threads), and both raw-native-method robustness cases
+  (null arrays, malformed lengths/out-of-range indices).
+* Repo-wide: 352 tests, 4 skipped, 0 failures, 0 errors.
+
+This run is what makes the numeric claims stated earlier in this
+ADR ("Design decision", the Stolperfallen entries on triangle-sign and
+tolerance) verified-by-this-wave's-own-test-suite, not merely restated
+from the separate planning-phase run described above.
+
+== Folge-Wellen (planned follow-up waves)
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| C-Welle 2
+| Additional constraint types on the same stateless points-only API:
+  coincidence, horizontal/vertical, point-on-line, parallel,
+  perpendicular, and angle-between-two-point-pairs.
+
+| C-Welle 3
+| Sketch entities -- `Line`, `Circle`, `Arc` (PlaneGCS's own
+  `GCS::Line`/`Circle`/`Arc` in `Geo.h`) plus their associated constraints
+  (tangent, equal-length, equal-radius, symmetry). The one-shot,
+  parallel-array API this wave ships becomes too narrow here; expect a
+  proper request/response data model instead.
+
+| C-Welle 4
+| An incremental, handle-based `ConstraintSystem` (`AutoCloseable`) for
+  interactive dragging (`System::clearByTag`, temporary constraints with
+  negative tags) -- this is where the handle-registry/concurrency work
+  this wave's stateless design deliberately deferred actually becomes
+  necessary.
+
+| C-Welle 5
+| PlaneGCS's own diagnosis API: `System::diagnose()`, `dofsNumber()`,
+  `getConflicting()`, `getRedundant()`, `hasConflicting()` -- surfacing
+  under/over-determined sketches in a form a human or an LLM agent can
+  act on, directly aligned with kSTEP's TDG (Typed Domain Grounding)
+  orientation.
+
+| C-Welle 6
+| A new module, `kstep-sketch`: the actual `.kstep.kts` sketch DSL, built
+  on both `kstep-constraints` (this module) and `kstep-geometry` (solved
+  sketch -> OCCT wire -> extrude). Depends on Geometrie Welle 5
+  (feature/parametric-history model).
+
+| C-Welle 7
+| Mapping solved sketches into AP242 (`geometric_representation_item`,
+  constraints as PMI/parametrics) -- needs its own ADR; overlaps with
+  Geometrie Welle 4 (merging OCCT geometry with kSTEP's own Part 21
+  writer).
+
+| C-Welle 8
+| macOS (arm64/x86-64) and Windows support -- this is where the LGPL
+  section 6 bundling obligations discussed under "Vendoring decision"
+  above become live for distributed artifacts, alongside Geometrie
+  Welle 7/8's identical OCCT-bundling obligation.
+
+| C-Welle 9
+| A WASM path reusing Salusoft89's own Emscripten build for a future
+  browser-facing kSTEP frontend -- symmetric to the JNI-first,
+  WASM/Panama-later sequencing ADR-0005 already chose for OCCT.
+|===

@@ -15,6 +15,7 @@ dependencies {
     implementation(project(":kstep-mcp"))
     implementation(project(":kstep-cli"))
     implementation(project(":kstep-geometry"))
+    implementation(project(":kstep-constraints"))
     implementation(libs.antlr4.runtime)
     testImplementation(libs.kotlinpoet)
     testImplementation(libs.kotest.runner.junit5)
@@ -42,4 +43,14 @@ tasks.withType<Test>().configureEach {
     // -Pkstep.occt.require=true on a machine that must guarantee OCCT is actually present. See
     // README 'Building' and docs/adr/ADR-0005-occt-jni-bridge.adoc.
     systemProperty("kstep.occt.require", providers.gradleProperty("kstep.occt.require").getOrElse("false"))
+    // PlaneGcsBridgeSmokeTest reads this at runtime: when "true", the test suite hard-fails if the
+    // native PlaneGCS bridge is NOT available (dev.kstep.constraints.PlaneGcsSolver.availability()
+    // reports Unavailable), instead of silently skipping the PlaneGCS-gated tests. Off by default so
+    // ./gradlew check stays green on a machine without the Eigen/Boost dev packages installed; pass
+    // -Pkstep.planegcs.require=true on a machine that must guarantee the bridge is actually present.
+    // See README 'Building' and docs/adr/ADR-0006-planegcs-constraint-bridge.adoc.
+    systemProperty(
+        "kstep.planegcs.require",
+        providers.gradleProperty("kstep.planegcs.require").getOrElse("false"),
+    )
 }

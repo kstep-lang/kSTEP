@@ -70,7 +70,11 @@ with an MCP server exposing the M1 DSL as LLM tool-calling tools (M2
 Welle 1, below). Separately, the long-planned geometry milestone has now
 started too (**Geometrie Welle 1** — a new `kstep-geometry` module bridging
 to OpenCASCADE Technology (OCCT) via JNI; see the `kstep-geometry` row
-below and `docs/adr/ADR-0005-occt-jni-bridge.adoc`). Concretely, as of
+below and `docs/adr/ADR-0005-occt-jni-bridge.adoc`), joined by
+**Geometrie Welle 6, pulled forward** — a new `kstep-constraints` module
+bridging to the PlaneGCS 2D geometric constraint solver via JNI; see the
+`kstep-constraints` row below and
+`docs/adr/ADR-0006-planegcs-constraint-bridge.adoc`. Concretely, as of
 this writing:
 
 * An ANTLR4-based parser for the EXPRESS schema language (ISO 10303-11)
@@ -686,6 +690,31 @@ See <<roadmap,Roadmap>> for what's planned next.
   and provenance discussion, and Building below for the required
   `apt-get install`.
 
+| `kstep-constraints`
+| PlaneGCS 2D geometric constraint-solver bridge -- Geometrie Welle 6,
+  pulled forward (`dev.kstep.constraints`, native/JNI internals in
+  `dev.kstep.constraints.planegcs`)
+| Working (Geometrie Welle 6, pulled forward):
+  `PlaneGcsSolver.solveDistances(points, constraints)` solves a 2D point
+  system under point-to-point distance constraints through a real,
+  vendored PlaneGCS solver core, returning each point's solved position
+  and a `SolveStatus` (`SUCCESS`/`CONVERGED`/`FAILED`/
+  `SUCCESSFUL_SOLUTION_INVALID`). A single stateless native call per solve
+  -- no persistent handle, no `close()` -- see
+  docs/adr/ADR-0006-planegcs-constraint-bridge.adoc for why. Depends on
+  nothing but `kotlin-logging-jvm`, same as `kstep-geometry`. The PlaneGCS
+  solver sources are vendored (unlike `kstep-geometry`'s OCCT, which links
+  a system package -- PlaneGCS ships no distribution package at all) under
+  `src/main/cpp/third_party/planegcs/` at a pinned upstream commit; see
+  that directory's `PROVENANCE.adoc`, NOTICE, and the ADR for the full
+  LGPL-2.0-or-later license analysis. The native shim
+  (`src/main/cpp/kstep_planegcs_bridge.cpp`) is compiled by Gradle
+  (linux-x86-64 only in this wave) and skipped entirely -- not failed --
+  when the Eigen/Boost dev headers are absent, in which case
+  `PlaneGcsSolver.availability()` reports `PlaneGcsAvailability.Unavailable`
+  at runtime with a human-readable reason. See Building below for the
+  required `apt-get install`.
+
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
 | Smoke test for the EXPRESS parser; semantic-model, naming-convention,
@@ -730,7 +759,18 @@ See <<roadmap,Roadmap>> for what's planned next.
   suite's own first case, which instead hard-fails under
   `-Pkstep.occt.require=true`) and `OcctBoxValidationExportTest`
   (analogous to `FreeCadValidationExportTest`, but writing a real
-  `MANIFOLD_SOLID_BREP`-bearing STEP file for manual STEP-viewer import)
+  `MANIFOLD_SOLID_BREP`-bearing STEP file for manual STEP-viewer import);
+  (Geometrie Welle 6, pulled forward) `PlaneGcsBridgeSmokeTest` (the full
+  `kstep-constraints` acceptance chain: a real two-point distance solve,
+  a real 3-4-5 right-triangle solve, a deliberately conflicting system
+  failing cleanly without corrupting a later solve, an already-satisfied
+  constraint staying stable, two concurrency stress cases, both raw
+  native-method JNI-robustness cases (null arrays; malformed lengths and
+  out-of-range indices), and full Kotlin-side input validation -- every
+  PlaneGCS-dependent case skips cleanly when
+  `PlaneGcsSolver.availability()` reports `Unavailable`, except the
+  suite's own first case, which instead hard-fails under
+  `-Pkstep.planegcs.require=true`)
 |===
 
 == Building
@@ -791,6 +831,40 @@ failing. `-Pkstep.occt.require=true` turns that into a hard test failure
 instead — pass it only on a machine where OCCT is expected to actually be
 present. This wave supports linux-x86-64 only; see the ADR's Folge-Wellen
 for the planned macOS/Windows follow-up.
+
+=== Building — optional PlaneGCS constraint solver
+
+`kstep-constraints` (Geometrie Welle 6, pulled forward, see
+docs/adr/ADR-0006-planegcs-constraint-bridge.adoc) compiles a vendored copy
+of the PlaneGCS 2D geometric constraint solver (unlike `kstep-geometry`'s
+OCCT, which links a *system-installed* package — PlaneGCS ships no
+distribution package at all, so its sources are vendored directly into
+this repository at a pinned commit; see NOTICE and
+`kstep-constraints/src/main/cpp/third_party/planegcs/PROVENANCE.adoc`).
+This is entirely optional: `./gradlew clean check` stays green with or
+without the required dev headers installed. To get real end-to-end
+constraint-solving coverage, install the Eigen and Boost dev packages
+first — on Ubuntu/Debian:
+
+[source,shell]
+----
+sudo apt-get install --no-install-recommends libeigen3-dev libboost-dev
+./gradlew clean check -Pkstep.planegcs.require=true
+----
+
+Without those packages installed, `kstep-constraints`'s
+`compilePlaneGcsBridge` Gradle task is skipped (not failed), and
+`dev.kstep.constraints.PlaneGcsSolver.availability()` reports
+`PlaneGcsAvailability.Unavailable` at runtime with a human-readable reason;
+`PlaneGcsBridgeSmokeTest`'s PlaneGCS-dependent cases then skip cleanly
+instead of failing. `-Pkstep.planegcs.require=true` turns that into a hard
+test failure instead — pass it only on a machine where the bridge is
+expected to actually be present. This wave supports linux-x86-64 only,
+same as `kstep-geometry`; see the ADR's Folge-Wellen for the planned
+macOS/Windows follow-up. Unlike the OCCT bridge, no `-L`/`-l`/`-rpath`
+linker flags are needed at all — Eigen and Boost are both used here in a
+strictly header-only capacity, so nothing links against an external shared
+library.
 
 kSTEP logs through kotlin-logging
 (`io.github.oshai:kotlin-logging-jvm`), an idiomatic Kotlin wrapper
@@ -1489,9 +1563,17 @@ an entity not modeled anywhere in `kstep-core`).
   rationale, license findings, and the named follow-up waves (further
   primitives and boolean ops, STEP *import*, a `.kstep.kts` geometry DSL,
   merging OCCT shape data with kSTEP's own AP242 product-structure Part 21
-  output, a feature/parametric-history model, PlaneGCS, multi-platform
-  support, a desktop viewer). Additional STEP Application Protocols beyond
-  AP242 remain a separate, not-yet-started later item.
+  output, a feature/parametric-history model, multi-platform support, a
+  desktop viewer). **(Geometrie Welle 6, pulled forward, done)**
+  `kstep-constraints` now exists: a PlaneGCS 2D geometric constraint-solver
+  bridge, solving point systems under distance constraints — see the
+  `kstep-constraints` row above and
+  `docs/adr/ADR-0006-planegcs-constraint-bridge.adoc` for the full
+  license analysis and the named follow-up waves (further constraint
+  types, sketch entities, an incremental/interactive solver, PlaneGCS's
+  own diagnosis API, a `kstep-sketch` module, AP242 mapping,
+  multi-platform support, a WASM path). Additional STEP Application
+  Protocols beyond AP242 remain a separate, not-yet-started later item.
 
 == License and attribution
 

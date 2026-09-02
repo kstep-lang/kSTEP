@@ -1,0 +1,130 @@
+= PlaneGCS vendoring provenance
+
+This directory (`kstep-constraints/src/main/cpp/third_party/planegcs/`) vendors an unmodified copy
+of the PlaneGCS 2D geometric constraint solver, as maintained by the Salusoft89 WASM-bindings fork
+of the code originally developed inside FreeCAD's Sketcher workbench. See
+`docs/adr/ADR-0006-planegcs-constraint-bridge.adoc` for the full rationale, the vendoring decision,
+and the license analysis this file's "License" section summarizes.
+
+== Upstream source
+
+* Repository: https://github.com/Salusoft89/planegcs
+* Commit pinned: `ee9b156da9827a91a56a888a53520f63d5cffaa6`
+* Commit date: 2026-07-06T16:56:38+10:00
+* Tag at that commit: `1.2.0`
+* FreeCAD upstream commit this fork was patched from (per the upstream repo's own
+  `planegcs/commit.txt`): `5f8eac49f31626354ee69bf40616bac801ca5560`
+
+== What was copied, and how
+
+Every file below was copied byte-for-byte from the upstream repository at the commit above -- no
+patch, no reformatting, no whitespace change. All original license headers are intact.
+
+[cols="1,1"]
+|===
+|Upstream path |Vendored as
+
+|`planegcs/GCS.cpp`, `planegcs/GCS.h`
+|`GCS.cpp`, `GCS.h`
+
+|`planegcs/Geo.cpp`, `planegcs/Geo.h`
+|`Geo.cpp`, `Geo.h`
+
+|`planegcs/Constraints.cpp`, `planegcs/Constraints.h`
+|`Constraints.cpp`, `Constraints.h`
+
+|`planegcs/SubSystem.cpp`, `planegcs/SubSystem.h`
+|`SubSystem.cpp`, `SubSystem.h`
+
+|`planegcs/qp_eq.cpp`, `planegcs/qp_eq.h`
+|`qp_eq.cpp`, `qp_eq.h`
+
+|`planegcs/Util.h`
+|`Util.h`
+
+|`planegcs/headers/FCConfig.h`
+|`headers/FCConfig.h`
+
+|`planegcs/headers/FCGlobal.h` (pulled in transitively by `FCConfig.h:267`'s
+`#include <FCGlobal.h>`, even though no vendored `.cpp` includes it directly -- omitting it breaks
+the build with `fatal error: FCGlobal.h: No such file or directory`)
+|`headers/FCGlobal.h`
+
+|`planegcs/headers/boost_graph_adjacency_list.hpp`
+|`headers/boost_graph_adjacency_list.hpp`
+
+|`planegcs/LICENSE` (LGPL-2.1 full text, the repo-wide license file)
+|`LICENSE`
+|===
+
+`planegcs/headers/Console.h` was **deliberately NOT copied**: the upstream version is
+Emscripten-only (`#include <emscripten.h>`, `EM_JS`) and cannot compile natively. The native build
+instead uses a kSTEP-authored replacement at `kstep-constraints/src/main/cpp/Console.h` (Apache-2.0,
+kSTEP's own copyright) -- see that file's own header comment, and
+`docs/adr/ADR-0006-planegcs-constraint-bridge.adoc`'s Security section, for why it is written the
+way it is (never treats its argument as a `printf`-style format string).
+
+`planegcs/CMakeLists.txt`, `planegcs/update_freecad.sh`, `planegcs/patch_file.ts`, and every file
+outside `planegcs/` in the upstream repository (WASM bindings, TypeScript sketch/test code, docs)
+were **not** vendored -- kSTEP compiles the five vendored `.cpp` files directly with a single `g++`
+invocation (see `kstep-constraints/build.gradle.kts`), not via CMake, and has no use for the
+WASM-binding or TypeScript-test layers.
+
+== Verifying this copy
+
+Every vendored source file's SHA-256, computed at the time of vendoring:
+
+----
+8bb52797b95165601b36fce1246c0c02cc110e1ccd82826bd3f7f23622f787fa  Constraints.cpp
+4c0450132e03699919bef7a46116d0697c483994918774dd609cbc3794737323  Constraints.h
+3fa6204325f0945cd4cb1f370e51d8200cdb78d2b5df333ba9e08f1a67dabbac  GCS.cpp
+b1e7438228b3e0974619ae5228a137e32c250ba0eaaa1871d4ce1cf1037e049c  GCS.h
+eb56eaf4ee6911c0d0082c1e43e9155dcd11cf2c6443cfc7d3703cf2fbd8e330  Geo.cpp
+77d8b4d01f1462e9c20227c7f0441b68adb3ca0e6df3d6e78df00cd82fefb507  Geo.h
+3d400e9faa1b3262ec6ed8ff4ade4a8eddb0149644dc32f10335fa5ef6400725  SubSystem.cpp
+9a601de5fc441675551cf717a21da184060eb2f95bd76a026430f053401ae758  SubSystem.h
+ff6df589332423ecb4b29e7b2f8d9f2d779f6520861b4155bb8e5a9b2f7a4eeb  Util.h
+2d6c544c80b08a99d6e6b26d515c36f561399cc5714ac41ce34d852ae0ed3d82  qp_eq.cpp
+f77fcd9cf7e35feba3a9e990e946c8e76961943338f1245adc188f9876ab653e  qp_eq.h
+5040014aaff5681f3e2ead3d3c7e3ea41d11742c6b20a4fc7f15f960d8f586f6  headers/FCConfig.h
+53b18aa04252349932738cb2291099b779114fcfcacbd900cf0ce4d6020832ba  headers/FCGlobal.h
+8fa45c6d14db631965bfcad11996be166ca825ed8b8aae3e60c3972ad253bdb3  headers/boost_graph_adjacency_list.hpp
+20c17d8b8c48a600800dfd14f95d5cb9ff47066a9641ddeab48dc54aec96e331  LICENSE
+----
+
+Reproduce with (from this directory):
+
+[source,bash]
+----
+sha256sum Constraints.cpp Constraints.h GCS.cpp GCS.h Geo.cpp Geo.h SubSystem.cpp SubSystem.h \
+  Util.h qp_eq.cpp qp_eq.h headers/FCConfig.h headers/FCGlobal.h \
+  headers/boost_graph_adjacency_list.hpp LICENSE
+----
+
+Or re-clone the upstream repository and diff directly:
+
+[source,bash]
+----
+git clone --depth 1 https://github.com/Salusoft89/planegcs.git /tmp/planegcs-verify
+cd /tmp/planegcs-verify && git fetch --depth 1 origin ee9b156da9827a91a56a888a53520f63d5cffaa6 \
+  && git checkout ee9b156da9827a91a56a888a53520f63d5cffaa6
+diff planegcs/GCS.cpp <kstep-repo>/kstep-constraints/src/main/cpp/third_party/planegcs/GCS.cpp
+# ... repeat per file; every diff must be empty.
+----
+
+== License
+
+Every vendored file's own header states: _"GNU Library General Public License ... version 2 of the
+License, or (at your option) any later version"_ -- "Library GPL v2" is the historical name of what
+is now called LGPL-2.0. This is confirmed by the upstream repository's own `package.json`, which
+declares `"license": "LGPL-2.0-or-later"` (not a typo). The repo-wide `LICENSE` file vendored above
+is nonetheless the LGPL-2.1 full text (the license of the Salusoft89 *wrapper* code -- CMakeLists,
+WASM bindings, `update_freecad.sh` -- which is NOT vendored here); the solver files themselves are
+LGPL-2.0-or-later, which "or later" makes usable under LGPL-2.1 or LGPL-3.0 terms as well. See
+`docs/adr/ADR-0006-planegcs-constraint-bridge.adoc`, "Source and license", for the full analysis and
+the practical (none) consequence of this correction.
+
+**LGPL-2.0-or-later.** Copyright (c) 2011 Konstantinos Poulios and other FreeCAD contributors
+(solver core, originally developed for FreeCAD's Sketcher workbench); Copyright (c) 2023 Miroslav
+Šerý, Salusoft89 (WASM packaging and the patches applied on top of the FreeCAD original -- see
+`update_freecad.sh` in the upstream repo, not vendored here, for what those patches are).

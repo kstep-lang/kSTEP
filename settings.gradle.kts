@@ -25,5 +25,6 @@ include(
     "kstep-cli",
     "kstep-mcp",
     "kstep-geometry",
+    "kstep-constraints",
     "kstep-tests",
 )

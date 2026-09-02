@@ -461,8 +461,13 @@ exercised either way).
   replayable).
 
 | Geometrie Welle 6
-| PlaneGCS constraint-solver adapter -- its own native bridge, its own
-  license review (LGPL-2.1-or-later).
+| **Pulled forward and implemented** as its own module, `kstep-constraints`
+  -- see docs/adr/ADR-0006-planegcs-constraint-bridge.adoc for the full
+  bridge, license review, and security analysis. Correction to this row's
+  original text: the vendored PlaneGCS solver core is
+  LGPL-2.0-or-later, not LGPL-2.1-or-later (see ADR-0006's "Source and
+  license" for the file-header evidence) -- practically inconsequential
+  ("or later" covers 2.1 either way), but stated precisely there and here.
 
 | Geometrie Welle 7
 | macOS (arm64/x86-64) and Windows support; shipping native libraries in a

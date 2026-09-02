@@ -77,6 +77,36 @@ entirely when that installation is absent (see
 docs/adr/ADR-0005-occt-jni-bridge.adoc). This product does not currently
 bundle or redistribute any OCCT binary.
 
+This product's kstep-constraints module vendors the PlaneGCS 2D geometric
+constraint solver (Salusoft89's standalone WASM-bindings fork of the
+solver originally developed for FreeCAD's Sketcher workbench), Copyright
+(c) 2011 Konstantinos Poulios and other FreeCAD contributors (solver core)
+and Copyright (c) 2023 Miroslav Šerý, Salusoft89 (WASM packaging and
+patches), licensed under the GNU Lesser General Public License, version
+2.0 or later (LGPL-2.0-or-later -- confirmed by every vendored source
+file's own header comment, which predates the "Lesser" GPL naming and
+reads "GNU Library General Public License ... version 2 ... or (at your
+option) any later version"; the upstream repository's own package.json
+independently confirms "license": "LGPL-2.0-or-later"). Vendored,
+unmodified, at commit ee9b156da9827a91a56a888a53520f63d5cffaa6 (tag
+1.2.0) from https://github.com/Salusoft89/planegcs, itself patched from
+FreeCAD upstream commit 5f8eac49f31626354ee69bf40616bac801ca5560, under
+kstep-constraints/src/main/cpp/third_party/planegcs/ -- see that
+directory's PROVENANCE.adoc for the exact file list and per-file SHA-256,
+and docs/adr/ADR-0006-planegcs-constraint-bridge.adoc for the full license
+analysis and vendoring rationale. Unlike the OCCT paragraph above, source
+IS vendored here: the compiled kstep_planegcs_bridge.so is itself an LGPL
+work, and LGPL section 6 is satisfied because the exact source it was
+built from is committed to this same repository at the documented commit.
+The Kotlin/JVM side of kstep-constraints (and every other kSTEP module)
+remains Apache-2.0 -- it only calls into the compiled library dynamically
+via JNI. This repository's LICENSE (Apache-2.0) governs the repository as
+a whole; the kstep-constraints/src/main/cpp/third_party/planegcs/
+subtree is the one exception, under LGPL-2.0-or-later as described above
+(full LGPL-2.1 text also vendored in that subtree's own LICENSE file, per
+upstream's own repository-wide license file -- see PROVENANCE.adoc for why
+that differs from the per-file LGPL-2.0-or-later header).
+
 BSD 2-Clause License (Ribose Inc.)
 -----------------------------------
 Copyright (c) 2020, Ribose Inc.
