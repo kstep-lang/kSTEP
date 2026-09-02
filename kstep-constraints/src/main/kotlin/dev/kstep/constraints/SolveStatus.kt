@@ -7,7 +7,7 @@ package dev.kstep.constraints
  * The ordinal values match the native `GCS::SolveStatus` values exactly (`SUCCESS` = 0, `CONVERGED`
  * = 1, `FAILED` = 2, `SUCCESSFUL_SOLUTION_INVALID` = 3) --
  * [dev.kstep.constraints.planegcs.PlaneGcsBridge]'s native side returns the raw native integer, and
- * [PlaneGcsSolver.solveDistances] converts it back via [entries] `ordinal` lookup. Do not reorder
+ * [PlaneGcsSolver.solve] converts it back via [entries] `ordinal` lookup. Do not reorder
  * these entries.
  */
 enum class SolveStatus {
@@ -25,9 +25,10 @@ enum class SolveStatus {
 
     /**
      * The solver reported success, but PlaneGCS itself flags the resulting geometry as invalid.
-     * Not exercised by this wave's own constraint vocabulary (plain point-to-point distances have
-     * no such invalid-geometry failure mode PlaneGCS is known to report) -- kept only because it is
-     * part of the native enum this type mirrors 1:1.
+     * Not exercised by this module's own test suite as of the ADR-0007 wave (distance, coincidence,
+     * horizontal/vertical, and point-on-line constraints did not trigger this status in any test
+     * constructed there either) -- kept only because it is part of the native enum this type
+     * mirrors 1:1.
      */
     SUCCESSFUL_SOLUTION_INVALID,
     ;
@@ -35,7 +36,7 @@ enum class SolveStatus {
     internal companion object {
         /**
          * Converts a raw native `GCS::SolveStatus` ordinal (as returned by
-         * [dev.kstep.constraints.planegcs.PlaneGcsBridge.nativeSolveP2PDistances]) into a
+         * [dev.kstep.constraints.planegcs.PlaneGcsBridge.nativeSolveConstraints]) into a
          * [SolveStatus].
          *
          * @throws ConstraintSolverException if `nativeStatus` is not one of the four known values --

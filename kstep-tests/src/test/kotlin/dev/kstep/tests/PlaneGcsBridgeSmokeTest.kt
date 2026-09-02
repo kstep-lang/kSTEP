@@ -211,7 +211,7 @@ class PlaneGcsBridgeSmokeTest :
             // method directly with a real null argument.
             val method =
                 PlaneGcsBridge::class.java.getDeclaredMethod(
-                    "nativeSolveP2PDistances",
+                    "nativeSolveConstraints",
                     DoubleArray::class.java,
                     IntArray::class.java,
                     IntArray::class.java,
@@ -223,9 +223,9 @@ class PlaneGcsBridgeSmokeTest :
                 )
             val coords = doubleArrayOf(0.0, 0.0, 1.0, 0.0)
             val fixedFlags = intArrayOf(1, 0)
-            val ca = intArrayOf(0)
-            val cb = intArrayOf(1)
-            val cd = doubleArrayOf(5.0)
+            val kinds = intArrayOf(0)
+            val cp = intArrayOf(0, 1, -1, -1)
+            val params = doubleArrayOf(5.0)
             val out = DoubleArray(4)
 
             fun invokeWith(vararg args: Any?): InvocationTargetException =
@@ -236,12 +236,12 @@ class PlaneGcsBridgeSmokeTest :
             fun causeIsNpe(target: InvocationTargetException) {
                 target.cause.shouldBeInstanceOf<NullPointerException>()
             }
-            causeIsNpe(invokeWith(null, fixedFlags, ca, cb, cd, 100, 1e-10, out))
-            causeIsNpe(invokeWith(coords, null, ca, cb, cd, 100, 1e-10, out))
-            causeIsNpe(invokeWith(coords, fixedFlags, null, cb, cd, 100, 1e-10, out))
-            causeIsNpe(invokeWith(coords, fixedFlags, ca, null, cd, 100, 1e-10, out))
-            causeIsNpe(invokeWith(coords, fixedFlags, ca, cb, null, 100, 1e-10, out))
-            causeIsNpe(invokeWith(coords, fixedFlags, ca, cb, cd, 100, 1e-10, null))
+            causeIsNpe(invokeWith(null, fixedFlags, kinds, cp, params, 100, 1e-10, out))
+            causeIsNpe(invokeWith(coords, null, kinds, cp, params, 100, 1e-10, out))
+            causeIsNpe(invokeWith(coords, fixedFlags, null, cp, params, 100, 1e-10, out))
+            causeIsNpe(invokeWith(coords, fixedFlags, kinds, null, params, 100, 1e-10, out))
+            causeIsNpe(invokeWith(coords, fixedFlags, kinds, cp, null, 100, 1e-10, out))
+            causeIsNpe(invokeWith(coords, fixedFlags, kinds, cp, params, 100, 1e-10, null))
 
             // The JVM is still alive to run this: PlaneGCS still answers a completely normal
             // request right afterward, in the same test, on the same thread.
@@ -260,11 +260,11 @@ class PlaneGcsBridgeSmokeTest :
             fun solveRaw(
                 coords: DoubleArray,
                 fixedFlags: IntArray,
-                ca: IntArray,
-                cb: IntArray,
-                cd: DoubleArray,
+                kinds: IntArray,
+                cp: IntArray,
+                params: DoubleArray,
                 out: DoubleArray,
-            ): Int = PlaneGcsBridge.nativeSolveP2PDistances(coords, fixedFlags, ca, cb, cd, 100, 1e-10, out)
+            ): Int = PlaneGcsBridge.nativeSolveConstraints(coords, fixedFlags, kinds, cp, params, 100, 1e-10, out)
 
             // outCoords too short.
             shouldThrow<IllegalArgumentException> {
@@ -272,7 +272,7 @@ class PlaneGcsBridgeSmokeTest :
                     doubleArrayOf(0.0, 0.0, 1.0, 0.0),
                     intArrayOf(1, 0),
                     intArrayOf(0),
-                    intArrayOf(1),
+                    intArrayOf(0, 1, -1, -1),
                     doubleArrayOf(5.0),
                     DoubleArray(2),
                 )
@@ -283,19 +283,30 @@ class PlaneGcsBridgeSmokeTest :
                     doubleArrayOf(0.0, 0.0, 1.0, 0.0),
                     intArrayOf(1),
                     intArrayOf(0),
-                    intArrayOf(1),
+                    intArrayOf(0, 1, -1, -1),
                     doubleArrayOf(5.0),
                     DoubleArray(4),
                 )
             }
-            // constraint arrays of unequal length.
+            // constraintPoints length != 4 * constraintKinds length.
             shouldThrow<IllegalArgumentException> {
                 solveRaw(
                     doubleArrayOf(0.0, 0.0, 1.0, 0.0),
                     intArrayOf(1, 0),
                     intArrayOf(0),
-                    intArrayOf(1, 0),
+                    intArrayOf(0, 1, -1),
                     doubleArrayOf(5.0),
+                    DoubleArray(4),
+                )
+            }
+            // constraintParams length != constraintKinds length.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(
+                    doubleArrayOf(0.0, 0.0, 1.0, 0.0),
+                    intArrayOf(1, 0),
+                    intArrayOf(0),
+                    intArrayOf(0, 1, -1, -1),
+                    doubleArrayOf(5.0, 5.0),
                     DoubleArray(4),
                 )
             }
@@ -305,7 +316,73 @@ class PlaneGcsBridgeSmokeTest :
                     doubleArrayOf(0.0, 0.0, 1.0, 0.0),
                     intArrayOf(1, 0),
                     intArrayOf(0),
-                    intArrayOf(99),
+                    intArrayOf(0, 99, -1, -1),
+                    doubleArrayOf(5.0),
+                    DoubleArray(4),
+                )
+            }
+            // unknown constraint kind.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(
+                    doubleArrayOf(0.0, 0.0, 1.0, 0.0),
+                    intArrayOf(1, 0),
+                    intArrayOf(5),
+                    intArrayOf(0, 1, -1, -1),
+                    doubleArrayOf(0.0),
+                    DoubleArray(4),
+                )
+            }
+            // unused slot not -1.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(
+                    doubleArrayOf(0.0, 0.0, 1.0, 0.0),
+                    intArrayOf(1, 0),
+                    intArrayOf(1),
+                    intArrayOf(0, 1, 0, -1),
+                    doubleArrayOf(0.0),
+                    DoubleArray(4),
+                )
+            }
+            // duplicate index within a constraint.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(
+                    doubleArrayOf(0.0, 0.0, 1.0, 0.0),
+                    intArrayOf(1, 0),
+                    intArrayOf(1),
+                    intArrayOf(0, 0, -1, -1),
+                    doubleArrayOf(0.0),
+                    DoubleArray(4),
+                )
+            }
+            // non-zero parameter on a parameterless kind.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(
+                    doubleArrayOf(0.0, 0.0, 1.0, 0.0),
+                    intArrayOf(1, 0),
+                    intArrayOf(1),
+                    intArrayOf(0, 1, -1, -1),
+                    doubleArrayOf(1.0),
+                    DoubleArray(4),
+                )
+            }
+            // pointCount == 0.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(
+                    DoubleArray(0),
+                    IntArray(0),
+                    IntArray(0),
+                    IntArray(0),
+                    DoubleArray(0),
+                    DoubleArray(0),
+                )
+            }
+            // all points fixed -- no unknowns.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(
+                    doubleArrayOf(0.0, 0.0, 1.0, 0.0),
+                    intArrayOf(1, 1),
+                    intArrayOf(0),
+                    intArrayOf(0, 1, -1, -1),
                     doubleArrayOf(5.0),
                     DoubleArray(4),
                 )
@@ -336,14 +413,14 @@ class PlaneGcsBridgeSmokeTest :
             fun solveRaw(
                 coords: DoubleArray,
                 fixedFlags: IntArray,
-                cd: DoubleArray = doubleArrayOf(5.0),
+                params: DoubleArray = doubleArrayOf(5.0),
             ): Int =
-                PlaneGcsBridge.nativeSolveP2PDistances(
+                PlaneGcsBridge.nativeSolveConstraints(
                     coords,
                     fixedFlags,
                     intArrayOf(0),
-                    intArrayOf(1),
-                    cd,
+                    intArrayOf(0, 1, -1, -1),
+                    params,
                     100,
                     1e-10,
                     DoubleArray(coords.size),
@@ -356,13 +433,13 @@ class PlaneGcsBridgeSmokeTest :
                 solveRaw(doubleArrayOf(0.0, 0.0, Double.POSITIVE_INFINITY, 0.0), intArrayOf(1, 0))
             }
             shouldThrow<IllegalArgumentException> {
-                solveRaw(doubleArrayOf(0.0, 0.0, 1.0, 0.0), intArrayOf(1, 0), cd = doubleArrayOf(-2.0))
+                solveRaw(doubleArrayOf(0.0, 0.0, 1.0, 0.0), intArrayOf(1, 0), params = doubleArrayOf(-2.0))
             }
             shouldThrow<IllegalArgumentException> {
-                solveRaw(doubleArrayOf(0.0, 0.0, 1.0, 0.0), intArrayOf(1, 0), cd = doubleArrayOf(0.0))
+                solveRaw(doubleArrayOf(0.0, 0.0, 1.0, 0.0), intArrayOf(1, 0), params = doubleArrayOf(0.0))
             }
             shouldThrow<IllegalArgumentException> {
-                solveRaw(doubleArrayOf(0.0, 0.0, 1.0, 0.0), intArrayOf(1, 0), cd = doubleArrayOf(Double.NaN))
+                solveRaw(doubleArrayOf(0.0, 0.0, 1.0, 0.0), intArrayOf(1, 0), params = doubleArrayOf(Double.NaN))
             }
             shouldThrow<IllegalArgumentException> {
                 solveRaw(doubleArrayOf(0.0, 0.0, 1.0, 0.0), intArrayOf(7, 0))

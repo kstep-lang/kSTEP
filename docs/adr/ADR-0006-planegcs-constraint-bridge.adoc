@@ -622,9 +622,21 @@ from the separate planning-phase run described above.
 | Wave | Content
 
 | C-Welle 2
-| Additional constraint types on the same stateless points-only API:
-  coincidence, horizontal/vertical, point-on-line, parallel,
-  perpendicular, and angle-between-two-point-pairs.
+| **Partially implemented -- see ADR-0007.** Coincidence, horizontal/
+  vertical, and point-on-line shipped as `CoincidenceConstraint`/
+  `HorizontalConstraint`/`VerticalConstraint`/`PointOnLineConstraint` on
+  the same stateless points-only API. Perpendicular, parallel, and
+  angle-between-two-point-pairs remain, continued as C-Welle 2b below
+  (parallel specifically needs `GCS::Line` and may end up folded into
+  C-Welle 3 instead).
+
+| C-Welle 2b
+| Remaining C-Welle 2 scope: perpendicular, angle-between-two-point-pairs
+  (`L2LAngle`/`P2PAngle`), `CoordinateX`/`CoordinateY`,
+  `PointOnPerpBisector`, `Symmetric` -- plus the full DoS measurement
+  matrix ADR-0007's own Security section documents as not yet completed
+  for the constraint types that wave already added. Parallel is deferred
+  further, to C-Welle 3, since it is the one candidate needing `GCS::Line`.
 
 | C-Welle 3
 | Sketch entities -- `Line`, `Circle`, `Arc` (PlaneGCS's own

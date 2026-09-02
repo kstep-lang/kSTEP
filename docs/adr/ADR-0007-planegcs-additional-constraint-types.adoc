@@ -1,0 +1,404 @@
+= ADR-0007: Additional PlaneGCS constraint types (C-Welle 2, partial)
+:toc:
+
+== Status
+
+Accepted, implemented. Covers three of ADR-0006's "Folge-Wellen" C-Welle 2
+items -- coincidence, horizontal/vertical, point-on-line -- as four Kotlin
+constraint types. Parallel, perpendicular, and angle-between-two-point-pairs
+remain out of scope; ADR-0006's Folge-Wellen table is updated alongside this
+ADR to reflect the split into C-Welle 2 (done here) and C-Welle 2b
+(remaining).
+
+== Context
+
+ADR-0006 shipped `kstep-constraints` with exactly one constraint type,
+`DistanceConstraint`, and one native entry point,
+`PlaneGcsBridge.nativeSolveP2PDistances`. Its own KDoc and ADR-0006's
+Folge-Wellen table both named the next, obvious gap: no way to pin two
+points together (coincidence), align them on an axis (horizontal/vertical),
+or force a point onto a line (point-on-line) -- all constraint kinds
+PlaneGCS's own `GCS::System` already exposes as plain `Point`-pair (or
+`Point`-triple) overloads, needing no new `GCS::Line`/entity concept on the
+Kotlin side.
+
+=== Verified PlaneGCS capability survey
+
+Read directly from the vendored source (`GCS.h`/`GCS.cpp`/`Constraints.cpp`)
+rather than assumed from FreeCAD documentation:
+
+[cols="3,2,3,1", options="header"]
+|===
+| `GCS::System` method | Arity | Native implementation | Needs `GCS::Line`?
+
+| `addConstraintP2PCoincident(Point&, Point&)`
+| 2 points
+| **Two** `ConstraintEqual` rows (`p1.x==p2.x`, `p1.y==p2.y`) -- verified at
+  `GCS.cpp:904-908`. Not a primitive constraint of its own.
+| No
+
+| `addConstraintHorizontal(Point&, Point&)`
+| 2 points
+| One `ConstraintEqual(p1.y, p2.y)` -- `GCS.cpp:915-918`.
+| No
+
+| `addConstraintVertical(Point&, Point&)`
+| 2 points
+| One `ConstraintEqual(p1.x, p2.x)` -- `GCS.cpp:925-928`.
+| No
+
+| `addConstraintPointOnLine(Point&, Point&, Point&)`
+| 3 points
+| Own `ConstraintPointOnLine` class, genuinely nonlinear (signed-area /
+  length residual) -- `Constraints.cpp:1027-1058`.
+| No (this overload)
+
+| `addConstraintPerpendicular(Point&×4)`
+| 4 points
+| `ConstraintPerpendicular`.
+| No
+
+| `addConstraintL2LAngle(Point&×4, double*)`
+| 4 points + scalar
+| `ConstraintL2LAngle`.
+| No
+
+| `addConstraintParallel(Line&, Line&)`
+| --
+| `ConstraintParallel`.
+| **Yes**
+|===
+
+Every constraint class copies the raw `double*` out of its `Point&`/`Line&`
+constructor arguments into its own `pvec` (`Constraints.cpp:1015-1037` for
+`ConstraintPointOnLine`, identically elsewhere) and never retains a
+reference to the `Point`/`Line` object itself -- confirming a temporary
+`GCS::Point` built directly from this bridge's own `params` storage is safe
+to pass, exactly as ADR-0006's existing `nativeSolveP2PDistances` already
+relied on for `ConstraintP2PDistance`.
+
+=== Scope decision: four types, not seven
+
+This wave implements `CoincidenceConstraint`, `HorizontalConstraint`,
+`VerticalConstraint`, and `PointOnLineConstraint` -- all point-index-only,
+matching `DistanceConstraint`'s existing shape exactly. `Perpendicular`,
+`L2LAngle`/`P2PAngle`, and `Parallel` are deliberately deferred:
+
+* **`Parallel`** is the only one of the seven that needs `GCS::Line` at
+  all -- exactly the entity concept this wave's own scope (and ADR-0006's
+  "Design decision") excludes until C-Welle 3.
+* **`Perpendicular`** and **`L2LAngle`** are both 4-point (or
+  4-point-plus-scalar) constraints. Four raw point indices with no named
+  intermediate concept read poorly at the call site (which pair is which
+  "leg"?) and, with four independently free points, introduce a new
+  degenerate-input class (zero-length legs) this wave's validation and DoS
+  measurement do not yet cover. `L2LAngle` additionally has its own
+  parameter-semantics questions (radians vs. degrees, sign, wrap-around)
+  that deserve their own review round rather than being folded in here.
+
+These three, plus `CoordinateX`/`CoordinateY`, `PointOnPerpBisector`, and
+`Symmetric` (all real PlaneGCS capabilities, none evaluated in depth this
+wave), are named as C-Welle 2b in ADR-0006's Folge-Wellen table.
+
+== Decision
+
+=== Sealed constraint hierarchy
+
+`SketchConstraint` is a `sealed interface`; `DistanceConstraint`,
+`CoincidenceConstraint`, `HorizontalConstraint`, `VerticalConstraint`, and
+`PointOnLineConstraint` implement it. `PlaneGcsSolver`'s internal encoding
+functions (`kind()`, `pointIndices()`, `parameter()`) and its per-constraint
+validation `when` are all exhaustive over this hierarchy -- adding a future
+constraint type without wiring it into every one of those breaks the build
+rather than silently mis-encoding.
+
+=== One native entry point, not two
+
+`nativeSolveP2PDistances` is **replaced** by `nativeSolveConstraints`, not
+kept alongside it. Two native functions would mean two independent
+validation paths and a real risk of the same logical operation (solving a
+plain distance system) diverging in behavior between them over time. The
+replacement is verified, not merely assumed safe: every pre-existing
+distance-only test in `PlaneGcsBridgeSmokeTest` now exercises the new
+native path unchanged, and `PlaneGcsSolver.solveDistances(...)` remains as
+a public convenience overload that delegates to `solve(...)` -- source
+compatible for every existing caller.
+
+=== Wire format: tagged-union parallel arrays, four point-slots
+
+[cols="1,3,1,3,3", options="header"]
+|===
+| Kind | Meaning | Arity | `constraintPoints[4i..4i+3]` | `constraintParams[i]`
+
+| 0 | Point-to-point distance | 2 | `[a, b, -1, -1]` | target distance (finite, `> 0`)
+| 1 | Point-to-point coincidence | 2 | `[a, b, -1, -1]` | `0.0` (unused)
+| 2 | Horizontal (equal Y) | 2 | `[a, b, -1, -1]` | `0.0` (unused)
+| 3 | Vertical (equal X) | 2 | `[a, b, -1, -1]` | `0.0` (unused)
+| 4 | Point-on-(infinite)line | 3 | `[point, lineFrom, lineTo, -1]` | `0.0` (unused)
+|===
+
+Every slot beyond a kind's arity must be exactly `-1`; every unused
+parameter must be exactly `0.0` -- both enforced natively as a hard
+`IllegalArgumentException`, not silently ignored, so an encoder bug writing
+stray data into a slot the native side is supposed to disregard fails
+loudly instead of quietly crossing the JNI boundary unchecked. This table
+is the single authoritative copy of the wire format; it is duplicated (by
+hand, not generated) into `PlaneGcsBridge.nativeSolveConstraints`'s KDoc,
+`NativeConstraintKind`'s KDoc, and `kstep_planegcs_bridge.cpp`'s own
+`switch` -- kept synchronized by code review, flagged explicitly in each
+copy's own comment.
+
+Four point-slots are reserved per constraint even though this wave's
+highest arity is 3 (`PointOnLineConstraint`): the C-Welle 2b candidates
+named above (`Perpendicular`, `L2LAngle`, `Symmetric`) are all 4-point
+constraints, so choosing 4 now avoids a second wire-format change purely to
+widen this constant later. This is a concrete, named justification, not
+speculative headroom.
+
+=== New safety check: finite-result verification after every solve
+
+**Verified finding, not theoretical**: `ConstraintPointOnLine::error()`
+(`Constraints.cpp:1049-1058`) computes `area / d` where
+`d = sqrt(dx*dx + dy*dy)` over the line's two defining points, and `grad()`
+additionally divides by `d^2`. If the two line-defining points become
+numerically coincident *at any point during the solver's iteration* -- not
+just at the initial guess -- both blow up to `inf`/`NaN`. Point-index
+distinctness (enforced both Kotlin- and native-side) does **not** prevent
+this: two distinct indices can still converge onto the same coordinates
+mid-solve, e.g. under a simultaneous `CoincidenceConstraint` on the same two
+points.
+
+`PlaneGcsSolver.solve` therefore checks every coordinate in a `SUCCESS`- or
+`CONVERGED`-status native result for `Double.isFinite()` before constructing
+a `SolveResult`, throwing `ConstraintSolverException` instead if any
+coordinate is not finite. A NaN-polluted result is never allowed to reach a
+caller labeled as a successful solve. The native bridge additionally sweeps
+its own `params` buffer for a non-finite value as defense in depth (for a
+caller that reaches `PlaneGcsBridge` directly, bypassing
+`PlaneGcsSolver.solve`'s check) -- see "Attempted reproduction" below for
+why this remains defense in depth rather than a verified-necessary
+safeguard.
+
+=== Native hardening beyond what the Kotlin caller already excludes
+
+ADR-0006's own "Environment note" flagged `nativeSolveP2PDistances`'s
+behavior at `pointCount == 0` or an all-fixed point set as *not verified*
+-- excluded only by `PlaneGcsSolver`'s Kotlin-side `validate()`, never
+natively. `nativeSolveConstraints` closes that gap natively too:
+`pointCount == 0` and an empty unknowns list (every point fixed) are both
+rejected with `IllegalArgumentException` before any `GCS::System` is built,
+so `PlaneGcsBridge` is now defined for a direct (test) caller as well as a
+well-behaved Kotlin one.
+
+=== Overflow guard on the wire-format length check
+
+`jsize` is a 32-bit `jint`. `constraintPoints.length` is checked against
+`4 * constraintKinds.length` using division
+(`cpLen % 4 != 0 || cpLen / 4 != kindsLen`), never multiplication, so a
+`constraintKinds` array large enough to make `4 * kindsLen` overflow cannot
+slip past the check by wrapping around to a small or negative value.
+
+== Consequences
+
+* `DistanceConstraint`, `CoincidenceConstraint`, `HorizontalConstraint`,
+  `VerticalConstraint`, and `PointOnLineConstraint` are all now
+  `SketchConstraint` implementations, encoded and validated uniformly by
+  `PlaneGcsSolver.solve`.
+* `PlaneGcsBridge.nativeSolveP2PDistances` no longer exists; anything
+  outside this module and its own tests that referenced it directly (there
+  is no such caller in this repository, verified by
+  `grep -rn nativeSolveP2PDistances`) would need to move to
+  `nativeSolveConstraints`.
+* `MAX_POINTS`/`MAX_CONSTRAINTS`/`MAX_ITERATIONS` are unchanged (`64` /
+  `128` / `1000`) -- see "Security" below for the measurements behind
+  keeping them as-is rather than re-deriving them for the new constraint
+  kinds.
+
+=== Security
+
+[cols="2,4", options="header"]
+|===
+| Concern | Handling in this wave
+
+| DoS -- scope of this wave's own measurement
+| **Reduced scope, stated explicitly rather than implied complete.** The
+  plan drafted ahead of this wave called for a twelve-topology,
+  ten-seed-per-topology measurement matrix (dense/degenerate/rank-deficient
+  variants of coincidence, horizontal/vertical, and point-on-line, plus a
+  mixed worst case) before any cap decision. That full matrix was not run
+  in this implementation pass; what was run instead, at the existing
+  `MAX_POINTS`/`MAX_CONSTRAINTS`/`MAX_ITERATIONS` caps (64 / 128 / 1000),
+  with `java.util.Random` seeds 1 and 2:
++
+--
+* A dense, randomly-connected coincidence-only graph (every one of 128
+  `CoincidenceConstraint`s a random, non-self pair among 64 points -- the
+  topology that produces up to 256 native `ConstraintEqual` rows, twice the
+  row count the same constraint *count* of distances would produce) solved
+  in **15ms**, status `CONVERGED`.
+* A dense, randomly-connected point-on-line graph (128 `PointOnLineConstraint`s,
+  each a random pairwise-distinct triple among 64 points -- chosen as the
+  most plausible worst case among this wave's additions precisely because
+  it is the one genuinely nonlinear kind) solved in **68ms**, status
+  `FAILED`, with no non-finite coordinate produced.
+--
++
+Both numbers sit far enough below the one-second budget `MAX_POINTS` was
+  originally sized against (ADR-0006's own 557ms worst-case measurement for
+  the distance-only topology) that they gave no basis to change the caps.
+  They are two data points, not a matrix -- deliberately not represented
+  here as a completed DoS review. A follow-up wave should run the full
+  measurement plan (see ADR-0006's Folge-Wellen entry for C-Welle 2b, which
+  this table's gap is folded into) before this constraint vocabulary grows
+  further, particularly before `Perpendicular`/`L2LAngle` (4-point
+  constraints, a different and unmeasured cost shape) are added.
+
+| DoS -- coincidence's row-count asymmetry
+| `CoincidenceConstraint` lowers to *two* native `ConstraintEqual` rows per
+  Kotlin constraint (`GCS.cpp:904-908`), so `MAX_CONSTRAINTS` (128)
+  coincidences can produce up to 256 native rows -- double what the same
+  count of distance/horizontal/vertical constraints produces. The dense
+  coincidence-graph measurement above (15ms) is comfortably under budget at
+  that worst-case row count, so no separate row-count cap
+  (`MAX_NATIVE_CONSTRAINT_ROWS`, discussed as a contingency in this wave's
+  planning) was introduced. Documented here rather than silently accepted:
+  a future wave adding another multi-row-per-constraint kind should
+  re-check this margin, not assume it holds indefinitely.
+
+| Division-by-near-zero in `ConstraintPointOnLine`
+| **Verified finding** (see "Decision" above): `error()`/`grad()` divide by
+  the distance between the two line-defining points, which can reach zero
+  mid-solve even with distinct point indices. `PlaneGcsSolver.solve`
+  rejects any non-finite result from a nominally successful solve with
+  `ConstraintSolverException`; `kstep_planegcs_bridge.cpp` sweeps for the
+  same condition natively as defense in depth.
++
+**Attempted reproduction, not found.** Three separate constructions aimed
+  at actually triggering this — (a) two free points 1e-12 apart made
+  coincident while a third point is constrained onto their line, (b) the
+  same starting configuration with both line-defining points free and not
+  pre-collapsed, (c) a fixed 1e-9 target distance directly between the
+  would-be-coincident points — all converged to ordinary `FAILED` or
+  `SUCCESS` results, no `NaN`/`Infinity` in any output coordinate. The
+  guard is kept regardless, because the underlying division is a verified
+  fact of the vendored source, not a hypothesis; a future wave attempting
+  reproduction should try genuinely adversarial start points inside a
+  tight iteration budget (this wave's attempts used PlaneGCS's own default
+  iteration/convergence settings, which may resolve the degeneracy before
+  it can manifest as an actual `NaN`) rather than treating this table's
+  "not found" as evidence the hazard is unreachable.
+
+| Overflow
+| `constraintPoints.length` is checked against `4 * constraintKinds.length`
+  divisionally, not multiplicatively, so a `constraintKinds` array long
+  enough to overflow a 32-bit `jsize` on the multiplied form cannot bypass
+  the length check by wrapping. See "Decision" above.
+
+| Native input validation (new for this wave's arrays)
+| `constraintKinds`/`constraintPoints`/`constraintParams` are null-checked,
+  length-checked (including the divisional overflow guard above), then
+  per-constraint kind-checked (rejecting any value outside `0..4`),
+  slot-arity-checked (every used slot in point range, every unused slot
+  exactly `-1`), pairwise-distinctness-checked over exactly the used slots,
+  and parameter-checked (finite and positive for kind 0, exactly `0.0`
+  otherwise) -- all before any `GCS::System` is built, mirroring
+  ADR-0006's existing validation-before-construction discipline for the
+  original three arrays.
++
+`-0.0 == 0.0` is `true` in both C++ and Kotlin, so a `-0.0` parameter passes
+  the "must be exactly `0.0`" check on a parameterless kind. Accepted
+  deliberately -- not a gap worth a special case for a value with no
+  behavioral difference from `0.0`.
+
+| Native hardening (`pointCount == 0`, all-fixed system)
+| Now rejected natively, not just Kotlin-side -- see "Decision" above.
+  Closes the gap ADR-0006's own "Environment note" flagged as unverified
+  for the original bridge.
+
+| Resource leaks / use-after-free
+| Unchanged from ADR-0006: the same RAII array guards, the same
+  once-at-final-size `params`/`distances` vectors (now sized to
+  `constraintCount` rather than the constraint-count-worth of distances
+  specifically, same never-`push_back` invariant), the same no-persistent-
+  state design.
+
+| Logging
+| Unchanged: `kotlin-logging` only, no caller-supplied geometry logged.
+  This wave's new smoke-test suite logs its own DoS-measurement timings and
+  statuses (see the test file itself), which is test-only output, not
+  library logging.
+
+| License provenance
+| Unchanged: same vendored commit, same `PROVENANCE.adoc`, same runtime
+  commit check in `PlaneGcsBridgeSmokeTest`. No new vendored files --
+  `Constraints.cpp`'s `ConstraintPointOnLine` and the `addConstraint*`
+  overloads used by this wave were already part of the commit ADR-0006
+  vendored.
+|===
+
+=== Stolperfallen (recorded so a future wave does not rediscover them)
+
+. `ConstraintPointOnLine::error()` divides by the distance between the two
+  line-defining points; `grad()` divides by that distance squared. Index
+  distinctness does not prevent numerical coincidence mid-solve. See
+  `PointOnLineConstraint`'s KDoc and the Security table above.
+. `addConstraintP2PCoincident` is two native `ConstraintEqual` rows, not
+  one -- any accounting of "how many native rows does this system have"
+  must double-count coincidences.
+. The `params`/`distances` `std::vector`s must be built once, at final
+  size, and never resized afterward -- unchanged invariant from ADR-0006,
+  restated here because `distances` is now sized to `constraintCount`
+  (every constraint gets a slot, including parameterless kinds that never
+  read it) rather than to a distance-specific count.
+. Constraint-addition order relative to `declareUnknowns`/`initSolution` is
+  unchanged from ADR-0006 and must not be reordered.
+. `system.debugMode = GCS::NoDebug` remains an explicit set, not a reliance
+  on the constructor default.
+. `sketchSizeMultiplier` remains at its `GCS::System()` default (`false`).
+. `PlaneGcsBridge` remains a plain Kotlin `object` (not `companion`) --
+  every native symbol still carries a `jobject` second parameter. Verified
+  after this wave's signature change:
+  `nm -D --defined-only libkstep_planegcs_bridge.so | grep kstep` shows
+  exactly `Java_..._nativePlaneGcsSourceCommit` and
+  `Java_..._nativeSolveConstraints`; `nativeSolveP2PDistances` is gone.
+. `jsize` is a 32-bit `jint` -- see "Overflow" in the Security table.
+. `-0.0 == 0.0` is `true` in both languages -- see "Native input
+  validation" in the Security table.
+. Solve statuses for the "contradictory" test cases were measured against a
+  real build, not assumed: `ConstraintEqual`'s own least-squares character
+  means a different contradictory construction could converge to a
+  degenerate minimum instead of `FAILED`. `PlaneGcsConstraintTypesSmokeTest`'s
+  own KDoc says so explicitly rather than implying its two contradictory
+  cases generalize.
+
+== Rejected alternatives
+
+* **Keep `nativeSolveP2PDistances` alongside a new `nativeSolveConstraints`.**
+  Rejected: two native validation paths for what is logically one
+  operation (solving a point system) is a real divergence risk over time,
+  for no benefit once the replacement is verified against the full
+  pre-existing distance-only test suite. See "Decision" above.
+* **A new `SolveStatus` value for a non-finite result**, instead of
+  throwing `ConstraintSolverException`. Rejected: `SolveStatus` is
+  documented as a 1:1 mirror of the native `GCS::SolveStatus` enum: adding
+  a Kotlin-only value would break that documented correspondence for a
+  condition (`solve()` returned a nominally successful status but the
+  result is unusable) that is better modeled as an exception, matching how
+  every other "the native call itself is untrustworthy" case in this
+  module is already handled.
+* **A `Line`/`PointPair` value type for `Perpendicular`/`Parallel`,
+  implemented in this same wave.** Rejected as out of scope -- see "Scope
+  decision" above; left to C-Welle 2b/3.
+
+== Folge-Wellen (updates to ADR-0006's table)
+
+ADR-0006's Folge-Wellen table's "C-Welle 2" row is superseded by this ADR
+for coincidence/horizontal/vertical/point-on-line. The remaining C-Welle 2
+scope (perpendicular, parallel-as-point-pairs is not offered by PlaneGCS at
+all -- parallel genuinely needs `GCS::Line` -- angle-between-two-point-pairs,
+`CoordinateX`/`CoordinateY`, `PointOnPerpBisector`, `Symmetric`) continues
+as **C-Welle 2b**, to be picked up together with the full DoS measurement
+matrix this wave's own Security table above says was not completed. C-Welle
+3 (sketch entities: `Line`/`Circle`/`Arc`) remains the natural home for
+`Parallel` specifically, since it is the one candidate that actually needs
+`GCS::Line`.

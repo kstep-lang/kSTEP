@@ -164,31 +164,50 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativePlaneGcsSourceCommit(JN
     return nullptr;
 }
 
+// Kind values for constraintKinds -- MUST match dev.kstep.constraints.planegcs.NativeConstraintKind
+// and PlaneGcsBridge.nativeSolveConstraints's KDoc table exactly. Three independent, hand-
+// synchronized copies of the same contract (this file, that enum, and that KDoc table) -- see
+// docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc for the authoritative table.
+constexpr jint kKindP2PDistance = 0;
+constexpr jint kKindP2PCoincident = 1;
+constexpr jint kKindHorizontal = 2;
+constexpr jint kKindVertical = 3;
+constexpr jint kKindPointOnLine = 4;
+
+// Fixed number of point-index slots reserved per constraint in constraintPoints, regardless of a
+// given kind's actual arity -- see PlaneGcsBridge.nativeSolveConstraints's KDoc and
+// NativeConstraintKind.POINT_SLOTS for why 4 (not the current maximum arity of 3) was chosen.
+constexpr jsize kPointSlotsPerConstraint = 4;
+constexpr jint kUnusedPointSlot = -1;
+constexpr jdouble kUnusedParam = 0.0;
+
 JNIEXPORT jint JNICALL
-Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
+Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
     JNIEnv* env,
     jobject /*self*/,
     jdoubleArray coords,
     jintArray fixedFlags,
-    jintArray constraintA,
-    jintArray constraintB,
-    jdoubleArray constraintDist,
+    jintArray constraintKinds,
+    jintArray constraintPoints,
+    jdoubleArray constraintParams,
     jint maxIterations,
     jdouble convergence,
     jdoubleArray outCoords) {
     // --- 1. Null checks, before ANY array access (see invariant 2 in the file header comment). ---
-    if (coords == nullptr || fixedFlags == nullptr || constraintA == nullptr || constraintB == nullptr ||
-        constraintDist == nullptr || outCoords == nullptr) {
-        throwJava(env, "java/lang/NullPointerException", "nativeSolveP2PDistances: no array argument may be null");
+    if (coords == nullptr || fixedFlags == nullptr || constraintKinds == nullptr ||
+        constraintPoints == nullptr || constraintParams == nullptr || outCoords == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", "nativeSolveConstraints: no array argument may be null");
         return -1;
     }
 
-    // --- 2. Length checks, before any Get*ArrayElements call. ---
+    // --- 2. Length checks, before any Get*ArrayElements call. All length arithmetic below is
+    // divisionbased, never multiplication-based, to avoid a 32-bit jsize overflow on
+    // kPointSlotsPerConstraint * constraintCount (see docs/adr/ADR-0007, "Overflow guard"). ---
     jsize coordsLen = env->GetArrayLength(coords);
     jsize fixedLen = env->GetArrayLength(fixedFlags);
-    jsize caLen = env->GetArrayLength(constraintA);
-    jsize cbLen = env->GetArrayLength(constraintB);
-    jsize cdLen = env->GetArrayLength(constraintDist);
+    jsize kindsLen = env->GetArrayLength(constraintKinds);
+    jsize cpLen = env->GetArrayLength(constraintPoints);
+    jsize paramsLen = env->GetArrayLength(constraintParams);
     jsize outLen = env->GetArrayLength(outCoords);
 
     if (coordsLen < 0 || (coordsLen % 2) != 0) {
@@ -208,14 +227,20 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
         throwJava(env, "java/lang/IllegalArgumentException", "outCoords length must equal coords length");
         return -1;
     }
-    if (caLen != cbLen || cbLen != cdLen) {
+    if (paramsLen != kindsLen) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException", "constraintParams length must equal constraintKinds length");
+        return -1;
+    }
+    if (cpLen < 0 || (cpLen % kPointSlotsPerConstraint) != 0 || (cpLen / kPointSlotsPerConstraint) != kindsLen) {
         throwJava(
             env,
             "java/lang/IllegalArgumentException",
-            "constraintA, constraintB and constraintDist must all have the same length");
+            "constraintPoints length must equal " + std::to_string(kPointSlotsPerConstraint) +
+                " * constraintKinds length");
         return -1;
     }
-    jsize constraintCount = caLen;
+    jsize constraintCount = kindsLen;
     if (maxIterations <= 0) {
         throwJava(env, "java/lang/IllegalArgumentException", "maxIterations must be positive");
         return -1;
@@ -229,21 +254,22 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
         // --- 3. Pin input arrays (RAII; auto-released on every return path below). ---
         DoubleArrayGuard coordsGuard(env, coords);
         IntArrayGuard fixedGuard(env, fixedFlags);
-        IntArrayGuard caGuard(env, constraintA);
-        IntArrayGuard cbGuard(env, constraintB);
-        DoubleArrayGuard cdGuard(env, constraintDist);
+        IntArrayGuard kindsGuard(env, constraintKinds);
+        IntArrayGuard pointsGuard(env, constraintPoints);
+        DoubleArrayGuard paramsGuard(env, constraintParams);
 
-        if (coordsGuard.elements() == nullptr || fixedGuard.elements() == nullptr || caGuard.elements() == nullptr ||
-            cbGuard.elements() == nullptr || cdGuard.elements() == nullptr) {
+        if (coordsGuard.elements() == nullptr || fixedGuard.elements() == nullptr ||
+            kindsGuard.elements() == nullptr || pointsGuard.elements() == nullptr ||
+            paramsGuard.elements() == nullptr) {
             // OutOfMemoryError already pending on env, thrown by the JVM itself (Get*ArrayElements'
             // documented failure mode for a non-null array argument).
             return -1;
         }
 
-        // --- 4. Content-check coords/constraintDist/fixedFlags BEFORE any value is used to build
-        // the solver's own storage below -- see invariant 2 in the file header comment. Every loop
-        // here reads only already-pinned arrays (no further Get*ArrayElements calls), so this stays
-        // cheap even at MAX_POINTS/MAX_CONSTRAINTS. ---
+        // --- 4. Content-check coords/fixedFlags BEFORE any value is used to build the solver's own
+        // storage below -- see invariant 2 in the file header comment. Every loop here reads only
+        // already-pinned arrays (no further Get*ArrayElements calls), so this stays cheap even at
+        // MAX_POINTS/MAX_CONSTRAINTS. ---
         for (jsize i = 0; i < coordsLen; ++i) {
             if (!std::isfinite(coordsGuard.elements()[i])) {
                 throwJava(
@@ -264,38 +290,91 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
                 return -1;
             }
         }
-        for (jsize i = 0; i < constraintCount; ++i) {
-            double dist = cdGuard.elements()[i];
-            if (!std::isfinite(dist) || !(dist > 0.0)) {
-                throwJava(
-                    env,
-                    "java/lang/IllegalArgumentException",
-                    "constraintDist[" + std::to_string(i) + "] must be finite and positive, got " +
-                        std::to_string(dist));
-                return -1;
-            }
-        }
 
-        // --- 5. Range-check constraint point indices BEFORE they are used to index `params` below.
-        // ---
+        // --- 5. Per-constraint kind/slot/param/index validation, BEFORE any value is used to build
+        // the solver's own storage below. Every kind's exact slot count (arity) and unused-slot/
+        // unused-param sentinels are enforced here -- see PlaneGcsBridge.nativeSolveConstraints's
+        // KDoc table. ---
         for (jsize i = 0; i < constraintCount; ++i) {
-            jint a = caGuard.elements()[i];
-            jint b = cbGuard.elements()[i];
-            if (a < 0 || a >= pointCount || b < 0 || b >= pointCount) {
-                throwJava(
-                    env,
-                    "java/lang/IllegalArgumentException",
-                    "constraint point index out of range: pointCount=" + std::to_string(pointCount) +
-                        ", constraintA[" + std::to_string(i) + "]=" + std::to_string(a) + ", constraintB[" +
-                        std::to_string(i) + "]=" + std::to_string(b));
-                return -1;
+            jint kind = kindsGuard.elements()[i];
+            int arity;
+            switch (kind) {
+                case kKindP2PDistance:
+                case kKindP2PCoincident:
+                case kKindHorizontal:
+                case kKindVertical:
+                    arity = 2;
+                    break;
+                case kKindPointOnLine:
+                    arity = 3;
+                    break;
+                default:
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraintKinds[" + std::to_string(i) + "] is not a recognized kind: " +
+                            std::to_string(kind));
+                    return -1;
             }
-            if (a == b) {
+
+            jsize base = i * kPointSlotsPerConstraint;
+            jint slotValues[kPointSlotsPerConstraint];
+            for (jsize slot = 0; slot < kPointSlotsPerConstraint; ++slot) {
+                jint value = pointsGuard.elements()[base + slot];
+                slotValues[slot] = value;
+                if (slot < arity) {
+                    if (value < 0 || value >= pointCount) {
+                        throwJava(
+                            env,
+                            "java/lang/IllegalArgumentException",
+                            "constraintPoints[" + std::to_string(base + slot) +
+                                "] is out of range for pointCount=" + std::to_string(pointCount) + ": " +
+                                std::to_string(value));
+                        return -1;
+                    }
+                } else if (value != kUnusedPointSlot) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraintPoints[" + std::to_string(base + slot) +
+                            "] must be -1 for an unused slot on constraint kind " + std::to_string(kind) +
+                            ", got " + std::to_string(value));
+                    return -1;
+                }
+            }
+            // Pairwise-distinct check over exactly the used slots -- covers P2P/H/V's single pair
+            // and PointOnLine's three-way distinctness (point/lineFrom/lineTo) with one loop.
+            for (int a = 0; a < arity; ++a) {
+                for (int b = a + 1; b < arity; ++b) {
+                    if (slotValues[a] == slotValues[b]) {
+                        throwJava(
+                            env,
+                            "java/lang/IllegalArgumentException",
+                            "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                                ") references the same point twice (index " + std::to_string(slotValues[a]) + ")");
+                        return -1;
+                    }
+                }
+            }
+
+            double param = paramsGuard.elements()[i];
+            if (kind == kKindP2PDistance) {
+                if (!std::isfinite(param) || !(param > 0.0)) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraintParams[" + std::to_string(i) + "] must be finite and positive for a distance " +
+                            "constraint, got " + std::to_string(param));
+                    return -1;
+                }
+            } else if (param != kUnusedParam) {
+                // -0.0 == 0.0 is true in both C++ and Kotlin, so -0.0 passes this check -- accepted
+                // deliberately, see docs/adr/ADR-0007's "Stolperfallen".
                 throwJava(
                     env,
                     "java/lang/IllegalArgumentException",
-                    "constraint " + std::to_string(i) + " references the same point twice (index " +
-                        std::to_string(a) + ")");
+                    "constraintParams[" + std::to_string(i) + "] must be 0.0 for a parameterless constraint " +
+                        "kind " + std::to_string(kind) + ", got " + std::to_string(param));
                 return -1;
             }
         }
@@ -313,14 +392,16 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
         // `jdouble*` buffers) also means this bridge never depends on whatever
         // GetDoubleArrayElements chose to hand back (a direct pointer into the JVM heap, or a
         // temporary copy) outliving the JNI call -- once these vectors are built, the JNI-pinned
-        // buffers are no longer touched at all.
+        // buffers are no longer touched at all. `distances` is sized to constraintCount (one slot
+        // per constraint, including parameterless kinds that never use it) -- constant, allocated
+        // once, never push_back'd, same invariant.
         std::vector<double> params(coordsLen);
         for (jsize i = 0; i < coordsLen; ++i) {
             params[i] = coordsGuard.elements()[i];
         }
         std::vector<double> distances(constraintCount);
         for (jsize i = 0; i < constraintCount; ++i) {
-            distances[i] = cdGuard.elements()[i];
+            distances[i] = paramsGuard.elements()[i];
         }
 
         std::vector<GCS::Point> points;
@@ -338,8 +419,8 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
         // DoS guard: caller-supplied bounds, additionally capped Kotlin-side by
         // PlaneGcsSolver.MAX_ITERATIONS -- this native function trusts its caller's bounds (already
         // range-checked above: maxIterations > 0, convergence finite and positive) but applies no
-        // additional cap of its own; the hard ceiling lives in PlaneGcsSolver.solveDistances, which
-        // is the only intended caller other than this module's own tests. Point count
+        // additional cap of its own; the hard ceiling lives in PlaneGcsSolver.solve, which is the
+        // only intended caller other than this module's own tests. Point count
         // (PlaneGcsSolver.MAX_POINTS), not this iteration budget, is the primary lever that actually
         // bounds this call's wall time -- see that constant's KDoc for the measurements behind that
         // conclusion. sketchSizeMultiplier is deliberately left at its GCS::System() default
@@ -348,6 +429,15 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
         system.maxIter = maxIterations;
         system.convergence = convergence;
 
+        // --- 7. Reject pointCount == 0 and an all-fixed system natively too, not just Kotlin-side
+        // (see docs/adr/ADR-0007, "Native hardening"): PlaneGcsSolver.solve already excludes both,
+        // but PlaneGcsBridge is public so a direct (test) caller must get a defined result here too,
+        // rather than relying on a well-behaved Kotlin caller. ---
+        if (pointCount == 0) {
+            throwJava(env, "java/lang/IllegalArgumentException", "pointCount must be positive");
+            return -1;
+        }
+
         GCS::VEC_pD unknowns;
         for (jsize i = 0; i < pointCount; ++i) {
             if (fixedGuard.elements()[i] == 0) {
@@ -355,14 +445,64 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
                 unknowns.push_back(&params[2 * i + 1]);
             }
         }
+        if (unknowns.empty()) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "at least one point must be non-fixed (an all-fixed system has no unknowns)");
+            return -1;
+        }
 
         for (jsize i = 0; i < constraintCount; ++i) {
-            jint a = caGuard.elements()[i];
-            jint b = cbGuard.elements()[i];
+            jint kind = kindsGuard.elements()[i];
+            jsize base = i * kPointSlotsPerConstraint;
             // tagId must be non-zero and is otherwise only used by PlaneGCS for later
             // selective-clear/diagnosis operations this one-shot bridge never performs -- 1-based
             // constraint index is an arbitrary but stable choice.
-            system.addConstraintP2PDistance(points[a], points[b], &distances[i], static_cast<int>(i) + 1);
+            int tagId = static_cast<int>(i) + 1;
+            switch (kind) {
+                case kKindP2PDistance: {
+                    jint a = pointsGuard.elements()[base];
+                    jint b = pointsGuard.elements()[base + 1];
+                    system.addConstraintP2PDistance(points[a], points[b], &distances[i], tagId);
+                    break;
+                }
+                case kKindP2PCoincident: {
+                    jint a = pointsGuard.elements()[base];
+                    jint b = pointsGuard.elements()[base + 1];
+                    system.addConstraintP2PCoincident(points[a], points[b], tagId);
+                    break;
+                }
+                case kKindHorizontal: {
+                    jint a = pointsGuard.elements()[base];
+                    jint b = pointsGuard.elements()[base + 1];
+                    system.addConstraintHorizontal(points[a], points[b], tagId);
+                    break;
+                }
+                case kKindVertical: {
+                    jint a = pointsGuard.elements()[base];
+                    jint b = pointsGuard.elements()[base + 1];
+                    system.addConstraintVertical(points[a], points[b], tagId);
+                    break;
+                }
+                case kKindPointOnLine: {
+                    jint p = pointsGuard.elements()[base];
+                    jint lp1 = pointsGuard.elements()[base + 1];
+                    jint lp2 = pointsGuard.elements()[base + 2];
+                    system.addConstraintPointOnLine(points[p], points[lp1], points[lp2], tagId);
+                    break;
+                }
+                default:
+                    // Unreachable: already rejected in the validation pass above. Kept as a defensive
+                    // guard rather than assumed unreachable, mirroring this file's own stated
+                    // philosophy (see the file header comment).
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "unreachable: unrecognized constraint kind " + std::to_string(kind) + " at index " +
+                            std::to_string(i));
+                    return -1;
+            }
         }
 
         system.declareUnknowns(unknowns);
@@ -379,7 +519,23 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
             system.applySolution();
         }
 
-        // --- 7. Write the result back via SetDoubleArrayRegion -- never via Get/ReleaseArrayElements
+        // --- 8. Defense-in-depth: sweep `params` for a non-finite value before writing it back.
+        // PlaneGcsSolver.solve performs the authoritative version of this check Kotlin-side (see its
+        // KDoc and PointOnLineConstraint's KDoc for the ConstraintPointOnLine division-by-near-zero
+        // hazard this guards against); this native sweep exists only for a caller that reaches
+        // PlaneGcsBridge directly, and intentionally does NOT change the returned status -- it is
+        // not authoritative, just defense in depth (see docs/adr/ADR-0007). ---
+        for (jsize i = 0; i < coordsLen; ++i) {
+            if (!std::isfinite(params[i])) {
+                throwJava(
+                    env,
+                    "java/lang/RuntimeException",
+                    "PlaneGCS produced a non-finite result at params[" + std::to_string(i) + "]");
+                return -1;
+            }
+        }
+
+        // --- 9. Write the result back via SetDoubleArrayRegion -- never via Get/ReleaseArrayElements
         // for outCoords, so there is no write-back array to release on any path above. ---
         env->SetDoubleArrayRegion(outCoords, 0, coordsLen, params.data());
         if (env->ExceptionCheck()) {
@@ -390,12 +546,12 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveP2PDistances(
         }
 
         return static_cast<jint>(status);
-        // coordsGuard/fixedGuard/caGuard/cbGuard/cdGuard are released here via their destructors, in
-        // reverse declaration order, regardless of which return path was taken above.
+        // coordsGuard/fixedGuard/kindsGuard/pointsGuard/paramsGuard are released here via their
+        // destructors, in reverse declaration order, regardless of which return path was taken above.
     } catch (const std::exception& e) {
         throwJava(env, "java/lang/RuntimeException", std::string("PlaneGCS native error: ") + e.what());
     } catch (...) {
-        throwJava(env, "java/lang/RuntimeException", "Unknown native error in nativeSolveP2PDistances");
+        throwJava(env, "java/lang/RuntimeException", "Unknown native error in nativeSolveConstraints");
     }
     return -1;
 }

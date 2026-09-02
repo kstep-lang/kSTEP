@@ -692,25 +692,29 @@ See <<roadmap,Roadmap>> for what's planned next.
 
 | `kstep-constraints`
 | PlaneGCS 2D geometric constraint-solver bridge -- Geometrie Welle 6,
-  pulled forward (`dev.kstep.constraints`, native/JNI internals in
-  `dev.kstep.constraints.planegcs`)
-| Working (Geometrie Welle 6, pulled forward):
-  `PlaneGcsSolver.solveDistances(points, constraints)` solves a 2D point
-  system under point-to-point distance constraints through a real,
-  vendored PlaneGCS solver core, returning each point's solved position
-  and a `SolveStatus` (`SUCCESS`/`CONVERGED`/`FAILED`/
-  `SUCCESSFUL_SOLUTION_INVALID`). A single stateless native call per solve
-  -- no persistent handle, no `close()` -- see
+  pulled forward, plus C-Welle 2 (`dev.kstep.constraints`, native/JNI
+  internals in `dev.kstep.constraints.planegcs`)
+| Working: `PlaneGcsSolver.solve(points, constraints)` solves a 2D point
+  system under a mixed set of `SketchConstraint`s -- `DistanceConstraint`,
+  `CoincidenceConstraint`, `HorizontalConstraint`, `VerticalConstraint`,
+  `PointOnLineConstraint` (C-Welle 2, see
+  docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc) -- through a
+  real, vendored PlaneGCS solver core, returning each point's solved
+  position and a `SolveStatus` (`SUCCESS`/`CONVERGED`/`FAILED`/
+  `SUCCESSFUL_SOLUTION_INVALID`). `PlaneGcsSolver.solveDistances(...)`
+  remains as a convenience overload for the distance-only case, delegating
+  to `solve(...)`. A single stateless native call per solve -- no
+  persistent handle, no `close()` -- see
   docs/adr/ADR-0006-planegcs-constraint-bridge.adoc for why. Depends on
   nothing but `kotlin-logging-jvm`, same as `kstep-geometry`. The PlaneGCS
   solver sources are vendored (unlike `kstep-geometry`'s OCCT, which links
   a system package -- PlaneGCS ships no distribution package at all) under
   `src/main/cpp/third_party/planegcs/` at a pinned upstream commit; see
-  that directory's `PROVENANCE.adoc`, NOTICE, and the ADR for the full
+  that directory's `PROVENANCE.adoc`, NOTICE, and the two ADRs for the full
   LGPL-2.0-or-later license analysis. The native shim
   (`src/main/cpp/kstep_planegcs_bridge.cpp`) is compiled by Gradle
-  (linux-x86-64 only in this wave) and skipped entirely -- not failed --
-  when the Eigen/Boost dev headers are absent, in which case
+  (linux-x86-64 only so far) and skipped entirely -- not failed -- when the
+  Eigen/Boost dev headers are absent, in which case
   `PlaneGcsSolver.availability()` reports `PlaneGcsAvailability.Unavailable`
   at runtime with a human-readable reason. See Building below for the
   required `apt-get install`.
@@ -761,16 +765,30 @@ See <<roadmap,Roadmap>> for what's planned next.
   (analogous to `FreeCadValidationExportTest`, but writing a real
   `MANIFOLD_SOLID_BREP`-bearing STEP file for manual STEP-viewer import);
   (Geometrie Welle 6, pulled forward) `PlaneGcsBridgeSmokeTest` (the full
-  `kstep-constraints` acceptance chain: a real two-point distance solve,
-  a real 3-4-5 right-triangle solve, a deliberately conflicting system
-  failing cleanly without corrupting a later solve, an already-satisfied
-  constraint staying stable, two concurrency stress cases, both raw
-  native-method JNI-robustness cases (null arrays; malformed lengths and
-  out-of-range indices), and full Kotlin-side input validation -- every
-  PlaneGCS-dependent case skips cleanly when
-  `PlaneGcsSolver.availability()` reports `Unavailable`, except the
-  suite's own first case, which instead hard-fails under
-  `-Pkstep.planegcs.require=true`)
+  `kstep-constraints` distance-only acceptance chain: a real two-point
+  distance solve, a real 3-4-5 right-triangle solve, a deliberately
+  conflicting system failing cleanly without corrupting a later solve, an
+  already-satisfied constraint staying stable, two concurrency stress
+  cases, both raw native-method JNI-robustness cases (null arrays;
+  malformed lengths, out-of-range indices, unknown constraint kinds, and
+  native hardening for `pointCount == 0`/all-fixed systems), and full
+  Kotlin-side input validation -- every PlaneGCS-dependent case skips
+  cleanly when `PlaneGcsSolver.availability()` reports `Unavailable`,
+  except the suite's own first case, which instead hard-fails under
+  `-Pkstep.planegcs.require=true`); (C-Welle 2)
+  `PlaneGcsConstraintTypesSmokeTest` (coincidence, horizontal/vertical, and
+  point-on-line solved individually and combined -- including an
+  axis-aligned rectangle built purely from horizontal/vertical/distance
+  constraints, a point pinned onto an infinite line together with a
+  distance constraint, two verified-`FAILED` contradictory systems, an
+  8-thread mixed-constraint-type concurrency stress case, a `solve(...)`
+  vs. `solveDistances(...)` equivalence regression guard, full Kotlin-side
+  validation for the new constraint types, and two dense-graph DoS
+  regression guards at `MAX_POINTS`/`MAX_CONSTRAINTS` (coincidence-only and
+  point-on-line-only) -- see
+  docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc for the
+  measurements behind those bounds and this wave's reduced DoS-measurement
+  scope)
 |===
 
 == Building
@@ -834,8 +852,10 @@ for the planned macOS/Windows follow-up.
 
 === Building — optional PlaneGCS constraint solver
 
-`kstep-constraints` (Geometrie Welle 6, pulled forward, see
-docs/adr/ADR-0006-planegcs-constraint-bridge.adoc) compiles a vendored copy
+`kstep-constraints` (Geometrie Welle 6, pulled forward, plus C-Welle 2 --
+see docs/adr/ADR-0006-planegcs-constraint-bridge.adoc and
+docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc) compiles a
+vendored copy
 of the PlaneGCS 2D geometric constraint solver (unlike `kstep-geometry`'s
 OCCT, which links a *system-installed* package — PlaneGCS ships no
 distribution package at all, so its sources are vendored directly into
@@ -1566,14 +1586,20 @@ an entity not modeled anywhere in `kstep-core`).
   output, a feature/parametric-history model, multi-platform support, a
   desktop viewer). **(Geometrie Welle 6, pulled forward, done)**
   `kstep-constraints` now exists: a PlaneGCS 2D geometric constraint-solver
-  bridge, solving point systems under distance constraints — see the
-  `kstep-constraints` row above and
+  bridge, initially solving point systems under distance constraints — see
+  the `kstep-constraints` row above and
   `docs/adr/ADR-0006-planegcs-constraint-bridge.adoc` for the full
-  license analysis and the named follow-up waves (further constraint
-  types, sketch entities, an incremental/interactive solver, PlaneGCS's
-  own diagnosis API, a `kstep-sketch` module, AP242 mapping,
-  multi-platform support, a WASM path). Additional STEP Application
-  Protocols beyond AP242 remain a separate, not-yet-started later item.
+  license analysis and the named follow-up waves. **(C-Welle 2, partial,
+  done)** Coincidence, horizontal/vertical, and point-on-line constraints
+  added on the same points-only API — see
+  `docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc` for what
+  shipped, what remains (perpendicular, parallel, angle-between-point-pairs
+  and others, continued as C-Welle 2b), and that wave's reduced-scope DoS
+  measurement. Sketch entities, an incremental/interactive solver,
+  PlaneGCS's own diagnosis API, a `kstep-sketch` module, AP242 mapping,
+  multi-platform support, and a WASM path remain later items. Additional
+  STEP Application Protocols beyond AP242 remain a separate, not-yet-started
+  later item.
 
 == License and attribution
 

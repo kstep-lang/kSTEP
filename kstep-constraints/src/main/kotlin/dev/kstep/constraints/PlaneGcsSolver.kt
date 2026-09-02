@@ -1,45 +1,46 @@
 package dev.kstep.constraints
 
+import dev.kstep.constraints.planegcs.NativeConstraintKind
 import dev.kstep.constraints.planegcs.PlaneGcsBridge
 import dev.kstep.constraints.planegcs.PlaneGcsNativeLibrary
 
 /**
  * Public entry point to the PlaneGCS 2D geometric constraint solver -- the only public type in this
- * wave besides the plain data carriers ([SketchPoint], [DistanceConstraint], [SolveResult],
- * [SolveStatus]) and the two exception types.
+ * module besides the plain data carriers ([SketchPoint], the [SketchConstraint] hierarchy,
+ * [SolveResult], [SolveStatus]) and the two exception types.
  *
  * kSTEP vendors the PlaneGCS solver sources directly into this repository (unlike kstep-geometry's
  * OCCT bridge, which links against a system-installed library) and compiles them into a JNI shim --
  * see `kstep-constraints/src/main/cpp/third_party/planegcs/PROVENANCE.adoc` for exactly what is
- * vendored and from where, and `docs/adr/ADR-0006-planegcs-constraint-bridge.adoc` for the full
- * rationale, license analysis, and this wave's scope. When the Eigen/Boost dev headers or a C++
- * compiler were absent at build time (or on any platform other than linux-x86-64, the only one
- * built in this wave), the native shim is never compiled, no `.so` classpath resource exists, and
- * [availability] reports [PlaneGcsAvailability.Unavailable] -- every function here then fails
- * predictably with [PlaneGcsUnavailableException] rather than the build, or this whole module,
- * failing outright. See README's "Building" section for the `-Pkstep.planegcs.require=true` flag
- * that turns this into a hard build failure instead, for environments that must guarantee the
- * bridge is present.
+ * vendored and from where, and `docs/adr/ADR-0006-planegcs-constraint-bridge.adoc` /
+ * `docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc` for the full rationale, license
+ * analysis, and each wave's scope. When the Eigen/Boost dev headers or a C++ compiler were absent at
+ * build time (or on any platform other than linux-x86-64, the only one built so far), the native
+ * shim is never compiled, no `.so` classpath resource exists, and [availability] reports
+ * [PlaneGcsAvailability.Unavailable] -- every function here then fails predictably with
+ * [PlaneGcsUnavailableException] rather than the build, or this whole module, failing outright. See
+ * README's "Building" section for the `-Pkstep.planegcs.require=true` flag that turns this into a
+ * hard build failure instead, for environments that must guarantee the bridge is present.
  *
- * This object's solving API is deliberately a **one-shot, stateless** call: [solveDistances] builds
- * a fresh native `GCS::System` for exactly the problem passed in, solves it, and returns. There is
- * no persistent solver handle to [AutoCloseable.close] and no way to add constraints incrementally
+ * This object's solving API is deliberately a **one-shot, stateless** call: [solve] builds a fresh
+ * native `GCS::System` for exactly the problem passed in, solves it, and returns. There is no
+ * persistent solver handle to [AutoCloseable.close] and no way to add constraints incrementally
  * across multiple calls -- see `docs/adr/ADR-0006`'s "Decision" for why, and its "Folge-Wellen" for
  * the later, handle-based wave that will add that.
  */
 object PlaneGcsSolver {
     /**
-     * Upper bound on the number of points a single [solveDistances] call may pass.
+     * Upper bound on the number of points a single [solve] call may pass.
      *
      * This is an actual, empirically-measured wall-clock bound, not a placeholder value:
-     * [solveDistances] is a single, non-interruptible JNI call -- no timeout parameter exists, and
+     * [solve] is a single, non-interruptible JNI call -- no timeout parameter exists, and
      * `Thread.interrupt()` has no effect on native code already inside PlaneGCS's solve loop (see
      * this object's class KDoc) -- so [MAX_POINTS] is the primary thing standing between a caller
      * and an unbounded native CPU burn on the calling thread.
      *
-     * A previous value of 4096 was found, during this wave's DoS review, to let a single call hang
+     * A previous value of 4096 was found, during ADR-0006's DoS review, to let a single call hang
      * past 10 minutes on a *chain* topology (`n` points / `n-1` distance constraints). A follow-up
-     * value of 512 was then found -- in a **second** round of this same review -- to still be
+     * value of 512 was then found -- in a **second** round of that same review -- to still be
      * unsafe: the chain/ring topologies measured for that value are not PlaneGCS's worst case.
      * Dense, randomly-connected, mutually inconsistent point sets (many points, each involved in
      * several conflicting distance constraints to other points, so no partial solution can locally
@@ -66,26 +67,31 @@ object PlaneGcsSolver {
      * "band" graph, and a chain with a huge coordinate scatter collapsing to a tiny target
      * distance), each run at exactly this cap's `n`/[MAX_CONSTRAINTS]/[MAX_ITERATIONS] combination
      * across ten independent random seeds, together produced a worst observed run of 557ms. See
-     * `docs/adr/ADR-0006`'s "Security" table for the full measurement table and the reproduction
-     * harness referenced there.
+     * `docs/adr/ADR-0006`'s "Security" table for the full measurement table.
      *
-     * This is still an empirical bound on the topologies this wave constructed, not a mathematical
-     * proof of a worst case -- some other adversarial shape not tried here could cost more at this
-     * same `n`. [MAX_POINTS] is deliberately set with roughly 2x headroom below one second (rather
-     * than at the exact edge of what was measured) to absorb that residual risk, but a caller that
-     * needs a hard wall-clock guarantee should still enforce its own timeout around the calling
-     * thread (e.g. running [solveDistances] on a dedicated thread/executor and abandoning --
-     * **not** interrupting, see this object's class KDoc -- that thread past a deadline) rather
-     * than trusting this constant alone. A future incremental/handle-based solver (ADR-0006,
-     * "Folge-Wellen") is the intended path for sketches larger than this one-shot call can safely
-     * serve -- not raising this constant.
+     * This constant was re-validated, not re-derived, when [SketchConstraint] grew beyond plain
+     * distances (see `docs/adr/ADR-0007`'s DoS section): the point-count-driven cost above is what
+     * bounds the (still exclusively distance-based) measurements this KDoc quotes, and the newer
+     * constraint kinds were separately measured at this SAME cap rather than by re-running this
+     * specific curve -- see [MAX_CONSTRAINTS]'s KDoc and ADR-0007 for those numbers.
+     *
+     * This is still an empirical bound on the topologies tried, not a mathematical proof of a worst
+     * case -- some other adversarial shape not tried here could cost more at this same `n`.
+     * [MAX_POINTS] is deliberately set with roughly 2x headroom below one second (rather than at the
+     * exact edge of what was measured) to absorb that residual risk, but a caller that needs a hard
+     * wall-clock guarantee should still enforce its own timeout around the calling thread (e.g.
+     * running [solve] on a dedicated thread/executor and abandoning -- **not** interrupting, see
+     * this object's class KDoc -- that thread past a deadline) rather than trusting this constant
+     * alone. A future incremental/handle-based solver (ADR-0006, "Folge-Wellen") is the intended
+     * path for sketches larger than this one-shot call can safely serve -- not raising this
+     * constant.
      */
     const val MAX_POINTS: Int = 64
 
     /**
-     * Upper bound on the number of constraints a single [solveDistances] call may pass. Kept at 2x
+     * Upper bound on the number of [SketchConstraint]s a single [solve] call may pass. Kept at 2x
      * [MAX_POINTS], the same ratio used throughout this constant's history (both the original
-     * pre-DoS-fix values and the still-unsafe 512/1024 pair from the first round of this wave's DoS
+     * pre-DoS-fix values and the still-unsafe 512/1024 pair from the first round of ADR-0006's DoS
      * fix) -- and, unlike that earlier round, the ratio this constant is actually *verified* at:
      * every dense-random-inconsistent-graph measurement behind [MAX_POINTS]'s KDoc uses exactly
      * `constraints = 2 * points`, including at the `n=64` cap itself. A separate check with `points`
@@ -93,26 +99,31 @@ object PlaneGcsSolver {
      * 128 via a redundant multigraph on those few points ran in under 200ms -- confirming, as
      * before, that constraint count independent of point count is not this module's primary cost
      * driver; see [MAX_POINTS]'s KDoc for the measurements that are.
+     *
+     * This constant counts Kotlin-level [SketchConstraint]s, NOT native constraint rows --
+     * [CoincidenceConstraint] alone lowers to *two* native `ConstraintEqual` rows per Kotlin
+     * constraint (see its KDoc), so [MAX_CONSTRAINTS] worth of coincidences can produce up to twice
+     * as many native rows as the same count of distance/H/V constraints. See `docs/adr/ADR-0007`'s
+     * DoS section for whether that asymmetry required its own, separate cap.
      */
     const val MAX_CONSTRAINTS: Int = 128
 
     /**
-     * Upper bound on [solveDistances]'s `maxIterations` parameter.
+     * Upper bound on [solve]'s `maxIterations` parameter.
      *
      * Point count, not this constant, is this module's primary DoS lever -- see [MAX_POINTS]'s
      * KDoc, whose measurements are already taken at this constant's full 1000-iteration budget.
-     * Unlike an earlier draft of this KDoc (corrected in the same review round that lowered
-     * [MAX_POINTS] from 512 to 64), wall time does **not** stay flat across `maxIterations` for the
-     * topology that actually matters here: on the dense random inconsistent graph at n=512 /
-     * m=1024, raising `maxIterations` from the default 100 to this constant's 1000 roughly
-     * quadrupled wall time (47s to over three minutes) rather than leaving it unchanged --
-     * PlaneGCS's convergence-stall detection does not give up early on this topology the way it
-     * does on the chain/ring shapes this constant's previous KDoc was based on. This constant stays
-     * at 1_000 (10x PlaneGCS's own default, [DEFAULT_MAX_ITERATIONS]) precisely because [MAX_POINTS]
-     * was lowered enough that even this full iteration budget, combined with [MAX_CONSTRAINTS], measures
-     * safely under one second on every topology tried -- see [MAX_POINTS]'s KDoc. Lowering
-     * [MAX_ITERATIONS] further was considered and rejected: it would shrink the margin for
-     * legitimately slow-but-convergent systems without addressing the actual cost driver.
+     * wall time does **not** stay flat across `maxIterations` for the topology that actually
+     * matters here: on the dense random inconsistent graph at n=512 / m=1024, raising
+     * `maxIterations` from the default 100 to this constant's 1000 roughly quadrupled wall time
+     * (47s to over three minutes) rather than leaving it unchanged -- PlaneGCS's convergence-stall
+     * detection does not give up early on this topology the way it does on the chain/ring shapes an
+     * earlier draft of this KDoc was based on. This constant stays at 1_000 (10x PlaneGCS's own
+     * default, [DEFAULT_MAX_ITERATIONS]) precisely because [MAX_POINTS] was lowered enough that
+     * even this full iteration budget, combined with [MAX_CONSTRAINTS], measures safely under one
+     * second on every topology tried -- see [MAX_POINTS]'s KDoc. Lowering [MAX_ITERATIONS] further
+     * was considered and rejected: it would shrink the margin for legitimately slow-but-convergent
+     * systems without addressing the actual cost driver.
      */
     const val MAX_ITERATIONS: Int = 1_000
 
@@ -122,10 +133,10 @@ object PlaneGcsSolver {
     /** `GCS::System()`'s own default `convergence` (verified against `third_party/planegcs/GCS.cpp`). */
     const val DEFAULT_CONVERGENCE: Double = 1e-10
 
-    /** Upper bound on the absolute value of any point coordinate accepted by [solveDistances]. */
+    /** Upper bound on the absolute value of any point coordinate accepted by [solve]. */
     const val MAX_ABS_COORDINATE: Double = 1e9
 
-    /** Upper bound on any [DistanceConstraint.distance] accepted by [solveDistances]. */
+    /** Upper bound on any [DistanceConstraint.distance] accepted by [solve]. */
     const val MAX_DISTANCE: Double = 1e9
 
     /**
@@ -147,30 +158,39 @@ object PlaneGcsSolver {
         }
 
     /**
-     * Solves a 2D point system under a set of point-to-point [constraints], starting from each
-     * point's initial position in [points].
+     * Solves a 2D point system under a set of [SketchConstraint]s, starting from each point's
+     * initial position in [points].
      *
      * Every argument is validated *before* any native call is made, so a malformed request never
      * reaches the solver at all -- see the `@throws` list below. Availability is checked only
      * *after* validation succeeds, matching `dev.kstep.geometry.OcctKernel.makeBox`'s pattern, so
      * that pure input-validation tests pass even on a machine without the native bridge built.
      *
+     * After a native solve that reports [SolveStatus.SUCCESS] or [SolveStatus.CONVERGED], every
+     * returned coordinate is checked for [Double.isFinite] before this function returns a
+     * [SolveResult] -- see [PointOnLineConstraint]'s KDoc for the concrete way a non-finite result
+     * can arise (a division-by-near-zero inside PlaneGCS's own `ConstraintPointOnLine::error()`/
+     * `grad()`). A NaN/Infinity coordinate is treated as a solver failure
+     * ([ConstraintSolverException]), never as a "successful" [SolveResult] a caller could
+     * unknowingly propagate.
+     *
      * @param points the points to solve for; must be non-empty and contain at least one non-[SketchPoint.fixed]
      *   point (an all-fixed system has no unknowns to solve for -- reject it here rather than pass an
-     *   empty unknowns list into the native solver, whose behavior for that input this wave has not
-     *   verified; see `docs/adr/ADR-0006`'s "Environment note").
-     * @param constraints the distance constraints to satisfy.
+     *   empty unknowns list into the native solver, whose behavior for that input is not verified;
+     *   see `docs/adr/ADR-0006`'s "Environment note").
+     * @param constraints the constraints to satisfy; see [SketchConstraint] and its implementations.
      * @param maxIterations solver iteration budget; defaults to PlaneGCS's own default ([DEFAULT_MAX_ITERATIONS]).
      * @param convergence solver convergence threshold; defaults to PlaneGCS's own default ([DEFAULT_CONVERGENCE]).
      * @throws IllegalArgumentException if `points`/`constraints`/`maxIterations`/`convergence` violate
-     *   any bound documented on this object's constants, if any [DistanceConstraint] references an
+     *   any bound documented on this object's constants, if any constraint references an
      *   out-of-range or duplicate point index, or if every point is [SketchPoint.fixed].
      * @throws PlaneGcsUnavailableException if the native bridge is not available.
-     * @throws ConstraintSolverException if the native bridge itself reports an unrecoverable error.
+     * @throws ConstraintSolverException if the native bridge itself reports an unrecoverable error,
+     *   or if the native result contains a non-finite coordinate (see above).
      */
-    fun solveDistances(
+    fun solve(
         points: List<SketchPoint>,
-        constraints: List<DistanceConstraint>,
+        constraints: List<SketchConstraint>,
         maxIterations: Int = DEFAULT_MAX_ITERATIONS,
         convergence: Double = DEFAULT_CONVERGENCE,
     ): SolveResult {
@@ -189,24 +209,17 @@ object PlaneGcsSolver {
             coords[2 * i + 1] = p.y
             fixedFlags[i] = if (p.fixed) 1 else 0
         }
-        val constraintA = IntArray(constraints.size)
-        val constraintB = IntArray(constraints.size)
-        val constraintDist = DoubleArray(constraints.size)
-        constraints.forEachIndexed { i, c ->
-            constraintA[i] = c.pointA
-            constraintB[i] = c.pointB
-            constraintDist[i] = c.distance
-        }
+        val encoded = encodeConstraints(constraints)
         val outCoords = DoubleArray(points.size * 2)
 
         val nativeStatus =
             try {
-                PlaneGcsBridge.nativeSolveP2PDistances(
+                PlaneGcsBridge.nativeSolveConstraints(
                     coords,
                     fixedFlags,
-                    constraintA,
-                    constraintB,
-                    constraintDist,
+                    encoded.kinds,
+                    encoded.points,
+                    encoded.params,
                     maxIterations,
                     convergence,
                     outCoords,
@@ -225,6 +238,19 @@ object PlaneGcsSolver {
         }
         val status = SolveStatus.fromNative(nativeStatus)
 
+        if (status == SolveStatus.SUCCESS || status == SolveStatus.CONVERGED) {
+            // See this function's own KDoc and PointOnLineConstraint's KDoc: a non-finite coordinate
+            // must never reach a caller labeled as a "successful" solve.
+            for (i in outCoords.indices) {
+                if (!outCoords[i].isFinite()) {
+                    throw ConstraintSolverException(
+                        "PlaneGCS reported status $status but produced a non-finite coordinate " +
+                            "at outCoords[$i] (${outCoords[i]}) -- refusing to return a NaN-polluted result",
+                    )
+                }
+            }
+        }
+
         val resultPoints =
             points.indices.map { i ->
                 SketchPoint(x = outCoords[2 * i], y = outCoords[2 * i + 1], fixed = points[i].fixed)
@@ -232,9 +258,23 @@ object PlaneGcsSolver {
         return SolveResult(status = status, points = resultPoints)
     }
 
-    private fun validate(
+    /**
+     * Convenience overload for the common all-distance case, delegating entirely to [solve]. Kept
+     * so every call site (and this module's own pre-existing distance-only test suite) written
+     * against the original, distance-only wave stays source-compatible -- see `docs/adr/ADR-0007`'s
+     * "Decision" for why `nativeSolveP2PDistances` itself was replaced rather than
+     * kept alongside [PlaneGcsBridge.nativeSolveConstraints] as a second native entry point.
+     */
+    fun solveDistances(
         points: List<SketchPoint>,
         constraints: List<DistanceConstraint>,
+        maxIterations: Int = DEFAULT_MAX_ITERATIONS,
+        convergence: Double = DEFAULT_CONVERGENCE,
+    ): SolveResult = solve(points, constraints, maxIterations, convergence)
+
+    private fun validate(
+        points: List<SketchPoint>,
+        constraints: List<SketchConstraint>,
         maxIterations: Int,
         convergence: Double,
     ) {
@@ -256,27 +296,141 @@ object PlaneGcsSolver {
         require(points.any { !it.fixed }) {
             "points must contain at least one non-fixed point (an all-fixed system has no unknowns)"
         }
-        constraints.forEachIndexed { i, c ->
-            require(c.pointA in points.indices) {
-                "constraints[$i].pointA (${c.pointA}) is out of range for ${points.size} points"
-            }
-            require(c.pointB in points.indices) {
-                "constraints[$i].pointB (${c.pointB}) is out of range for ${points.size} points"
-            }
-            require(c.pointA != c.pointB) {
-                "constraints[$i] references the same point twice (index ${c.pointA})"
-            }
-            require(c.distance.isFinite()) { "constraints[$i].distance must be finite, got ${c.distance}" }
-            require(c.distance > 0.0) { "constraints[$i].distance must be positive, got ${c.distance}" }
-            require(c.distance <= MAX_DISTANCE) {
-                "constraints[$i].distance (${c.distance}) exceeds MAX_DISTANCE ($MAX_DISTANCE)"
-            }
-        }
+        constraints.forEachIndexed { i, c -> validateConstraint(i, c, points) }
         require(maxIterations in 1..MAX_ITERATIONS) {
             "maxIterations ($maxIterations) must be in 1..$MAX_ITERATIONS"
         }
         require(convergence.isFinite() && convergence > 0.0) {
             "convergence must be finite and positive, got $convergence"
         }
+    }
+
+    private fun requireInRange(
+        index: Int,
+        pointIndex: Int,
+        fieldName: String,
+        points: List<SketchPoint>,
+    ) {
+        require(pointIndex in points.indices) {
+            "constraints[$index].$fieldName ($pointIndex) is out of range for ${points.size} points"
+        }
+    }
+
+    private fun validateConstraint(
+        index: Int,
+        constraint: SketchConstraint,
+        points: List<SketchPoint>,
+    ) {
+        when (constraint) {
+            is DistanceConstraint -> {
+                requireInRange(index, constraint.pointA, "pointA", points)
+                requireInRange(index, constraint.pointB, "pointB", points)
+                require(constraint.pointA != constraint.pointB) {
+                    "constraints[$index] references the same point twice (index ${constraint.pointA})"
+                }
+                require(constraint.distance.isFinite()) {
+                    "constraints[$index].distance must be finite, got ${constraint.distance}"
+                }
+                require(constraint.distance > 0.0) {
+                    "constraints[$index].distance must be positive, got ${constraint.distance}"
+                }
+                require(constraint.distance <= MAX_DISTANCE) {
+                    "constraints[$index].distance (${constraint.distance}) exceeds MAX_DISTANCE ($MAX_DISTANCE)"
+                }
+            }
+            is CoincidenceConstraint -> {
+                requireInRange(index, constraint.pointA, "pointA", points)
+                requireInRange(index, constraint.pointB, "pointB", points)
+                require(constraint.pointA != constraint.pointB) {
+                    "constraints[$index] references the same point twice (index ${constraint.pointA})"
+                }
+            }
+            is HorizontalConstraint -> {
+                requireInRange(index, constraint.pointA, "pointA", points)
+                requireInRange(index, constraint.pointB, "pointB", points)
+                require(constraint.pointA != constraint.pointB) {
+                    "constraints[$index] references the same point twice (index ${constraint.pointA})"
+                }
+            }
+            is VerticalConstraint -> {
+                requireInRange(index, constraint.pointA, "pointA", points)
+                requireInRange(index, constraint.pointB, "pointB", points)
+                require(constraint.pointA != constraint.pointB) {
+                    "constraints[$index] references the same point twice (index ${constraint.pointA})"
+                }
+            }
+            is PointOnLineConstraint -> {
+                requireInRange(index, constraint.point, "point", points)
+                requireInRange(index, constraint.lineFrom, "lineFrom", points)
+                requireInRange(index, constraint.lineTo, "lineTo", points)
+                // Pairwise-distinct: see PointOnLineConstraint's KDoc for why point == lineFrom/lineTo
+                // and lineFrom == lineTo are both rejected, not just the degenerate line case alone.
+                require(constraint.point != constraint.lineFrom) {
+                    "constraints[$index].point must differ from lineFrom (index ${constraint.point})"
+                }
+                require(constraint.point != constraint.lineTo) {
+                    "constraints[$index].point must differ from lineTo (index ${constraint.point})"
+                }
+                require(constraint.lineFrom != constraint.lineTo) {
+                    "constraints[$index].lineFrom must differ from lineTo (index ${constraint.lineFrom})"
+                }
+            }
+        }
+    }
+
+    /** Result of [encodeConstraints]: the three parallel arrays [PlaneGcsBridge.nativeSolveConstraints] expects. */
+    private data class EncodedConstraints(
+        val kinds: IntArray,
+        val points: IntArray,
+        val params: DoubleArray,
+    )
+
+    private fun SketchConstraint.kind(): NativeConstraintKind =
+        when (this) {
+            is DistanceConstraint -> NativeConstraintKind.P2P_DISTANCE
+            is CoincidenceConstraint -> NativeConstraintKind.P2P_COINCIDENT
+            is HorizontalConstraint -> NativeConstraintKind.HORIZONTAL
+            is VerticalConstraint -> NativeConstraintKind.VERTICAL
+            is PointOnLineConstraint -> NativeConstraintKind.POINT_ON_LINE
+        }
+
+    private fun SketchConstraint.pointIndices(): IntArray =
+        when (this) {
+            is DistanceConstraint -> intArrayOf(pointA, pointB)
+            is CoincidenceConstraint -> intArrayOf(pointA, pointB)
+            is HorizontalConstraint -> intArrayOf(pointA, pointB)
+            is VerticalConstraint -> intArrayOf(pointA, pointB)
+            is PointOnLineConstraint -> intArrayOf(point, lineFrom, lineTo)
+        }
+
+    private fun SketchConstraint.parameter(): Double =
+        when (this) {
+            is DistanceConstraint -> distance
+            is CoincidenceConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is HorizontalConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is VerticalConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is PointOnLineConstraint -> NativeConstraintKind.UNUSED_PARAM
+        }
+
+    private fun encodeConstraints(constraints: List<SketchConstraint>): EncodedConstraints {
+        val kinds = IntArray(constraints.size)
+        val pointSlots = IntArray(constraints.size * NativeConstraintKind.POINT_SLOTS)
+        val params = DoubleArray(constraints.size)
+        constraints.forEachIndexed { i, c ->
+            val kind = c.kind()
+            kinds[i] = kind.nativeValue
+            val indices = c.pointIndices()
+            require(indices.size == kind.arity) {
+                "${kind.name} constraint at index $i encoded ${indices.size} point indices, " +
+                    "but its arity is ${kind.arity}"
+            }
+            val base = i * NativeConstraintKind.POINT_SLOTS
+            for (slot in 0 until NativeConstraintKind.POINT_SLOTS) {
+                pointSlots[base + slot] =
+                    if (slot < kind.arity) indices[slot] else NativeConstraintKind.UNUSED_POINT_SLOT
+            }
+            params[i] = c.parameter()
+        }
+        return EncodedConstraints(kinds = kinds, points = pointSlots, params = params)
     }
 }
