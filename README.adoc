@@ -4,6 +4,10 @@ image::docs/images/kstep-banner.png[kSTEP,link=https://github.com/kstep-lang/kST
 
 Type-safe Kotlin DSL for the STEP standard (ISO 10303).
 
+image:https://img.shields.io/badge/Kotlin-2.4.10-7F52FF.svg?logo=kotlin&logoColor=white[Kotlin 2.4.10,link=https://kotlinlang.org]
+image:https://img.shields.io/badge/JDK-21+-ED8B00.svg?logo=openjdk&logoColor=white[Java 21+,link=https://adoptium.net]
+image:https://img.shields.io/github/license/kstep-lang/kSTEP[Apache 2.0,link=https://github.com/kstep-lang/kSTEP/blob/master/LICENSE]
+
 WARNING: kSTEP is in early, pre-release development (M2). The API is
 unstable and no artifacts are published yet. See <<status,Status>> below
 for what actually works today.
