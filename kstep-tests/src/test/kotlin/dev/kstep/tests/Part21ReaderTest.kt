@@ -3,6 +3,7 @@ package dev.kstep.tests
 import dev.kstep.core.DslViolationCodes
 import dev.kstep.step21.Part21CycleException
 import dev.kstep.step21.Part21DanglingReferenceException
+import dev.kstep.step21.Part21EncodingException
 import dev.kstep.step21.Part21LimitExceededException
 import dev.kstep.step21.Part21Reader
 import dev.kstep.step21.Part21SyntaxException
@@ -44,6 +45,16 @@ class Part21ReaderTest :
 
         "an unknown entity name throws Part21SyntaxException" {
             val source = wrap("#1=WIDGET('a','b','c');\n")
+            shouldThrow<Part21SyntaxException> { Part21Reader.read(source) }
+        }
+
+        // STRICT mode already rejected "9FOO" as an unknown entity name before the parseIdentifier
+        // fix below; this test just pins that STRICT behavior. The actual before/after regression
+        // -- a leading digit being accepted by the reader and only rejected much later, at render
+        // time, by Part21Renderer -- is only observable under TOLERANT, where an unknown entity
+        // name is otherwise left opaque rather than rejected; see Part21TolerantReaderTest.
+        "an entity name starting with a digit throws Part21SyntaxException (renderer identifier grammar)" {
+            val source = wrap("#1=9FOO('a');\n")
             shouldThrow<Part21SyntaxException> { Part21Reader.read(source) }
         }
 
@@ -193,6 +204,16 @@ class Part21ReaderTest :
             result.isFullySuccessful shouldBe false
             val violation = result.violations.getValue(1).single()
             violation.code shouldBe DslViolationCodes.AGGREGATION_BOUND_VIOLATED
+        }
+
+        // Regression for the reader/writer asymmetry where the tokenizer silently accepted an
+        // unescaped reverse solidus as literal text (0x5C is within the printable-ASCII range it
+        // otherwise allows) while Part21Renderer/Part21Writer reject it — a document the reader
+        // just parsed could never be rendered back. The reader now rejects it symmetrically with
+        // the writer, matching Part21Renderer.assertEncodable exactly.
+        "a string literal containing a reverse solidus throws Part21EncodingException, matching the writer" {
+            val source = wrap("#1=PRODUCT('BRK\\001','Bracket','x',());\n")
+            shouldThrow<Part21EncodingException> { Part21Reader.read(source) }
         }
 
         "the header round-trips all seven Part21Header fields" {

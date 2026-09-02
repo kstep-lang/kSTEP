@@ -16,6 +16,7 @@ dependencies {
     implementation(project(":kstep-cli"))
     implementation(project(":kstep-geometry"))
     implementation(project(":kstep-constraints"))
+    implementation(project(":kstep-shape"))
     implementation(libs.antlr4.runtime)
     testImplementation(libs.kotlinpoet)
     testImplementation(libs.kotest.runner.junit5)

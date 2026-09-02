@@ -450,11 +450,13 @@ exercised either way).
   in `kstep-mcp`.
 
 | Geometrie Welle 4
-| Merging OCCT geometry with kSTEP's own AP242 product-structure Part 21
-  writer into a single file (`PRODUCT`/`PRODUCT_DEFINITION` +
-  `SHAPE_REPRESENTATION` in one document) -- needs its own ADR;
-  `STEPCAFControl_Writer`/XCAF vs. a Part-21-level merge is an open design
-  question.
+| **Implemented**, see docs/adr/ADR-0009-ap242-shape-assignment.adoc: merges
+  OCCT geometry with kSTEP's own validated AP242 product structure into a
+  single file via a Part-21-level merge (new module `kstep-shape`), not
+  `STEPCAFControl_Writer`/XCAF. Also grew `kstep-step21`'s value grammar
+  (integers/reals/enumerations/`*`/typed parameters/complex instances) and a
+  `Part21ReadMode.TOLERANT` -- without which OCCT's own STEP output cannot
+  be read back at all.
 
 | Geometrie Welle 5
 | Feature-model / parametric history (sketch -> extrude -> fillet,

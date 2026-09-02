@@ -20,6 +20,11 @@ import java.util.IdentityHashMap
  * `application_context`/`product_context`/`product_definition_context`/`approval_status`/
  * `person`/`organization`), reachable from one or more `roots`, into a complete, syntactically
  * valid ISO 10303-21 physical exchange file.
+ *
+ * As of kSTEP Geometrie Welle 4 (see ADR-0009), [write] is implemented as [emit] (object-graph
+ * walk + numbering, no text) followed by [Part21Renderer.render] (the one text-serialization
+ * path also used by [Part21Document.render]) — this refactor produces byte-identical output to
+ * before (see `Part21WriterTest`'s exact-string assertions, unchanged).
  */
 object Part21Writer {
     private const val MAX_WRITE_GRAPH_DEPTH = 64
@@ -28,30 +33,47 @@ object Part21Writer {
         header: Part21Header,
         roots: List<Any>,
     ): String {
-        val identityMap = IdentityHashMap<Any, Int>()
-        val order = mutableListOf<Any>()
-        for (root in roots) {
-            visit(root, 0, identityMap, order)
-        }
-
-        return buildString {
-            append("ISO-10303-21;\n")
-            append("HEADER;\n")
-            appendHeaderStatements(this, header)
-            append("ENDSEC;\n")
-            append("DATA;\n")
-            for ((index, instance) in order.withIndex()) {
-                appendInstanceStatement(this, index + 1, instance, identityMap)
-            }
-            append("ENDSEC;\n")
-            append("END-ISO-10303-21;\n")
-        }
+        val emitted = emit(roots, startId = 1)
+        return Part21Renderer.render(header, emitted.instances)
     }
 
     fun write(
         header: Part21Header,
         vararg roots: Any,
     ): String = write(header, roots.toList())
+
+    /**
+     * Walks the reachable object graph from [roots] (same post-order-DFS/identity-dedup
+     * traversal [write] has always used — see [visit]'s KDoc) and numbers it starting at
+     * [startId], WITHOUT rendering to text. This is the one numbering path [write] and
+     * `kstep-shape`'s AP242 merge (see ADR-0009) both build on, so the two cannot drift apart.
+     */
+    fun emit(
+        roots: List<Any>,
+        startId: Int = 1,
+    ): Part21EmitResult {
+        val identityMap = IdentityHashMap<Any, Int>()
+        val order = mutableListOf<Any>()
+        for (root in roots) {
+            visit(root, 0, identityMap, order)
+        }
+
+        val offset = startId - 1
+        val finalIdentity = IdentityHashMap<Any, Int>()
+        for (instance in order) {
+            finalIdentity[instance] = identityMap.getValue(instance) + offset
+        }
+
+        val simpleInstances =
+            order.map { instance ->
+                Part21SimpleInstance(
+                    id = finalIdentity.getValue(instance),
+                    entityName = entityKindOf(instance).entityName,
+                    args = valueArgs(instance, finalIdentity),
+                )
+            }
+        return Part21EmitResult(simpleInstances, offset + order.size + 1, finalIdentity)
+    }
 
     // Post-order DFS reachability walk: every referenced instance is fully discovered (and
     // numbered, in the caller-facing DATA section pass below) before the instance referencing
@@ -121,65 +143,68 @@ object Part21Writer {
             else -> unsupportedInstanceType(instance)
         }
 
-    private fun writeArgs(
+    // Structured equivalent of the pre-Welle-4 string-producing `writeArgs`: same per-type
+    // attribute order, but builds Part21Value data instead of pre-rendered text — rendering
+    // (including all quoting/encoding checks) is Part21Renderer's job alone now.
+    private fun valueArgs(
         instance: Any,
         identityMap: IdentityHashMap<Any, Int>,
-    ): List<String> {
-        fun ref(target: Any) = "#${identityMap.getValue(target)}"
+    ): List<Part21Value> {
+        fun ref(target: Any) = Part21Value.Ref(identityMap.getValue(target))
 
-        fun refList(targets: Collection<Any>) = "(" + targets.joinToString(",") { ref(it) } + ")"
+        fun refList(targets: Collection<Any>) = Part21Value.ListValue(targets.map { ref(it) })
+
+        fun str(text: String) = Part21Value.Str(text)
+
+        fun strOrUnset(text: String?): Part21Value = if (text == null) Part21Value.Unset else Part21Value.Str(text)
+
+        fun strListOrUnset(items: List<String>?): Part21Value =
+            if (items == null) Part21Value.Unset else Part21Value.ListValue(items.map { Part21Value.Str(it) })
+
         return when (instance) {
-            is ApplicationContext -> listOf(quoteString(instance.application))
+            is ApplicationContext -> listOf(str(instance.application))
             is ProductContext ->
-                listOf(quoteString(instance.name), ref(instance.frameOfReference), quoteString(instance.disciplineType))
+                listOf(str(instance.name), ref(instance.frameOfReference), str(instance.disciplineType))
             is ProductDefinitionContext ->
-                listOf(
-                    quoteString(instance.name),
-                    ref(instance.frameOfReference),
-                    quoteString(instance.lifeCycleStage),
-                )
-            is ApprovalStatus -> listOf(quoteString(instance.name))
+                listOf(str(instance.name), ref(instance.frameOfReference), str(instance.lifeCycleStage))
+            is ApprovalStatus -> listOf(str(instance.name))
             is Person ->
                 listOf(
-                    quoteString(instance.id),
-                    quoteStringOrUnset(instance.lastName),
-                    quoteStringOrUnset(instance.firstName),
-                    stringListOrUnset(instance.middleNames),
-                    stringListOrUnset(instance.prefixTitles),
-                    stringListOrUnset(instance.suffixTitles),
+                    str(instance.id),
+                    strOrUnset(instance.lastName),
+                    strOrUnset(instance.firstName),
+                    strListOrUnset(instance.middleNames),
+                    strListOrUnset(instance.prefixTitles),
+                    strListOrUnset(instance.suffixTitles),
                 )
             is Organization ->
-                listOf(
-                    quoteStringOrUnset(instance.id),
-                    quoteString(instance.name),
-                    quoteStringOrUnset(instance.description),
-                )
+                listOf(strOrUnset(instance.id), str(instance.name), strOrUnset(instance.description))
             is Product ->
                 listOf(
-                    quoteString(instance.id),
-                    quoteString(instance.name),
-                    quoteStringOrUnset(instance.description),
+                    str(instance.id),
+                    str(instance.name),
+                    strOrUnset(instance.description),
                     refList(instance.frameOfReference),
                 )
             is ProductDefinitionFormation ->
-                listOf(quoteString(instance.id), quoteStringOrUnset(instance.description), ref(instance.ofProduct))
+                listOf(str(instance.id), strOrUnset(instance.description), ref(instance.ofProduct))
             is ProductDefinition ->
                 listOf(
-                    quoteString(instance.id),
-                    quoteStringOrUnset(instance.description),
+                    str(instance.id),
+                    strOrUnset(instance.description),
                     ref(instance.formation),
                     ref(instance.frameOfReference),
                 )
             is NextAssemblyUsageOccurrence ->
                 listOf(
-                    quoteString(instance.id),
-                    quoteString(instance.name),
-                    quoteStringOrUnset(instance.description),
+                    str(instance.id),
+                    str(instance.name),
+                    strOrUnset(instance.description),
                     ref(instance.relatingProductDefinition),
                     ref(instance.relatedProductDefinition),
-                    quoteStringOrUnset(instance.referenceDesignator),
+                    strOrUnset(instance.referenceDesignator),
                 )
-            is Approval -> listOf(ref(instance.status), quoteString(instance.level))
+            is Approval -> listOf(ref(instance.status), str(instance.level))
             is PersonAndOrganization -> listOf(ref(instance.thePerson), ref(instance.theOrganization))
             else -> unsupportedInstanceType(instance)
         }
@@ -190,92 +215,26 @@ object Part21Writer {
             "object of type '${instance::class.qualifiedName}' reachable from the writer's roots is not " +
                 "one of the twelve supported kstep-core AP242 V1/support entity types",
         )
+}
 
-    private fun appendInstanceStatement(
-        sb: StringBuilder,
-        id: Int,
-        instance: Any,
-        identityMap: IdentityHashMap<Any, Int>,
-    ) {
-        val kind = entityKindOf(instance)
-        val args = writeArgs(instance, identityMap)
-        sb.append("#$id=${kind.entityName}(${args.joinToString(",")});\n")
-    }
-
-    private fun appendHeaderStatements(
-        sb: StringBuilder,
-        header: Part21Header,
-    ) {
-        val description = stringListLiteral(header.description)
-        val implementationLevel = quoteString(header.implementationLevel)
-        sb.append("FILE_DESCRIPTION($description,$implementationLevel);\n")
-
-        val fileName = quoteString(header.fileName)
-        val timestamp = quoteString(header.timestamp)
-        val author = stringListLiteral(header.author)
-        val organization = stringListLiteral(header.organization)
-        val preprocessorVersion = quoteString(header.preprocessorVersion)
-        val originatingSystem = quoteString(header.originatingSystem)
-        val authorization = quoteString(header.authorization)
-        sb.append(
-            "FILE_NAME($fileName,$timestamp,$author,$organization,$preprocessorVersion," +
-                "$originatingSystem,$authorization);\n",
-        )
-
-        val schemaIdentifiers = stringListLiteral(header.schemaIdentifiers)
-        sb.append("FILE_SCHEMA($schemaIdentifiers);\n")
-    }
-
-    private fun stringListLiteral(items: List<String>): String {
-        val quoted = items.joinToString(",") { quoteString(it) }
-        return "($quoted)"
-    }
-
-    // Renders a nullable OPTIONAL LIST OF label attribute (Person.middleNames and friends): the
-    // Part-21 '$' token when unset, or a parenthesized list of quoted strings otherwise — never
-    // an empty '()' standing in for "unset", which would be ambiguous with a genuinely empty
-    // (but present) LIST.
-    private fun stringListOrUnset(items: List<String>?): String =
-        if (items == null) "$" else "(" + items.joinToString(",") { quoteString(it) } + ")"
-
-    private fun quoteStringOrUnset(value: String?): String = if (value == null) "$" else quoteString(value)
-
-    // Single-quote doubling ('O''Brien' round-trips O'Brien), matching the reader's manual
-    // scan (see Part21Tokenizer's KDoc for why this is hand-written instead of reusing the
-    // ANTLR EXPRESS lexer's documented-buggy SimpleStringLiteral rule).
-    private fun quoteString(value: String): String {
-        assertEncodable(value)
-        return "'" + value.replace("'", "''") + "'"
-    }
-
-    // Reverse solidus (\, 0x5C) is deliberately rejected even though it is within the
-    // printable-ASCII range this writer otherwise allows: ISO 10303-21 reserves an unescaped
-    // '\' to introduce a \X\/\X2\/\X4\ non-ASCII escape sequence, which V1 does not implement
-    // (see README). Letting a raw '\' through unescaped would silently change meaning for any
-    // conformant external Part-21 reader that DOES implement the escape mechanism — e.g. a
-    // caller-supplied value containing "\X2\04D0\X0\" would be re-interpreted by such a reader
-    // as a UTF-16 escape rather than the literal ASCII text kSTEP validated and echoed back,
-    // a content-forgery gap across the export boundary. Rejecting it here keeps the writer's
-    // behavior honest with the README's "anything else raises Part21EncodingException rather
-    // than being silently mis-encoded" promise, and forces a caller who genuinely needs a
-    // literal backslash to pick a different representation rather than have kSTEP guess.
-    private fun assertEncodable(value: String) {
-        for (c in value) {
-            if (c == '\\') {
-                throw Part21EncodingException(
-                    "value '$value' contains a reverse solidus ('\\', code point 0x5c) — V1 does not " +
-                        "implement the ISO 10303-21 \\X\\/\\X2\\/\\X4\\ escape mechanism, so an unescaped " +
-                        "backslash cannot be written without risking misinterpretation by conformant " +
-                        "external Part-21 readers, see README",
-                )
-            }
-            if (c.code < 0x20 || c.code > 0x7E) {
-                throw Part21EncodingException(
-                    "value '$value' contains an unsupported character (code point 0x${
-                        c.code.toString(16)
-                    }) — only printable ASCII is supported, see README",
-                )
-            }
-        }
-    }
+/**
+ * The result of [Part21Writer.emit]: the numbered [instances] (ready for [Part21Renderer.render]
+ * or further merging — see `dev.kstep.shape.Ap242ShapeExporter`), [nextId] (the first `#N` not
+ * used by this emission, for a caller appending more instances afterward), and an identity-based
+ * [idOf] lookup back from a specific object in the original `roots` graph to its assigned `#N`.
+ */
+class Part21EmitResult internal constructor(
+    val instances: List<Part21SimpleInstance>,
+    val nextId: Int,
+    private val identity: IdentityHashMap<Any, Int>,
+) {
+    /**
+     * The `#N` assigned to this exact object instance. Identity-based (`IdentityHashMap`), not
+     * `equals()`-based — mirrors [Part21Writer.visit]'s own dedup key, so two structurally-equal
+     * but distinct objects reliably resolve to their own, distinct `#N` rather than being
+     * silently conflated (see ADR-0009 §8 stolperfalle 7).
+     *
+     * @throws NoSuchElementException if [instance] was not reachable from the `roots` passed to [Part21Writer.emit].
+     */
+    fun idOf(instance: Any): Int = identity.getValue(instance)
 }

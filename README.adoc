@@ -299,7 +299,9 @@ this writing:
   reconstructs each instance through its `kstep-core` builder function
   — so `WHERE`-rule validation runs on read too, not only on write.
   Genuine structural malformation (missing semicolon, malformed `#N=`,
-  unknown entity name, wrong argument arity/kind, a reference pointing
+  an unknown entity name — under the default `Part21ReadMode.STRICT`;
+  see the `kstep-step21` row below for `TOLERANT` — wrong argument
+  arity/kind, a reference pointing
   at the wrong target entity type, a dangling reference, a reference
   cycle, or a DoS-guard trip on source length/instance count/nesting
   depth/reference-chain depth) raises one of six structured exceptions
@@ -317,12 +319,15 @@ this writing:
   scoped to printable ASCII plus the `''`-doubling convention for an
   embedded `'`; anything else raises `Part21EncodingException` rather
   than being silently mis-encoded. This includes a bare reverse
-  solidus (`\`, 0x5C) on write: although it is itself printable ASCII,
-  an unescaped `\` is exactly what a conformant external Part-21
-  reader would take as the start of an escape sequence it (unlike
-  V1) does implement, so `Part21Writer` rejects it with
-  `Part21EncodingException` rather than emit a value whose meaning
-  could change on the far side of the export boundary.
+  solidus (`\`, 0x5C), rejected symmetrically on both sides: although
+  it is itself printable ASCII, an unescaped `\` is exactly what a
+  conformant external Part-21 reader/writer would take as the start
+  of an escape sequence it (unlike V1) does implement, so both
+  `Part21Writer` (on write) and `Part21Reader`/`Part21Tokenizer` (on
+  read, in either `Part21ReadMode`) reject it with
+  `Part21EncodingException` rather than emit or silently mis-read a
+  value whose meaning could change on the far side of the export
+  boundary.
   **Acceptance-criterion honesty**:
   kSTEP-ADR-0001 names a lossless roundtrip through an external
   CAD/PLM tool (e.g. FreeCAD) as the real-world bar for Part 21
@@ -618,7 +623,13 @@ See <<roadmap,Roadmap>> for what's planned next.
   self-roundtrip test suite in `kstep-tests`; no external CAD/PLM
   tool (e.g. FreeCAD) validation yet — see Status above. (M2 Welle 6)
   Now wired into the CLI via `kstep-script`/`kstep export` — see the
-  `kstep-script`/`kstep-cli` rows below.
+  `kstep-script`/`kstep-cli` rows below. (Geometrie Welle 4) The value
+  grammar and instance model now also cover real, foreign-produced AP242
+  output (integers/reals, enumerations, `*`, typed parameters, complex
+  instances) behind `Part21ReadMode.TOLERANT` — `STRICT` (the default)
+  is unchanged: an unknown entity name is still a hard
+  `Part21SyntaxException` there. See the `kstep-shape` row below and
+  `docs/adr/ADR-0009-ap242-shape-assignment.adoc`.
 
 | `kstep-script`
 | Kotlin-scripting DSL surface for `*.kstep.kts` scripts
@@ -731,6 +742,22 @@ See <<roadmap,Roadmap>> for what's planned next.
   at runtime with a human-readable reason. See Building below for the
   required `apt-get install`.
 
+| `kstep-shape`
+| AP242 shape assignment -- Geometrie Welle 4, merges `kstep-core` product
+  structure with `kstep-geometry` B-Rep solids (`dev.kstep.shape`)
+| Working: `Ap242ShapeExporter.export(header, ShapeAssignment(productDefinition,
+  occtShape))` writes the shape to a real temp STEP file, extracts its
+  geometry subgraph (discarding OCCT's own placeholder product structure --
+  see `Ap242GeometryExtraction`), and merges it with kSTEP's own validated
+  product structure into one ISO 10303-21 file via
+  `PRODUCT_DEFINITION_SHAPE`/`SHAPE_DEFINITION_REPRESENTATION`. Deliberately
+  1:1 (one `ProductDefinition`, one `OcctShape`) this wave; no DSL/CLI/MCP
+  surface yet. Depends on `kstep-core`, `kstep-step21`, and `kstep-geometry`
+  (all `api`, since they appear in this module's own public signatures) --
+  see docs/adr/ADR-0009-ap242-shape-assignment.adoc for the full design,
+  the Part-21-level-merge-vs-XCAF decision, and the injection/DoS security
+  analysis.
+
 | `kstep-tests`
 | Cross-module integration tests (Kotest)
 | Smoke test for the EXPRESS parser; semantic-model, naming-convention,
@@ -815,7 +842,22 @@ See <<roadmap,Roadmap>> for what's planned next.
   point-on-line-only) -- see
   docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc for the
   measurements behind those bounds and this wave's reduced DoS-measurement
-  scope)
+  scope); (Geometrie Welle 4) `Part21TolerantReaderTest` (the full value
+  grammar under `Part21ReadMode.TOLERANT` -- numeric-lexeme verbatim
+  round-tripping, enumerations, `*`, typed parameters, complex instances,
+  opaque-vs-typed-constructed known/unknown entities, a dangling reference
+  and a reference cycle each reached through the new value forms, and a
+  regression guard against mistaking a `#` inside a string literal for a
+  reference), `Part21DocumentMergeTest` (`Part21Document.renumbered`
+  shifting references at every nesting level including complex-instance
+  parts, `Part21Document.concat`'s duplicate-id rejection, and
+  `Part21Renderer`'s injection-guard rejections for a malformed `Num`
+  lexeme, an embedded backslash, and an invalid entity name), and
+  `Ap242ShapeExportRoundtripTest` (end-to-end, OCCT-gated: a real 20x30x40mm
+  box merged with a real validated product structure, re-imported, and
+  checked for the actual `SHAPE_DEFINITION_REPRESENTATION` ->
+  `PRODUCT_DEFINITION_SHAPE` -> `ProductDefinition` identity link and
+  matching B-Rep element counts, not just that both halves are present)
 |===
 
 == Building
@@ -1637,7 +1679,21 @@ an entity not modeled anywhere in `kstep-core`).
   PlaneGCS's own diagnosis API, a `kstep-sketch` module, AP242 mapping,
   multi-platform support, and a WASM path remain later items. Additional
   STEP Application Protocols beyond AP242 remain a separate, not-yet-started
-  later item.
+  later item. **(Geometrie Welle 4, done)** A new `kstep-shape` module now
+  merges a validated `kstep-core` AP242 product structure with an OCCT B-Rep
+  solid into one ISO 10303-21 file (`Ap242ShapeExporter.export`), discarding
+  the placeholder product structure OCCT's own writer emits and replacing it
+  with kSTEP's own — see the `kstep-shape` row below and
+  `docs/adr/ADR-0009-ap242-shape-assignment.adoc` for the full design
+  rationale and the named follow-up waves (assembly geometry, a DSL/CLI/MCP
+  surface, codegen-typed bridge entities, STEP import, raised DoS limits,
+  non-ASCII escapes). This wave also grew `kstep-step21` itself: the full
+  ISO 10303-21 value grammar (integers/reals, enumerations, the `*`
+  DERIVE-token, typed parameters, complex instances) and a new
+  `Part21ReadMode.TOLERANT` that keeps unrecognized entities as opaque
+  instances instead of throwing — without which OCCT's own STEP output
+  could not be read back through `kstep-step21` at all. `Part21ReadMode.STRICT`
+  remains the default and is behaviorally unchanged from before this wave.
 
 == License and attribution
 

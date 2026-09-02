@@ -50,10 +50,21 @@ import dev.kstep.generated.ap242v1.ProductDefinitionFormation
 internal object Part21GraphResolver {
     private const val MAX_REFERENCE_CHAIN_DEPTH = 64
 
+    // Bounds Part21DanglingReferenceException's message the same way MAX_IDENTIFIER_LENGTH/
+    // MAX_ECHOED_VALUE_LENGTH bound Part21Tokenizer's -- a file with many opaque instances that
+    // each reference one undefined `#N` would otherwise produce a joinToString(...) message that
+    // grows linearly with the *whole file* (observed: a 260 KB input produced a 520 KB message),
+    // defeating the log-amplification guarantee ADR-0009 documents for the Part21Reader boundary.
+    private const val MAX_DANGLING_REFERENCES_REPORTED = 20
+
     fun resolve(document: Part21RawDocument): Part21ReadResult {
-        val rawById: Map<Int, Part21RawInstance> = document.instances.associateBy { it.id }
+        val rawById: Map<Int, Part21EntityInstance> = document.instances.associateBy { it.id }
         val idOrder: List<Int> = document.instances.map { it.id }
-        val edges: Map<Int, List<Int>> = rawById.mapValues { (_, raw) -> referenceIdsOf(raw) }
+        // Delegates to Part21EntityInstance.referencedIds() (interface method) — covers Typed
+        // parameters and Complex-Instance parts, not just single REFERENCE/REFERENCE_LIST
+        // positions on a known-kind Part21SimpleInstance, so a dangling/cyclic reference nested
+        // inside opaque (foreign) geometry data is caught exactly like a known-kind one.
+        val edges: Map<Int, List<Int>> = rawById.mapValues { (_, raw) -> raw.referencedIds() }
 
         checkDangling(rawById, edges)
         val order = topologicalOrder(idOrder, edges)
@@ -61,21 +72,8 @@ internal object Part21GraphResolver {
         return construct(document.header, order, rawById, edges)
     }
 
-    // Every #N a raw instance's arguments mention, single REFERENCE positions and every element
-    // of a REFERENCE_LIST position alike — this is the edge set the dangling/cycle/topological
-    // passes below all operate on, so a missing or cyclic reference nested inside a
-    // REFERENCE_LIST is caught exactly like a single-REFERENCE one.
-    private fun referenceIdsOf(raw: Part21RawInstance): List<Int> =
-        raw.args.flatMap { arg ->
-            when (arg) {
-                is Part21Value.Ref -> listOf(arg.id)
-                is Part21Value.ListValue -> arg.items.filterIsInstance<Part21Value.Ref>().map { it.id }
-                else -> emptyList()
-            }
-        }
-
     private fun checkDangling(
-        rawById: Map<Int, Part21RawInstance>,
+        rawById: Map<Int, Part21EntityInstance>,
         edges: Map<Int, List<Int>>,
     ) {
         val dangling = mutableListOf<Pair<Int, Int>>()
@@ -87,8 +85,11 @@ internal object Part21GraphResolver {
             }
         }
         if (dangling.isNotEmpty()) {
+            val shown = dangling.take(MAX_DANGLING_REFERENCES_REPORTED)
+            val omitted = dangling.size - shown.size
             val message =
-                dangling.joinToString("; ") { (from, to) -> "#$from references #$to, which is never defined in DATA" }
+                shown.joinToString("; ") { (from, to) -> "#$from references #$to, which is never defined in DATA" } +
+                    if (omitted > 0) "; and $omitted more dangling reference(s) not shown" else ""
             throw Part21DanglingReferenceException(message)
         }
     }
@@ -157,13 +158,29 @@ internal object Part21GraphResolver {
         return order
     }
 
+    // Only iterates KNOWN-kind Part21SimpleInstances as the *source* of a check — an opaque
+    // instance (Part21ComplexInstance, or a Part21SimpleInstance with no matching
+    // Part21EntityKind) declares no reference-target spec, so its own arguments are never
+    // checked here. As a *target*, though, an opaque instance is checked like any other: a
+    // known entity's REFERENCE position whose target instance's entity name(s) don't include the
+    // expected kind still throws — including when the target is opaque, via entityNamesOf's
+    // empty-intersection result. See ADR-0009 §4.1 point 3.
+    //
+    // A target that IS a Part21ComplexInstance needs one more check even when its parts DO
+    // include the expected entity name: entityNamesOf's union-of-part-names means the name match
+    // alone doesn't mean the reference is resolvable, because `construct` below never
+    // typed-constructs a Part21ComplexInstance (no `kstep-core` builder can express "one of
+    // several simultaneous types") — it always stays in `Part21ReadResult.opaque`. Letting a
+    // name-matching complex-instance target pass here would make `construct`'s `built.getValue`
+    // throw an undocumented NoSuchElementException instead of a structured
+    // Part21SyntaxException, breaking Part21Reader's documented exception taxonomy.
     private fun checkReferenceTargetTypes(
         order: List<Int>,
-        rawById: Map<Int, Part21RawInstance>,
+        rawById: Map<Int, Part21EntityInstance>,
     ) {
         for (id in order) {
-            val raw = rawById.getValue(id)
-            val kind = Part21EntityKind.byEntityName.getValue(raw.entityName)
+            val raw = rawById.getValue(id) as? Part21SimpleInstance ?: continue
+            val kind = Part21EntityKind.byEntityName[raw.entityName] ?: continue
             raw.args.forEachIndexed { index, arg ->
                 val expectedTarget = kind.referenceTargets[index] ?: return@forEachIndexed
                 when (arg) {
@@ -178,19 +195,34 @@ internal object Part21GraphResolver {
         }
     }
 
+    private fun entityNamesOf(instance: Part21EntityInstance): Set<String> =
+        when (instance) {
+            is Part21SimpleInstance -> setOf(instance.entityName)
+            is Part21ComplexInstance -> instance.parts.mapTo(mutableSetOf()) { it.entityName }
+        }
+
     private fun checkOneReferenceTarget(
         kind: Part21EntityKind,
         id: Int,
         index: Int,
         expectedTarget: Part21EntityKind,
         refId: Int,
-        rawById: Map<Int, Part21RawInstance>,
+        rawById: Map<Int, Part21EntityInstance>,
     ) {
         val actual = rawById.getValue(refId)
-        if (actual.entityName != expectedTarget.entityName) {
+        val actualNames = entityNamesOf(actual)
+        if (expectedTarget.entityName !in actualNames) {
             throw Part21SyntaxException(
                 "${kind.entityName} #$id argument ${index + 1} must reference a " +
-                    "${expectedTarget.entityName}, but #$refId is a ${actual.entityName}",
+                    "${expectedTarget.entityName}, but #$refId is a ${actualNames.joinToString("/")}",
+            )
+        }
+        if (actual is Part21ComplexInstance) {
+            throw Part21SyntaxException(
+                "${kind.entityName} #$id argument ${index + 1} references #$refId, a complex instance " +
+                    "(${actualNames.joinToString("/")}) — even though one of its parts is a " +
+                    "${expectedTarget.entityName}, kSTEP cannot typed-construct a complex instance, so this " +
+                    "reference cannot be resolved to a typed value",
             )
         }
     }
@@ -198,22 +230,32 @@ internal object Part21GraphResolver {
     private fun construct(
         header: Part21Header,
         order: List<Int>,
-        rawById: Map<Int, Part21RawInstance>,
+        rawById: Map<Int, Part21EntityInstance>,
         edges: Map<Int, List<Int>>,
     ): Part21ReadResult {
         val built = LinkedHashMap<Int, Any>()
         val violations = LinkedHashMap<Int, List<DslViolation>>()
         val skipped = LinkedHashMap<Int, List<Int>>()
+        val opaque = LinkedHashMap<Int, Part21EntityInstance>()
 
         for (id in order) {
+            val raw = rawById.getValue(id)
+            val kind = (raw as? Part21SimpleInstance)?.let { Part21EntityKind.byEntityName[it.entityName] }
+            if (kind == null) {
+                // Neither a success nor a failure: excluded from `built`/`violations`/`skipped`
+                // entirely, so a KNOWN instance depending on this opaque one is never wrongly
+                // marked `skipped` by the failedDeps check below (see ADR-0009 §4.1 point 4 and
+                // §8 stolperfalle 5) — this id simply never appears in `violations`/`skipped`.
+                opaque[id] = raw
+                continue
+            }
+
             val failedDeps = edges.getValue(id).filter { it in violations || it in skipped }
             if (failedDeps.isNotEmpty()) {
                 skipped[id] = failedDeps
                 continue
             }
 
-            val raw = rawById.getValue(id)
-            val kind = Part21EntityKind.byEntityName.getValue(raw.entityName)
             val result: ValidationResult<Any> = buildInstance(kind, raw, built)
 
             when (result) {
@@ -222,12 +264,12 @@ internal object Part21GraphResolver {
             }
         }
 
-        return Part21ReadResult(header, built, violations, skipped)
+        return Part21ReadResult(header, built, violations, skipped, opaque)
     }
 
     private fun buildInstance(
         kind: Part21EntityKind,
-        raw: Part21RawInstance,
+        raw: Part21SimpleInstance,
         built: Map<Int, Any>,
     ): ValidationResult<Any> {
         fun str(index: Int) = (raw.args[index] as Part21Value.Str).text
