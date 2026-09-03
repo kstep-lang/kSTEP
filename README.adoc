@@ -2026,9 +2026,14 @@ an entity not modeled anywhere in `kstep-core`).
   done)** Coincidence, horizontal/vertical, and point-on-line constraints
   added on the same points-only API — see
   `docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc` for what
-  shipped, what remains (perpendicular, parallel, angle-between-point-pairs
-  and others, continued as C-Welle 2b), and that wave's reduced-scope DoS
-  measurement. Sketch entities, an incremental/interactive solver,
+  shipped and that wave's reduced-scope DoS measurement, continued as
+  C-Welle 2b. **(C-Welle 2c, done)** Parallel and perpendicular
+  constraints added on the same points-only API — see the
+  `kstep-constraints` row above and
+  `docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc`. Still
+  remaining: `L2LAngle`/`P2PAngle` (angle-between-line/point-pairs) and
+  `CoordinateX`/`CoordinateY`, deferred to C-Welle 3 alongside sketch
+  entities. Sketch entities, an incremental/interactive solver,
   PlaneGCS's own diagnosis API, a `kstep-sketch` module, AP242 mapping,
   multi-platform support, and a WASM path remain later items. Additional
   STEP Application Protocols beyond AP242 remain a separate, not-yet-started
@@ -2047,6 +2052,25 @@ an entity not modeled anywhere in `kstep-core`).
   instances instead of throwing — without which OCCT's own STEP output
   could not be read back through `kstep-step21` at all. `Part21ReadMode.STRICT`
   remains the default and is behaviorally unchanged from before this wave.
+  **(Viewer-Welle 1, done)** The "a desktop viewer" follow-up ADR-0005 named
+  above is also done: `kstep-viewer` opens a real Compose Desktop window
+  showing a triangulated OCCT shape — see the `kstep-viewer` row above and
+  `docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc`. **(viewer-camera-
+  interaction wave, done)** The initial static isometric snapshot now
+  supports drag-to-orbit, scroll-to-zoom, and a reset — see
+  `docs/adr/ADR-0012-viewer-camera-interaction.adoc`. **(multi-shape-
+  composition-and-fill-light wave, done)** The demo scene composes several
+  placed shapes into one mesh under a second, additive fill light — see
+  `docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc`.
+  **(headless-preview-rendering wave, done)** The same projection/rasterizer
+  code also renders headlessly (no window, no display server) via `kstep
+  render` in SVG/PNG/text — see `docs/adr/ADR-0011-headless-preview-
+  rendering.adoc`. **(gltf-glb-export wave, done)** `kstep render -f glb`
+  additionally exports a self-contained, Khronos-validator-clean binary
+  glTF 2.0 document — see `docs/adr/ADR-0016-gltf-glb-export.adoc`. Still
+  open: undo/redo, a full sketch DSL beyond the points-only constraint API
+  above, stable geometric edge identity, and multi-platform distribution of
+  the viewer/CLI beyond linux-x86-64.
 
 == License and attribution
 
