@@ -748,7 +748,20 @@ See <<roadmap,Roadmap>> for what's planned next.
   at runtime with a human-readable reason. No OCCT binary/header/source is
   vendored in this repository; see NOTICE and the ADRs for the full license
   and provenance discussion, and Building below for the required
-  `apt-get install`.
+  `apt-get install`. (Geometrie Welle 5b, Teil 1) A new
+  `dev.kstep.geometry.feature` subpackage adds a parametric-history
+  foundation on top of the above, unmodified: `Feature` (sealed --
+  `BoxFeature`/`ExtrudeFeature`/`FilletFeature`), `FeatureSequence`, and
+  `FeatureRebuilder.rebuild(sequence)` replay a sequence of `OcctKernel`
+  calls and return a `FeatureRebuildResult` (all built shapes, not just the
+  final one, all `AutoCloseable` together) -- letting a caller change one
+  `Feature`'s value (e.g. a `FilletFeature.radius` via `.copy(...)`) and
+  rebuild to get a new, independently measurable result. Still opaque,
+  construction-order-dependent fillet edge indices (unchanged from
+  Geometrie Welle 5a); still no stable geometric edge identity, undo/redo,
+  feature-tree UI, or serialization -- see
+  docs/adr/ADR-0015-parametric-feature-history-foundation.adoc for the full
+  scope boundary and what remains for Geometrie Welle 5b's continuation.
 
 | `kstep-constraints`
 | PlaneGCS 2D geometric constraint-solver bridge -- Geometrie Welle 6,
@@ -939,6 +952,18 @@ See <<roadmap,Roadmap>> for what's planned next.
   determinism across rebuilds) and `OcctFeatureValidationExportTest`
   (analogous to `OcctBoxValidationExportTest`, writing a real
   extruded-then-filleted STEP file for manual STEP-viewer import);
+  (Geometrie Welle 5b, Teil 1) `FeatureRebuildTest` (a `FeatureSequence`
+  replayed through `FeatureRebuilder.rebuild(...)`, regression-pinned
+  against `OcctFeatureOperationsTest`'s own already-measured single- and
+  chained-fillet volumes; the core "change a fillet radius and rebuild"
+  proof that an untouched earlier feature's result stays bit-for-bit
+  identical while the changed one's result differs; a too-large and a
+  structurally invalid radius each wrapped into a `FeatureRebuildException`
+  naming the correct failing position and cause type; four ungated
+  structural-validation cases — empty sequence, over-length sequence, a
+  fillet referencing its own or a later position; and
+  `FeatureRebuildResult.close()` closing every shape it built, not just the
+  final one);
   (Geometrie Welle 6, pulled forward) `PlaneGcsBridgeSmokeTest` (the full
   `kstep-constraints` distance-only acceptance chain: a real two-point
   distance solve, a real 3-4-5 right-triangle solve, a deliberately
@@ -1929,7 +1954,16 @@ an entity not modeled anywhere in `kstep-core`).
   each other — see the `kstep-geometry` row above and
   `docs/adr/ADR-0008-occt-feature-operations.adoc` for the DoS-guard
   measurements and the parametric-history half (Geometrie Welle 5b) this
-  wave deliberately leaves open. **(Geometrie Welle 6, pulled forward, done)**
+  wave deliberately leaves open. **(Geometrie Welle 5b, Teil 1, done)** A new
+  `dev.kstep.geometry.feature` subpackage (`Feature`/`FeatureSequence`/
+  `FeatureRebuilder.rebuild(...)`) replays a value-only sequence of
+  `OcctKernel` calls, proving the "change one parameter, rebuild, get a new
+  measured result" claim on top of `OcctKernel` exactly as it already is —
+  see the `kstep-geometry` row above and
+  `docs/adr/ADR-0015-parametric-feature-history-foundation.adoc` for the
+  scope boundary (still no stable geometric edge identity, undo/redo,
+  feature-tree UI, or serialization — all remain open follow-ups).
+  **(Geometrie Welle 6, pulled forward, done)**
   `kstep-constraints` now exists: a PlaneGCS 2D geometric constraint-solver
   bridge, initially solving point systems under distance constraints — see
   the `kstep-constraints` row above and

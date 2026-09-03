@@ -365,9 +365,16 @@ non-history extrude/fillet foundation. The remaining scope continues as:
 | Wave | Content
 
 | Geometrie Welle 5b
-| Parametric feature history: a feature tree, replay, undo/redo. The core
-  problem this wave deliberately leaves open: a stable, *geometric* edge
-  identity, replacing this wave's construction-order-dependent map indices.
+| Parametric feature history: a feature tree, replay, undo/redo. **Teil 1
+  (value-sequence-plus-replay foundation) shipped** -- see
+  docs/adr/ADR-0015-parametric-feature-history-foundation.adoc: `Feature`
+  (sealed, three cases)/`FeatureSequence`/`FeatureRebuilder.rebuild(...)`
+  replay the same `OcctKernel.makeBox`/`extrudeProfile`/`fillet` operations
+  documented above, unmodified. Still open, unchanged from this ADR: a
+  stable, *geometric* edge identity, replacing the construction-order-
+  dependent map indices this ADR's "Edge addressing" section documents;
+  undo/redo; a feature-tree UI; serialization (JSON/Part-21) of a
+  `FeatureSequence`.
 
 | Geometrie Welle 5a-Nachzügler
 | Chamfer (`BRepFilletAPI_MakeChamfer`, structurally identical to fillet),

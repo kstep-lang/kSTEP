@@ -1,0 +1,295 @@
+= ADR-0015: Parametric feature history -- foundation (Geometrie Welle 5b, Teil 1)
+:toc:
+
+== Status
+
+Accepted, implemented. Covers only the value-sequence-plus-replay foundation
+named in ADR-0008's "Geometrie Welle 5b" row -- NOT the whole of that row.
+Deliberately left open by this wave, unchanged from ADR-0008: a stable,
+*geometric* edge identity (this wave inherits `OcctKernel.fillet`'s opaque,
+construction-order-dependent edge indices exactly as-is), undo/redo, a
+feature-tree UI, and serialization (JSON/Part-21).
+
+== Context
+
+ADR-0008's own Folge-Wellen table names "Geometrie Welle 5b" as *"Parametric
+feature history: a feature tree, replay, undo/redo. The core problem this
+wave deliberately leaves open: a stable, geometric edge identity, replacing
+this wave's construction-order-dependent map indices."* That is a large wave
+if attempted whole. This ADR scopes a first, deliberately small slice out of
+it: prove the actual "change one parameter, rebuild, get a new, independently
+measurable result" claim, on top of `OcctKernel` exactly as it already is --
+nothing in `OcctKernel`, `OcctShape`, or `ProfilePoint` changes in this wave.
+
+=== Why the geometric edge identity problem is still not attempted here
+
+Solving it would mean either post-hoc matching of fillet-input edges across
+rebuilds by some geometric signature (unreliable in general -- two distinct
+edges can share endpoints, length, and direction) or carrying enough
+construction provenance through OCCT's own topology-naming facilities
+(`TNaming_*`, part of `TKCAF`/`OCAF`, not yet linked by this module at all)
+to re-resolve an edge after upstream geometry changes. Either is a
+substantial, separate design effort with its own DoS/complexity trade-offs --
+attempting it inside this already-scoped foundation wave would blur what is
+actually proven here (replay correctness) with an unrelated, much harder
+problem. `FilletFeature.edgeIndices` therefore means exactly what
+`OcctKernel.fillet`'s own `edgeIndices` parameter already means: an opaque,
+shape-specific address, valid only for the specific rebuilt shape at
+`baseIndex`, not a durable identifier that survives an upstream geometry
+change reordering the underlying `TopExp::MapShapes` enumeration. A caller
+that changes an earlier `BoxFeature`/`ExtrudeFeature`'s parameters and then
+rebuilds a later `FilletFeature` referencing it is fully responsible for
+knowing whether the edge indices it specified still address the intended
+edges -- `FeatureRebuilder` neither verifies nor promises this.
+
+== Decision
+
+=== Placement: no new module, no new Gradle dependency
+
+The new code lives in a new package, `dev.kstep.geometry.feature`, inside
+the existing `kstep-geometry` module -- mirroring the established
+`dev.kstep.geometry.occt` subpackage convention (`OcctBridge`/
+`OcctNativeLibrary`). It uses only `OcctKernel`'s and `OcctShape`'s already
+*public* API, so no `internal` visibility crossing is needed and no new
+Gradle module is justified. `kstep-tests` already depends on
+`:kstep-geometry` (`kstep-tests/build.gradle.kts`), so no new test
+dependency was needed either.
+
+=== Public Kotlin surface
+
+* `sealed interface Feature`, with exactly three cases --
+  `BoxFeature(dx, dy, dz)`, `ExtrudeFeature(profile, height)`,
+  `FilletFeature(baseIndex, edgeIndices, radius)` -- one per `OcctKernel`
+  operation this wave replays. Every case is a plain value holder
+  (`Double`/`Int`/`List` only, never an `OcctShape` or native handle), which
+  is what makes a sequence safe to hold, `.copy()`, and rebuild repeatedly
+  without touching OCCT until `rebuild()` actually runs.
+* `FeatureSequence(features: List<Feature>)` -- a pure value holder, not
+  validated in its own constructor (mirrors `ProfilePoint`'s own
+  not-self-validating pattern; validity is judged only in the context of the
+  whole sequence, so it belongs in `FeatureRebuilder.rebuild`, not here).
+* `FeatureRebuilder.rebuild(sequence: FeatureSequence): FeatureRebuildResult`
+  -- replays every `Feature`, in order, against `OcctKernel`'s existing
+  public functions, returning every built shape.
+* `FeatureRebuildResult(shapes: List<OcctShape>) : AutoCloseable` --
+  parallel-indexed to `sequence.features`; `close()` closes ALL of `shapes`,
+  not just `final` (the last one), so an intermediate shape (e.g. the
+  un-filleted extrude result underneath a later fillet) is never leaked.
+* `FeatureRebuildException(featureIndex, feature, message, cause)` -- thrown
+  by `rebuild()` on any replay failure, naming exactly which feature at
+  which position failed.
+
+`FilletFeature.baseIndex` addresses an EARLIER feature in the same sequence
+by 0-based position, never by shape or native handle -- the design this ADR
+commits to for keeping a `FeatureSequence` a pure value list that never
+depends on prior OCCT state. `FeatureRebuilder.rebuild` validates
+`baseIndex in 0 until <own position>` before any native call.
+
+No `RootFeature`/`DerivedFeature` marker interface was introduced: with only
+`FilletFeature` carrying a `baseIndex` today, a direct `is FilletFeature`
+check in `FeatureRebuilder` is simpler and equally clear. That split becomes
+worth its own abstraction once a second `baseIndex`-carrying feature exists
+(chamfer -- see ADR-0008's "Geometrie Welle 5a-Nachzügler" row) -- left as a
+named follow-up, not built preemptively.
+
+=== Exception mapping: deliberately uniform, unlike `OcctKernel`'s own split
+
+`OcctKernel` itself keeps `IllegalArgumentException` (a caller-input problem,
+surfaced as-is) and `OcctGeometryException` (a genuine OCCT geometry
+failure, wrapped) strictly distinct -- see `OcctKernel.fillet`'s and
+`extrudeProfile`'s own KDoc. `FeatureRebuilder.rebuild` deliberately breaks
+that distinction: both exception classes, when thrown while replaying a
+`Feature`, are wrapped uniformly into `FeatureRebuildException`. The
+reasoning: in a multi-step sequence, knowing WHICH feature at WHICH position
+failed is more valuable to a caller than which exception class OCCT
+originally used -- and the original is always still reachable via
+`Throwable.cause`, so no information is actually lost, only re-prioritized.
+`OcctUnavailableException` is the one exception NOT wrapped -- it propagates
+unmodified, because it means "the native bridge itself is missing", not
+"this feature is invalid", exactly matching `OcctKernel`'s own contract for
+every one of its functions. (A third class, `IllegalStateException`, is also
+wrapped uniformly alongside the two above, defensively -- see "Leak safety
+on a failed rebuild" below for why it is not reachable through this
+function's own current usage.)
+
+=== Leak safety on a failed rebuild
+
+Every shape successfully built before a failure is closed before `rebuild`
+throws (`built.forEach { it.close() }` on all three catch paths -- see
+below) -- a caller never receives a `FeatureRebuildException` while also
+being responsible for closing partial, unreachable shapes it was never
+handed a reference to. `FeatureRebuildException.closedShapes` exposes those
+same, already-closed shapes, so this guarantee is independently observable
+by a caller (or a test), not just documented -- see `FeatureRebuildTest`'s
+T-4/T-5 cases under Testing below.
+
+Three catch paths, not two: alongside `IllegalArgumentException` and
+`OcctGeometryException` (the two failure classes `rebuild()`'s own
+`@throws FeatureRebuildException` documents as reachable through this
+function's current usage), `rebuild()` also catches `IllegalStateException`
+defensively. `OcctKernel.fillet` documents `@throws IllegalStateException if
+shape is already closed`, raised by `OcctShape.withHandle`'s `checkOpen()`
+before `fillet`'s own catch-and-wrap logic even runs (see `OcctShape.kt`).
+Nothing in `FeatureRebuilder`'s own usage pattern can trigger that today --
+`built` holds every shape strongly for the whole call, and nothing else
+closes one mid-replay -- so this branch is unreachable through the public
+API as it stands. It exists so that if a future change ever did violate that
+invariant (e.g. a caller-visible partial-result API, or `FeatureRebuilder`
+state reused in a way this wave does not), the failure would still be
+wrapped uniformly into `FeatureRebuildException` (rather than escaping
+unwrapped, contradicting "Exception mapping" above) and would still close
+every shape built so far -- rather than silently reintroducing exactly the
+native-handle leak this section otherwise rules out.
+
+== Consequences
+
+* `OcctKernel`, `OcctShape`, `ProfilePoint`, and `OcctGeometryException` are
+  completely unchanged by this wave -- `FeatureRebuilder` is a pure
+  orchestration layer on top of their existing, already-DoS-guarded public
+  API. Every per-operation guard (`MAX_PROFILE_POINTS`,
+  `MAX_FILLET_INPUT_FACES`, `MAX_FILLET_EDGES`, the fillet radius bounds,
+  the profile-point-coincidence tolerance) keeps applying exactly as before,
+  unmodified and unduplicated.
+* A `FeatureSequence` is a genuine value -- copyable, comparable
+  (`data class` `equals`/`hashCode` all the way down), and safe to hold
+  without any OCCT native state attached. This is what a later wave would
+  need to add serialization (JSON/Part-21) or an undo/redo stack on top of,
+  neither of which is attempted here.
+* The one genuinely new DoS dimension this wave introduces is sequence
+  length itself -- see "Security" below.
+
+=== Security
+
+[cols="2,4", options="header"]
+|===
+| Concern | Handling in this wave
+
+| SSRF
+| Not applicable -- no network code.
+
+| DoS
+| `FeatureRebuilder.MAX_SEQUENCE_LENGTH = 256` is the one new guard this
+  wave adds, bounding sequence length itself; every per-operation guard
+  `rebuild()` triggers via `OcctKernel` (`MAX_PROFILE_POINTS`,
+  `MAX_FILLET_INPUT_FACES`, `MAX_FILLET_EDGES`, fillet radius bounds) is
+  inherited unmodified from ADR-0008/ADR-0005, not re-implemented or
+  re-measured here. `MAX_SEQUENCE_LENGTH` itself is a deliberately generous,
+  UNMEASURED placeholder for this wave -- see the constant's own KDoc in
+  `FeatureRebuilder.kt`. A real worst-case measurement (e.g. 256 chained
+  fillets, each near `MAX_FILLET_INPUT_FACES`) is a named follow-up, not
+  done here; this is a conscious, documented gap, not an oversight.
+
+| Cryptography
+| Not applicable -- unchanged from ADR-0005/ADR-0008.
+
+| Resource leaks
+| `FeatureRebuildResult.close()` closes every shape it built, not just
+  `final` (`FeatureRebuildTest`'s T-10 case). A mid-replay failure closes
+  every shape built so far before `rebuild()` throws (see "Leak safety on a
+  failed rebuild" above) -- verified by `FeatureRebuildTest`'s T-4/T-5
+  cases, not T-10 (T-10 only covers the fully-successful-result path).
+
+| Native input validation
+| No new native code in this wave -- `FeatureRebuilder` never crosses the
+  JNI boundary itself, only through `OcctKernel`'s already-hardened
+  functions, which independently re-validate every bound natively
+  (unchanged from ADR-0008).
+
+| Exception safety
+| See "Exception mapping" under Decision above.
+
+| Logging
+| No new log call sites -- `FeatureRebuilder` does not log; `OcctShape`'s
+  existing `kotlin-logging` usage (Cleaner-failure warning) is unchanged.
+
+| License
+| No new dependency, no new native code, no new toolkit linked.
+|===
+
+== Testing
+
+`FeatureRebuildTest` (`kstep-tests`), `.config(enabled = available)` for
+every OCCT-dependent case, mirroring `OcctFeatureOperationsTest`:
+
+* Regression-pins a rebuilt extrude-then-fillet sequence's volumes against
+  `OcctFeatureOperationsTest`'s own already-measured T-1/T-5 values, and a
+  chained two-fillet sequence against that suite's T-7 value -- proving
+  replay reproduces direct `OcctKernel` calls exactly, not just "some"
+  result.
+* The core proof (Kernbeweis): rebuilding the same sequence twice, once with
+  `FilletFeature.radius = 5.0` and once `.copy(radius = 8.0)`, shows the
+  final volume changes between runs while the untouched earlier feature's
+  volume (the plain extrude result) stays bit-for-bit identical across both
+  -- the actual "change a parameter, rebuild, get a new, independently
+  measurable result" claim this whole wave exists to support. Deliberately
+  asserts inequality (`shouldNotBe`) rather than pinning a second exact
+  volume figure: proving the two runs differ is the claim under test, and
+  does not depend on knowing the second run's number in advance.
+* A geometrically-too-large radius (reusing `OcctFeatureOperationsTest`'s own
+  T-11 reproduction) and a structurally invalid radius each produce a
+  `FeatureRebuildException` naming the correct `featureIndex`, with `.cause`
+  correctly typed as `OcctGeometryException` or `IllegalArgumentException`
+  respectively -- proving the uniform-wrapping decision above actually holds
+  for both failure classes. Both cases (T-4, T-5) also assert on
+  `.closedShapes`: the one shape built before the failing fillet (the plain
+  extrude result) is present, and accessing it (`.volume`) throws
+  `IllegalStateException` -- proving the "closed before `rebuild()` throws"
+  guarantee actually held for THIS failure, not merely asserting on the
+  thrown exception's type/index and trusting the cleanup claim on faith. The
+  defensive third catch path (`IllegalStateException`, see "Leak safety on a
+  failed rebuild" above) has no dedicated test of its own -- it is not
+  reachable through `FeatureRebuilder`'s own current usage pattern, so there
+  is no way to trigger it without reaching into `OcctShape`/`FeatureRebuilder`
+  internals a test should not depend on; it is covered by code review and the
+  KDoc/ADR documentation above instead.
+* Four ungated, pure-Kotlin structural-validation cases (empty sequence,
+  sequence longer than `MAX_SEQUENCE_LENGTH`, a `FilletFeature` referencing
+  its own position, a `FilletFeature` referencing a later position) --
+  deliberately not gated on `available`, since none reach a native call.
+* `FeatureRebuildResult.close()` closing every shape, not just `final`.
+
+== Rejected alternatives
+
+* **Keeping `OcctKernel`'s `IllegalArgumentException`/`OcctGeometryException`
+  split inside `FeatureRebuildException` too** (i.e. only wrapping
+  `OcctGeometryException`, letting `IllegalArgumentException` propagate
+  unwrapped with the feature index only in the message text). Rejected:
+  would leave a caller without a typed `featureIndex`/`feature` pair on the
+  (common, easy-to-hit) structurally-invalid-parameter path, exactly the
+  case a caller changing one value between rebuilds is most likely to hit.
+* **A `RootFeature`/`DerivedFeature` marker interface up front.** Rejected
+  as premature with only one `baseIndex`-carrying case
+  (`FilletFeature`) -- see Decision above.
+* **Attempting a stable geometric edge identity in this wave.** Rejected --
+  see Context's "Why the geometric edge identity problem is still not
+  attempted here" above; a substantial, separate design effort.
+* **A new Gradle module for this code.** Rejected -- no `internal`
+  visibility is needed across a module boundary; see Decision's Placement
+  section.
+
+== Folge-Wellen (updates to ADR-0008's table)
+
+ADR-0008's "Geometrie Welle 5b" row is superseded by this ADR for the
+value-sequence-plus-replay foundation specifically. The remaining scope
+continues as:
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| Geometrie Welle 5b (Fortsetzung)
+| Stable, *geometric* edge identity (still the core open problem -- see
+  Context above), undo/redo stack, a feature-tree UI (`kstep-viewer`
+  integration), and serialization (JSON/Part-21) of a `FeatureSequence`.
+  `FeatureSequence`/`Feature` are already pure values, so serialization is
+  expected to be comparatively mechanical once attempted -- not attempted in
+  this wave regardless.
+| Real `MAX_SEQUENCE_LENGTH` measurement
+| `FeatureRebuilder.MAX_SEQUENCE_LENGTH = 256` is an unmeasured placeholder
+  (see Security above) -- a real worst-case chained-fillet measurement
+  against OCCT 7.9.2 should land before this constant is relied on as a
+  genuine DoS guard rather than a generous, unverified one.
+|===
+
+ADR-0008's other Folge-Wellen rows ("Geometrie Welle 5a-Nachzügler",
+"Consolidation") are unaffected and not repeated here.
