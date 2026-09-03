@@ -17,6 +17,11 @@ dependencies {
     implementation(project(":kstep-geometry"))
     implementation(project(":kstep-constraints"))
     implementation(project(":kstep-shape"))
+    // FilletShadingTest projects a real, filleted OCCT shape via MeshProjection (this wave's
+    // multi-shape-composition-and-fill-light coverage, see
+    // docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc) -- no other test in this
+    // module needed dev.kstep.render before.
+    implementation(project(":kstep-render"))
     implementation(libs.antlr4.runtime)
     testImplementation(libs.kotlinpoet)
     testImplementation(libs.kotest.runner.junit5)

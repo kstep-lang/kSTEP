@@ -1,0 +1,407 @@
+= ADR-0013: Multi-shape composition and fill-light shading
+:toc:
+
+== Status
+
+Accepted, implemented. `kstep-geometry` gains a new `Placement`
+(rigid-body transform) type and a `MeshComposition.merge(...)` function
+that flattens several placed `TriangleMesh`es into ONE world-space mesh;
+`kstep-viewer`'s demo window now shows a three-part assembly (a base
+plate, a pillar, and a filleted block) built with them, instead of a
+single static box. `dev.kstep.render.mesh.MeshProjection`'s shading
+formula gains a second, additive fill light on top of the existing
+ambient floor and key light. `kstep render`'s headless path is
+UNCHANGED in capability -- it still previews only `model.shapes.first()`
+-- but its stderr warning text is precisified to name the real reason
+(no placement transform on `ShapeAssignment` yet) instead of a vague
+"Folge-Welle" placeholder.
+
+== Context
+
+Two independent, previously-deferred items were scoped together into one
+wave (design-team review, see this wave's own kickoff plan):
+
+* ADR-0010's V-5 Folge-Welle ("Multi-shape scenes / a scene graph, wired
+  into `kstep-shape`'s assembly structure") -- but deliberately WITHOUT
+  the "wired into `kstep-shape`'s assembly structure" half. `kstep-shape`
+  is currently declared 1:1: `ShapeAssignment(productDefinition, shape)`
+  is genuinely one product definition to genuinely one OCCT solid (see
+  `docs/adr/ADR-0009-ap242-shape-assignment.adoc`'s own KDoc), with no
+  placement field at all. Adding one would need a real AP242 assembly
+  representation (`NEXT_ASSEMBLY_USAGE_OCCURRENCE` +
+  `ITEM_DEFINED_TRANSFORMATION`) threaded through `kstep-shape` AND
+  `kstep-script`'s DSL -- a substantially bigger wave than a viewer-side
+  demo scene needs. This wave's multi-shape support therefore lives
+  ENTIRELY in the viewer/render side (`kstep-geometry`'s new
+  `Placement`/`MeshComposition`, `kstep-viewer`'s demo scene) and touches
+  `kstep-shape` not at all. `kstep render`'s headless path (R-3, see
+  ADR-0011) stays exactly as blocked as before -- see Decision below for
+  why its warning text still changed.
+* ADR-0010's V-4 Folge-Welle ("Shading: smooth per-vertex normals, material
+  colors") -- but only the shading HALF of it, and only the fill-light
+  slice of that half. Smooth per-vertex normals
+  (`Poly_Triangulation::HasNormals()`) and per-part material colors are
+  both still open (see Folge-Wellen below); this wave adds exactly one
+  thing to the shading model: a second, dimmer, differently-angled light
+  on top of the existing ambient-floor-plus-key-light formula, so a
+  multi-part scene's shadow-side faces are not left sitting at a flat,
+  uniform `AMBIENT` value.
+
+These two items were bundled into one wave, not because they are
+technically coupled (they are not -- `Placement`/`MeshComposition` do not
+touch `MeshProjection`'s shading code at all, and the fill light does not
+touch composition), but because a multi-part DEMO scene is much more
+convincing evidence that the fill light actually helps once there is more
+than one axis-aligned box on screen to look at. Scope was explicitly kept
+narrow on both sides: composition via a merged world mesh (no `Scene`
+type), fill light additive only (no `AMBIENT`/key-light change), no
+`--all-shapes` CLI flag.
+
+=== Why a merged world mesh, not a `Scene` type
+
+`dev.kstep.render.mesh.MeshProjection` already operates on exactly one
+`TriangleMesh`, with no notion of "which part a triangle came from" --
+backface culling, shading, depth-sorting and auto-fit all run over a flat
+triangle soup. Introducing a `Scene`/scene-graph type would mean either
+(a) `MeshProjection` itself learns to iterate multiple meshes (duplicating
+its cull/shade/sort loop, or threading a part index through
+`ProjectedTriangle`), or (b) every caller merges scenes into one mesh
+before calling `MeshProjection` anyway, making the `Scene` type pure
+overhead for THIS wave's actual need. `MeshComposition.merge(parts):
+TriangleMesh` is (b), made explicit: merge happens once, before
+projection, in `kstep-geometry` (which has no dependency on
+`kstep-render` and never will -- see `PlacementPackageBoundaryTest`), and
+`MeshProjection`/`ShapeCanvas`/`RenderCommand` need NOT change to draw a
+merged scene. The cost, accepted deliberately: a merged mesh has no
+per-triangle provenance (which input part did this triangle come from?)
+-- see V-5b in Folge-Wellen for when that will actually be needed
+(picking/selection, not this wave's demo scene).
+
+=== Why `Placement` is closed (translation + rotation only, no scaling)
+
+`Placement`'s only constructors are `IDENTITY`, `translation`,
+`rotationX`/`Y`/`Z`, and `then` (composing two `Placement`s) -- there is
+no public matrix constructor and no scaling primitive. Every `Placement`
+this closed set can build has rotation-block determinant exactly `+1` by
+construction (translation and each axis rotation do; composing two
+determinant-`+1` transforms stays determinant-`+1`), so there is
+deliberately no `require(det > 0)` runtime guard -- there is nothing for
+it to catch. Opening the constructor set to arbitrary matrices, or adding
+a scaling primitive, would reopen the reflection question a closed set
+avoids for free: a negative scale factor (or an arbitrary matrix with
+negative determinant) flips a mesh's winding, which would silently break
+`MeshProjection`'s backface culling (`normal dot view >= 0` assumes
+outward-pointing normals, which a mirrored part would no longer have).
+See Folge-Wellen for what reopening this would require.
+
+=== Why the fill light is additive, and why `AMBIENT`/`KEY_WEIGHT` are untouched
+
+`MeshProjection.AMBIENT` (0.25) is a PUBLIC constant -- `IsometricProjectionTest`
+and `CameraProjectionTest` both assert `shade in AMBIENT..1.0` for every
+triangle, and changing its value would be a silent behavior change for
+every existing caller with no compile-time signal. The pre-wave key-light
+weight (`(1.0 - AMBIENT)`, now named `KEY_WEIGHT` for symmetry with the
+new `FILL_WEIGHT`) is likewise unchanged in VALUE, only in name. The fill
+light is a pure ADDITION: `shade = (AMBIENT + KEY_WEIGHT * key_term +
+FILL_WEIGHT * fill_term).coerceIn(0.0, 1.0)`. `FILL_WEIGHT = 0.18` is
+deliberately small relative to `KEY_WEIGHT = 0.75` -- large enough to
+lift a fully-shadowed face measurably above `AMBIENT` (see Decision's
+measured numbers), small enough that the key light still dominates a
+scene's overall contrast; a fill light that could out-shine the key light
+would defeat the entire point of having a "key" light at all.
+
+`FILL_DIRECTION_HOME = Vec3(-0.8, -0.45, 0.35).normalized()` is
+DELIBERATELY NOT the antiparallel of `LIGHT_DIRECTION_HOME`
+(`Vec3(-0.2, -0.4, -1.0).normalized()`) -- an antiparallel fill would
+shine exactly opposite the key light, so for a symmetric solid the two
+faces on either side of the key light would end up identically lit again:
+the same flattening failure mode `LIGHT_DIRECTION_HOME`'s own KDoc
+already documents for a light aligned with the camera's view direction
+(see ADR-0010's Stolperfallen), just relocated from the key/view pair to
+the fill/key pair. Measured (see this wave's own derivation, reproduced
+in `FillLightShadingTest`'s KDoc): the two fixed directions land almost,
+but not exactly, orthogonal to each other (`LIGHT_DIRECTION_HOME dot
+FILL_DIRECTION_HOME` ~= -0.0093) -- close to orthogonal is a deliberate
+choice (a fill light near-perpendicular to the key light illuminates the
+faces the key light leaves darkest, without being so close to
+antiparallel that it reintroduces the flattening risk above), not a
+coincidence of the chosen literal.
+
+The fill direction is decomposed into the HOME camera basis and
+recombined per call exactly like the key light already was (ADR-0012's
+design decision 5) -- `FILL_RIGHT_COMPONENT`/`FILL_UP_COMPONENT`/
+`FILL_VIEW_COMPONENT`, recombined in `basisFor(camera)` alongside the
+existing `LIGHT_*_COMPONENT` recombination -- so the fill light orbits
+together with the camera instead of going edge-on once the camera has
+orbited far from home, for the identical reason ADR-0012 already
+established for the key light.
+
+== Decision
+
+=== `Placement`/`MeshComposition` (`kstep-geometry`)
+
+```kotlin
+class Placement private constructor(...) {
+    fun then(next: Placement): Placement
+    internal fun apply(x: Double, y: Double, z: Double): DoubleArray
+
+    companion object {
+        val IDENTITY: Placement
+        fun translation(dx: Double, dy: Double, dz: Double): Placement
+        fun rotationX(degrees: Double): Placement
+        fun rotationY(degrees: Double): Placement
+        fun rotationZ(degrees: Double): Placement
+    }
+}
+
+data class PlacedMesh(val mesh: TriangleMesh, val placement: Placement = Placement.IDENTITY)
+fun TriangleMesh.transformedBy(placement: Placement): TriangleMesh
+
+object MeshComposition {
+    fun merge(parts: List<PlacedMesh>): TriangleMesh
+}
+```
+
+`then(next)` composes "this transform first, then `next`" --
+`assemblyPlacement` reads left-to-right as "place the part, then place
+the assembly it belongs to". Stored internally as 12 `Double`s (a
+row-major 3x3 rotation block + 3 translation components) -- a small,
+module-local vector/matrix implementation, NOT a reuse of
+`dev.kstep.render.mesh.Vec3`: that type is `internal` to `kstep-render`'s
+`mesh` package (see `MeshPackageComposeBoundaryTest`), and `kstep-geometry`
+has no dependency on `kstep-render` to begin with (nor should it gain
+one just for a vector type -- see `PlacementPackageBoundaryTest`, this
+wave's new automated guard mirroring that one).
+
+`MeshComposition.merge(parts)` transforms each part's coordinates by its
+own `Placement` (`TriangleMesh.transformedBy`) and concatenates the
+results into one `TriangleMesh`. Guards the combined triangle count
+against `OcctKernel.MAX_TRIANGLES` BEFORE allocating the merged
+coordinate array (summed as `Long` first, to avoid an `Int` overflow on
+the sum itself masking the guard). Returns a plain `TriangleMesh` -- no
+per-part offset/provenance table, a Steve Jobs review decision against an
+earlier sketch that returned one (see Folge-Wellen, V-5b).
+
+=== `MeshProjection` fill light (`kstep-render`)
+
+`ScreenBasis` gains a fourth field, `fillDirection: Vec3`, resolved in
+`basisFor(camera)` alongside the existing `lightDirection` exactly as
+described in Context above (including the `camera === Camera.ISOMETRIC`
+fast path, which now also short-circuits to the literal
+`FILL_DIRECTION_HOME`, for the same bit-for-bit-compatibility reason
+ADR-0012 established for the key light). `projectInternal`'s per-triangle
+shade computation becomes:
+
+```kotlin
+val shade = (
+    AMBIENT +
+        KEY_WEIGHT * max(0.0, unitNormal dot negLightDirection) +
+        FILL_WEIGHT * max(0.0, unitNormal dot negFillDirection)
+).coerceIn(0.0, 1.0)
+```
+
+`coerceIn(0.0, 1.0)` is FUNCTIONALLY REQUIRED, not defensive polish: the
+brightest theoretically possible face (`unitNormal` exactly anti-parallel
+to BOTH lights at once -- not geometrically achievable for a single flat
+face given the two lights' actual angle, but not excluded by the formula
+itself) sums to `AMBIENT + KEY_WEIGHT + FILL_WEIGHT = 0.25 + 0.75 + 0.18 =
+1.18`, which must be clamped back into a valid `[0, 1]` shade before
+`TriangleRasterizer`/`TriangleSvgWriter` turn it into a color.
+`FillLightShadingTest` (`kstep-render`) pins the clamp explicitly, not
+just the common case.
+
+Measured effect (see `FillLightShadingTest`'s own derivation): a
+hand-built triangle whose normal is exactly orthogonal to the key light
+(key-only contribution = 0, i.e. the pre-wave formula would have shaded
+it at EXACTLY `AMBIENT` = 0.25) and near-maximally aligned with the fill
+light shades at ~=0.4300 under the new formula -- comfortably above
+`AMBIENT`, and the rasterized 8-bit gray value rises from 63 (pre-wave)
+to 109 (this wave) for that exact triangle.
+
+=== `kstep-viewer` demo scene (`Main.kt`)
+
+The static single-box demo becomes a three-part assembly, merged once
+(not per frame) before the first composition: a `60x40x6` base plate at
+`Placement.IDENTITY`, a `10x10x30` pillar at
+`Placement.translation(10.0, 15.0, 6.0)`, and a `20x20x12` box with ONE
+edge filleted (`OcctKernel.fillet(box, edgeIndex = 0, radius = 3.0)`) at
+`Placement.translation(32.0, 10.0, 6.0)`. `ShapeCanvas` itself needed NO
+API change -- it already only ever took one `TriangleMesh`; the viewer
+merges before calling it, not inside it.
+
+**Fillet demo scope, narrowed from this wave's own plan**: rounding ALL
+FOUR of the block's bottom edges (a fully "rounded base") was the
+original intent, but `OcctKernel.fillet`'s edge indices are opaque and
+construction-specific (see that function's own KDoc) -- there is no
+"round every bottom edge" convenience, and the four relevant indices for
+`makeBox(20, 20, 12)` would need to be measured empirically (e.g. via
+`ShapeTopology`/a probe build) rather than assumed. The demo instead
+rounds a SINGLE edge (`edgeIndex = 0`), the same index every existing
+fillet test in this codebase already uses successfully against a plain
+`makeBox` result (`OcctFeatureOperationsTest`'s T-8 case) -- a real,
+visible fillet on a real multi-part scene, without a fragile
+per-construction edge-index lookup this wave does not need. Rounding all
+four bottom edges remains available as a straightforward follow-up
+(replace `edgeIndex = 0` with the measured index list) whenever someone
+wants the fuller look; it does not change this ADR's decision, only the
+demo's cosmetics.
+
+=== `kstep render`'s headless path (`RenderCommand.kt`)
+
+UNCHANGED in behavior: `resolveContent` still previews only
+`model.shapes.first()`, `previewedShapeIndex` is still always `0`. Only
+the stderr warning text changed, from:
+
+....
+kstep render: model carries N shape(s); previewing shape 1 of N (see
+'kstep render --help' -- multi-shape scenes are a Folge-Welle).
+....
+
+to:
+
+....
+kstep render: model carries N shape(s); previewing shape 1 of N --
+ShapeAssignment carries no placement transform yet, so a combined preview
+would overlay all shapes at the origin (see
+docs/adr/ADR-0011-headless-preview-rendering.adoc, R-3).
+....
+
+The old text was vague ("a Folge-Welle") in a way that, after THIS wave
+actually ships multi-shape support in the viewer, would read as
+misleading -- multi-shape rendering is not uniformly deferred any more,
+only the HEADLESS path is, and specifically because of a real, named
+blocker (`ShapeAssignment` has no placement field) rather than an
+unscheduled "later". `CliRenderIntegrationTest`'s new R21 case pins the
+new wording as a regression guard.
+
+== Security
+
+[cols="2,3,2", options="header"]
+|===
+| Category | Measure | Verified by
+
+| DoS -- merge allocation
+| `MeshComposition.merge`'s `MAX_TRIANGLES` guard runs BEFORE the merged
+  `DoubleArray` is allocated, and sums each part's triangle count as
+  `Long` first (not `Int`) so the sum itself cannot silently overflow and
+  mask the guard for a maliciously long `parts` list.
+| `MeshCompositionTest`'s over-`MAX_TRIANGLES` case
+
+| Resource leak
+| `kstep-viewer`'s demo scene builds all three parts via sequential,
+  non-overlapping `use { }` blocks (the fillet case nested: the OUTER
+  block closes the plain box, the INNER closes the fillet result) -- each
+  block closes its own `OcctShape` on ANY exit, including an exception
+  thrown while building or triangulating a LATER part, so no part's
+  native handle can leak regardless of where construction fails.
+| Code review (`Main.kt`'s `buildDemoMesh`); no automated leak test in
+  this wave (mirrors ADR-0010's own scope for the original single-box
+  demo, which also relied on `use { }` plus review, not an automated
+  handle-leak test)
+
+| Numeric -- shade range
+| `coerceIn(0.0, 1.0)` on every shade value, unconditionally -- see
+  Decision above for why this is required, not defensive.
+| `FillLightShadingTest`'s explicit clamp case; `CameraProjectionTest`'s
+  full azimuth/elevation sweep (still asserts `shade in AMBIENT..1.0` for
+  every triangle at every swept pose)
+
+| Reflection/winding
+| `Placement`'s closed constructor set (translation + rotation only, no
+  scaling, no arbitrary matrix) guarantees rotation-block determinant
+  `+1` by construction, so a merged scene cannot silently flip a part's
+  winding and break `MeshProjection`'s backface culling.
+| `PlacementTest`'s determinant-`+1` case across every constructor this
+  type exposes
+
+| Krypto/SSRF
+| Not applicable -- no new I/O or cryptographic surface.
+| --
+|===
+
+== Stolperfallen
+
+1. **`Vec3` is `internal` to `kstep-render`'s `mesh` package --
+   `Placement` needed its OWN vector/matrix arithmetic, not a reuse.**
+   Confirmed by reading `Vec3.kt` before writing any composition code
+   (its KDoc names `MeshPackageComposeBoundaryTest` as the enforcing
+   guard). `Placement` stores its rotation+translation as a flat
+   12-`Double` array with small private helper functions
+   (`multiply3x3`, `applyRotation`) rather than reaching across the
+   module boundary or introducing a second public vector type nobody
+   else needs.
+2. **`OcctKernel.fillet`'s edge indices are opaque, construction-specific,
+   and NOT "round every bottom edge of a box".** The original demo-scene
+   plan assumed a `fillet(makeBox(20,20,12), r=3)`-shaped call that
+   rounds an entire bottom band; no such convenience exists.
+   `edgeIndex = 0` (the same index every existing test already uses
+   successfully against `makeBox`) was substituted instead -- see
+   Decision's "Fillet demo scope" note.
+3. **The fill direction must NOT be the key light's antiparallel.** An
+   early sketch considered `-LIGHT_DIRECTION_HOME` as the "obvious"
+   opposite-side fill light; this would have reintroduced ADR-0010's
+   original flattening bug for any symmetric solid, just relocated from
+   the key/view pair to the fill/key pair. `FILL_DIRECTION_HOME =
+   Vec3(-0.8, -0.45, 0.35).normalized()` was chosen instead, verified
+   (not assumed) to be close to, but not exactly, orthogonal to the key
+   light (`dot ~= -0.0093`).
+4. **`IsometricProjectionTest`'s `"flat shading genuinely varies with a
+   triangle's normal"` case (`shades.size shouldBe 2`) was a genuine risk,
+   not a hypothetical one.** Verified by hand calculation before
+   implementation (two triangles with normals `(1,1,1)`/`(1,0,0)`: real
+   shades ~=0.978/~=0.534 under the new formula, still two distinct
+   values) and confirmed by the actual test run once the formula was
+   implemented -- see this wave's own build log, not just the
+   hand-calculation.
+5. **A key-only comparison inside a test cannot import `MeshProjection`'s
+   private `KEY_WEIGHT`/`LIGHT_DIRECTION_HOME`.** `FilletShadingTest`
+   (`kstep-tests`) independently re-derives the pre-wave formula from the
+   same public literals `MeshProjection`'s own KDoc documents, exactly
+   like `IsometricProjectionTest`/`CameraProjectionTest` already do for
+   the view direction -- not a shortcut around visibility, a deliberate,
+   documented duplication of a FORMULA (not the whole projection
+   pipeline) for comparison purposes only.
+
+== Folge-Wellen
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| V-4 (rest)
+| Smooth per-vertex normals (`Poly_Triangulation::HasNormals()`/
+  `Normals()`) and per-part material colors -- this wave's fill light is
+  the shading slice of V-4 that ships now; flat shading itself is
+  unchanged.
+
+| V-5b
+| Per-part provenance/offset tracking out of `MeshComposition.merge` --
+  needed once a real caller (V-6, selection/picking) needs to answer
+  "which input part does merged triangle N belong to". Deliberately not
+  introduced in this wave (Steve Jobs review decision): no caller needs
+  it yet, and an unvalidated shape guessed at now would likely need to
+  change again once V-6's actual requirements are known.
+
+| V-6
+| Selection and picking -- needs V-5b's provenance tracking plus an
+  additional per-triangle face-index array from the OCCT bridge (see
+  ADR-0010's own V-6 entry, unchanged).
+
+| R-3 (ADR-0011)
+| Multi-shape scenes in the HEADLESS (`kstep render`) path -- still
+  blocked by `ShapeAssignment` carrying no placement transform (see
+  Context above). This wave only precisifies R-3's warning text; actually
+  unblocking it needs a real AP242 assembly representation
+  (`NEXT_ASSEMBLY_USAGE_OCCURRENCE` + `ITEM_DEFINED_TRANSFORMATION`)
+  threaded through `kstep-shape` and `kstep-script`, out of scope here.
+
+| V-2b (ADR-0012, still open)
+| Pan remains deferred, untouched by this wave.
+
+| `Placement` scaling
+| Deliberately not added in this wave (see Context's "why `Placement` is
+  closed" above). If a future wave needs non-uniform or uniform scaling,
+  it MUST add `require(det > 0)` (or an equivalent reflection guard) at
+  that point, rather than silently trusting every caller to never pass a
+  negative scale factor.
+|===

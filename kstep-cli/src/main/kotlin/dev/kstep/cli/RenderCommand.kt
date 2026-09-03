@@ -198,7 +198,9 @@ private fun resolveContent(
     if (model.shapes.size > 1) {
         System.err.println(
             "kstep render: model carries ${model.shapes.size} shape(s); previewing shape 1 of " +
-                "${model.shapes.size} (see 'kstep render --help' -- multi-shape scenes are a Folge-Welle).",
+                "${model.shapes.size} -- ShapeAssignment carries no placement transform yet, so a " +
+                "combined preview would overlay all shapes at the origin (see " +
+                "docs/adr/ADR-0011-headless-preview-rendering.adoc, R-3).",
         )
     }
     val assignment = model.shapes.first()

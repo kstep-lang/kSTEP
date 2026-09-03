@@ -728,9 +728,19 @@ See <<roadmap,Roadmap>> for what's planned next.
   can itself be filleted again); see
   docs/adr/ADR-0008-occt-feature-operations.adoc for the DoS-guard
   measurements, edge-addressing caveats, and the native-side deadlock trap
-  its own implementation had to avoid. Depends on nothing but
-  `kotlin-logging-jvm` -- deliberately not on `kstep-core` yet (see
-  docs/adr/ADR-0005-occt-jni-bridge.adoc). The native shim
+  its own implementation had to avoid. (multi-shape-composition-and-
+  fill-light wave) `Placement` (translation + `rotationX`/`Y`/`Z`, no
+  scaling, no arbitrary matrix -- rotation-block determinant `+1` by
+  construction, no runtime guard needed) and `MeshComposition.merge(parts:
+  List<PlacedMesh>): TriangleMesh` flatten several placed meshes into one
+  world-space mesh, guarded against `OcctKernel.MAX_TRIANGLES` before
+  allocating; `kstep-viewer`'s demo scene is the first real caller. See
+  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc. Depends
+  on nothing but `kotlin-logging-jvm` -- deliberately not on `kstep-core`
+  yet (see docs/adr/ADR-0005-occt-jni-bridge.adoc), and deliberately not
+  on `kstep-render` either (`PlacementPackageBoundaryTest` enforces this
+  -- `Placement`'s vector/matrix arithmetic is its own, not a reuse of
+  `kstep-render`'s internal `Vec3`). The native shim
   (`src/main/cpp/kstep_occt_bridge.cpp`) is compiled by Gradle against a
   *system-installed* OCCT (linux-x86-64 only in this wave) and skipped
   entirely -- not failed -- when the OCCT dev headers are absent, in which
@@ -803,7 +813,8 @@ See <<roadmap,Roadmap>> for what's planned next.
   `kstep-viewer` test-only class), the new
   `dev.kstep.render.svg.TriangleSvgWriter` (a deterministic, byte-
   reproducible vector render -- same coordinates rounded to 2 decimals,
-  input order preserved, never re-sorted), and the new
+  input order preserved, never re-sorted; unaffected by the
+  multi-shape-composition-and-fill-light wave -- see below), and the new
   `dev.kstep.render.text.TextCardRenderer` (renders a plain
   `List<String>` as an SVG or `BufferedImage` "text card" -- the ONE
   renderer both a no-geometry and a not-renderable-this-run `kstep
@@ -817,9 +828,17 @@ See <<roadmap,Roadmap>> for what's planned next.
   directly, and `KStepScriptCompilationConfiguration`'s
   `wholeClasspath = true` would otherwise forward Compose/Skiko into
   every `*.kstep.kts` script's own compile step. See
-  docs/adr/ADR-0011-headless-preview-rendering.adoc. Depends only on
-  `kstep-geometry` (`api`) and `kotlin-logging-jvm` -- no new external
-  dependency.
+  docs/adr/ADR-0011-headless-preview-rendering.adoc. (multi-shape-
+  composition-and-fill-light wave) `MeshProjection`'s shading formula
+  gains a second, additive fill light on top of the existing `AMBIENT`
+  floor + key light -- `shade = (AMBIENT + KEY_WEIGHT * key_term +
+  FILL_WEIGHT * fill_term).coerceIn(0.0, 1.0)`, `AMBIENT`/`KEY_WEIGHT`
+  unchanged in value, the fill light dimmer than and deliberately not
+  antiparallel to the key light, decomposed/recombined per camera pose
+  exactly like the key light already was (ADR-0012). See
+  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc. Depends
+  only on `kstep-geometry` (`api`) and `kotlin-logging-jvm` -- no new
+  external dependency.
 
 | `kstep-viewer`
 | Interactive OCCT shape viewer -- Viewer-Welle 1
@@ -846,7 +865,14 @@ See <<roadmap,Roadmap>> for what's planned next.
   camera-aligned light makes flat shading invisible on an axis-aligned
   box; see docs/adr/ADR-0012-viewer-camera-interaction.adoc for the
   camera interaction design (zoom bounds, non-finite-input handling, the
-  camera-state-read-only-in-the-draw-phase recomposition design). Depends
+  camera-state-read-only-in-the-draw-phase recomposition design).
+  (multi-shape-composition-and-fill-light wave) The demo window now shows
+  a three-part assembly -- a base plate, a pillar, and a single-edge-
+  filleted block -- merged into one world mesh via
+  `dev.kstep.geometry.MeshComposition.merge` before the first
+  composition (`ShapeCanvas` itself needed no change: it still consumes
+  exactly one `TriangleMesh`). See
+  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc. Depends
   on `kstep-geometry`, `kstep-render`, and Compose Multiplatform
   (`org.jetbrains.compose` 1.11.1) -- see Building below for the scoped
   `google()` repository this pulls in.

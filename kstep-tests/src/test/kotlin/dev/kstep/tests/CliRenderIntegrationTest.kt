@@ -544,4 +544,58 @@ class CliRenderIntegrationTest :
             json["command"]?.jsonPrimitive?.content shouldBe "render"
             dirTarget.isDirectory shouldBe true
         }
+
+        // R21 -- regression test for kSTEP's multi-shape-composition-and-fill-light wave (see
+        // docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc): `kstep render`'s
+        // headless path still previews only the FIRST shape (R-3 stays blocked -- ShapeAssignment
+        // carries no placement transform), but the stderr warning text was precisified in this
+        // wave. Pins both the still-single-shape behavior AND the new wording, so a future
+        // regression to the old, vaguer "Folge-Welle" wording (or a silent behavior change) fails
+        // this test rather than going unnoticed.
+        "a model with three shapes still previews only shape 1, with the precisified R-3 warning".config(
+            enabled = available,
+        ) {
+            val script = File(workDir, "assembly-r21.kstep.kts")
+            script.writeText(
+                CONTEXT_PRELUDE +
+                    """
+                    val partA = product("R21-A") { name = "Plate"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val formationA = productDefinitionFormation("R21-A-F") { ofProduct = partA }.getOrThrow()
+                    val definitionA = productDefinition("R21-A-D") { formation = formationA; frameOfReference = defCtx }.getOrThrow()
+                    val boxA = OcctKernel.makeBox(10.0, 10.0, 10.0)
+
+                    val partB = product("R21-B") { name = "Pillar"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val formationB = productDefinitionFormation("R21-B-F") { ofProduct = partB }.getOrThrow()
+                    val definitionB = productDefinition("R21-B-D") { formation = formationB; frameOfReference = defCtx }.getOrThrow()
+                    val boxB = OcctKernel.makeBox(5.0, 5.0, 20.0)
+
+                    val partC = product("R21-C") { name = "Block"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val formationC = productDefinitionFormation("R21-C-F") { ofProduct = partC }.getOrThrow()
+                    val definitionC = productDefinition("R21-C-D") { formation = formationC; frameOfReference = defCtx }.getOrThrow()
+                    val boxC = OcctKernel.makeBox(8.0, 8.0, 8.0)
+
+                    stepFile(fileName = "r21.step") {
+                        root(definitionA)
+                        root(definitionB)
+                        root(definitionC)
+                        shape(definitionA, boxA)
+                        shape(definitionB, boxB)
+                        shape(definitionC, boxC)
+                    }
+                    """.trimIndent(),
+            )
+
+            val result = runner.run("render", "--output", "json", script.name)
+
+            result.exitCode shouldBe 0
+            result.stderr.contains("Exception in thread") shouldBe false
+            result.stderr shouldContain "model carries 3 shape(s); previewing shape 1 of 3"
+            result.stderr shouldContain "ShapeAssignment carries no placement transform yet"
+            result.stderr shouldContain "ADR-0011-headless-preview-rendering.adoc, R-3"
+
+            val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+            val geometry = json["geometry"]?.jsonObject
+            geometry?.get("shapeCount")?.jsonPrimitive?.int shouldBe 3
+            geometry?.get("previewedShapeIndex")?.jsonPrimitive?.int shouldBe 0
+        }
     })

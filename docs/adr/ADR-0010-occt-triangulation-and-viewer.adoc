@@ -559,11 +559,21 @@ wave's actual surface:
 
 | V-4
 | Shading: smooth per-vertex normals
-  (`Poly_Triangulation::HasNormals()`/`Normals()`), material colors.
+  (`Poly_Triangulation::HasNormals()`/`Normals()`), material colors. The
+  fill-light slice of this entry shipped in kSTEP's
+  multi-shape-composition-and-fill-light wave (see
+  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc) --
+  smooth normals and material colors remain open.
 
 | V-5
 | Multi-shape scenes / a scene graph, wired into `kstep-shape`'s assembly
-  structure.
+  structure. The VIEWER-side half (merged-world-mesh composition via
+  `dev.kstep.geometry.Placement`/`MeshComposition`, a three-part demo
+  scene) shipped in kSTEP's multi-shape-composition-and-fill-light wave
+  (see docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc) --
+  deliberately WITHOUT the "wired into `kstep-shape`'s assembly
+  structure" half, which stays open (see that ADR's Context section, and
+  ADR-0011's R-3 entry for the headless-path consequence).
 
 | V-6
 | Selection and picking -- needs an additional per-triangle face-index

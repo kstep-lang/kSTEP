@@ -411,7 +411,13 @@ cleanly on a machine without OCCT and still produce a `summary` (not a
 | R-3
 | Multi-shape scenes: render every `model.shapes` entry together
   (placement via `ITEM_DEFINED_TRANSFORMATION`), not just the first with
-  a warning.
+  a warning. Still blocked as of kSTEP's multi-shape-composition-and-
+  fill-light wave (see docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc):
+  that wave ships merged-world-mesh composition in the VIEWER only
+  (`ShapeAssignment` still carries no placement transform, so this
+  headless path has nothing to place a second/third shape AT besides the
+  origin) -- only this entry's warning text was precisified, not its
+  underlying blocker.
 
 | R-4
 | Additional vector output formats (PDF, LaTeX/TikZ) built on

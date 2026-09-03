@@ -59,12 +59,41 @@ object MeshProjection {
      */
     private val LIGHT_DIRECTION_HOME: Vec3 = Vec3(-0.2, -0.4, -1.0).normalized()
 
+    /**
+     * Fixed fill-light direction (from the light, into the scene), added on top of [AMBIENT] and
+     * the key light in kSTEP's multi-shape-composition-and-fill-light wave (see
+     * `docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc`) -- a second, dimmer light
+     * that softens the shadow side a key-only render leaves at exactly [AMBIENT], without
+     * touching [AMBIENT] or [KEY_WEIGHT] themselves.
+     *
+     * DELIBERATELY NOT the antiparallel of [LIGHT_DIRECTION_HOME] (i.e. not
+     * `Vec3(0.2, 0.4, 1.0)`): an antiparallel fill would shine exactly opposite the key light, so
+     * for a symmetric solid the two faces on either side of the key light would end up
+     * identically lit again -- the same flattening failure mode `LIGHT_DIRECTION_HOME`'s own KDoc
+     * already documents for a light aligned with the view direction, just relocated to the
+     * fill/key pair instead of the key/view pair. Decomposed into the home camera basis and
+     * recombined against the actual camera basis exactly like [LIGHT_DIRECTION_HOME] -- see
+     * [FILL_RIGHT_COMPONENT]/[FILL_UP_COMPONENT]/[FILL_VIEW_COMPONENT] and [basisFor].
+     */
+    private val FILL_DIRECTION_HOME: Vec3 = Vec3(-0.8, -0.45, 0.35).normalized()
+
     /** World-space "up" for the screen basis. Not a camera degree of freedom -- every [Camera]
      *  pose in this wave orbits around this fixed axis; see [Camera]'s own KDoc. */
     private val UP: Vec3 = Vec3(0.0, 0.0, 1.0)
 
     const val MARGIN_FRACTION: Double = 0.05
     const val AMBIENT: Double = 0.25
+
+    /** Key-light weight -- was inlined as `(1.0 - AMBIENT)` before kSTEP's
+     *  multi-shape-composition-and-fill-light wave; named explicitly now that a second,
+     *  [FILL_WEIGHT] term exists alongside it in [projectInternal]'s shading formula. */
+    private const val KEY_WEIGHT: Double = 0.75
+
+    /** Fill-light weight -- deliberately small relative to [KEY_WEIGHT], so the fill light softens
+     *  the shadow side without washing out the key light's own face-to-face contrast. See
+     *  `docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc` for the measured effect on
+     *  the darkest visible face (bumps it from exactly [AMBIENT] to comfortably above it). */
+    private const val FILL_WEIGHT: Double = 0.18
 
     private const val DEGENERATE_LENGTH: Double = 1e-12
 
@@ -85,6 +114,13 @@ object MeshProjection {
     private val LIGHT_UP_COMPONENT: Double = LIGHT_DIRECTION_HOME dot TRUE_UP_HOME
     private val LIGHT_VIEW_COMPONENT: Double = LIGHT_DIRECTION_HOME dot VIEW_DIRECTION_HOME
 
+    // FILL_DIRECTION_HOME expressed in the same (RIGHT_HOME, TRUE_UP_HOME, VIEW_DIRECTION_HOME)
+    // orthonormal basis -- see LIGHT_RIGHT_COMPONENT/LIGHT_UP_COMPONENT/LIGHT_VIEW_COMPONENT above
+    // for why this decompose-once/recombine-per-call shape exists at all.
+    private val FILL_RIGHT_COMPONENT: Double = FILL_DIRECTION_HOME dot RIGHT_HOME
+    private val FILL_UP_COMPONENT: Double = FILL_DIRECTION_HOME dot TRUE_UP_HOME
+    private val FILL_VIEW_COMPONENT: Double = FILL_DIRECTION_HOME dot VIEW_DIRECTION_HOME
+
     private data class RawTriangle(
         val ax: Double,
         val ay: Double,
@@ -96,12 +132,13 @@ object MeshProjection {
         val depth: Double,
     )
 
-    /** The resolved screen basis + key-light direction for one [Camera] pose. */
+    /** The resolved screen basis + key-light and fill-light directions for one [Camera] pose. */
     private data class ScreenBasis(
         val right: Vec3,
         val trueUp: Vec3,
         val view: Vec3,
         val lightDirection: Vec3,
+        val fillDirection: Vec3,
     )
 
     /**
@@ -118,7 +155,7 @@ object MeshProjection {
      */
     private fun basisFor(camera: Camera): ScreenBasis {
         if (camera === Camera.ISOMETRIC) {
-            return ScreenBasis(RIGHT_HOME, TRUE_UP_HOME, VIEW_DIRECTION_HOME, LIGHT_DIRECTION_HOME)
+            return ScreenBasis(RIGHT_HOME, TRUE_UP_HOME, VIEW_DIRECTION_HOME, LIGHT_DIRECTION_HOME, FILL_DIRECTION_HOME)
         }
 
         val view = camera.viewDirection()
@@ -129,7 +166,7 @@ object MeshProjection {
         val right = (UP cross view).normalized().let { if (it == Vec3.ZERO) Vec3(1.0, 0.0, 0.0) else it }
         val trueUp = (view cross right).normalized().let { if (it == Vec3.ZERO) Vec3(0.0, 1.0, 0.0) else it }
 
-        val recombined =
+        val recombinedLight =
             Vec3(
                 right.x * LIGHT_RIGHT_COMPONENT + trueUp.x * LIGHT_UP_COMPONENT + view.x * LIGHT_VIEW_COMPONENT,
                 right.y * LIGHT_RIGHT_COMPONENT + trueUp.y * LIGHT_UP_COMPONENT + view.y * LIGHT_VIEW_COMPONENT,
@@ -139,9 +176,20 @@ object MeshProjection {
         // rounding -- normalized() above is a no-op in practice, but the Vec3.ZERO fallback below
         // still protects against a future change to LIGHT_DIRECTION_HOME that made the light
         // exactly antiparallel to itself under some basis (never true today, kept fail-safe).
-        val lightDirection = if (recombined == Vec3.ZERO) LIGHT_DIRECTION_HOME else recombined
+        val lightDirection = if (recombinedLight == Vec3.ZERO) LIGHT_DIRECTION_HOME else recombinedLight
 
-        return ScreenBasis(right, trueUp, view, lightDirection)
+        // Identical recombination for the fill light, against the same (right, trueUp, view)
+        // basis -- see FILL_DIRECTION_HOME's own KDoc for why the fill direction is decomposed
+        // and recombined exactly like the key light rather than left fixed in world space.
+        val recombinedFill =
+            Vec3(
+                right.x * FILL_RIGHT_COMPONENT + trueUp.x * FILL_UP_COMPONENT + view.x * FILL_VIEW_COMPONENT,
+                right.y * FILL_RIGHT_COMPONENT + trueUp.y * FILL_UP_COMPONENT + view.y * FILL_VIEW_COMPONENT,
+                right.z * FILL_RIGHT_COMPONENT + trueUp.z * FILL_UP_COMPONENT + view.z * FILL_VIEW_COMPONENT,
+            ).normalized()
+        val fillDirection = if (recombinedFill == Vec3.ZERO) FILL_DIRECTION_HOME else recombinedFill
+
+        return ScreenBasis(right, trueUp, view, lightDirection, fillDirection)
     }
 
     /** Everything [project]/[fitScale] share: the culled, shaded, screen-space triangles for one
@@ -169,6 +217,7 @@ object MeshProjection {
 
         val basis = basisFor(camera)
         val negLightDirection = Vec3(-basis.lightDirection.x, -basis.lightDirection.y, -basis.lightDirection.z)
+        val negFillDirection = Vec3(-basis.fillDirection.x, -basis.fillDirection.y, -basis.fillDirection.z)
 
         val raw = ArrayList<RawTriangle>(mesh.triangleCount)
         var minX = Double.POSITIVE_INFINITY
@@ -195,7 +244,20 @@ object MeshProjection {
             if ((normal dot basis.view) >= 0.0) continue
 
             val unitNormal = Vec3(normal.x / normalLength, normal.y / normalLength, normal.z / normalLength)
-            val shade = AMBIENT + (1.0 - AMBIENT) * max(0.0, unitNormal dot negLightDirection)
+            // Additive two-light model: AMBIENT floor + a KEY_WEIGHT-weighted key light (as
+            // before this wave) + a dimmer FILL_WEIGHT-weighted fill light on top (new in kSTEP's
+            // multi-shape-composition-and-fill-light wave, see
+            // docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc). coerceIn is
+            // FUNCTIONALLY REQUIRED, not defensive polish: the brightest possible face
+            // (unitNormal exactly anti-parallel to both lights) sums to
+            // AMBIENT + KEY_WEIGHT + FILL_WEIGHT = 1.18, which must be clamped back into a valid
+            // shade/brightness range.
+            val shade =
+                (
+                    AMBIENT +
+                        KEY_WEIGHT * max(0.0, unitNormal dot negLightDirection) +
+                        FILL_WEIGHT * max(0.0, unitNormal dot negFillDirection)
+                ).coerceIn(0.0, 1.0)
 
             val ax = v0 dot basis.right
             val ay = -(v0 dot basis.trueUp)
