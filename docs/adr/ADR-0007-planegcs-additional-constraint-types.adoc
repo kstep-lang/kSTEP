@@ -6,9 +6,29 @@
 Accepted, implemented. Covers three of ADR-0006's "Folge-Wellen" C-Welle 2
 items -- coincidence, horizontal/vertical, point-on-line -- as four Kotlin
 constraint types. Parallel, perpendicular, and angle-between-two-point-pairs
-remain out of scope; ADR-0006's Folge-Wellen table is updated alongside this
-ADR to reflect the split into C-Welle 2 (done here) and C-Welle 2b
-(remaining).
+were out of scope for this wave; ADR-0006's Folge-Wellen table is updated
+alongside this ADR to reflect the split into C-Welle 2 (done here) and
+C-Welle 2b (remaining).
+
+[NOTE]
+====
+**Addendum (ADR-0014, C-Welle 2c):** perpendicular and parallel have since
+shipped as `PerpendicularConstraint`/`ParallelConstraint`. In particular,
+the "Scope decision" section below states that parallel "is the only one
+of the seven that needs `GCS::Line` at all" and defers it specifically for
+that reason -- ADR-0014 verified, against the vendored source and a real
+build, that this `GCS::Line` requirement is fully absorbable as a
+bridge-internal, stack-local adapter with no lifetime consequence, so no
+Kotlin-side line/entity concept was actually needed to ship it. That
+finding does not make this section's reasoning wrong for the wave it
+describes -- deferring a genuinely unverified `Line`-lifetime question was
+the right call at the time -- but a reader should not take "parallel needs
+`GCS::Line`" as still describing a gap in the *Kotlin API* today; it only
+ever described a gap in the *C++ call signature*. See ADR-0014 for the
+full verification and the resulting design. This addendum is appended, not
+a rewrite of what follows -- the rest of this ADR is left exactly as
+written for its own wave.
+====
 
 == Context
 
@@ -394,11 +414,24 @@ Both numbers sit far enough below the one-second budget `MAX_POINTS` was
 
 ADR-0006's Folge-Wellen table's "C-Welle 2" row is superseded by this ADR
 for coincidence/horizontal/vertical/point-on-line. The remaining C-Welle 2
-scope (perpendicular, parallel-as-point-pairs is not offered by PlaneGCS at
-all -- parallel genuinely needs `GCS::Line` -- angle-between-two-point-pairs,
-`CoordinateX`/`CoordinateY`, `PointOnPerpBisector`, `Symmetric`) continues
-as **C-Welle 2b**, to be picked up together with the full DoS measurement
-matrix this wave's own Security table above says was not completed. C-Welle
-3 (sketch entities: `Line`/`Circle`/`Arc`) remains the natural home for
-`Parallel` specifically, since it is the one candidate that actually needs
-`GCS::Line`.
+scope at the time of this ADR (perpendicular, parallel-as-point-pairs is not
+offered by PlaneGCS at all -- parallel genuinely needs `GCS::Line` **for
+its C++ call signature**, see this ADR's addendum above -- angle-between-
+two-point-pairs, `CoordinateX`/`CoordinateY`, `PointOnPerpBisector`,
+`Symmetric`) was named **C-Welle 2b**, to be picked up together with the
+full DoS measurement matrix this wave's own Security table above says was
+not completed.
+
+**Superseded by ADR-0014 (C-Welle 2c):** perpendicular and parallel have
+since shipped -- ADR-0014 verified that `Parallel`'s `GCS::Line`
+requirement is absorbable natively with no Kotlin-side line concept, and
+its own DoS measurement discharges this ADR's "not yet completed" note for
+those two kinds specifically (not for `L2LAngle`, which remains open).
+C-Welle 2b's remaining scope is therefore angle-between-two-point-pairs,
+`CoordinateX`/`CoordinateY`, `PointOnPerpBisector`, `Symmetric`. C-Welle 3
+(sketch entities: `Line`/`Circle`/`Arc`) remains the natural home for a
+genuine `SketchLine` *entity* type -- arriving with tangency/equal-length/
+symmetry constraints and a proper request/response data model -- but is no
+longer motivated by any remaining gap in `Parallel`/`Perpendicular`
+support, both of which ADR-0014 already fully serves via the index-pair
+encoding every other constraint in this module uses.

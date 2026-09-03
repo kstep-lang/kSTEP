@@ -752,13 +752,15 @@ See <<roadmap,Roadmap>> for what's planned next.
 
 | `kstep-constraints`
 | PlaneGCS 2D geometric constraint-solver bridge -- Geometrie Welle 6,
-  pulled forward, plus C-Welle 2 (`dev.kstep.constraints`, native/JNI
+  pulled forward, plus C-Welle 2/2c (`dev.kstep.constraints`, native/JNI
   internals in `dev.kstep.constraints.planegcs`)
 | Working: `PlaneGcsSolver.solve(points, constraints)` solves a 2D point
   system under a mixed set of `SketchConstraint`s -- `DistanceConstraint`,
   `CoincidenceConstraint`, `HorizontalConstraint`, `VerticalConstraint`,
   `PointOnLineConstraint` (C-Welle 2, see
-  docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc) -- through a
+  docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc),
+  `ParallelConstraint`, `PerpendicularConstraint` (C-Welle 2c, see
+  docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc) -- through a
   real, vendored PlaneGCS solver core, returning each point's solved
   position and a `SolveStatus` (`SUCCESS`/`CONVERGED`/`FAILED`/
   `SUCCESSFUL_SOLUTION_INVALID`). `PlaneGcsSolver.solveDistances(...)`
@@ -770,8 +772,8 @@ See <<roadmap,Roadmap>> for what's planned next.
   solver sources are vendored (unlike `kstep-geometry`'s OCCT, which links
   a system package -- PlaneGCS ships no distribution package at all) under
   `src/main/cpp/third_party/planegcs/` at a pinned upstream commit; see
-  that directory's `PROVENANCE.adoc`, NOTICE, and the two ADRs for the full
-  LGPL-2.0-or-later license analysis. The native shim
+  that directory's `PROVENANCE.adoc`, NOTICE, and ADR-0006/-0007/-0014 for
+  the full LGPL-2.0-or-later license analysis. The native shim
   (`src/main/cpp/kstep_planegcs_bridge.cpp`) is compiled by Gradle
   (linux-x86-64 only so far) and skipped entirely -- not failed -- when the
   Eigen/Boost dev headers are absent, in which case
@@ -961,7 +963,20 @@ See <<roadmap,Roadmap>> for what's planned next.
   point-on-line-only) -- see
   docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc for the
   measurements behind those bounds and this wave's reduced DoS-measurement
-  scope); (Geometrie Welle 4) `Part21TolerantReaderTest` (the full value
+  scope; (C-Welle 2c) the same suite continues with Parallel/Perpendicular
+  solved individually (including the direction-agnostic cross/dot-product
+  idiom and a shared-endpoint rectangle-corner regression guard), a rotated
+  (non-axis-aligned) rectangle built purely from Perpendicular/Distance --
+  no Horizontal/Vertical -- a Parallel+Perpendicular contradiction that
+  resolves by collapsing a leg rather than reporting `FAILED`, both new
+  kinds layered onto the existing combined system without disturbing it,
+  an extended 8-thread concurrency case, full Kotlin-side validation, and
+  three further dense-graph DoS regression guards (Parallel-only,
+  Perpendicular-only, and both blended into the existing worst-case
+  inconsistent-distance topology) -- see
+  docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc for the
+  measurements and the `GCS::Line` lifetime verification behind them);
+  (Geometrie Welle 4) `Part21TolerantReaderTest` (the full value
   grammar under `Part21ReadMode.TOLERANT` -- numeric-lexeme verbatim
   round-tripping, enumerations, `*`, typed parameters, complex instances,
   opaque-vs-typed-constructed known/unknown entities, a dangling reference

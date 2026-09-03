@@ -321,12 +321,14 @@ class PlaneGcsBridgeSmokeTest :
                     DoubleArray(4),
                 )
             }
-            // unknown constraint kind.
+            // unknown constraint kind. NOT kind 5/6 -- those are now PARALLEL/PERPENDICULAR (see
+            // docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc); 99 is unrecognized by
+            // both this native switch and NativeConstraintKind.
             shouldThrow<IllegalArgumentException> {
                 solveRaw(
                     doubleArrayOf(0.0, 0.0, 1.0, 0.0),
                     intArrayOf(1, 0),
-                    intArrayOf(5),
+                    intArrayOf(99),
                     intArrayOf(0, 1, -1, -1),
                     doubleArrayOf(0.0),
                     DoubleArray(4),
@@ -387,6 +389,94 @@ class PlaneGcsBridgeSmokeTest :
                     DoubleArray(4),
                 )
             }
+            // The JVM is still alive to run this right afterward.
+            val afterward =
+                PlaneGcsSolver.solveDistances(
+                    points = listOf(SketchPoint(0.0, 0.0, fixed = true), SketchPoint(1.0, 0.0)),
+                    constraints = listOf(DistanceConstraint(0, 1, 5.0)),
+                )
+            afterward.status shouldBe SolveStatus.SUCCESS
+        }
+
+        (
+            "the raw native method rejects malformed Parallel/Perpendicular (kind 5/6) input with a " +
+                "Java exception instead of crashing the JVM"
+        ).config(enabled = available) {
+            // See docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc: kinds 5/6 are the
+            // first to use all 4 constraintPoints slots (arity == POINT_SLOTS), so -- unlike kinds
+            // 0-4 -- there is no unused-slot sentinel to check; every slot must be a valid point
+            // index instead.
+            // Four points: P0=(0,0) fixed, P1=(1,0), P2=(0,1), P3=(1,0) -- P3 deliberately at the
+            // SAME coordinates as P1 (but a distinct index), so a leg can be built from two
+            // DISTINCT indices that are nonetheless coordinate-degenerate (see the P3 case below) --
+            // distinct from the index-degenerate case (same index used twice), which is a separate
+            // check covered by the "Degenerate leg" cases.
+            fun solveRaw(
+                kinds: IntArray,
+                cp: IntArray,
+                params: DoubleArray = doubleArrayOf(0.0),
+            ): Int =
+                PlaneGcsBridge.nativeSolveConstraints(
+                    doubleArrayOf(0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0),
+                    intArrayOf(1, 0, 0, 0),
+                    kinds,
+                    cp,
+                    params,
+                    100,
+                    1e-10,
+                    DoubleArray(8),
+                )
+
+            // kind 5 (Parallel) with a -1 in slot 3: arity 4 leaves no unused slot, so -1 is simply
+            // an out-of-range point index here, not a valid sentinel the way it would be for kind
+            // 0-4's unused slots.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(5), intArrayOf(0, 1, 2, -1))
+            }
+            // kind 6 (Perpendicular), same shape.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(6), intArrayOf(0, 1, 2, -1))
+            }
+            // Unknown kind 7 -- one past the last recognized kind (6).
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(7), intArrayOf(0, 1, 2, 0))
+            }
+            // Non-zero constraintParams on kind 5/6 -- both are parameterless.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(5), intArrayOf(0, 1, 2, 0), params = doubleArrayOf(1.0))
+            }
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(6), intArrayOf(0, 1, 2, 0), params = doubleArrayOf(1.0))
+            }
+            // Degenerate leg A (index 0 == index 0) on kind 5 -- rejected by the kind-aware
+            // per-leg distinctness rule, not the (inapplicable here) full-pairwise rule.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(5), intArrayOf(0, 0, 1, 2))
+            }
+            // Identical legs (same unordered pair) on kind 6.
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(6), intArrayOf(0, 1, 0, 1))
+            }
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(6), intArrayOf(0, 1, 1, 0))
+            }
+            // Leg B = indices (1, 3) -- DISTINCT indices (so the index-level distinctness check
+            // above does NOT fire), but P1 and P3 sit at the SAME coordinates (1.0, 0.0) --
+            // rejected by the separate, coordinate-level degenerate-leg check instead. This is the
+            // native-bridge regression guard for ADR-0014's rule 5 / the "distinct indices, same
+            // starting coordinates" hazard PointOnLineConstraint's own KDoc first named (a hazard
+            // this bridge closes by REJECTING up front, unlike PointOnLineConstraint's, which can
+            // only be detected after the fact -- see ADR-0014's "Decision").
+            shouldThrow<IllegalArgumentException> {
+                solveRaw(intArrayOf(5), intArrayOf(0, 2, 1, 3))
+            }
+
+            // A shared endpoint between the two legs (index 1 used as both leg A's end and leg B's
+            // start) must NOT be rejected -- the rectangle-corner case, see ADR-0014's T-C. `0` is
+            // GCS::Success's raw native ordinal (SolveStatus's own KDoc: SUCCESS = 0) -- this test
+            // calls PlaneGcsBridge directly, one layer below SolveStatus.fromNative's conversion.
+            solveRaw(intArrayOf(6), intArrayOf(0, 1, 1, 2)) shouldBe 0
+
             // The JVM is still alive to run this right afterward.
             val afterward =
                 PlaneGcsSolver.solveDistances(

@@ -26,16 +26,19 @@ internal enum class NativeConstraintKind(
     HORIZONTAL(nativeValue = 2, arity = 2),
     VERTICAL(nativeValue = 3, arity = 2),
     POINT_ON_LINE(nativeValue = 4, arity = 3),
+    PARALLEL(nativeValue = 5, arity = 4),
+    PERPENDICULAR(nativeValue = 6, arity = 4),
     ;
 
     internal companion object {
         /**
          * Fixed number of point-index slots reserved per constraint in `constraintPoints`,
          * regardless of that constraint's actual [arity] -- see
-         * [PlaneGcsBridge.nativeSolveConstraints]'s KDoc for why 4 (not the current maximum arity
-         * of 3) was chosen: it is exactly the arity of every constraint type this wave's own
-         * "Folge-Wellen" already names as the next candidates (Perpendicular, L2LAngle, Symmetric),
-         * so choosing it now avoids a second wire-format change purely to widen this constant.
+         * [PlaneGcsBridge.nativeSolveConstraints]'s KDoc for why 4 was chosen: it was sized ahead
+         * of need, back when the maximum arity in use was 3 (`POINT_ON_LINE`), specifically to
+         * cover [PARALLEL]/[PERPENDICULAR] without a second wire-format change -- see
+         * `docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc`, which is the first ADR to
+         * actually spend that headroom (both new kinds fill all four slots).
          */
         const val POINT_SLOTS: Int = 4
 

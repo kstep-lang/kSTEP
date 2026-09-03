@@ -1,0 +1,397 @@
+= ADR-0014: PlaneGCS Parallel and Perpendicular constraints (C-Welle 2c)
+:toc:
+
+== Status
+
+Accepted, implemented. Ships `ParallelConstraint` and `PerpendicularConstraint`
+as `SketchConstraint` implementations, closing the "parallel needs
+`GCS::Line`" gap ADR-0006/ADR-0007 both deferred, and discharging ADR-0007's
+own DoS-measurement obligation for these two kinds specifically (`L2LAngle`
+remains unmeasured).
+
+== Context
+
+ADR-0007 shipped four of PlaneGCS's `Point`-index-only constraint kinds
+(coincidence, horizontal, vertical, point-on-line) and deliberately deferred
+three more: `Perpendicular`, `L2LAngle`, and `Parallel` -- the last of these
+specifically because `GCS::System::addConstraintParallel` has **only** a
+`(Line&, Line&)` overload, and ADR-0007's own "Decision" excluded introducing
+a `GCS::Line`-shaped concept into the Kotlin API until a later wave actually
+needed it.
+
+=== Verified PlaneGCS capability survey
+
+Read directly from the vendored source
+(`third_party/planegcs/GCS.h`/`GCS.cpp`/`Constraints.cpp`/`Geo.h`), not
+assumed:
+
+[cols="3,2,3,1", options="header"]
+|===
+| `GCS::System` method | Arity | Native implementation | Needs `GCS::Line`?
+
+| `addConstraintPerpendicular(Point&, Point&, Point&, Point&)`
+| 4 points
+| `ConstraintPerpendicular(Point&,Point&,Point&,Point&)` --
+  `GCS.h:298-303`, `GCS.cpp:730-742`, `Constraints.cpp:1264-1276`.
+| No -- a genuine 4-`Point` overload exists.
+
+| `addConstraintParallel(Line&, Line&)`
+| --
+| `ConstraintParallel(Line&,Line&)` -- `GCS.h:296`, `GCS.cpp:714-720`.
+  **No `Point`-quadruple overload exists.**
+| Yes, for the call signature only -- see "Decision" below for why this does
+  NOT mean the Kotlin API needs one.
+|===
+
+`GCS::Line` (`Geo.h:194-208`) is a concrete, default-constructible `Curve`
+subclass holding two public `Point p1, p2` members -- nothing more. Two
+further facts, read directly from the source, decide this wave's whole
+design:
+
+* **`ConstraintParallel`'s constructor copies only the eight raw `double*`
+  out of `l1`/`l2` into its own `pvec`** (`Constraints.cpp:1178-1190`) and
+  retains no reference to the `Line` object itself. `System::addConstraint`
+  (`GCS.cpp:557-573`) likewise stores only the `Constraint*` and those same
+  `double*`s. Exactly the same pattern ADR-0006/ADR-0007 already relied on
+  for `ConstraintP2PDistance`/`ConstraintPointOnLine` and every other
+  constraint class in this module.
+* **`Constraint::rescale()` -- which contains the only division in either
+  `ConstraintParallel` or `ConstraintPerpendicular` -- runs exactly once,
+  from the constructor** (`Constraints.cpp:1187`/`:1263`/`:1272`), computing
+  `scale = coef / sqrt((dx1^2+dy1^2) * (dx2^2+dy2^2))` from each leg's
+  *initial* coordinates only. `System::rescaleConstraint`
+  (`GCS.cpp:1790`, declared `GCS.h:539`) is defined but **never called
+  anywhere inside the solver** (verified: `grep -rn rescaleConstraint
+  GCS.cpp GCS.h SubSystem.cpp` finds only its own definition and
+  declaration). `error()` for both kinds (`Constraints.cpp:1206-1213`,
+  `:1292-1299`) is a plain bilinear cross/dot product using that
+  already-fixed `scale` -- division-free at every iteration after
+  construction.
+
+These two facts together mean a `GCS::Line` value built on the stack,
+assigned two already-existing `GCS::Point`s, passed to
+`addConstraintParallel`, and destroyed at the end of the enclosing scope
+(before `solve()` ever runs) is safe: nothing inside PlaneGCS reads it again
+after the constructor returns. Regression-guarded by
+`PlaneGcsConstraintTypesSmokeTest`'s T15/T16, which solve correctly with the
+`GCS::Line` locals long out of scope by the time those assertions run.
+
+=== Scope decision: both types ship together, no split
+
+ADR-0007's task explicitly allowed deferring the harder of the two -- there
+is no harder one. `Perpendicular` is a one-`case` native switch entry (the
+native 4-`Point` overload takes the four points directly). `Parallel` is a
+four-line native `case` (two `GCS::Line` locals, two field assignments
+each). Both share the exact same Kotlin-side validation shape (two legs,
+four indices) and the exact same degeneracy hazard (see below) -- splitting
+them would mean two ADRs, two review loops, and two DoS-measurement passes
+for what is structurally one constraint family.
+
+== Decision
+
+=== No `GCS::Line` concept on the Kotlin side
+
+`ParallelConstraint` and `PerpendicularConstraint` are both flat,
+`Int`-indexed data classes -- `lineAFrom`/`lineATo`/`lineBFrom`/`lineBTo` --
+matching every other `SketchConstraint` in this module. No `Line` value
+type, no `Pair<Int,Int>`. The `GCS::Line` requirement `addConstraintParallel`
+imposes is an artifact of PlaneGCS's C++ overload set, fully absorbed inside
+`kstep_planegcs_bridge.cpp` as two stack-local, immediately-discarded
+adapters -- see "Verified PlaneGCS capability survey" above for why that is
+safe, not merely convenient. `SketchConstraint`'s own KDoc is amended in
+place to state this explicitly (it previously said parallel was out of
+scope specifically because it needed `GCS::Line`; that reasoning still
+describes the C++ signature, but no longer describes a gap in the Kotlin
+API).
+
+A genuine `SketchLine` *entity* type -- as opposed to this index-pair
+encoding -- remains out of scope until C-Welle 3, where it arrives together
+with `Circle`/`Arc` and their own associated constraints (tangency,
+equal-length, symmetry) and, per ADR-0006, a proper request/response data
+model rather than parallel arrays.
+
+=== Wire format: kinds 5 and 6, purely additive
+
+[cols="1,4,1,3,3", options="header"]
+|===
+| Kind | Meaning | Arity | `constraintPoints[4i..4i+3]` | `constraintParams[i]`
+
+| 5 | Parallel (leg A ∥ leg B) | 4 | `[aFrom, aTo, bFrom, bTo]` | `0.0` (unused)
+| 6 | Perpendicular (leg A ⊥ leg B) | 4 | `[aFrom, aTo, bFrom, bTo]` | `0.0` (unused)
+|===
+
+`NativeConstraintKind.POINT_SLOTS` stays at 4 -- ADR-0007 already sized it
+there specifically for this eventual need (its own KDoc named
+`Perpendicular` as the reason), so kinds 5/6 are the first to actually fill
+all four slots rather than requiring a wire-format change to widen the
+constant. The change is purely additive: kinds 0-4 encode and validate
+byte-for-byte identically to ADR-0007; an old encoder against a new
+`.so` and a new encoder against an old `.so` differ only in that the latter
+rejects kinds 5/6 with a clean `IllegalArgumentException` from the existing
+`default:` switch branch. `PlaneGcsBridge` has no consumers outside this
+module and its own tests (unchanged from ADR-0007's own finding, re-checked
+here), and the `.so` and the Kotlin that calls it are built from the same
+Gradle invocation, so there is no version-skew window to design around. The
+three hand-synchronized copies of the wire table
+(`kstep_planegcs_bridge.cpp`'s `switch`, `NativeConstraintKind`,
+`PlaneGcsBridge.nativeSolveConstraints`'s KDoc) were all extended in this
+same commit; this ADR's table above is the authoritative fourth copy, per
+the existing convention.
+
+=== Kind-aware distinctness: shared endpoints must be permitted
+
+Kinds 0-4's existing native validation runs one full pairwise-distinctness
+loop over every used slot. Left unchanged for kinds 5/6, that rule would
+reject `PerpendicularConstraint(0, 1, 1, 2)` -- leg A = P0->P1, leg B =
+P1->P2, sharing P1 -- which is the normal way to express a rectangle corner
+or an L-bracket, and is verified to solve correctly
+(`PlaneGcsConstraintTypesSmokeTest`'s T18: `dot == 0.0` exactly). The
+native validation for arity-4 kinds is therefore a distinct, kind-aware
+rule instead:
+
+. Each leg individually non-degenerate: `aFrom != aTo` and `bFrom != bTo`.
+. The two legs, as unordered pairs, must not be identical: `(a,b,a,b)` and
+  `(a,b,b,a)` are both rejected -- for `Parallel` this makes the residual a
+  constant zero (trivially, permanently satisfied); for `Perpendicular` it
+  makes the residual a constant `dx^2+dy^2 > 0` (permanently unsatisfiable
+  except by collapsing the leg). Both are degenerate encodings of "no real
+  constraint", not legitimate uses.
+. Full pairwise distinctness across all four slots is deliberately **not**
+  applied -- see the T18 regression guard above, which exists specifically
+  so a future "fix" restoring that symmetry with kinds 0-4 fails loudly.
+
+`PlaneGcsSolver.validateConstraint` mirrors this exact rule Kotlin-side via
+a shared `validateFourPointLegs` helper (both new types validate
+identically).
+
+=== Degenerate-leg coordinate check: preventable, not just detectable
+
+Because `rescale()` runs once, at construction, from each leg's *initial*
+coordinates (see "Verified PlaneGCS capability survey"), a leg whose two
+points start at identical coordinates makes that leg's `scale` factor
+infinite and the constraint's residual permanently `NaN` for the entire
+solve -- silently inert, not loudly failing. This is categorically
+different from `PointOnLineConstraint`'s own division-by-near-zero hazard
+(ADR-0007): that one recomputes every iteration and can therefore only be
+*detected after the fact* (its own residual can blow up mid-solve even from
+distinct starting coordinates, e.g. under a simultaneous
+`CoincidenceConstraint`). Here, because the hazard is entirely determined
+by the *starting* configuration, input validation genuinely *closes* the
+gap rather than merely reducing its likelihood: both
+`kstep_planegcs_bridge.cpp` (reading the already-validated, already-pinned
+`coords` array) and `PlaneGcsSolver.validateFourPointLegs` reject a
+coordinate-degenerate leg with `IllegalArgumentException` before any
+`GCS::System` is built. Deliberately exact-equality only, no epsilon
+threshold -- see "No epsilon threshold" below.
+
+Note this is a **different** degeneracy from index-degeneracy (rule 1
+above): two *distinct* point indices can still sit at identical starting
+coordinates (a caller placed two points on top of each other before adding
+a `DistanceConstraint` to pull them apart, say) -- the coordinate check
+catches that case too, not just the same-index case.
+`PlaneGcsBridgeSmokeTest`'s new hostile-input case constructs exactly this
+(two distinct indices, shared coordinates) as its own regression guard,
+distinct from the index-degenerate cases.
+
+=== No epsilon threshold for near-degenerate legs
+
+Exact zero-length legs are rejected (above). Near-degenerate legs (very
+small but nonzero starting separation) are not specially rejected:
+`MAX_ABS_COORDINATE` is `1e9`, where `double` resolution is already around
+`1e-7`, so a single absolute epsilon would be wrong at one end of the
+coordinate range or the other, and a relative epsilon would be a new,
+unverified policy this wave has no measurement basis for introducing. The
+existing `!isFinite` guard in `PlaneGcsSolver.solve` and the native
+`params`-sweep both remain as the backstop for anything that does slip
+through as `NaN`/`Infinity`.
+
+== Consequences
+
+* `ParallelConstraint` and `PerpendicularConstraint` are now
+  `SketchConstraint` implementations, encoded and validated uniformly by
+  `PlaneGcsSolver.solve` alongside every earlier kind.
+* `NativeConstraintKind.POINT_SLOTS` (4) is now fully used for the first
+  time -- no further widening is anticipated without a genuinely
+  higher-arity kind.
+* `MAX_POINTS`/`MAX_CONSTRAINTS`/`MAX_ITERATIONS` are unchanged (`64` /
+  `128` / `1000`) -- see "Security" below for the JNI-measured numbers this
+  rests on.
+* `SketchConstraint`'s class KDoc and ADR-0006/ADR-0007's Folge-Wellen
+  tables are corrected in place (see "Folge-Wellen" below) -- both
+  previously stated that parallel specifically needed a `GCS::Line`
+  concept on the Kotlin side and was deferred to C-Welle 3 for that reason.
+  That claim is falsified by this wave's finding above and would actively
+  mislead a future C-Welle 3 implementer if left uncorrected.
+
+=== Security
+
+[cols="2,4", options="header"]
+|===
+| Concern | Handling in this wave
+
+| DoS -- measured through the real JNI path, not a standalone probe
+| Three topologies, each at the full `MAX_POINTS`/`MAX_CONSTRAINTS`/
+  `MAX_ITERATIONS` caps (64 / 128 / 1000), measured by
+  `PlaneGcsConstraintTypesSmokeTest`'s T24a/T24b/T24c against the actual
+  built `.so` through `PlaneGcsSolver.solve` (not a bare `GCS::System`
+  probe) during a full, `--rerun-tasks --no-build-cache` `./gradlew check`
+  run of this wave:
++
+--
+* Dense, randomly-connected **Parallel-only** graph (128 `ParallelConstraint`s,
+  `java.util.Random(3)`, each a random pairwise-distinct-leg quad among 64
+  points): **15ms**, `CONVERGED`.
+* Dense, randomly-connected **Perpendicular-only** graph (same shape,
+  `java.util.Random(4)`): **27ms**, `CONVERGED`.
+* Parallel/Perpendicular **blended 50/50 into ADR-0006's own documented
+  worst-case topology** (a dense, mutually inconsistent `DistanceConstraint`
+  graph, `java.util.Random(5)`, alternating `Parallel`/`Perpendicular` over
+  the other half of the constraint budget): **499ms**, `FAILED`.
+--
++
+The third figure is the one with real signal: it is close to, but still
+  comfortably under, ADR-0006's own 557ms worst-case measurement for the
+  distance-only topology `MAX_POINTS` was originally sized against, and
+  this module's one-second design budget. **This discharges ADR-0007's own
+  stated obligation** ("a follow-up wave should run the full measurement
+  plan... particularly before Perpendicular/L2LAngle... are added") for
+  `Perpendicular` and `Parallel` specifically. `L2LAngle` remains
+  unmeasured and out of scope for this wave.
+
+| DoS -- why Parallel/Perpendicular are structurally cheaper, not just
+  measured lucky
+| Both residuals (`Constraints.cpp:1206-1213`, `:1292-1299`) are bilinear
+  polynomials in the coordinates against a `scale` fixed once at
+  construction -- no `sqrt` at iteration time (unlike `DistanceConstraint`)
+  and no per-iteration division (unlike `PointOnLineConstraint`). Unlike
+  `CoincidenceConstraint` (two native `ConstraintEqual` rows per Kotlin
+  constraint, ADR-0007), both new kinds are **exactly one** native
+  `Constraint*` per Kotlin constraint (`GCS.cpp:714-720`, `:730-742`) -- no
+  row-count asymmetry to account for in `MAX_CONSTRAINTS`'s budget.
+
+| Degenerate-leg hazard (`rescale()`'s construction-time division)
+| **Verified finding** (see "Decision" above): a zero-length leg at the
+  *initial* coordinates makes the constraint's `scale` infinite and its
+  residual permanently `NaN`. Rejected up front by both
+  `kstep_planegcs_bridge.cpp` and `PlaneGcsSolver.validateFourPointLegs`,
+  before any `GCS::System` is built -- unlike `PointOnLineConstraint`'s
+  analogous hazard (ADR-0007), which can only be detected after an
+  otherwise-successful-looking solve because it depends on iteration-time
+  coordinates, this one is fully preventable because it depends only on
+  the starting configuration.
+
+| Native input validation (kind-aware distinctness, new for this wave)
+| Kinds 5/6 use a kind-aware validation rule instead of kinds 0-4's full
+  pairwise-distinctness loop -- see "Decision" above for the exact rule and
+  why a naive full-pairwise rule would wrongly reject the rectangle-corner
+  case. Covered by both a positive regression guard (T18: shared endpoint
+  solves correctly) and negative ones (`PlaneGcsBridgeSmokeTest`'s new
+  hostile-input case: index-degenerate legs, coordinate-degenerate legs
+  with distinct indices, identical legs in both orderings, an unrecognized
+  kind, a nonzero parameter on a parameterless kind, and a `-1` in slot 3 --
+  which, unlike kinds 0-4's unused-slot sentinel, is simply an out-of-range
+  point index here since arity 4 leaves no unused slot).
+
+| Overflow / resource leaks / use-after-free / logging / license provenance
+| Unchanged from ADR-0006/ADR-0007: same RAII array guards, same
+  once-at-final-size `params`/`distances` vectors, same no-persistent-state
+  design, same `kotlin-logging`-only logging discipline, no new vendored
+  files (`ConstraintParallel`/`ConstraintPerpendicular` and both
+  `addConstraint*` overloads used here were already part of the commit
+  ADR-0006 vendored -- verified via `git diff --stat -- '*third_party*'
+  NOTICE` returning empty for this wave).
+|===
+
+=== Stolperfallen (recorded so a future wave does not rediscover them)
+
+. **Direction is irrelevant for both kinds.** Swapping `lineAFrom`/
+  `lineATo` (or the B pair) negates that leg's `dx`/`dy`, flipping the
+  residual's sign but not its zero set. `ParallelConstraint` accepts
+  anti-parallel (180 degree) solutions as equally valid to same-direction
+  (0 degree) ones; `PerpendicularConstraint` accepts both +90 and -90
+  degree relative orientations. Neither type's KDoc or test suite asserts
+  a specific direction for this reason.
+. **Leg length is not preserved by either constraint.** Both residuals are
+  zero regardless of either leg's length -- `PlaneGcsConstraintTypesSmokeTest`
+  observed a leg's length change during T16's underdetermined case (both
+  legB endpoints free, only y-coordinates adjusted, cross product driven to
+  exactly `0.0`). A caller needing a fixed length must add a
+  `DistanceConstraint`.
+. **A contradictory Parallel+Perpendicular system can report `SUCCESS`, not
+  `FAILED`** -- unlike `CoincidenceConstraint`'s/`PointOnLineConstraint`'s
+  own contradictory-system test cases (ADR-0007's T3/T10, which leave the
+  free point at its starting position and report `FAILED`). T20's real run
+  (leg A parallel AND perpendicular to leg B) resolved by collapsing leg B
+  to a single point (both endpoints converged to the exact same
+  coordinates) and reported `SUCCESS` -- a legitimate least-squares minimum
+  reachable by shrinking a leg to zero length. Do not copy T3/T10's
+  `FAILED` expectation onto a Parallel/Perpendicular contradiction without
+  re-measuring.
+. **Shared endpoints between the two legs are supported and intended** --
+  see "Decision" above. Do not "fix" the kind-aware distinctness rule into
+  full pairwise distinctness; T18 exists specifically to catch that
+  regression.
+. **`GCS::Line` locals in the native bridge must be lvalues, stack-local,
+  and never stored anywhere that outlives the `switch` case.**
+  `addConstraintParallel(Line&, Line&)` takes non-const references, so a
+  temporary cannot bind -- declare named locals. Do not add them to any
+  container: that would wrongly suggest a lifetime requirement the
+  vendored source does not have (see "Verified PlaneGCS capability
+  survey").
+. **One native row per Kotlin constraint for both kinds** -- no
+  `CoincidenceConstraint`-style doubling to account for in
+  `MAX_CONSTRAINTS`'s row-count budget.
+. `system.debugMode = GCS::NoDebug`, `sketchSizeMultiplier` at its default,
+  the `params`/`distances` once-at-final-size invariant, and the
+  divisional (not multiplicative) `jsize` overflow guard are all unchanged
+  from ADR-0006/ADR-0007 and were not touched by this wave.
+. `nm -D --defined-only libkstep_planegcs_bridge.so | grep kstep` still
+  shows exactly the same two exported symbols
+  (`nativePlaneGcsSourceCommit`, `nativeSolveConstraints`) as ADR-0007 left
+  it -- adding kinds 5/6 is a runtime `switch` change, not a JNI signature
+  change, so no new symbol is expected or was found.
+
+== Rejected alternatives
+
+* **Introduce a `SketchLine`/`Line` value type now**, alongside
+  `ParallelConstraint`. Rejected: the verified capability survey above
+  shows the `GCS::Line` requirement is fully absorbable natively, so
+  introducing a Kotlin-side line concept here would export an upstream C++
+  overload-set accident as a kSTEP public type, and would likely need
+  redesigning anyway once C-Welle 3's genuine `SketchLine` entity (with its
+  own request/response data model, per ADR-0006) arrives.
+* **Split this wave**, shipping `Perpendicular` alone and deferring
+  `Parallel` again. Rejected: no effort-delta justifies it once the
+  `GCS::Line` lifetime question is verified rather than assumed -- see
+  "Scope decision" above.
+* **An epsilon threshold for near-degenerate (not exactly zero-length)
+  legs.** Rejected -- see "No epsilon threshold" above: no measurement
+  basis for picking one, and the existing finite-result guards already
+  backstop anything that slips through.
+* **Raising or lowering `MAX_POINTS`/`MAX_CONSTRAINTS`/`MAX_ITERATIONS`
+  for this wave.** Rejected: the measured numbers (see "Security" above)
+  show these kinds are structurally cheaper than what the existing caps
+  were already sized against, and blending them into the documented worst
+  case moves it by single-digit percent, not enough to justify touching a
+  cap that three prior ADRs have already carefully derived.
+
+== Folge-Wellen (updates to ADR-0006/ADR-0007's tables)
+
+ADR-0006's Folge-Wellen "C-Welle 2b" row previously said *"Parallel is
+deferred further, to C-Welle 3, since it is the one candidate needing
+`GCS::Line`"* -- corrected in place: Parallel shipped in this wave
+(C-Welle 2c) via a bridge-internal temporary `Line`, per this ADR. C-Welle
+2b's remaining scope (`L2LAngle`/`P2PAngle`, `CoordinateX`/`CoordinateY`,
+`PointOnPerpBisector`, `Symmetric`) is unaffected.
+
+ADR-0007's own "Status" and closing Folge-Wellen paragraph carried the same
+claim (*"parallel genuinely needs `GCS::Line`"*) -- amended in place with a
+pointer to this ADR, without rewriting ADR-0007's own scope reasoning
+(which was correct for its wave; this is an addendum, not a revision).
+
+C-Welle 3 (sketch entities: `Line`/`Circle`/`Arc`) remains the natural home
+for a genuine `SketchLine` type, arriving together with tangency,
+equal-length, and equal-radius constraints and a proper request/response
+data model -- not motivated by any remaining gap in `Parallel`/
+`Perpendicular` support, both of which are now fully served by the
+index-pair encoding this ADR ships.

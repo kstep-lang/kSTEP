@@ -375,6 +375,101 @@ object PlaneGcsSolver {
                     "constraints[$index].lineFrom must differ from lineTo (index ${constraint.lineFrom})"
                 }
             }
+            is ParallelConstraint -> {
+                validateFourPointLegs(
+                    index = index,
+                    kindName = "ParallelConstraint",
+                    aFrom = constraint.lineAFrom,
+                    aTo = constraint.lineATo,
+                    bFrom = constraint.lineBFrom,
+                    bTo = constraint.lineBTo,
+                    points = points,
+                )
+            }
+            is PerpendicularConstraint -> {
+                validateFourPointLegs(
+                    index = index,
+                    kindName = "PerpendicularConstraint",
+                    aFrom = constraint.lineAFrom,
+                    aTo = constraint.lineATo,
+                    bFrom = constraint.lineBFrom,
+                    bTo = constraint.lineBTo,
+                    points = points,
+                )
+            }
+        }
+    }
+
+    /**
+     * Shared validation for [ParallelConstraint] and [PerpendicularConstraint] -- both are
+     * structurally identical (two legs, four point indices), and both carry the exact same
+     * degeneracy hazards; see either type's KDoc for the full reasoning behind each rule below.
+     *
+     * Order of checks matters: range first (so later checks can safely index into [points]),
+     * then index-level degeneracy (leg self-distinctness, then cross-leg identical-pair
+     * rejection), then finally the coordinate-level check (rule 5) -- which is the module's first
+     * constraint validation that inspects point *coordinates* rather than only indices, and
+     * therefore must run after every earlier check already guarantees valid, in-range indices.
+     */
+    private fun validateFourPointLegs(
+        index: Int,
+        kindName: String,
+        aFrom: Int,
+        aTo: Int,
+        bFrom: Int,
+        bTo: Int,
+        points: List<SketchPoint>,
+    ) {
+        requireInRange(index, aFrom, "lineAFrom", points)
+        requireInRange(index, aTo, "lineATo", points)
+        requireInRange(index, bFrom, "lineBFrom", points)
+        requireInRange(index, bTo, "lineBTo", points)
+
+        // Rule 2: each leg needs two distinct points -- a self-referencing leg (aFrom == aTo) is
+        // degenerate regardless of the other leg.
+        require(aFrom != aTo) {
+            "constraints[$index] ($kindName).lineAFrom must differ from lineATo (index $aFrom)"
+        }
+        require(bFrom != bTo) {
+            "constraints[$index] ($kindName).lineBFrom must differ from lineBTo (index $bFrom)"
+        }
+
+        // Rule 3 (deliberately NOT full pairwise distinctness): a shared endpoint between the two
+        // legs (e.g. aTo == bFrom) is explicitly PERMITTED -- it is the normal way to express a
+        // rectangle corner or a chamfer (see ParallelConstraint/PerpendicularConstraint's KDoc and
+        // the T18/T23 regression tests). Do not "fix" this into requiring all four indices
+        // pairwise distinct -- that would reject the single most common real sketch shape this
+        // constraint type exists for.
+
+        // Rule 4: the two legs, as unordered index pairs, must not be identical -- (a,b,a,b) and
+        // (a,b,b,a) both make the residual a constant (see each type's KDoc for why), a degenerate
+        // encoding of "no constraint at all" rather than a legitimate use.
+        val sameOrder = aFrom == bFrom && aTo == bTo
+        val swappedOrder = aFrom == bTo && aTo == bFrom
+        require(!sameOrder && !swappedOrder) {
+            "constraints[$index] ($kindName) references the same leg twice as lineA and lineB " +
+                "(indices [$aFrom, $aTo])"
+        }
+
+        // Rule 5: neither leg may start at zero length -- PlaneGCS's Constraint::rescale() runs
+        // exactly once, in the constructor, from these INITIAL coordinates (see
+        // ParallelConstraint's KDoc for the full citation and reasoning); a zero-length leg here
+        // makes the constraint permanently NaN for the whole solve rather than merely failing to
+        // converge, so it is rejected loudly here instead. Exact equality only, deliberately no
+        // epsilon threshold -- see docs/adr/ADR-0014's "measured, bounded decision" section for why.
+        val pa = points[aFrom]
+        val pb = points[aTo]
+        require(pa.x != pb.x || pa.y != pb.y) {
+            "constraints[$index] ($kindName).lineAFrom/lineATo (indices $aFrom/$aTo) start at " +
+                "identical coordinates ($pa) -- PlaneGCS computes this constraint's scale factor " +
+                "once, from these initial coordinates, and a zero-length leg makes it infinite"
+        }
+        val pc = points[bFrom]
+        val pd = points[bTo]
+        require(pc.x != pd.x || pc.y != pd.y) {
+            "constraints[$index] ($kindName).lineBFrom/lineBTo (indices $bFrom/$bTo) start at " +
+                "identical coordinates ($pc) -- PlaneGCS computes this constraint's scale factor " +
+                "once, from these initial coordinates, and a zero-length leg makes it infinite"
         }
     }
 
@@ -392,6 +487,8 @@ object PlaneGcsSolver {
             is HorizontalConstraint -> NativeConstraintKind.HORIZONTAL
             is VerticalConstraint -> NativeConstraintKind.VERTICAL
             is PointOnLineConstraint -> NativeConstraintKind.POINT_ON_LINE
+            is ParallelConstraint -> NativeConstraintKind.PARALLEL
+            is PerpendicularConstraint -> NativeConstraintKind.PERPENDICULAR
         }
 
     private fun SketchConstraint.pointIndices(): IntArray =
@@ -401,6 +498,8 @@ object PlaneGcsSolver {
             is HorizontalConstraint -> intArrayOf(pointA, pointB)
             is VerticalConstraint -> intArrayOf(pointA, pointB)
             is PointOnLineConstraint -> intArrayOf(point, lineFrom, lineTo)
+            is ParallelConstraint -> intArrayOf(lineAFrom, lineATo, lineBFrom, lineBTo)
+            is PerpendicularConstraint -> intArrayOf(lineAFrom, lineATo, lineBFrom, lineBTo)
         }
 
     private fun SketchConstraint.parameter(): Double =
@@ -410,6 +509,8 @@ object PlaneGcsSolver {
             is HorizontalConstraint -> NativeConstraintKind.UNUSED_PARAM
             is VerticalConstraint -> NativeConstraintKind.UNUSED_PARAM
             is PointOnLineConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is ParallelConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is PerpendicularConstraint -> NativeConstraintKind.UNUSED_PARAM
         }
 
     private fun encodeConstraints(constraints: List<SketchConstraint>): EncodedConstraints {

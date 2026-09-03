@@ -167,12 +167,16 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativePlaneGcsSourceCommit(JN
 // Kind values for constraintKinds -- MUST match dev.kstep.constraints.planegcs.NativeConstraintKind
 // and PlaneGcsBridge.nativeSolveConstraints's KDoc table exactly. Three independent, hand-
 // synchronized copies of the same contract (this file, that enum, and that KDoc table) -- see
-// docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc for the authoritative table.
+// docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc (kinds 0-4) and
+// docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc (kinds 5-6) for the authoritative
+// tables.
 constexpr jint kKindP2PDistance = 0;
 constexpr jint kKindP2PCoincident = 1;
 constexpr jint kKindHorizontal = 2;
 constexpr jint kKindVertical = 3;
 constexpr jint kKindPointOnLine = 4;
+constexpr jint kKindParallel = 5;
+constexpr jint kKindPerpendicular = 6;
 
 // Fixed number of point-index slots reserved per constraint in constraintPoints, regardless of a
 // given kind's actual arity -- see PlaneGcsBridge.nativeSolveConstraints's KDoc and
@@ -308,6 +312,10 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                 case kKindPointOnLine:
                     arity = 3;
                     break;
+                case kKindParallel:
+                case kKindPerpendicular:
+                    arity = 4;
+                    break;
                 default:
                     throwJava(
                         env,
@@ -342,17 +350,94 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                     return -1;
                 }
             }
-            // Pairwise-distinct check over exactly the used slots -- covers P2P/H/V's single pair
-            // and PointOnLine's three-way distinctness (point/lineFrom/lineTo) with one loop.
-            for (int a = 0; a < arity; ++a) {
-                for (int b = a + 1; b < arity; ++b) {
-                    if (slotValues[a] == slotValues[b]) {
-                        throwJava(
-                            env,
-                            "java/lang/IllegalArgumentException",
-                            "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
-                                ") references the same point twice (index " + std::to_string(slotValues[a]) + ")");
-                        return -1;
+            if (arity == 4) {
+                // Parallel/Perpendicular (kind 5/6, see docs/adr/ADR-0014-planegcs-parallel-and-
+                // perpendicular.adoc): each LEG ([0,1] = A, [2,3] = B) must individually be
+                // non-degenerate, but the two legs ARE allowed to share an endpoint -- that is the
+                // rectangle-corner/chamfer case (verified to solve correctly, see ADR-0014's T-C /
+                // PlaneGcsConstraintTypesSmokeTest's T18). Full pairwise distinctness (the kinds
+                // 0-4 rule below) would wrongly reject that case, so it is NOT applied here.
+                if (slotValues[0] == slotValues[1]) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                            ") has a degenerate leg A: lineAFrom == lineATo (index " +
+                            std::to_string(slotValues[0]) + ")");
+                    return -1;
+                }
+                if (slotValues[2] == slotValues[3]) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                            ") has a degenerate leg B: lineBFrom == lineBTo (index " +
+                            std::to_string(slotValues[2]) + ")");
+                    return -1;
+                }
+                // Both legs naming the same unordered point pair is a second, distinct degeneracy:
+                // Parallel becomes a constant-zero residual (trivially, permanently satisfied),
+                // Perpendicular becomes a constant-positive residual (permanently unsatisfiable
+                // except by collapsing the leg) -- see ParallelConstraint/PerpendicularConstraint's
+                // KDoc. Reject both orderings (aFrom,aTo,bFrom,bTo) == (x,y,x,y) or (x,y,y,x).
+                bool sameOrder = slotValues[0] == slotValues[2] && slotValues[1] == slotValues[3];
+                bool swappedOrder = slotValues[0] == slotValues[3] && slotValues[1] == slotValues[2];
+                if (sameOrder || swappedOrder) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                            ") references the same leg twice as lineA and lineB (indices [" +
+                            std::to_string(slotValues[0]) + ", " + std::to_string(slotValues[1]) + "])");
+                    return -1;
+                }
+                // Degenerate-leg COORDINATE check: PlaneGCS's Constraint::rescale() for both kinds
+                // runs exactly once, in the constructor, from the leg's INITIAL coordinates (see
+                // ADR-0014) -- a leg whose two points start at identical coordinates makes the
+                // constraint's scale factor infinite and its residual permanently NaN for the
+                // whole solve, silently inert rather than loudly failing. Rejected here, before any
+                // GCS::System is built. Exact equality only, no epsilon -- see ADR-0014 for why.
+                double aFromX = coordsGuard.elements()[2 * slotValues[0]];
+                double aFromY = coordsGuard.elements()[2 * slotValues[0] + 1];
+                double aToX = coordsGuard.elements()[2 * slotValues[1]];
+                double aToY = coordsGuard.elements()[2 * slotValues[1] + 1];
+                if (aFromX == aToX && aFromY == aToY) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                            ") has leg A starting at identical coordinates (indices " +
+                            std::to_string(slotValues[0]) + "/" + std::to_string(slotValues[1]) + ")");
+                    return -1;
+                }
+                double bFromX = coordsGuard.elements()[2 * slotValues[2]];
+                double bFromY = coordsGuard.elements()[2 * slotValues[2] + 1];
+                double bToX = coordsGuard.elements()[2 * slotValues[3]];
+                double bToY = coordsGuard.elements()[2 * slotValues[3] + 1];
+                if (bFromX == bToX && bFromY == bToY) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                            ") has leg B starting at identical coordinates (indices " +
+                            std::to_string(slotValues[2]) + "/" + std::to_string(slotValues[3]) + ")");
+                    return -1;
+                }
+            } else {
+                // Pairwise-distinct check over exactly the used slots -- covers P2P/H/V's single
+                // pair and PointOnLine's three-way distinctness (point/lineFrom/lineTo) with one
+                // loop. NOT applied to kind 5/6 (arity 4) -- see the kind-aware block above.
+                for (int a = 0; a < arity; ++a) {
+                    for (int b = a + 1; b < arity; ++b) {
+                        if (slotValues[a] == slotValues[b]) {
+                            throwJava(
+                                env,
+                                "java/lang/IllegalArgumentException",
+                                "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                                    ") references the same point twice (index " +
+                                    std::to_string(slotValues[a]) + ")");
+                            return -1;
+                        }
                     }
                 }
             }
@@ -490,6 +575,44 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                     jint lp1 = pointsGuard.elements()[base + 1];
                     jint lp2 = pointsGuard.elements()[base + 2];
                     system.addConstraintPointOnLine(points[p], points[lp1], points[lp2], tagId);
+                    break;
+                }
+                case kKindParallel: {
+                    jint a1 = pointsGuard.elements()[base];
+                    jint a2 = pointsGuard.elements()[base + 1];
+                    jint b1 = pointsGuard.elements()[base + 2];
+                    jint b2 = pointsGuard.elements()[base + 3];
+                    // PlaneGCS offers NO Point-quadruple overload of addConstraintParallel
+                    // (GCS.h:296) -- only (Line&, Line&). These two GCS::Line values are therefore
+                    // built here, on the stack, purely to satisfy that signature, and are destroyed
+                    // at the end of this scope (right after addConstraintParallel returns). That is
+                    // safe and verified, not assumed: ConstraintParallel's constructor
+                    // (third_party/planegcs/Constraints.cpp:1178-1190) copies ONLY the eight raw
+                    // double* out of l1/l2 into its own pvec, and System::addConstraint
+                    // (GCS.cpp:557-573) stores only the Constraint* and those same double*s --
+                    // neither retains the Line or its Points. Those double*s point into `params`,
+                    // which outlives this entire solve and is never resized (see the "Build the
+                    // solver's own storage" comment above). Regression-guarded by
+                    // PlaneGcsConstraintTypesSmokeTest's T15/T16, which solve correctly with the
+                    // Line long since out of scope. This is exactly why no Kotlin-side Line concept
+                    // was introduced -- see docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc.
+                    GCS::Line lineA;
+                    lineA.p1 = points[a1];
+                    lineA.p2 = points[a2];
+                    GCS::Line lineB;
+                    lineB.p1 = points[b1];
+                    lineB.p2 = points[b2];
+                    system.addConstraintParallel(lineA, lineB, tagId);
+                    break;
+                }
+                case kKindPerpendicular: {
+                    jint a1 = pointsGuard.elements()[base];
+                    jint a2 = pointsGuard.elements()[base + 1];
+                    jint b1 = pointsGuard.elements()[base + 2];
+                    jint b2 = pointsGuard.elements()[base + 3];
+                    // Perpendicular, unlike Parallel, has a native four-Point overload
+                    // (GCS.h:298-303) -- no temporary GCS::Line needed.
+                    system.addConstraintPerpendicular(points[a1], points[a2], points[b1], points[b2], tagId);
                     break;
                 }
                 default:

@@ -36,6 +36,17 @@ object PlaneGcsBridge {
      * | 2    | horizontal (equal Y)        | 2     | `[a, b, -1, -1]`                          | `0.0` (unused)         |
      * | 3    | vertical (equal X)          | 2     | `[a, b, -1, -1]`                          | `0.0` (unused)         |
      * | 4    | point-on-(infinite)line     | 3     | `[point, lineFrom, lineTo, -1]`           | `0.0` (unused)         |
+     * | 5    | parallel (leg A par. leg B) | 4     | `[aFrom, aTo, bFrom, bTo]`                | `0.0` (unused)         |
+     * | 6    | perpendicular (leg A perp. leg B) | 4 | `[aFrom, aTo, bFrom, bTo]`             | `0.0` (unused)         |
+     *
+     * Kinds 5 and 6 are the first to use all four `constraintPoints` slots -- see
+     * [dev.kstep.constraints.planegcs.NativeConstraintKind.POINT_SLOTS] for why 4 was chosen ahead
+     * of that need. Unlike kinds 0-4, the distinctness check kinds 5/6 apply over their four slots
+     * is NOT full pairwise distinctness: each leg (`[aFrom, aTo]` and `[bFrom, bTo]`) must
+     * individually be non-degenerate, but the two legs are explicitly allowed to share an endpoint
+     * (the common rectangle-corner/chamfer shape) -- see
+     * `docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc` for the full rule and why a
+     * naive full-pairwise rule would reject that shape.
      *
      * Every slot beyond a kind's arity MUST be exactly `-1`, and every unused parameter MUST be
      * exactly `0.0` -- both checked natively and rejected with `IllegalArgumentException` rather

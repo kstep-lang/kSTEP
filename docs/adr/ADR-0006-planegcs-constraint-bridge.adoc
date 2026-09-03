@@ -622,21 +622,24 @@ from the separate planning-phase run described above.
 | Wave | Content
 
 | C-Welle 2
-| **Partially implemented -- see ADR-0007.** Coincidence, horizontal/
-  vertical, and point-on-line shipped as `CoincidenceConstraint`/
-  `HorizontalConstraint`/`VerticalConstraint`/`PointOnLineConstraint` on
-  the same stateless points-only API. Perpendicular, parallel, and
-  angle-between-two-point-pairs remain, continued as C-Welle 2b below
-  (parallel specifically needs `GCS::Line` and may end up folded into
-  C-Welle 3 instead).
+| **Implemented across two follow-up ADRs.** ADR-0007 shipped coincidence,
+  horizontal/vertical, and point-on-line as `CoincidenceConstraint`/
+  `HorizontalConstraint`/`VerticalConstraint`/`PointOnLineConstraint`;
+  ADR-0014 shipped perpendicular and parallel as `PerpendicularConstraint`/
+  `ParallelConstraint` (C-Welle 2c) on the same stateless points-only API --
+  including `Parallel`, despite `addConstraintParallel` taking only a
+  `(Line&, Line&)` overload: ADR-0014 verified that requirement is fully
+  absorbable as a bridge-internal, stack-local `GCS::Line` adapter, so no
+  Kotlin-side line concept was needed after all. Angle-between-two-point-
+  pairs remains, continued as C-Welle 2b below.
 
 | C-Welle 2b
-| Remaining C-Welle 2 scope: perpendicular, angle-between-two-point-pairs
+| Remaining C-Welle 2 scope: angle-between-two-point-pairs
   (`L2LAngle`/`P2PAngle`), `CoordinateX`/`CoordinateY`,
-  `PointOnPerpBisector`, `Symmetric` -- plus the full DoS measurement
-  matrix ADR-0007's own Security section documents as not yet completed
-  for the constraint types that wave already added. Parallel is deferred
-  further, to C-Welle 3, since it is the one candidate needing `GCS::Line`.
+  `PointOnPerpBisector`, `Symmetric`. `L2LAngle` specifically still carries
+  the unmeasured-DoS-cost gap ADR-0007's Security section first flagged --
+  ADR-0014 discharged that same obligation for `Perpendicular`/`Parallel`,
+  not for `L2LAngle`.
 
 | C-Welle 3
 | Sketch entities -- `Line`, `Circle`, `Arc` (PlaneGCS's own
