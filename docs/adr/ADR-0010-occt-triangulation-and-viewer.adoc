@@ -547,7 +547,10 @@ wave's actual surface:
 | Wave | Content
 
 | V-2
-| Camera: arcball orbit, pan, zoom, a "fit" command.
+| Camera: arcball orbit, pan, zoom, a "fit" command. Orbit + zoom + a
+  reset-to-fit command shipped in kSTEP's viewer-camera-interaction wave
+  (see docs/adr/ADR-0012-viewer-camera-interaction.adoc); pan remains
+  deferred (that ADR's own Folge-Wellen, V-2b).
 
 | V-3
 | A real CAD-silhouette edge overlay via

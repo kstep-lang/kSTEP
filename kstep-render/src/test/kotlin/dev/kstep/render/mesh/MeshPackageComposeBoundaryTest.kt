@@ -10,7 +10,7 @@ import java.io.File
  * docs/adr/ADR-0011-headless-preview-rendering.adoc's package-boundary decision (inherited from
  * ADR-0010's original `kstep-viewer` rule). This is what lets [IsometricProjectionTest] test the
  * projection math with no window, and what lets `TriangleRasterizerTest`/`RenderOcctPipelineTest`
- * reuse the exact same [IsometricProjection.project] call the real Compose canvas (in
+ * reuse the exact same [MeshProjection.project] call the real Compose canvas (in
  * `kstep-viewer`) uses.
  *
  * The boundary this test enforces now covers this whole module (`kstep-render`), not just this
@@ -31,9 +31,10 @@ class MeshPackageComposeBoundaryTest :
             // Regression guard for the "scans 0 files and is trivially green" failure mode: after
             // the kstep-viewer -> kstep-render package move, a wrong `meshDir` path here would
             // silently pass with an empty file list instead of failing loudly. Vec3.kt,
-            // ProjectedTriangle.kt, IsometricProjection.kt are the three files this package has
-            // held since ADR-0010; this asserts the scan actually found them.
-            (kotlinFiles.size >= 3) shouldBe true
+            // ProjectedTriangle.kt, MeshProjection.kt (renamed from IsometricProjection.kt in
+            // kSTEP's viewer-camera-interaction wave) and, since that same wave, Camera.kt are the
+            // (at least) four files this package holds; this asserts the scan actually found them.
+            (kotlinFiles.size >= 4) shouldBe true
 
             val offendingLines =
                 kotlinFiles.flatMap { file ->

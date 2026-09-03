@@ -3,7 +3,7 @@ package dev.kstep.render
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.render.image.TriangleRasterizer
-import dev.kstep.render.mesh.IsometricProjection
+import dev.kstep.render.mesh.MeshProjection
 import dev.kstep.render.svg.TriangleSvgWriter
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
@@ -23,7 +23,7 @@ private const val MIN_PLATEAU_PIXELS = 500
 
 /**
  * The real, end-to-end proof: `OcctKernel.makeBox(...)` -> [dev.kstep.geometry.OcctShape.triangulate]
- * -> [IsometricProjection.project] -> [TriangleRasterizer.render]/[TriangleSvgWriter.render],
+ * -> [MeshProjection.project] -> [TriangleRasterizer.render]/[TriangleSvgWriter.render],
  * against a real OCCT 7.9.2 install. `TriangleRasterizerTest` proves the same pipeline's
  * math/rendering half against a hand-written fixture, independent of OCCT; this suite is the one
  * that proves the native bridge's output actually flows through unmodified, into BOTH the raster
@@ -75,7 +75,7 @@ class RenderOcctPipelineTest :
             enabled = available,
         ) {
             val mesh = OcctKernel.makeBox(10.0, 20.0, 30.0).use { it.triangulate() }
-            val triangles = IsometricProjection.project(mesh, WIDTH.toDouble(), HEIGHT.toDouble())
+            val triangles = MeshProjection.project(mesh, WIDTH.toDouble(), HEIGHT.toDouble())
             triangles.isNotEmpty() shouldBe true
             val image = TriangleRasterizer.render(triangles, WIDTH, HEIGHT)
 
@@ -95,7 +95,7 @@ class RenderOcctPipelineTest :
             enabled = available,
         ) {
             val mesh = OcctKernel.makeBox(10.0, 20.0, 30.0).use { it.triangulate() }
-            val triangles = IsometricProjection.project(mesh, WIDTH.toDouble(), HEIGHT.toDouble())
+            val triangles = MeshProjection.project(mesh, WIDTH.toDouble(), HEIGHT.toDouble())
             val svg = TriangleSvgWriter.render(triangles, WIDTH, HEIGHT)
 
             svg shouldContain "<svg"

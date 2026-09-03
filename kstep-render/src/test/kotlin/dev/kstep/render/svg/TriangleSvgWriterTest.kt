@@ -32,7 +32,7 @@ class TriangleSvgWriterTest :
 
         "triangles are painted in input order, not re-sorted by depth" {
             // Deliberately out of depth order -- TriangleSvgWriter must NOT re-sort (painter's
-            // algorithm order is IsometricProjection's responsibility, not this writer's).
+            // algorithm order is MeshProjection's responsibility, not this writer's).
             val triangles = listOf(triangle(depth = 3.0, shade = 0.1), triangle(depth = 1.0, shade = 0.9))
             val svg = TriangleSvgWriter.render(triangles, 200, 100)
             // gray = (shade * 255.0).toInt(): 0.1 -> 25 (0x19), 0.9 -> 229 (0xe5).

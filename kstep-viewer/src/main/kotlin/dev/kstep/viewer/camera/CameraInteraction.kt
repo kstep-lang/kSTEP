@@ -1,0 +1,87 @@
+package dev.kstep.viewer.camera
+
+import dev.kstep.render.mesh.Camera
+import kotlin.math.pow
+
+/**
+ * Pure, Compose-free translation from raw pointer/scroll deltas into a new [ViewerCameraState].
+ * No `androidx.compose.*` import anywhere in this file -- deliberately testable (see
+ * `CameraInteractionTest`) without a window or even Compose on the test classpath, the same
+ * reasoning `dev.kstep.render.mesh`'s package-boundary test applies to the projection math this
+ * feeds into ([dev.kstep.render.mesh.MeshProjection]).
+ */
+object CameraInteraction {
+    /** Degrees of orbit per pixel of drag. Tuned by feel, not derived from anything physical --
+     *  a full canvas-width drag (a few hundred pixels) should orbit noticeably more than a few
+     *  degrees, but a single accidental-jitter pixel should not visibly move the camera. */
+    private const val DEG_PER_PIXEL = 0.5
+
+    /** Zoom multiplier applied per scroll "notch" (one unit of scroll delta). */
+    private const val ZOOM_FACTOR_PER_NOTCH = 1.1
+
+    /** Caps how much a SINGLE scroll event can zoom by, independent of how large a raw delta the
+     *  host OS/input device reports for one event -- see [onScroll]'s KDoc. */
+    private const val MAX_NOTCHES_PER_EVENT = 10.0
+
+    private const val MIN_ZOOM = 0.05
+    private const val MAX_ZOOM = 50.0
+
+    /**
+     * Applies one drag delta (screen pixels moved since the last event) to [state]'s camera:
+     * horizontal drag orbits azimuth, vertical drag orbits elevation.
+     *
+     * A non-finite [dx]/[dy] -- which [Camera.of] would otherwise reject with
+     * [IllegalArgumentException] -- is checked HERE, before ever calling [Camera.of], and simply
+     * leaves [state] unchanged. This is deliberate, not an oversight of relying on [Camera.of]'s
+     * own validation: a drag/scroll handler runs inside a Compose pointer-input coroutine, and an
+     * uncaught exception there does not degrade gracefully -- see this wave's design notes
+     * (docs/adr/ADR-0012-viewer-camera-interaction.adoc) -- it kills the whole window. Dropping one
+     * malformed input event on the floor is a far better failure mode than that.
+     */
+    fun onDrag(
+        state: ViewerCameraState,
+        dx: Float,
+        dy: Float,
+    ): ViewerCameraState {
+        if (!dx.isFinite() || !dy.isFinite()) return state
+        // Dragging right (positive dx) should feel like orbiting the camera around the object
+        // towards the left -- i.e. DECREASING azimuth -- so the object appears to follow the
+        // cursor. Dragging down (positive dy) increases elevation, tilting the view down towards
+        // the object's top face, matching the same "content follows the cursor" convention.
+        val newAzimuth = state.camera.azimuthDeg - DEG_PER_PIXEL * dx
+        val newElevation = state.camera.elevationDeg + DEG_PER_PIXEL * dy
+        return state.copy(camera = Camera.of(newAzimuth, newElevation))
+    }
+
+    /**
+     * Applies one scroll event's vertical delta to [state]'s zoom: a positive [scrollDeltaY]
+     * (scrolling down/away on most platforms) zooms out, negative zooms in.
+     *
+     * [scrollDeltaY] is clamped to +/-[MAX_NOTCHES_PER_EVENT] BEFORE being used as an exponent --
+     * different pointing devices and OS scroll-acceleration settings report wildly different
+     * magnitudes for what is semantically "one scroll gesture" (a trackpad's inertial fling can
+     * report a single event with a delta in the hundreds), and without this clamp such an event
+     * would multiply zoom by [ZOOM_FACTOR_PER_NOTCH] raised to that same wildly varying exponent
+     * -- e.g. `1.1^300` -- overflowing towards [Double.POSITIVE_INFINITY] in one event before
+     * [MAX_ZOOM]'s `coerceIn` below ever gets a chance to clamp the RESULT rather than the input.
+     * Both guards matter: this one bounds how much a single event can move the value, [MAX_ZOOM]/
+     * [MIN_ZOOM] bound the value itself across arbitrarily many events.
+     *
+     * Like [onDrag], a non-finite [scrollDeltaY] leaves [state] unchanged rather than reaching
+     * [Camera.of]'s (inapplicable here -- zoom is not a [Camera] field) or any other validation
+     * path -- see [onDrag]'s KDoc for why that matters inside a Compose pointer-input handler.
+     */
+    fun onScroll(
+        state: ViewerCameraState,
+        scrollDeltaY: Float,
+    ): ViewerCameraState {
+        if (!scrollDeltaY.isFinite()) return state
+        val notches = scrollDeltaY.toDouble().coerceIn(-MAX_NOTCHES_PER_EVENT, MAX_NOTCHES_PER_EVENT)
+        val newZoom = (state.zoom * ZOOM_FACTOR_PER_NOTCH.pow(-notches)).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        return state.copy(zoom = newZoom)
+    }
+
+    /** The home pose/zoom -- what double-click and the `R` key reset to in
+     *  [dev.kstep.viewer.ui.ShapeCanvas]. */
+    fun reset(): ViewerCameraState = ViewerCameraState.HOME
+}

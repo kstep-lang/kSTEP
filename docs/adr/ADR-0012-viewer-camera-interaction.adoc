@@ -1,0 +1,357 @@
+= ADR-0012: Viewer camera interaction (`kstep-viewer` orbit/zoom/reset)
+:toc:
+
+== Status
+
+Accepted, implemented. `kstep-viewer`'s window is no longer a single
+static isometric snapshot: drag to orbit, scroll to zoom, double-click or
+`R` to reset. `dev.kstep.render.mesh.IsometricProjection` is renamed to
+`MeshProjection` and gains a `Camera` parameter + an explicit `scale`
+parameter; a new `dev.kstep.viewer.camera` package (`ViewerCameraState`,
+`CameraInteraction`) holds the pure input-handling math. This is
+`ADR-0010`'s V-2 Folge-Welle ("Camera: arcball orbit, pan, zoom, a `fit`
+command") minus pan -- see Folge-Wellen below for why pan is deferred --
+and it also lands the projection-side prerequisite `ADR-0011`'s R-2 entry
+already called out: "Requires parametrizing
+`IsometricProjection.VIEW_DIRECTION`/`UP`".
+
+== Context
+
+Before this wave, `dev.kstep.render.mesh.IsometricProjection` had exactly
+one camera: two `internal val` constants, `VIEW_DIRECTION` and `UP`,
+computed once and used by every caller unconditionally --
+`kstep-viewer`'s `ShapeCanvas`, `kstep-cli`'s `render` command, and every
+test in `kstep-render`. A real, interactive 3D viewer that cannot be
+rotated is a picture, not a viewer -- ADR-0010 always scoped this as a
+V-1 limitation ("Camera: fixed isometric... V-2+ may revisit"), not a
+permanent design decision.
+
+Two things had to move together, not independently, to make orbiting
+possible without breaking every existing caller:
+
+* `MeshProjection` needed a `Camera` value type that could vary per call
+  instead of two fixed module-level constants -- but every one of
+  `MeshProjection`'s FOUR existing call sites (`RenderCommand.kt`,
+  `ViewerCanvas.kt`, `TriangleRasterizerTest.kt`,
+  `RenderOcctPipelineTest.kt`) calls the two-argument
+  `project(mesh, width, height)` form, with no camera argument at all --
+  so `camera: Camera = Camera.ISOMETRIC` had to be source- and
+  behavior-compatible with every one of them, not just compile against
+  them.
+* `kstep-viewer`'s `ShapeCanvas` needed to go from "draw once" to "redraw
+  continuously as the user drags/scrolls", which is a Compose state/
+  recomposition/redraw design question independent of the projection math
+  itself -- see the "Fit computed once, not per frame" and "Camera state
+  lives in the draw phase, not the composition phase" decisions below.
+
+=== Six design decisions
+
+1. **A single shared `Camera` type, in `kstep-render`, not
+   `kstep-viewer`.** `Camera` (azimuth/elevation, degrees, around the
+   fixed world-space `UP` axis) lives next to `MeshProjection` in
+   `dev.kstep.render.mesh`, not in the new `dev.kstep.viewer.camera`
+   package. `kstep-render` has no Compose dependency at all (see
+   `MeshPackageComposeBoundaryTest`) and is the module `kstep-cli`'s
+   headless `render` command already depends on -- a future R-2
+   `--azimuth`/`--elevation` CLI flag (ADR-0011's Folge-Welle table)
+   constructs the exact same `Camera` type this wave's interactive drag
+   handler does, with no conversion layer between them.
+2. **Zoom is NOT a `Camera` field.** `Camera` models a pure orbit
+   direction; "zoom relative to auto-fit" only makes sense next to an
+   interactive canvas with a concrete pixel size, which `kstep-render`'s
+   headless path does not have a persistent notion of. Zoom lives in the
+   new, `kstep-viewer`-side `ViewerCameraState(camera, zoom)` instead.
+3. **Fit is computed once per (mesh, canvas size), not once per frame.**
+   `MeshProjection.fitScale(mesh, w, h, camera)` is a new function,
+   extracted from the auto-fit bounding-box logic `project()` already had.
+   `ShapeCanvas` calls it via `remember(mesh, canvasSize)` -- composition-
+   scoped, recomputed only when the mesh changes or an actual resize
+   fires `Modifier.onSizeChanged` -- and multiplies the result by the
+   camera's current `zoom` on every draw. Recomputing a full silhouette
+   bounding box on every one of 60 draws/second, for a value that changes
+   maybe once per resize, would have been pure waste.
+4. **Camera state is READ inside the `Canvas` draw phase, never WRITTEN
+   there.** `ShapeCanvas` takes `state: MutableState<ViewerCameraState>`
+   (defaulting to an internally-`remember`ed `ViewerCameraState.HOME`, so
+   `Main.kt`'s existing `ShapeCanvas(mesh, Modifier.fillMaxSize())` call
+   needed no change at all). Every WRITE to `state.value` happens in a
+   pointer/key event callback (`detectDragGestures`, `onPointerEvent`,
+   `onKeyEvent`) -- composable/layout-phase code, not inside the `Canvas`
+   draw lambda. The draw lambda only reads `state.value`, which is what
+   lets a camera-only change (drag/scroll/reset) invalidate just the draw
+   phase instead of triggering a full recomposition of the composable
+   tree on every pointer-move event.
+5. **The key light orbits together with the camera.** `MeshProjection`'s
+   fixed `LIGHT_DIRECTION` (now `LIGHT_DIRECTION_HOME`) is decomposed,
+   once, into the home camera's own `(right, trueUp, view)` basis; every
+   `project()` call recombines those three scalar components against the
+   ACTUAL camera's basis for that call. A light direction that instead
+   stayed fixed in world space would go edge-on-to-the-viewer (and every
+   visible face flat, uniformly-shaded again -- see ADR-0010's original
+   "identically-shaded hexagon" bug this exact failure mode already burned
+   this codebase on once) as soon as the camera had orbited far enough
+   away from home.
+6. **`MeshProjection`'s `camera === Camera.ISOMETRIC` fast path exists
+   ONLY for bit-identical backward compatibility.** Every call site before
+   this wave passed no camera at all, i.e. always got the fixed isometric
+   direction computed the same way every time. `Camera.viewDirection()`'s
+   general trig derivation would reproduce that direction to within
+   `1e-12`, not bit-for-bit (`CameraProjectionTest` checks both: the
+   default-argument call is bit-identical to the explicit
+   `Camera.ISOMETRIC`/`null` call via the fast path; a SEPARATELY
+   constructed `Camera.of(45.0, 35.264389682754654)` -- structurally
+   equal angles, but `!==` the singleton -- goes through the general trig
+   path instead and lands within a fraction of a pixel of it (matched by
+   nearest triangle, not list position -- see this ADR's Stolperfallen
+   #3 for why), not bit-identical). Nothing downstream of
+   `MeshProjection.project()`
+   depends on that ULP-level precision; the fast path is there so a
+   future regression in the trig path cannot silently perturb the
+   headless `kstep render` CLI's default (camera-less) output.
+
+== Decision
+
+=== `Camera` (`kstep-render`, `dev.kstep.render.mesh`)
+
+Immutable, `Camera.of(azimuthDeg, elevationDeg)` the only constructor
+(private primary constructor, structural `equals`/`hashCode`).
+Normalizes azimuth into `[0, 360)`; clamps elevation into `[-89, 89]` --
+never exactly the poles, where `MeshProjection`'s `UP cross view` screen
+basis would degenerate. Throws `IllegalArgumentException` for a
+non-finite input, BEFORE normalizing/clamping, so a `NaN`/`Infinity`
+delta from a malformed caller fails loudly here rather than silently
+producing a finite-looking but meaningless pose. `Camera.ISOMETRIC` is a
+plain literal (`Camera.of(45.0, 35.264389682754654)`), not derived from
+the trig formula, precisely so it never depends on floating-point
+evaluation order -- see design decision 6 above.
+
+=== `MeshProjection` (renamed from `IsometricProjection`)
+
+```kotlin
+fun fitScale(mesh: TriangleMesh, canvasWidth: Double, canvasHeight: Double,
+             camera: Camera = Camera.ISOMETRIC): Double
+
+fun project(mesh: TriangleMesh, canvasWidth: Double, canvasHeight: Double,
+            camera: Camera = Camera.ISOMETRIC, scale: Double? = null): List<ProjectedTriangle>
+```
+
+`scale = null` auto-fits, identical to this codebase's only behavior
+before this wave; a non-null `scale` (validated: finite, `> 0.0`) is used
+directly, letting a caller multiply `fitScale(...)` by its own zoom
+factor. Centering is ALWAYS computed from the CURRENT projected
+silhouette's bounding box, regardless of whether `scale` was supplied or
+auto-fit -- an explicit zoom changes how large the silhouette appears on
+screen, not where its own center sits. `fitScale()` is a thin wrapper
+around the same private pipeline `project()` uses (called with
+`requestedScale = null`) rather than a second, bbox-only code path that
+could drift out of sync -- see `fitScale()`'s own KDoc for the accepted
+tradeoff (a `fitScale()` call pays for the full cull/shade/triangle-build
+pipeline it does not need the output of; not a hot path in this wave,
+`kstep-viewer` calls it at most once per resize/reset, never per frame).
+
+=== `dev.kstep.viewer.camera` (`kstep-viewer`, new package)
+
+`ViewerCameraState(camera: Camera, zoom: Double)`, `HOME =
+ViewerCameraState(Camera.ISOMETRIC, 1.0)`. `CameraInteraction` -- an
+`object`, no Compose import anywhere in this file (mirrors
+`MeshPackageComposeBoundaryTest`'s reasoning for `dev.kstep.render.mesh`,
+though this package has no equivalent automated boundary test of its own
+in this wave -- see Folge-Wellen) -- three pure functions:
+
+* `onDrag(state, dx, dy)`: horizontal drag orbits azimuth (dragging right
+  decreases azimuth, so content appears to follow the cursor), vertical
+  drag orbits elevation, both via `Camera.of` (so the same finite/clamp
+  guarantees apply). A non-finite `dx`/`dy` is checked BEFORE calling
+  `Camera.of` and simply leaves `state` unchanged -- see the Security
+  section.
+* `onScroll(state, scrollDeltaY)`: multiplies `zoom` by `1.1` per scroll
+  "notch", clamped to `[0.05, 50.0]`. The raw delta is ALSO clamped to
+  +/-10 notches PER EVENT before being used as an exponent, independent
+  of the result-level `[0.05, 50.0]` clamp -- see the Security section for
+  why both guards are needed.
+* `reset()`: returns `ViewerCameraState.HOME`.
+
+=== `ShapeCanvas` (`kstep-viewer`, `dev.kstep.viewer.ui.ViewerCanvas.kt`)
+
+New `state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) }`
+parameter, defaulted so every existing caller is unaffected. Now wraps a
+`Box` (was: `Canvas` directly) so a bottom-centered hint label
+(`"Drag to orbit · Scroll to zoom · Double-click or R to reset"`, shown
+only at the untouched HOME pose) can be `Alignment`-positioned over the
+`Canvas`. Drag (`detectDragGestures`), double-tap
+(`detectTapGestures`/`onDoubleTap`), scroll
+(`onPointerEvent(PointerEventType.Scroll)`), and the `R` key
+(`focusRequester` + `focusable()` + `onKeyEvent`, auto-focused via
+`LaunchedEffect(Unit) { focusRequester.requestFocus() }` since there is
+nothing else in the window to steal focus instead) are all wired onto the
+`Canvas`'s own `Modifier` chain. The zero-size guard
+(`if (size.width <= 0f || size.height <= 0f) return@Canvas`) stays the
+FIRST line of the draw lambda, unchanged, ahead of every other read.
+
+== Security
+
+[cols="2,3,2", options="header"]
+|===
+| Category | Measure | Verified by
+
+| Zoom bounds
+| `[0.05, 50.0]`, re-clamped after every multiplication -- zoom can never
+  reach `0`/negative (a `scale <= 0.0` would hit `MeshProjection.project`'s
+  own `require` and, per `CameraInteraction`'s design, must never reach
+  that path from a UI gesture in the first place) or run away towards
+  `Double.POSITIVE_INFINITY`.
+| `CameraInteractionTest`'s 500-successive-scroll-event cases (both
+  directions)
+
+| Zoom bounds -- single-event amplification
+| A single scroll event's delta is ADDITIONALLY clamped to +/-10 notches
+  before being used as `1.1^notches` -- different pointing devices/OS
+  scroll-acceleration settings report wildly different magnitudes for
+  "one scroll gesture" (a trackpad fling can report a delta in the
+  hundreds within one event); without this a single such event could
+  compute `1.1^300`, overflowing towards `Double.POSITIVE_INFINITY` BEFORE
+  the result-level `[0.05, 50.0]` clamp ever gets a chance to bound the
+  RESULT rather than the input.
+| `CameraInteractionTest`'s extreme-single-event-delta case
+
+| Elevation bounds
+| Hard `[-89, 89]` inside `Camera.of` itself, not only in
+  `CameraInteraction` -- every caller of `Camera.of`, including a future
+  R-2 CLI `--elevation` flag, inherits the pole-degeneracy guard for
+  free.
+| `CameraTest`'s clamp cases, `CameraProjectionTest`'s full sweep (finite/
+  in-bounds output at every swept elevation)
+
+| Non-finite input from a UI event
+| `CameraInteraction.onDrag`/`onScroll` check `isFinite()` on every raw
+  `Float` delta BEFORE calling `Camera.of` (which would otherwise reject
+  it via `IllegalArgumentException`) and simply leave `state` unchanged.
+  Deliberate: a drag/scroll/key handler runs inside a Compose
+  pointer-input coroutine, and an uncaught exception there does not
+  degrade gracefully -- it kills the whole window (same principle
+  ADR-0010 already established for `ShapeCanvas`'s zero-size guard).
+  `ShapeCanvas`'s own `onPointerEvent(PointerEventType.Scroll)` handler
+  additionally uses `changes.firstOrNull()` (not `.first()`) for the same
+  reason -- an empty `changes` list must be a silent no-op, not a
+  `NoSuchElementException`.
+| `CameraInteractionTest`'s NaN/Infinity drag and scroll cases
+
+| DoS -- per-call cost
+| `project()`'s cull/shade/bbox loop remains a single pass over
+  `mesh.triangleCount`, no recursion, no camera-dependent iteration count
+  -- adding a `Camera` parameter and the light-recombination step did not
+  change its asymptotic shape. Measured, not estimated: a single
+  `project()` call over 130,000 triangles
+  (`OcctKernel.MAX_TRIANGLES`'s own bound) took **123.6ms** on the
+  development machine, comfortably under the test's 1-second guard.
+| `MeshProjectionPerformanceTest` (130,000-triangle single-call timing
+  guard, logs the measured duration via kotlin-logging)
+
+| Resource leak / supply chain
+| No new external dependency (`compose.foundation`'s `gestures`/
+  `androidx.compose.ui.input.key`/`.pointer`/`.focus` APIs used by
+  `ShapeCanvas` are already transitively present via
+  `compose.desktop.currentOs`/`compose.material3`, verified via
+  `./gradlew :kstep-viewer:dependencies` before writing this wave's code
+  -- `gradle/libs.versions.toml` unchanged). No new native/JNI surface.
+| Diff review, dependency-tree check (see this ADR's Stolperfallen)
+|===
+
+== Stolperfallen
+
+1. **`this === ISOMETRIC` inside `Camera` itself would have been too
+   narrow.** An early sketch of `Camera.viewDirection()` special-cased
+   `this === ISOMETRIC` to return the bit-identical fixed direction. That
+   only ever matches the ONE singleton instance -- a structurally equal
+   but separately constructed `Camera.of(45.0, 35.264389682754654)` would
+   silently fall through to the general trig path with no way for a
+   caller to know it did. The fast path was moved to
+   `MeshProjection.basisFor(camera)` instead (`camera === Camera.ISOMETRIC`
+   checked there, at the one place that actually needs bit-identical
+   output), and `Camera.viewDirection()` itself always uses the general
+   trig derivation unconditionally -- see design decision 6.
+2. **A `mutableStateOf` write inside the `Canvas` draw lambda would defeat
+   the whole "camera drag only invalidates the draw phase" point.** An
+   early sketch computed the auto-fit scale lazily, INSIDE the draw
+   lambda, caching it into a `mutableStateOf` on first access
+   (`homeFitScale ?: MeshProjection.fitScale(...).also { homeFitScale = it }`).
+   `DrawScope`'s draw lambda is not a `@Composable` context, so it cannot
+   call `remember` itself, and a state write from inside it risks
+   triggering the very recomposition design decision 4 exists to avoid.
+   Fixed by moving the fit-scale computation into composition proper,
+   `remember(mesh, canvasSize)`, with `canvasSize` itself only updated by
+   `Modifier.onSizeChanged` (a genuine resize) -- the draw lambda only
+   ever READS the resulting value, with a `?: return@Canvas` guard for the
+   one frame after a resize where `onSizeChanged` has fired but the
+   resulting recomposition has not yet reached the draw phase.
+3. **Comparing two `project()` calls' output with a plain `zip()` is unsafe --
+   near-tied depths can swap sort rank between calls.** An early draft of
+   `CameraProjectionTest`'s fast-path-vs-trig-path cross-check compared
+   `fastPath.zip(trigPath)` element-by-element and failed with a
+   macroscopic (not floating-point-noise) coordinate mismatch. Root
+   cause: `project()`'s painter's-algorithm sort is by `depth`, computed
+   from two numerically slightly different bases (bit-identical
+   `ISOMETRIC` fast-path constants vs. freshly evaluated trig, ~`1e-16`
+   per component) -- for a symmetric mesh like a unit cube, two DIFFERENT
+   triangles can have near-tied depths close enough that this tiny
+   numerical noise flips their RELATIVE SORT RANK between the two calls,
+   even though each triangle's own coordinates individually stay accurate
+   to ~`1e-13`. Fixed by matching each fast-path triangle to its NEAREST
+   trig-path triangle by coordinate distance (order-independent) instead
+   of comparing list positions directly.
+4. **`ImageComposeScene.render()`'s single-call semantics were not
+   something this wave's tests could assume from source reading alone.**
+   `ViewerCanvasCameraRenderTest` calls `render()` TWICE per case (keeping
+   only the second frame) specifically because the auto-fit scale's
+   `remember(mesh, canvasSize)` depends on a `Modifier.onSizeChanged`
+   layout callback settling first -- see that test's own KDoc. Whether a
+   real on-screen window ever visibly shows the intervening blank frame
+   was not verified either way in this wave (no real-window smoke test
+   was run); the double-render is a test-robustness measure against a
+   possible race, not a claim that the race is provably harmless in a
+   real window too.
+
+== Folge-Wellen
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| V-2b (pan)
+| ADR-0010's original V-2 scope also named pan; this wave deliberately
+  ships orbit + zoom + reset only. Pan needs a translation offset
+  threaded through `MeshProjection`'s centering step (today always
+  silhouette-bbox-centered, by design decision unchanged in this wave)
+  and was scoped out to keep this wave's diff reviewable.
+
+| V-2c (`dev.kstep.viewer.camera` package-boundary test)
+| `dev.kstep.render.mesh` has `MeshPackageComposeBoundaryTest` enforcing
+  "no Compose import in this package" as a real automated check, not just
+  a review intention. `dev.kstep.viewer.camera` (`CameraInteraction`,
+  `ViewerCameraState`) follows the identical rule by construction in this
+  wave (verified by code review, not an automated test) but has no
+  equivalent automated guard of its own yet.
+
+| V-2d (external camera control / toolbar)
+| `ShapeCanvas`'s `state` parameter already accepts an externally-hoisted
+  `MutableState<ViewerCameraState>` -- a toolbar with explicit orbit/zoom/
+  reset buttons, or a persisted "last camera pose" across window
+  sessions, needs no `ShapeCanvas` API change, only a new caller in
+  `Main.kt`.
+
+| R-2 (headless `--azimuth`/`--elevation`, ADR-0011)
+| The prerequisite this ADR names in its own Status section is now done:
+  `Camera`/`MeshProjection.project(..., camera, ...)` already exist and
+  are exercised by `kstep-cli`'s existing call site (unchanged, still
+  camera-less -- i.e. still `Camera.ISOMETRIC`). R-2 itself is still
+  scoped as its own Folge-Welle: add the actual `--view`/`--azimuth`/
+  `--elevation` CLI flags to `RenderCommand`, parse/validate them into a
+  `Camera.of(...)` call (reusing `Camera.of`'s own finite/clamp
+  validation for the CLI's own error messages), and handle
+  ADR-0011's originally-named "`UP`-parallel-to-view-direction degenerate
+  case" -- already structurally impossible today because `Camera.of`
+  clamps elevation to `[-89, 89]`, strictly short of the poles where that
+  degeneracy would occur, but this Folge-Welle should still add an
+  explicit CLI-level test pinning that guarantee rather than leaving it
+  implicit.
+|===

@@ -396,9 +396,17 @@ cleanly on a machine without OCCT and still produce a `summary` (not a
 | R-2
 | Camera configurability for the preview specifically: `--view
   <iso\|front\|top\|right\|back\|left\|bottom>` / `--azimuth`/`--elevation`.
-  Requires parametrizing `IsometricProjection.VIEW_DIRECTION`/`UP` (today
-  fixed `internal val`s) and handling the `UP`-parallel-to-view-direction
-  degenerate case.
+  The prerequisite this entry originally named -- parametrizing what was
+  `IsometricProjection.VIEW_DIRECTION`/`UP` -- is done as of kSTEP's
+  viewer-camera-interaction wave (see
+  docs/adr/ADR-0012-viewer-camera-interaction.adoc):
+  `IsometricProjection` is renamed `MeshProjection` and takes a `Camera`
+  parameter (`dev.kstep.render.mesh.Camera.of(azimuthDeg, elevationDeg)`,
+  clamped strictly short of the poles, so the `UP`-parallel-to-view-
+  direction degenerate case this entry originally flagged is now
+  structurally unreachable). Still open for THIS wave: `RenderCommand`'s
+  actual `--view`/`--azimuth`/`--elevation` CLI flags and their parsing/
+  validation into a `Camera.of(...)` call.
 
 | R-3
 | Multi-shape scenes: render every `model.shapes` entry together

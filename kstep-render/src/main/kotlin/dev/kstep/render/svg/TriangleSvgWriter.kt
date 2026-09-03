@@ -11,7 +11,7 @@ private val logger = KotlinLogging.logger {}
  * Renders a projected triangle list as a self-contained, deterministic SVG document -- the
  * vector companion to [dev.kstep.render.image.TriangleRasterizer]'s raster output, both
  * consuming the exact same [ProjectedTriangle] list from
- * [dev.kstep.render.mesh.IsometricProjection.project].
+ * [dev.kstep.render.mesh.MeshProjection.project].
  *
  * Deterministic on purpose (no timestamp, no random IDs, coordinates rounded to two decimal
  * places): two renders of the same triangle list produce byte-identical output, which is what
@@ -22,7 +22,7 @@ object TriangleSvgWriter {
 
     /**
      * @param triangles ALREADY in the order they must be painted (far-to-near, as
-     *   [dev.kstep.render.mesh.IsometricProjection.project] returns them) -- this function does
+     *   [dev.kstep.render.mesh.MeshProjection.project] returns them) -- this function does
      *   NOT re-sort, because doing so would reverse the painter's algorithm and show interior
      *   faces (see docs/adr/ADR-0011-headless-preview-rendering.adoc's Stolperfallen).
      */

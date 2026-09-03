@@ -13,10 +13,14 @@ private const val CANVAS_HEIGHT = 600.0
  * Runs without OCCT -- always active -- against a hand-written, closed unit-cube mesh (12
  * triangles, correct outward winding, verified by hand per triangle -- see this file's own
  * comment on [unitCubeMesh]). Complements `RenderOcctPipelineTest`'s real-OCCT coverage by
- * pinning [IsometricProjection]'s pure math independently of the native bridge.
+ * pinning [MeshProjection]'s pure math independently of the native bridge.
  *
  * Moved from `kstep-viewer` in kSTEP's headless-preview-rendering wave (see
  * docs/adr/ADR-0011-headless-preview-rendering.adoc) -- content unchanged, only the package.
+ * Class name kept as `IsometricProjectionTest` (not renamed alongside `MeshProjection` in the
+ * later viewer-camera-interaction wave, see docs/adr/ADR-0012-viewer-camera-interaction.adoc):
+ * every assertion here still exercises the default camera pose, [Camera.ISOMETRIC], so the name
+ * remains accurate to what this file actually tests.
  */
 class IsometricProjectionTest :
     StringSpec({
@@ -64,7 +68,7 @@ class IsometricProjectionTest :
         }
 
         "all projected coordinates lie within the canvas bounds" {
-            val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
+            val triangles = MeshProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             triangles.isNotEmpty() shouldBe true
             triangles.forEach { t ->
                 listOf(t.ax, t.bx, t.cx).forEach { x -> (x in 0.0..CANVAS_WIDTH) shouldBe true }
@@ -75,19 +79,19 @@ class IsometricProjectionTest :
         // exactly three of the cube's six faces (top, right, back -- +Z/+X/+Y) face the fixed
         // isometric viewer; the other three (bottom, left, front) are culled.
         "exactly half the cube's triangles survive backface culling" {
-            val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
+            val triangles = MeshProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             triangles.size shouldBe 6
         }
 
         "the result is sorted descending by depth" {
-            val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
+            val triangles = MeshProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             val depths = triangles.map { it.depth }
             depths shouldBe depths.sortedDescending()
         }
 
         "shade values are within range and vary across the cube's three visible faces" {
-            val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
-            triangles.forEach { t -> (t.shade in IsometricProjection.AMBIENT..1.0) shouldBe true }
+            val triangles = MeshProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
+            triangles.forEach { t -> (t.shade in MeshProjection.AMBIENT..1.0) shouldBe true }
             val distinctShades = triangles.map { it.shade }.toSet()
             (distinctShades.size >= 3) shouldBe true
         }
@@ -96,34 +100,34 @@ class IsometricProjectionTest :
             val headOn = doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0) // normal (1,1,1)
             val shallow = doubleArrayOf(2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 2.0, 0.0, 1.0) // normal (1,0,0)
             val mesh = TriangleMesh(headOn + shallow)
-            val triangles = IsometricProjection.project(mesh, CANVAS_WIDTH, CANVAS_HEIGHT)
+            val triangles = MeshProjection.project(mesh, CANVAS_WIDTH, CANVAS_HEIGHT)
             triangles.size shouldBe 2
             val shades = triangles.map { it.shade }.toSet()
             shades.size shouldBe 2
         }
 
         "an empty mesh projects to an empty list" {
-            IsometricProjection.project(TriangleMesh(DoubleArray(0)), CANVAS_WIDTH, CANVAS_HEIGHT) shouldBe emptyList()
+            MeshProjection.project(TriangleMesh(DoubleArray(0)), CANVAS_WIDTH, CANVAS_HEIGHT) shouldBe emptyList()
         }
 
         "a degenerate (zero-area) triangle is silently discarded" {
             val degenerate = TriangleMesh(doubleArrayOf(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0))
-            IsometricProjection.project(degenerate, CANVAS_WIDTH, CANVAS_HEIGHT) shouldBe emptyList()
+            MeshProjection.project(degenerate, CANVAS_WIDTH, CANVAS_HEIGHT) shouldBe emptyList()
         }
 
         "a non-positive canvas dimension is rejected" {
-            shouldThrow<IllegalArgumentException> { IsometricProjection.project(unitCubeMesh(), 0.0, CANVAS_HEIGHT) }
-            shouldThrow<IllegalArgumentException> { IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, 0.0) }
-            shouldThrow<IllegalArgumentException> { IsometricProjection.project(unitCubeMesh(), -1.0, CANVAS_HEIGHT) }
+            shouldThrow<IllegalArgumentException> { MeshProjection.project(unitCubeMesh(), 0.0, CANVAS_HEIGHT) }
+            shouldThrow<IllegalArgumentException> { MeshProjection.project(unitCubeMesh(), CANVAS_WIDTH, 0.0) }
+            shouldThrow<IllegalArgumentException> { MeshProjection.project(unitCubeMesh(), -1.0, CANVAS_HEIGHT) }
         }
 
         "fit-to-canvas fills most of at least one canvas axis" {
-            val triangles = IsometricProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
+            val triangles = MeshProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT)
             val xs = triangles.flatMap { listOf(it.ax, it.bx, it.cx) }
             val ys = triangles.flatMap { listOf(it.ay, it.by, it.cy) }
             val spanX = (xs.max() - xs.min()) / CANVAS_WIDTH
             val spanY = (ys.max() - ys.min()) / CANVAS_HEIGHT
-            val margin = IsometricProjection.MARGIN_FRACTION
+            val margin = MeshProjection.MARGIN_FRACTION
             val fillsAnAxis = spanX >= (1.0 - 2.0 * margin - 0.01) || spanY >= (1.0 - 2.0 * margin - 0.01)
             fillsAnAxis shouldBe true
             spanX shouldNotBe 0.0

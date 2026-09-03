@@ -2,7 +2,7 @@ package dev.kstep.render
 
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.image.TriangleRasterizer
-import dev.kstep.render.mesh.IsometricProjection
+import dev.kstep.render.mesh.MeshProjection
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import java.awt.image.BufferedImage
@@ -21,7 +21,7 @@ private const val MIN_PLATEAU_PIXELS = 500
 
 /**
  * Headless proof (plain JDK `BufferedImage`/`Graphics2D`, no OCCT, no display) that
- * [IsometricProjection]'s output actually rasterizes into a recognizable, shaded solid -- not
+ * [MeshProjection]'s output actually rasterizes into a recognizable, shaded solid -- not
  * just "the math runs", but "a human looking at the PNG this test writes sees a box". See
  * `RenderOcctPipelineTest` for the real-OCCT end-to-end companion of this suite.
  *
@@ -90,21 +90,21 @@ class TriangleRasterizerTest :
         }
 
         "rasterizing the unit cube fills a plausible fraction of the canvas, not empty or solid" {
-            val triangles = IsometricProjection.project(unitCubeMesh(), WIDTH.toDouble(), HEIGHT.toDouble())
+            val triangles = MeshProjection.project(unitCubeMesh(), WIDTH.toDouble(), HEIGHT.toDouble())
             val image = TriangleRasterizer.render(triangles, WIDTH, HEIGHT)
             val fraction = nonBackgroundFraction(image)
             (fraction in 0.15..0.75) shouldBe true
         }
 
         "rasterizing the unit cube shows at least three distinguishable brightness plateaus" {
-            val triangles = IsometricProjection.project(unitCubeMesh(), WIDTH.toDouble(), HEIGHT.toDouble())
+            val triangles = MeshProjection.project(unitCubeMesh(), WIDTH.toDouble(), HEIGHT.toDouble())
             val image = TriangleRasterizer.render(triangles, WIDTH, HEIGHT)
             val plateaus = brightnessHistogram(image).values.count { it >= MIN_PLATEAU_PIXELS }
             (plateaus >= 3) shouldBe true
         }
 
         "a PNG of the rasterized unit cube is written for human inspection" {
-            val triangles = IsometricProjection.project(unitCubeMesh(), WIDTH.toDouble(), HEIGHT.toDouble())
+            val triangles = MeshProjection.project(unitCubeMesh(), WIDTH.toDouble(), HEIGHT.toDouble())
             val image = TriangleRasterizer.render(triangles, WIDTH, HEIGHT)
             val outFile = File("build/sample-output/render/box-isometric.png")
             outFile.parentFile.mkdirs()

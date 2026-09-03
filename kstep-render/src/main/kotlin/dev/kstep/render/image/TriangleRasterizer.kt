@@ -10,7 +10,7 @@ import java.awt.image.BufferedImage
 /**
  * Headless, plain-JDK rasterizer for a projected triangle list. Draws each triangle in list
  * order (already fern-to-near sorted by
- * [dev.kstep.render.mesh.IsometricProjection.project]) onto a white background.
+ * [dev.kstep.render.mesh.MeshProjection.project]) onto a white background.
  *
  * Promoted from `kstep-viewer`'s test-only `internal object` to this module's public `main`
  * source set in kSTEP's headless-preview-rendering wave (see

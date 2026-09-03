@@ -7,7 +7,7 @@ import dev.kstep.geometry.OcctUnavailableException
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.RenderLimits
 import dev.kstep.render.image.TriangleRasterizer
-import dev.kstep.render.mesh.IsometricProjection
+import dev.kstep.render.mesh.MeshProjection
 import dev.kstep.render.mesh.ProjectedTriangle
 import dev.kstep.render.svg.TriangleSvgWriter
 import dev.kstep.render.text.TextCardRenderer
@@ -240,7 +240,7 @@ private fun resolveContent(
             RenderFallbackReasons.TRIANGULATION_FAILED,
         )
     }
-    val triangles = IsometricProjection.project(mesh, width.toDouble(), height.toDouble())
+    val triangles = MeshProjection.project(mesh, width.toDouble(), height.toDouble())
     return RenderContent.Geometry(triangles, model.shapes.size, previewedShapeIndex = 0)
 }
 

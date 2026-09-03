@@ -32,6 +32,11 @@ kotlin-scripting-jvm = { module = "org.jetbrains.kotlin:kotlin-scripting-jvm", v
 kotlin-scripting-jvm-host = { module = "org.jetbrains.kotlin:kotlin-scripting-jvm-host", version.ref = "kotlin" }
 kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
 compose-material3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "compose-material3" }
+# Test-only, kstep-viewer -- runDesktopComposeUiTest/performMouseInput/performKeyInput, see that
+# module's ViewerCanvasInteractionWiringTest and its build.gradle.kts dependency comment. Direct
+# coordinate + version.ref, not the compose-gradle-plugin's `compose.desktop.uiTestJUnit4`
+# accessor, which is itself deprecated ("specify dependency directly") as of this Compose version.
+compose-ui-test-junit4 = { module = "org.jetbrains.compose.ui:ui-test-junit4", version.ref = "compose-multiplatform" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

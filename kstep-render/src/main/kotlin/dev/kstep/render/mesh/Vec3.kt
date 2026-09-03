@@ -3,7 +3,7 @@ package dev.kstep.render.mesh
 import kotlin.math.sqrt
 
 /**
- * A plain 3D vector. `internal`: this package's public surface is [IsometricProjection] and
+ * A plain 3D vector. `internal`: this package's public surface is [MeshProjection], [Camera] and
  * [ProjectedTriangle] only -- see [dev.kstep.render.mesh]'s package-boundary test
  * (`MeshPackageComposeBoundaryTest`) in `kstep-render`'s test source set.
  */
@@ -26,7 +26,7 @@ internal data class Vec3(
     fun length(): Double = sqrt(x * x + y * y + z * z)
 
     /** Returns [Vec3.ZERO] for a zero-length vector rather than throwing or producing NaN --
-     *  callers that care distinguish that case themselves (see [IsometricProjection]'s
+     *  callers that care distinguish that case themselves (see [MeshProjection]'s
      *  degenerate-triangle handling). */
     fun normalized(): Vec3 {
         val len = length()

@@ -789,8 +789,14 @@ See <<roadmap,Roadmap>> for what's planned next.
 | Headless, Compose-free mesh projection + SVG/PNG/text-card rendering --
   headless-preview-rendering wave (`dev.kstep.render.mesh`/`.image`/`.svg`/
   `.text`)
-| Working: `dev.kstep.render.mesh.IsometricProjection` (moved here from
-  `kstep-viewer`, package renamed to match) turns a `TriangleMesh` into a
+| Working: `dev.kstep.render.mesh.MeshProjection` (moved here from
+  `kstep-viewer`, package renamed to match; itself renamed from
+  `IsometricProjection` in the viewer-camera-interaction wave once the
+  camera stopped being fixed-isometric-only, see
+  docs/adr/ADR-0012-viewer-camera-interaction.adoc) turns a `TriangleMesh`
+  and a `Camera` (azimuth/elevation orbit pose, defaulting to
+  `Camera.ISOMETRIC` for source- and behavior-compatibility with every
+  pre-ADR-0012 call site) into a
   backface-culled, flat-shaded, painter's-algorithm-sorted, canvas-fit
   `List<ProjectedTriangle>` -- consumed identically by
   `dev.kstep.render.image.TriangleRasterizer` (plain AWT, promoted from a
@@ -816,22 +822,34 @@ See <<roadmap,Roadmap>> for what's planned next.
   dependency.
 
 | `kstep-viewer`
-| Static isometric OCCT shape viewer -- Viewer-Welle 1
-  (`dev.kstep.viewer.ui`, mesh code now in `kstep-render`)
+| Interactive OCCT shape viewer -- Viewer-Welle 1
+  (`dev.kstep.viewer.ui`, mesh code now in `kstep-render`), camera
+  orbit/zoom/reset added in the viewer-camera-interaction wave
+  (`dev.kstep.viewer.camera`)
 | Working: a real Compose Desktop window (`ShapeCanvas`, opened via
   `./gradlew :kstep-viewer:run`, never part of `check`) consumes
-  `dev.kstep.render.mesh.IsometricProjection.project(...)` from
-  `kstep-render` (see that module's row above -- this code lived here
-  until the headless-preview-rendering wave moved it out so `kstep-cli`
-  could reuse it without a Compose dependency). See
+  `dev.kstep.render.mesh.MeshProjection.project(...)` from `kstep-render`
+  (see that module's row above -- this code lived here until the
+  headless-preview-rendering wave moved it out so `kstep-cli` could reuse
+  it without a Compose dependency). No longer a single static isometric
+  snapshot: drag to orbit, scroll to zoom, double-click or `R` to reset,
+  a bottom-centered hint label shown only at the untouched home pose.
+  `dev.kstep.viewer.camera.ViewerCameraState`/`CameraInteraction` hold
+  the pure (Compose-free) orbit/zoom math the pointer/keyboard handlers
+  call into; `ShapeCanvas`'s `state` parameter is externally hoistable
+  (defaults to an internal `remember`), so a future toolbar can drive the
+  camera without a `ShapeCanvas` API change. See
   docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc for the DoS
   measurements behind `OcctKernel.MAX_TRIANGLES`, the two classic OCCT
   triangulation pitfalls (`REVERSED`-face winding, `TopLoc_Location`
   transforms) this wave's own regression tests exist to catch, and why a
   camera-aligned light makes flat shading invisible on an axis-aligned
-  box. Depends on `kstep-geometry`, `kstep-render`, and Compose
-  Multiplatform (`org.jetbrains.compose` 1.11.1) -- see Building below
-  for the scoped `google()` repository this pulls in.
+  box; see docs/adr/ADR-0012-viewer-camera-interaction.adoc for the
+  camera interaction design (zoom bounds, non-finite-input handling, the
+  camera-state-read-only-in-the-draw-phase recomposition design). Depends
+  on `kstep-geometry`, `kstep-render`, and Compose Multiplatform
+  (`org.jetbrains.compose` 1.11.1) -- see Building below for the scoped
+  `google()` repository this pulls in.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest)

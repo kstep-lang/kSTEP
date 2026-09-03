@@ -6,7 +6,7 @@ package dev.kstep.render.mesh
  *
  * @property shade 0.0 (dark) .. 1.0 (light), a grayscale value for flat shading.
  * @property depth Centroid depth along the view direction; LARGER means farther away. The list
- *   [IsometricProjection.project] returns is already sorted descending by [depth] -- consumers
+ *   [MeshProjection.project] returns is already sorted descending by [depth] -- consumers
  *   draw it in list order (a painter's algorithm) without re-sorting.
  */
 data class ProjectedTriangle(
