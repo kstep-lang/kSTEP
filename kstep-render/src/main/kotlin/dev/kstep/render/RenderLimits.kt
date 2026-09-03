@@ -30,4 +30,12 @@ object RenderLimits {
     /** Maximum characters per line before a [dev.kstep.render.text.TextCardRenderer] line is
      *  truncated with a trailing marker. */
     const val MAX_CARD_LINE_CHARS: Int = 110
+
+    /** Above this many triangles, a [dev.kstep.render.gltf.GlbWriter] export is logged as
+     *  "large" -- not a hard cap ([dev.kstep.geometry.OcctKernel.MAX_TRIANGLES] already bounds
+     *  the underlying triangle count natively, and [dev.kstep.render.gltf.GlbWriter] itself
+     *  re-checks that same bound before allocating anything), just a signal. Measured: the native
+     *  ceiling of 130 000 triangles produces an 8.93 MiB GLB (see
+     *  docs/adr/ADR-0016-gltf-glb-export.adoc). */
+    const val GLB_TRIANGLE_WARN_THRESHOLD: Int = 50_000
 }

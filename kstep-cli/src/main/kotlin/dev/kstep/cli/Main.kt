@@ -32,12 +32,13 @@ Usage:
   kstep export <script.kstep.kts> [opts]   Export a *.kstep.kts script to a STEP Part 21 file
       --out <file.step>                    Output path (default: derived from the script name)
       --output json                        Emit the result as a JSON document instead of text
-  kstep render <script.kstep.kts> [opts]   Render a headless SVG/PNG/text preview of a script
-      -f, --format <auto|svg|png|text>     Preview container (default: auto)
+  kstep render <script.kstep.kts> [opts]   Render a headless SVG/PNG/text/glTF preview of a script
+      -f, --format <auto|svg|png|text|glb> Preview container (default: auto); "gltf" is an alias
+                                            for "glb" -- both write binary glTF 2.0 (.glb)
       -o, --out <file>                     Output path (default: derived from the script name)
-      -w, --width <px>                     Image width, 16..4096 (default: 1024)
-          --height <px>                    Image height, 16..4096 (default: 768)
-          --with-step                      Include the Part-21 text in the preview
+      -w, --width <px>                     Image width, 16..4096 (default: 1024) -- ignored for glb
+          --height <px>                    Image height, 16..4096 (default: 768) -- ignored for glb
+          --with-step                      Include the Part-21 text in the preview (svg/png/text)
           --require-geometry               Fail (exit 1) instead of silently falling back to text
           --output json                    Emit the result as a JSON document instead of text
   kstep help                                Show this message

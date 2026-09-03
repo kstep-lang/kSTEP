@@ -178,8 +178,26 @@ class CliMainTest :
             resolveCommand(arrayOf("render")) shouldBe CliCommand.ShowUsage(1)
         }
 
+        "\"render <path> -f glb\" resolves to Render with format GLB" {
+            resolveCommand(arrayOf("render", "a.kstep.kts", "-f", "glb")) shouldBe
+                CliCommand.Render(
+                    scriptPath = "a.kstep.kts",
+                    format = RenderFormat.GLB,
+                    outPath = null,
+                    width = 1024,
+                    height = 768,
+                    withStep = false,
+                    requireGeometry = false,
+                    jsonOutput = false,
+                )
+        }
+
         "\"render <path> --format bogus\" resolves to ShowUsage with exit code 1" {
             resolveCommand(arrayOf("render", "a.kstep.kts", "--format", "bogus")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"render <path> --format gltf2\" (not a recognized alias) resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("render", "a.kstep.kts", "--format", "gltf2")) shouldBe CliCommand.ShowUsage(1)
         }
 
         "\"render <path> --width notanumber\" resolves to ShowUsage with exit code 1" {

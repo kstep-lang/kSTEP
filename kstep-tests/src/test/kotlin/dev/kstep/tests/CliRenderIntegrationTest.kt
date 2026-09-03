@@ -5,6 +5,7 @@ import dev.kstep.geometry.OcctKernel
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
@@ -597,5 +598,176 @@ class CliRenderIntegrationTest :
             val geometry = json["geometry"]?.jsonObject
             geometry?.get("shapeCount")?.jsonPrimitive?.int shouldBe 3
             geometry?.get("previewedShapeIndex")?.jsonPrimitive?.int shouldBe 0
+        }
+
+        // R22 -- docs/adr/ADR-0016-gltf-glb-export.adoc: `-f glb` on a real OCCT box writes a
+        // well-formed binary glTF document whose reported counters match the box's known
+        // triangulation (12 triangles for a rectangular box: 6 faces x 2 triangles).
+        "a real OCCT box renders a well-formed GLB (content=geometry)".config(enabled = available) {
+            val script = copyFixture("hello-box.kstep.kts")
+
+            val result = runner.run("render", "--output", "json", script.name, "-f", "glb")
+
+            result.exitCode shouldBe 0
+            val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+            json["content"]?.jsonPrimitive?.content shouldBe "geometry"
+            json["fallback"]?.jsonPrimitive?.boolean shouldBe false
+            json["format"]?.jsonPrimitive?.content shouldBe "glb"
+
+            val glbFile = File(workDir, "hello-box.glb")
+            glbFile.exists() shouldBe true
+            val bytes = glbFile.readBytes()
+            String(bytes, 0, 4, Charsets.US_ASCII) shouldBe "glTF"
+
+            val glb = json["glb"]?.jsonObject
+            glb?.get("triangleCount")?.jsonPrimitive?.int shouldBe 12
+            glb?.get("vertexCount")?.jsonPrimitive?.int shouldBe 36
+            glb?.get("droppedTriangleCount")?.jsonPrimitive?.int shouldBe 0
+            glb?.get("byteLength")?.jsonPrimitive?.int shouldBe bytes.size
+            bytes.size.toLong() shouldBe glbFile.length()
+
+            // The `-f glb` counters above come from the raw, unprojected mesh
+            // (`content.mesh.triangleCount`, exposed on `geometry` as `meshTriangleCount`) --
+            // NOT from `geometry.triangleCount`, which is the 2D-projected, painter-culled
+            // count the SVG/PNG paths use (6 visible triangles for this box, see R6's identical
+            // isometric-culling reasoning above). Assert both so a future change that collapses
+            // the two numbers back together (e.g. the ADR-0016 "lazy-projection alternative"
+            // Folge-Welle) is caught by a red test instead of silently changing the documented
+            // JSON contract.
+            val geometry = json["geometry"]?.jsonObject
+            geometry?.get("meshTriangleCount")?.jsonPrimitive?.int shouldBe 12
+            geometry?.get("triangleCount")?.jsonPrimitive?.int shouldBe 6
+        }
+
+        // R23 -- the GLB expression of `kstep render`'s Container-Regel: a product-structure-only
+        // script still gets a well-formed, geometry-free .glb file at exit 0, exactly as it gets
+        // a text-card SVG/PNG/.txt today.
+        "--format glb on a product-structure-only script renders a valid geometry-free GLB" {
+            val script = File(workDir, "assembly-r23.kstep.kts")
+            script.writeText(
+                CONTEXT_PRELUDE +
+                    """
+                    val part = product("R23-001") { name = "Part"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val prodFormation = productDefinitionFormation("R23-001-F") { ofProduct = part }.getOrThrow()
+                    val definition = productDefinition("R23-001-D") { formation = prodFormation; frameOfReference = defCtx }.getOrThrow()
+                    stepFile(fileName = "r23.step") { root(definition) }
+                    """.trimIndent(),
+            )
+
+            val result = runner.run("render", "--output", "json", script.name, "--format", "glb")
+
+            result.exitCode shouldBe 0
+            val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+            json["content"]?.jsonPrimitive?.content shouldBe "summary"
+            val glb = json["glb"]?.jsonObject
+            glb?.get("triangleCount")?.jsonPrimitive?.int shouldBe 0
+
+            val glbFile = File(workDir, "assembly-r23.glb")
+            glbFile.exists() shouldBe true
+            val bytes = glbFile.readBytes()
+            String(bytes, 0, 4, Charsets.US_ASCII) shouldBe "glTF"
+        }
+
+        // R24 -- the Pflicht-Fallback (ADR-0011), expressed in GLB: OCCT forced unavailable still
+        // produces a valid, geometry-free .glb whose asset.extras.kstep.summary carries the
+        // notice text (there is no triangle mesh to draw, so the GLB is the only place that text
+        // can go); --require-geometry turns the same situation into a clean failure, same as
+        // every other format.
+        "geometry script falls back to a notice-carrying GLB when OCCT is forced unavailable" {
+            val script = copyFixture("hello-box.kstep.kts")
+
+            val result =
+                runner.run(
+                    "render",
+                    "--output",
+                    "json",
+                    script.name,
+                    "-f",
+                    "glb",
+                    "-o",
+                    "box-r24-fallback.glb",
+                    jvmArgs = listOf("-D$OCCT_OVERRIDE_PROPERTY=/nonexistent/libkstep_occt_bridge.so"),
+                )
+
+            result.exitCode shouldBe 0
+            val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+            json["fallback"]?.jsonPrimitive?.boolean shouldBe true
+            json["fallbackReason"]?.jsonPrimitive?.content shouldBe "occt_unavailable"
+
+            val glbFile = File(workDir, "box-r24-fallback.glb")
+            glbFile.exists() shouldBe true
+            val bytes = glbFile.readBytes()
+            String(bytes, 0, 4, Charsets.US_ASCII) shouldBe "glTF"
+            val summaryText = String(bytes, Charsets.UTF_8)
+            summaryText shouldContain "OCCT"
+            summaryText shouldContain "unavailable"
+            // Tamper-guard for the redactPaths(...) call in PreviewSummary.noticeLines: the
+            // forced-unavailable OCCT reason embeds the -Dkstep.occt.bridge.library override
+            // path itself (/nonexistent/libkstep_occt_bridge.so) -- if that redaction call is
+            // ever dropped again, this absolute path would leak verbatim into the committed/
+            // shared .glb's asset.extras.kstep.summary, same as the reproduced MAJOR finding
+            // this test guards against.
+            summaryText shouldNotContain "/nonexistent"
+
+            val requireResult =
+                runner.run(
+                    "render",
+                    script.name,
+                    "-f",
+                    "glb",
+                    "--require-geometry",
+                    "-o",
+                    "box-r24-required.glb",
+                    jvmArgs = listOf("-D$OCCT_OVERRIDE_PROPERTY=/nonexistent/libkstep_occt_bridge.so"),
+                )
+            requireResult.exitCode shouldBe 1
+            File(workDir, "box-r24-required.glb").exists() shouldBe false
+        }
+
+        // R25
+        "-o with an explicit .glb extension resolves auto-format to glb" {
+            val script = File(workDir, "assembly-r25.kstep.kts")
+            script.writeText(
+                CONTEXT_PRELUDE +
+                    """
+                    val part = product("R25-001") { name = "Part"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val prodFormation = productDefinitionFormation("R25-001-F") { ofProduct = part }.getOrThrow()
+                    val definition = productDefinition("R25-001-D") { formation = prodFormation; frameOfReference = defCtx }.getOrThrow()
+                    stepFile(fileName = "r25.step") { root(definition) }
+                    """.trimIndent(),
+            )
+
+            val result = runner.run("render", script.name, "-o", "modell-r25.glb")
+
+            result.exitCode shouldBe 0
+            result.stdout.trim() shouldBe "Wrote modell-r25.glb"
+            val glbFile = File(workDir, "modell-r25.glb")
+            glbFile.exists() shouldBe true
+            String(glbFile.readBytes(), 0, 4, Charsets.US_ASCII) shouldBe "glTF"
+        }
+
+        // R26 -- same io_error parity as R20/R20b, for the glb format.
+        "-o pointing at an existing directory with --format glb reports a clean io_error" {
+            val script = File(workDir, "assembly-r26.kstep.kts")
+            script.writeText(
+                CONTEXT_PRELUDE +
+                    """
+                    val part = product("R26-001") { name = "Part"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                    val prodFormation = productDefinitionFormation("R26-001-F") { ofProduct = part }.getOrThrow()
+                    val definition = productDefinition("R26-001-D") { formation = prodFormation; frameOfReference = defCtx }.getOrThrow()
+                    stepFile(fileName = "r26.step") { root(definition) }
+                    """.trimIndent(),
+            )
+            val dirTarget = File(workDir, "adir-r26").apply { mkdirs() }
+
+            val result = runner.run("render", "--output", "json", script.name, "-f", "glb", "-o", dirTarget.name)
+
+            result.exitCode shouldBe 1
+            result.stderr.contains("Exception in thread") shouldBe false
+            val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+            json["status"]?.jsonPrimitive?.content shouldBe "error"
+            json["errorKind"]?.jsonPrimitive?.content shouldBe "io_error"
+            json["command"]?.jsonPrimitive?.content shouldBe "render"
+            dirTarget.isDirectory shouldBe true
         }
     })

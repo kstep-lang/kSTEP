@@ -421,7 +421,10 @@ cleanly on a machine without OCCT and still produce a `summary` (not a
 
 | R-4
 | Additional vector output formats (PDF, LaTeX/TikZ) built on
-  `TriangleSvgWriter`'s already-vector triangle list.
+  `TriangleSvgWriter`'s already-vector triangle list. NOTE: GLB (R-9
+  below) is deliberately NOT an instance of this entry -- it is a 3D
+  export sharing `RenderCommand`'s Container-Regel, not a 2D vector format
+  built on `TriangleSvgWriter`'s projected triangle list.
 
 | R-5
 | `obsidian-kstep` Obsidian plugin: a ` ```kstep ``` ` code-fence renderer,
@@ -443,4 +446,8 @@ cleanly on a machine without OCCT and still produce a `summary` (not a
 | Silhouette/edge overlay and smooth shading in the headless path too
   (mirrors ADR-0010's V-3/V-4), plus a `--deflection` mesh-quality knob
   (mirrors V-8).
+
+| R-9
+| 3D model export as binary glTF (`kstep render -f glb`) -- DONE, see
+  docs/adr/ADR-0016-gltf-glb-export.adoc.
 |===

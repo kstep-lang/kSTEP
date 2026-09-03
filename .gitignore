@@ -4,3 +4,8 @@ build/
 *.iml
 out/
 .kotlin/
+
+# scripts/validate-gltf.mjs's own dependency (the Khronos gltf-validator) -- a dev-only, manually
+# `npm ci`'d tool, never a build/runtime dependency of any published artifact. See
+# docs/adr/ADR-0016-gltf-glb-export.adoc.
+scripts/node_modules/

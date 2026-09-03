@@ -168,6 +168,21 @@ class PreviewSummaryTest :
             lines.any { it.contains("<redacted>/libkstep_occt_bridge.so") } shouldBe true
         }
 
+        "noticeLines redacts an absolute filesystem path in the reason down to its file name" {
+            val model = fixedModel()
+            val lines =
+                PreviewSummary.noticeLines(
+                    "ps.kstep.kts",
+                    "OCCT native bridge unavailable: java.lang.UnsatisfiedLinkError: " +
+                        "/home/alice/dev/libkstep_occt_bridge.so: cannot open shared object file",
+                    unavailableOcct,
+                    model,
+                )
+
+            lines.none { it.contains("/home/alice") } shouldBe true
+            lines.any { it.contains("<redacted>/libkstep_occt_bridge.so") } shouldBe true
+        }
+
         "noticeLines reports the entity list as unavailable instead of crashing on an unsupported root type" {
             val model = unsupportedRootModel()
             val lines =

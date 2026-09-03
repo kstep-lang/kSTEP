@@ -851,9 +851,19 @@ See <<roadmap,Roadmap>> for what's planned next.
   unchanged in value, the fill light dimmer than and deliberately not
   antiparallel to the key light, decomposed/recombined per camera pose
   exactly like the key light already was (ADR-0012). See
-  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc. Depends
-  only on `kstep-geometry` (`api`) and `kotlin-logging-jvm` -- no new
-  external dependency.
+  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc.
+  (gltf-glb-export wave) `dev.kstep.render.gltf.GlbWriter` turns a
+  `TriangleMesh` into a self-contained, deterministic binary glTF 2.0
+  (`.glb`) document -- non-indexed, flat shaded, one PBR
+  metallic-roughness material, no textures, a Z-up-to-Y-up node rotation
+  rather than a baked-in transform. Verified against the real Khronos
+  `gltf-validator` (see `scripts/`, and Building below). This wave adds
+  the module's one new external dependency, `kotlinx-serialization-json`
+  (already on `kstep-cli`'s runtime classpath transitively before this
+  wave; now also declared directly here) -- used to build the writer's
+  JSON document, deliberately not a handwritten escaper (correct JSON
+  escaping of script-supplied `asset.extras` text is a security property,
+  not a style choice). See docs/adr/ADR-0016-gltf-glb-export.adoc.
 
 | `kstep-viewer`
 | Interactive OCCT shape viewer -- Viewer-Welle 1
@@ -1140,6 +1150,42 @@ directly, deliberately NOT on `kstep-viewer` — verify that stays true
 after any dependency change with
 `./gradlew :kstep-cli:dependencies --configuration runtimeClasspath |
 grep -iE "skiko|compose|androidx"` (must be empty).
+
+=== Building — glTF/GLB validation (optional)
+
+`kstep render -f glb`'s output (`dev.kstep.render.gltf.GlbWriter`, see
+docs/adr/ADR-0016-gltf-glb-export.adoc) needs no extra setup to BUILD or
+TEST at the byte level — `GlbWriterTest` (`kstep-render`) covers the
+writer's JSON/binary layout with no OCCT and no Node.js at all, and is
+part of the normal `./gradlew clean check`. Cross-checking a real `.glb`
+against the official Khronos `gltf-validator` is a genuinely optional,
+manual step, kept OUT of the Gradle build entirely (this repository has
+no established pattern of build-time network access — see that ADR's
+Security section):
+
+[source,shell]
+----
+cd scripts && npm ci
+node validate-gltf.mjs ../path/to/your.glb
+# or, cross-checking against a known triangle/vertex count:
+node validate-gltf.mjs ../path/to/your.glb --expect-triangles 12 --expect-vertices 36
+----
+
+Exits 0 only if the validator reports zero errors AND zero warnings (and,
+when given, the `--expect-*` counts match exactly). `GltfValidationExportTest`
+(`kstep-tests`, OCCT-gated) writes real `.glb` fixtures unconditionally
+under `kstep-tests/build/gltf-validation/`, and additionally RUNS this
+same validator itself, as a real Node subprocess, when both OCCT is
+available AND `-Pkstep.gltf.validate=true` is passed — that flag
+HARD-FAILS (never silently skips) if `node`/`scripts/node_modules` are
+missing, mirroring `-Pkstep.occt.require`/`-Pkstep.planegcs.require`'s own
+"a gate that can silently no-op is not a gate" rule:
+
+[source,shell]
+----
+cd scripts && npm ci && cd ..
+./gradlew clean check -Pkstep.occt.require=true -Pkstep.gltf.validate=true
+----
 
 === Building — optional desktop viewer
 
@@ -1667,11 +1713,12 @@ stack trace on stdout/stderr. Both fixture scripts above are the actual
 3-part-assembly variant of the first example), not just README prose —
 see the `kstep-tests` Modules row above.
 
-Rendering a headless SVG/PNG/text preview of a `*.kstep.kts` script via
-`kstep render` (see docs/adr/ADR-0011-headless-preview-rendering.adoc) —
-no window, no display server. `shape(...)` (also available with no
-`import`, alongside `root(...)`) registers geometry for the preview
-independently of `root(...)`:
+Rendering a headless SVG/PNG/text/glTF preview of a `*.kstep.kts` script
+via `kstep render` (see
+docs/adr/ADR-0011-headless-preview-rendering.adoc and, for `-f glb`,
+docs/adr/ADR-0016-gltf-glb-export.adoc) — no window, no display server.
+`shape(...)` (also available with no `import`, alongside `root(...)`)
+registers geometry for the preview independently of `root(...)`:
 
 [source,kotlin]
 ----
@@ -1707,6 +1754,13 @@ kstep render hello-box.kstep.kts
 
 kstep render hello-box.kstep.kts --format png -w 1200 --height 900 -o box.png
 kstep render hello-box.kstep.kts --format text --with-step
+
+kstep render hello-box.kstep.kts -f glb -o box.glb
+# Wrote box.glb -- a self-contained binary glTF 2.0 document (JSON + binary buffer in one
+# file); -w/--height are ignored for this format. "-f gltf" is accepted as an alias for
+# "glb" -- both write the same binary container, see ADR-0016 for why a separate plain-text
+# glTF format is not offered. Open it in any glTF viewer (e.g. https://gltf-viewer.donmccurdy.com/,
+# or a local `<model-viewer>` page) to inspect the model interactively.
 ----
 
 On a machine without the native OCCT bridge (or if triangulation fails

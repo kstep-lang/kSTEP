@@ -123,7 +123,7 @@ object PreviewSummary {
         lines += "  This script builds geometry, but no image could be rendered this run, so a"
         lines += "  text preview is shown instead."
         lines += ""
-        lines += "  reason: $reason"
+        lines += "  reason: ${redactPaths(reason)}"
         lines += ""
         if (occt is OcctAvailability.Unavailable) {
             lines += "  Install the OCCT dev packages, then rebuild:"
@@ -154,7 +154,8 @@ object PreviewSummary {
             try {
                 Part21Writer.emit(model.roots, startId = 1)
             } catch (e: RuntimeException) {
-                return listOf("Part 21 instances (unavailable: ${e.message ?: e::class.simpleName})")
+                val detail = e.message ?: e::class.simpleName ?: "unknown error"
+                return listOf("Part 21 instances (unavailable: ${redactPaths(detail)})")
             }
         val header = "Part 21 instances (${emitted.instances.size})"
         val body =
@@ -178,7 +179,8 @@ object PreviewSummary {
             try {
                 Part21Writer.write(model.header, model.roots)
             } catch (e: RuntimeException) {
-                return listOf("Part 21 text", "  unavailable: ${e.message ?: e::class.simpleName}")
+                val detail = e.message ?: e::class.simpleName ?: "unknown error"
+                return listOf("Part 21 text", "  unavailable: ${redactPaths(detail)}")
             }
         return listOf("Part 21 text") + text.lines().map { "  $it" }
     }

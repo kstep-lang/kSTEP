@@ -59,4 +59,16 @@ tasks.withType<Test>().configureEach {
         "kstep.planegcs.require",
         providers.gradleProperty("kstep.planegcs.require").getOrElse("false"),
     )
+    // GltfValidationExportTest reads this at runtime: when "true", it additionally runs the real
+    // Khronos gltf-validator (scripts/validate-gltf.mjs, a Node subprocess) against the .glb
+    // fixtures it writes, and HARD-FAILS if `node`/`scripts/node_modules` are missing -- never a
+    // silent skip, see docs/adr/ADR-0016-gltf-glb-export.adoc's Stolperfalle 12. Off by default,
+    // for the same "no network access in ./gradlew check" reason kstep.occt.require/
+    // kstep.planegcs.require are off by default (this one additionally never touches the
+    // network itself -- `npm ci` is a manual, one-time prerequisite -- but the gate stays opt-in
+    // so a machine without Node installed at all still gets a green `./gradlew check`).
+    systemProperty(
+        "kstep.gltf.validate",
+        providers.gradleProperty("kstep.gltf.validate").getOrElse("false"),
+    )
 }

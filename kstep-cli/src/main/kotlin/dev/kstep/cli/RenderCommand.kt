@@ -6,6 +6,9 @@ import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctUnavailableException
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.RenderLimits
+import dev.kstep.render.gltf.GlbExtras
+import dev.kstep.render.gltf.GlbWriteResult
+import dev.kstep.render.gltf.GlbWriter
 import dev.kstep.render.image.TriangleRasterizer
 import dev.kstep.render.mesh.MeshProjection
 import dev.kstep.render.mesh.ProjectedTriangle
@@ -32,6 +35,14 @@ import kotlin.system.exitProcess
  */
 private sealed interface RenderContent {
     data class Geometry(
+        /** The UNprojected world-space mesh -- only the `-f glb`/`-f gltf` branch of
+         *  [writeContainer] uses this; SVG/PNG keep working exclusively off [triangles], the
+         *  already-culled/painter-ordered 2D projection. Carried here (rather than re-deriving
+         *  it from [model] at write time) because [dev.kstep.script.KStepModel]'s
+         *  `ShapeAssignment.shape` is triangulated exactly once, in [resolveContent] -- a second
+         *  `triangulate()` call there would double the OCCT cost and risk operating on a shape
+         *  the script has since closed. */
+        val mesh: TriangleMesh,
         val triangles: List<ProjectedTriangle>,
         val shapeCount: Int,
         val previewedShapeIndex: Int,
@@ -164,18 +175,20 @@ private fun finishRender(
 
     val format = resolveFormat(command, content)
     val outPath = command.outPath ?: deriveRenderOutputPath(command.scriptPath, format)
+    val glbResult: GlbWriteResult?
     try {
-        writeContainer(
-            format,
-            outPath,
-            content,
-            scriptName,
-            model,
-            occt,
-            command.withStep,
-            command.width,
-            command.height,
-        )
+        glbResult =
+            writeContainer(
+                format,
+                outPath,
+                content,
+                scriptName,
+                model,
+                occt,
+                command.withStep,
+                command.width,
+                command.height,
+            )
     } catch (e: RenderIoException) {
         // Same reasoning as the requireGeometry branch above: reportIoFailure ends in
         // exitProcess(1), which never returns to renderSuccess's `finally`.
@@ -183,7 +196,7 @@ private fun finishRender(
         reportIoFailure(command, e)
         return
     }
-    reportSuccess(command, outPath, format, content, occt, model)
+    reportSuccess(command, outPath, format, content, occt, model, glbResult)
 }
 
 private fun resolveContent(
@@ -243,7 +256,7 @@ private fun resolveContent(
         )
     }
     val triangles = MeshProjection.project(mesh, width.toDouble(), height.toDouble())
-    return RenderContent.Geometry(triangles, model.shapes.size, previewedShapeIndex = 0)
+    return RenderContent.Geometry(mesh, triangles, model.shapes.size, previewedShapeIndex = 0)
 }
 
 private fun resolveFormat(
@@ -266,6 +279,9 @@ private class RenderIoException(
     cause: IOException,
 ) : RuntimeException("failed to write '$outPath': ${cause.message ?: cause::class.simpleName}", cause)
 
+/** @return the [GlbWriteResult] when [format] is [RenderFormat.GLB], for [reportSuccess]'s
+ *  `--output json` document -- `null` for every other format, which has nothing analogous to
+ *  report. */
 private fun writeContainer(
     format: RenderFormat,
     outPath: String,
@@ -276,8 +292,16 @@ private fun writeContainer(
     withStep: Boolean,
     width: Int,
     height: Int,
-) {
-    val lines =
+): GlbWriteResult? {
+    // Lazy: for `RenderFormat.GLB` with `RenderContent.Geometry`, nothing below ever reads
+    // `lines` (the GLB branch sets `summaryLines = emptyList()` in that case) -- computing it
+    // eagerly meant every `-f glb --with-step` render on real geometry paid for a full
+    // `Part21Writer.write` serialization of the entire model, just to throw the result away
+    // (PreviewSummary.modelLines -> entityListLines runs Part21Writer.emit over every root
+    // regardless of withStep; withStep additionally serializes the whole Part-21 text). SVG/PNG/
+    // TEXT, and GLB on the geometry-free (Summary/Notice) path, all still read `lines`, so the
+    // computation itself is unchanged -- only deferred until first use.
+    val lines by lazy {
         when (content) {
             is RenderContent.Geometry ->
                 PreviewSummary.modelLines(
@@ -296,6 +320,7 @@ private fun writeContainer(
                 )
             is RenderContent.Notice -> content.lines
         }
+    }
     // mkdirs() applies to all three formats alike -- previously only the PNG branch created
     // missing parent directories, so the identical `--out nested/dir/preview.svg` that worked
     // for `--format png` threw an uncaught FileNotFoundException for `svg`/`text`.
@@ -307,11 +332,11 @@ private fun writeContainer(
         // opens the ImageOutputStream, so an existing *empty* directory at `--out` is silently
         // deleted and replaced by the PNG file (exit 0, "Wrote ..."), while SVG/TEXT already fail
         // loudly via target.writeText's FileNotFoundException on the very same input. A single
-        // upfront check keeps all three formats identically strict instead of only two of them.
+        // upfront check keeps all formats identically strict instead of only some of them.
         if (target.isDirectory) {
             throw RenderIoException(outPath, IOException("$outPath is a directory"))
         }
-        when (format) {
+        return when (format) {
             RenderFormat.SVG -> {
                 val svg =
                     if (content is RenderContent.Geometry) {
@@ -320,6 +345,7 @@ private fun writeContainer(
                         TextCardRenderer.toSvg(lines, width, height)
                     }
                 target.writeText(svg)
+                null
             }
             RenderFormat.PNG -> {
                 val image =
@@ -332,8 +358,34 @@ private fun writeContainer(
                 if (!wrote) {
                     throw RenderIoException(outPath, IOException("no ImageIO writer available for 'png'"))
                 }
+                null
             }
-            RenderFormat.TEXT -> target.writeText(lines.joinToString("\n") + "\n")
+            RenderFormat.TEXT -> {
+                target.writeText(lines.joinToString("\n") + "\n")
+                null
+            }
+            RenderFormat.GLB -> {
+                // A full-text summary in `extras` only for the geometry-free case, where it is
+                // the ONLY content the document carries at all -- mirroring how SVG/PNG paint
+                // the text card only when there is no triangle mesh to draw. When real geometry
+                // is present, `extras` stays limited to the script name; the counters
+                // (triangleCount/droppedTriangleCount) already come back on GlbWriteResult for
+                // `--output json`, and the full Part-21 instance dump has no equivalent
+                // usefulness sitting inside a 3D viewer's material/asset panel.
+                val extras =
+                    GlbExtras(
+                        scriptName = scriptName,
+                        summaryLines = if (content is RenderContent.Geometry) emptyList() else lines,
+                    )
+                val result =
+                    if (content is RenderContent.Geometry) {
+                        GlbWriter.write(content.mesh, extras)
+                    } else {
+                        GlbWriter.writeEmptyScene(extras)
+                    }
+                target.writeBytes(result.bytes)
+                result
+            }
             RenderFormat.AUTO -> error("unreachable -- format must be resolved before writeContainer")
         }
     } catch (e: IOException) {
@@ -348,9 +400,10 @@ private fun reportSuccess(
     content: RenderContent,
     occt: OcctAvailability,
     model: KStepModel?,
+    glbResult: GlbWriteResult?,
 ) {
     if (command.jsonOutput) {
-        println(successJson(outPath, format, content, occt, model).toString())
+        println(successJson(outPath, format, content, occt, model, glbResult).toString())
     } else {
         println("Wrote $outPath")
     }
@@ -412,6 +465,7 @@ private fun successJson(
     content: RenderContent,
     occt: OcctAvailability,
     model: KStepModel?,
+    glbResult: GlbWriteResult?,
 ): JsonObject =
     buildJsonObject {
         put("status", "success")
@@ -438,11 +492,29 @@ private fun successJson(
             put("shapeCount", model?.shapes?.size ?: 0)
             if (content is RenderContent.Geometry) {
                 put("previewedShapeIndex", content.previewedShapeIndex)
+                // The 2D-projected, painter-culled triangle count -- UNCHANGED meaning from
+                // before this wave (existing callers/tests key off this exact number). See
+                // meshTriangleCount below for the raw, unprojected count the GLB path (and any
+                // external validator cross-checking it) actually cares about.
                 put("triangleCount", content.triangles.size)
+                // The raw world-space mesh's triangle count, before 2D projection/culling --
+                // what an external glTF validator's own reported triangle count should be
+                // compared against for the `-f glb` path (`content.triangles.size` above is a
+                // SVG/PNG-specific, camera-dependent, already-culled number and is not the right
+                // thing to compare a GLB export against).
+                put("meshTriangleCount", content.mesh.triangleCount)
             }
         }
         putOcct(occt)
         put("rootCount", model?.roots?.size ?: 0)
+        if (glbResult != null) {
+            putJsonObject("glb") {
+                put("triangleCount", glbResult.triangleCount)
+                put("vertexCount", glbResult.vertexCount)
+                put("droppedTriangleCount", glbResult.droppedTriangleCount)
+                put("byteLength", glbResult.byteLength)
+            }
+        }
     }
 
 private fun JsonObjectBuilder.putOcct(occt: OcctAvailability) {

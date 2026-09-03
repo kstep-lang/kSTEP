@@ -1,0 +1,478 @@
+= ADR-0016: glTF/GLB export (`kstep render -f glb`)
+:toc:
+
+== Status
+
+Accepted, implemented. `kstep-render` gains a hand-rolled binary glTF 2.0
+(GLB) writer, `dev.kstep.render.gltf.GlbWriter`, that turns a
+`TriangleMesh` into a self-contained `.glb` document -- non-indexed, flat
+shaded, one PBR metallic-roughness material, no textures.
+`kstep-cli`'s `render` command gains a fifth `RenderFormat`, `GLB`
+(reachable via `-f glb` or the `-f gltf` alias), wired into the exact
+same "Container-Regel" every existing format already follows (see
+ADR-0011): the requested container is always produced, only its CONTENT
+varies between a real triangle mesh and a geometry-free scene.
+
+== Context
+
+kSTEP's headless preview path (ADR-0011) can already show a script's
+geometry as a flat, 2D isometric raster (SVG/PNG). What it cannot do is
+hand that geometry to a real 3D viewer -- a browser `<model-viewer>`
+element, Blender, any glTF-aware tool -- for interactive inspection
+(orbit/zoom/pan). glTF 2.0 is the natural target: it is the de facto
+web-3D interchange format, and `TriangleMesh` (kSTEP's own triangle-soup
+type, `kstep-geometry`) already carries almost exactly what glTF's
+non-indexed `TRIANGLES` primitive mode wants -- flat, per-corner
+positions and (after this wave, per-corner) normals, no shared vertices,
+correct outward winding.
+
+This ADR's actual motivation is a Folge-Welle explicitly OUT of THIS
+wave's scope (see Folge-Wellen, G-1): an `obsidian-kstep` plugin that
+renders a ` ```kstep ` code fence as an interactive 3D model instead of a
+static SVG. This wave builds only the writer and the CLI surface it
+needs; the plugin itself is a separate repository and a separate wave.
+
+=== Why a hand-rolled Kotlin writer, not OCCT's `RWGltf_CafWriter`
+
+OCCT ships its own glTF writer (`RWGltf_CafWriter`, in `TKRWMesh`).
+Wrapping it was the obvious first idea and was rejected, for four
+concrete, repo-specific reasons (not just "reinventing is more fun"):
+
+1. **It would break `kstep-render`'s architecture.** ADR-0011 deliberately
+   built `kstep-render` to depend on `kstep-geometry` ONLY, so that
+   `kstep-cli` -- which reuses `kstep-render`'s runtime classpath wholesale
+   via `KStepScriptCompilationConfiguration`'s `wholeClasspath = true` --
+   never drags Compose/Skiko into every `*.kstep.kts` script's compile
+   classpath. A Kotlin writer over the existing `TriangleMesh` type fits
+   that shape exactly: `TriangleMesh` in, `ByteArray` out, zero new native
+   surface.
+2. **`RWGltf_CafWriter` needs an `XCAFDoc` document, not a bare
+   `TopoDS_Shape`.** `kstep_occt_bridge.cpp` is built with a single `g++`
+   invocation (no CMake), and the two-CI-job split (`build`: no OCCT at
+   all; `build-native`: verifies `libTKDESTEP.so` and friends) is tuned to
+   the toolkit list this module already links. Wrapping `RWGltf_CafWriter`
+   would mean a new JNI function AND building an `XCAFDoc` structure
+   natively just to hand it a document -- substantially more native
+   surface than this entire writer.
+3. **A Kotlin writer works without OCCT at all.** `GlbWriter` operates on
+   a plain `TriangleMesh` (a `DoubleArray` wrapper) -- every byte-level
+   test in `GlbWriterTest` (`kstep-render`) runs with no native bridge, in
+   BOTH CI jobs. The OCCT-wrapping alternative would gate every one of
+   those tests behind OCCT availability for no reason connected to what
+   they actually verify (JSON/binary layout correctness).
+4. **The data shape matches exactly.** `TriangleMesh` is already
+   index-free with corrected winding -- precisely what glTF's
+   non-indexed, flat-shaded `TRIANGLES` mode wants. No welding, no
+   smoothing, no vertex-sharing logic needed on either side.
+
+**When this decision should be revisited**: once kSTEP wants to export
+material/color metadata, real assembly structure, or Draco/meshopt
+compression FROM the STEP model itself -- see Folge-Wellen, G-6. None of
+that is needed for a triangle-soup preview export, so `RWGltf_CafWriter`
+brings no benefit this wave could use.
+
+=== Format naming: `glb`, with `gltf` accepted as an alias
+
+The `RenderFormat` value is named `GLB`, not `GLTF` -- this writer only
+ever produces the self-contained BINARY container (JSON chunk + BIN
+chunk in one file), because `kstep render`'s "one output path" contract
+(ADR-0011) has no second path to put a separate `.bin` buffer into.
+Plain-text glTF (`.gltf` + `.bin`) is a genuinely different, two-file
+output shape and is deliberately not offered.
+
+`RenderFormat.parse` accepts BOTH `"glb"` and `"gltf"` (case-insensitively)
+as spellings of `GLB` -- a user reaches for the format FAMILY name at
+least as often as the specific container extension, and this wave writes
+the same bytes either way. `RenderFormat.fromExtension`, in contrast,
+recognizes ONLY `.glb` -- `.gltf` deliberately resolves to `null` (falls
+through to the next `--format auto` resolution step) so that
+`kstep render script.kstep.kts -o model.gltf` under `--format auto` never
+silently writes binary data into a filename extension that conventionally
+means plain-text JSON.
+
+If a future wave adds real text-glTF output (Folge-Wellen, G-5), it needs
+its OWN format name (e.g. `gltf-text`) -- `gltf` is already claimed as a
+`GLB` alias by this wave and reassigning it later would be a breaking
+change to `-f gltf`'s existing meaning.
+
+=== Coordinate system: a node rotation, not a baked-in transform
+
+kSTEP/OCCT model space is Z-up; glTF is Y-up. The conversion is applied
+as the scene's single node's `rotation` quaternion (`-90` degrees about
+X: `(x,y,z,w) = (-√0.5, 0, 0, √0.5)`) -- buffer data itself STAYS in
+model-space coordinates, untransformed. Three reasons, not one:
+
+* glTF's own spec defines `accessor.min`/`max` in the accessor's local
+  (pre-node-transform) space, so leaving buffer data in model space keeps
+  those bounds a direct function of the buffer, no special-casing needed.
+* A direct, byte-for-byte comparison between `TriangleMesh.coordinates`
+  and the written buffer (float32-narrowed) stays possible -- exactly the
+  proof `GlbWriterTest`'s round-trip case wants, without first having to
+  undo a transform in the test itself.
+* It matches what OCCT's own `RWGltf_CafWriter` does -- switching to that
+  writer later (Folge-Wellen, G-6) would not change this wave's output
+  shape.
+
+The rotation is orthonormal (rotation-block determinant `+1`), so it
+introduces no reflection: normals stay correct with no normal-matrix
+correction needed, and winding is preserved.
+
+=== Winding: no flip needed, `doubleSided` set explicitly
+
+`TriangleMesh` already guarantees `n = (v1-v0) x (v2-v0)` points outward
+(its own KDoc; `REVERSED` OCCT faces are corrected natively) -- exactly
+glTF's front-face convention (CCW, right-hand rule). `GlbWriter` therefore
+never reorders a triangle's vertices. `materials[0].doubleSided` is
+written as `false` EXPLICITLY (glTF's own spec default is already
+`false`, so this is redundant on paper) so that a future winding
+regression in `TriangleMesh` shows up as visibly wrong/inside-out
+geometry in a real viewer instead of being silently masked by two-sided
+rendering.
+
+== Decision
+
+=== `dev.kstep.render.gltf` (`kstep-render`)
+
+```kotlin
+data class GlbExtras(
+    val scriptName: String? = null,
+    val summaryLines: List<String> = emptyList(),
+)
+
+class GlbWriteResult(
+    val bytes: ByteArray,
+    val triangleCount: Int,
+    val vertexCount: Int,
+    val droppedTriangleCount: Int,
+) {
+    val byteLength: Int get() = bytes.size
+}
+
+object GlbWriter {
+    const val GENERATOR: String = "kSTEP (dev.kstep.render.gltf.GlbWriter)"
+
+    fun write(mesh: TriangleMesh, extras: GlbExtras = GlbExtras.EMPTY): GlbWriteResult
+    fun writeEmptyScene(extras: GlbExtras = GlbExtras.EMPTY): GlbWriteResult
+}
+```
+
+`write` filters out any triangle that is DEGENERATE (zero-length
+cross-product normal -- collinear/zero-area) or carries a non-finite or
+float32-unrepresentable coordinate (`|value| > Float.MAX_VALUE`); such a
+triangle is silently DROPPED, never written and never an error (writing
+it verbatim is exactly what would produce a hard glTF-validator error --
+see Stolperfallen 1/3 below). If every triangle is dropped (or the input
+mesh was already empty), `write` delegates to `writeEmptyScene` -- the GLB
+expression of ADR-0011's Container-Regel: the container is always valid,
+only its content differs.
+
+`writeEmptyScene` produces:
+
+```jsonc
+{ "asset": { "version": "2.0", "generator": "..." }, "scenes": [{}] }
+```
+
+-- no `meshes`/`buffers`/`accessors`/`bufferViews` keys at all (NOT empty
+arrays: `meshes: []` is itself a validator error, `EMPTY_ENTITY` -- see
+Stolperfalle 4), and no BIN chunk in the GLB container (a document with no
+`buffers` entry has no buffer data to attach).
+
+The real-geometry document's key order (`asset`, `scene`, `scenes`,
+`nodes`, `meshes`, `materials`, `accessors`, `bufferViews`, `buffers`) is
+fixed by `buildJsonObject`'s insertion-ordered map -- this, plus no
+timestamp/version string in `asset.generator`, makes `GlbWriter`
+byte-deterministic: identical `TriangleMesh`/`GlbExtras` input always
+produces identical output bytes (`GlbWriterTest`'s A13 case), matching
+`TriangleSvgWriter`'s existing determinism contract for SVG.
+
+`asset.extras.kstep` carries `{ scriptName, summary }` (both optional,
+`extras` omitted entirely when neither is present) -- built via
+`kotlinx-serialization-json`'s `buildJsonObject`/`JsonObjectBuilder`, NOT
+`dev.kstep.render.svg.SvgEscaping`: SVG escaping's rules (XML entities,
+non-ASCII replaced with `?`) are both the wrong shape and insufficient
+for JSON (JSON allows literal Unicode text XML would need entity-escaped,
+and needs its own escaping for `"`/`\`/control characters SVG escaping
+never touches). `summaryLines` is capped at
+`RenderLimits.MAX_CARD_LINES` lines of `RenderLimits.MAX_CARD_LINE_CHARS`
+characters each, the same constants `TextCardRenderer` already enforces.
+
+=== `RenderLimits` (`kstep-render`)
+
+```kotlin
+const val GLB_TRIANGLE_WARN_THRESHOLD: Int = 50_000
+```
+
+A LOGGING signal only, mirroring `SVG_TRIANGLE_WARN_THRESHOLD` -- the
+real hard cap is `OcctKernel.MAX_TRIANGLES` (130 000), which `GlbWriter`
+re-checks itself (see Security) since `TriangleMesh` is a public type any
+caller could construct with an arbitrarily large `DoubleArray`.
+
+=== `RenderFormat`/`RenderCommand`/`Main.kt` (`kstep-cli`)
+
+`RenderFormat` gains `GLB`; `parse` accepts `"glb"`/`"gltf"`;
+`fromExtension` recognizes only `.glb` (see Context above for both).
+`RenderContent.Geometry` gains a `mesh: TriangleMesh` field carrying the
+UNprojected world-space mesh alongside the existing `triangles: List<ProjectedTriangle>`
+2D projection -- `-f glb` needs the former, SVG/PNG keep using only the
+latter. The 2D projection still runs EAGERLY even under `-f glb`
+(`resolveContent` runs before format resolution, and `--format auto`
+needs to know whether a geometry render succeeded at all) -- accepted as
+deliberate, documented double work for this wave; see Folge-Wellen for
+the lazy-projection alternative if it ever becomes measurably expensive.
+
+`writeContainer`'s GLB branch builds `GlbExtras` with the script name
+always, and the FULL text-card summary lines only when there is no
+geometry to draw (mirroring how SVG/PNG paint the text card only in that
+same case) -- when real geometry is present, the triangle/vertex counters
+already travel on `GlbWriteResult` for `--output json` instead.
+`writeContainer` now returns `GlbWriteResult?` (non-null only for the GLB
+format) so `successJson` can add a `"glb"` object:
+
+```jsonc
+"glb": { "triangleCount": 12, "vertexCount": 36, "droppedTriangleCount": 0, "byteLength": 1732 }
+```
+
+`successJson`'s existing `geometry.triangleCount` field is UNCHANGED --
+still the 2D-projected, painter-culled count SVG/PNG use (existing tests,
+e.g. R6, key off this exact number). A new `geometry.meshTriangleCount`
+field carries the raw, unprojected mesh triangle count instead -- the
+number an external glTF validator's own reported count should be compared
+against, since the projected count is camera-dependent and already
+culled.
+
+`--width`/`--height` are still validated (and still meaningless) for
+`-f glb`, exactly as documented for `-f text` already -- one validation
+path for every format is simpler than a format-conditional exemption; see
+`USAGE_TEXT`'s "ignored for glb" note.
+
+== Security
+
+[cols="2,3,2", options="header"]
+|===
+| Category | Measure | Verified by
+
+| DoS -- triangle count
+| `GlbWriter.write` re-checks `mesh.triangleCount <= OcctKernel.MAX_TRIANGLES`
+  BEFORE allocating any output buffer -- the same "guard before allocate"
+  pattern as `MeshComposition.merge`. Needed because `TriangleMesh` is a
+  public type any caller can construct directly with an arbitrary
+  `DoubleArray`; the native OCCT-side guard only bounds what triangulation
+  itself can produce.
+| `GlbWriterTest`'s A10 case (`MAX_TRIANGLES + 1` rejected)
+
+| DoS -- file size
+| Follows directly from the triangle-count guard: `130 000 * 3 * 24` bytes
+  (position + normal) `~= 8.93 MiB` at the ceiling -- measured on a real
+  130 000-triangle mesh during this wave's design, not just computed.
+| Manual measurement during design; bounded transitively by the A10 guard
+  above
+
+| DoS -- `extras` text volume
+| `summaryLines` capped at `RenderLimits.MAX_CARD_LINES` x
+  `MAX_CARD_LINE_CHARS` -- the same constants `TextCardRenderer` already
+  enforces for the identical reason (an attacker-controlled script with
+  thousands of roots could otherwise inflate the JSON chunk arbitrarily).
+| `GlbWriterTest`'s A11 case
+
+| Injection
+| `asset.extras` is built via `kotlinx-serialization-json`'s
+  `JsonObjectBuilder`, never string concatenation -- correct JSON escaping
+  (quotes, backslashes, control characters, and Unicode passed through
+  legally) is a maintained library's job, not a hand-rolled one.
+  Deliberately NOT `SvgEscaping` (XML rules do not apply to JSON -- see
+  Context).
+| `GlbWriterTest`'s A12 case (`</text><script>...` + Unicode payload
+  round-trips exactly, and parses as valid JSON at all)
+
+| Non-finite/oversized floats
+| A triangle with any `NaN`/`Infinity`/`|value| > Float.MAX_VALUE`
+  coordinate is DROPPED, not written -- writing it would either produce
+  `NaN`/`Infinity` literals in the JSON `min`/`max` (not valid JSON at
+  all) or a hard validator error.
+| `GlbWriterTest`'s A7 case
+
+| Degenerate geometry
+| A triangle whose cross-product normal has zero (or non-finite) length
+  is DROPPED -- writing a zero-length "unit" normal produces a hard
+  `ACCESSOR_VECTOR3_NON_UNIT` validator error, verified during this wave's
+  design (measured: 3 errors per degenerate triangle, one per corner).
+| `GlbWriterTest`'s A6 case
+
+| No new native surface
+| `kstep_occt_bridge.cpp` is untouched -- see Decision's "why a hand-rolled
+  writer" reasoning; this is the primary reason `RWGltf_CafWriter` was
+  rejected.
+| Diff review
+
+| Resource leak
+| Unchanged from ADR-0011: `renderSuccess`'s `finally` (plus the two
+  explicit `closeShapes` calls ahead of `exitProcess(1)`) already covers
+  every path through `writeContainer`, GLB included -- this wave adds no
+  new `exitProcess` path.
+| Review
+
+| Supply chain
+| No new artifact enters `kstep-cli`'s BUILD/RUNTIME classpath:
+  `kotlinx-serialization-json` was already on it transitively (via
+  `kstep-mcp`/`kstep-script`) and is now also declared directly by
+  `kstep-render`, for the same "used directly, not just transitively"
+  reason `kstep-cli` already declares several of its own dependencies
+  explicitly. The Khronos `gltf-validator` (`scripts/`) is a DEV-ONLY
+  dependency, pinned via `scripts/package-lock.json`, and ships in NO
+  published kSTEP artifact.
+| `:kstep-cli:dependencies --configuration runtimeClasspath` diff (no
+  `skiko`/`compose`/`androidx` before or after; no new artifact overall)
+
+| No network access from the build
+| `./gradlew check` never invokes `npm`/`node` -- the validator
+  (`scripts/validate-gltf.mjs`) runs only manually, or under the
+  explicit, off-by-default `-Pkstep.gltf.validate=true` gate, which itself
+  never calls `npm` (it assumes `npm ci` was already run by hand).
+| `GltfValidationExportTest`'s gated case HARD-FAILS (not skips) if
+  `scripts/node_modules` is missing while the property is set -- see
+  Stolperfalle 12
+
+| Trust boundary
+| Unchanged: `*.kstep.kts` remains trusted, locally-invoked Kotlin code.
+  GLB is a third OUTPUT FORM of the same evaluation `kstep render` already
+  performs for SVG/PNG/TEXT. Flagged for the Folge-Welle consumer (G-1):
+  an `obsidian-kstep` plugin rendering `asset.extras.kstep.summary` as a
+  caption MUST HTML-escape it itself -- `extras` is data, not markup, and
+  this writer's own JSON-escaping does not imply any downstream HTML
+  safety.
+| Noted here for the Folge-Welle to inherit; not directly testable in
+  THIS repo
+|===
+
+== Stolperfallen
+
+1. **`accessors[0].min`/`max` MUST come from the float32-NARROWED
+   position values, not the source `Double`s -- and the Khronos validator
+   does NOT catch a regression here.** Measured directly: a document whose
+   `min`/`max` come from the raw doubles validates with ZERO errors, same
+   as one whose bounds come from the narrowed floats. Only
+   `GlbWriterTest`'s A8 case (an exact byte-level comparison) catches a
+   regression on this point -- the single most dangerous item in this
+   whole wave, because it hides behind a passing external validator.
+2. **`POSITION` accessors require BOTH `min` and `max` -- `NORMAL`
+   accessors must NOT have them.** Omitting `min`/`max` on the position
+   accessor is a hard error (`MESH_PRIMITIVE_POSITION_ACCESSOR_WITHOUT_BOUNDS`),
+   measured directly; the normal accessor carries neither field.
+3. **A zero-length (degenerate) normal is THREE hard errors, not one --
+   `ACCESSOR_VECTOR3_NON_UNIT` fires once per corner.** Confirmed by
+   writing a real degenerate triangle through the prototype writer used to
+   design this wave and reading the validator's own message list, not
+   assumed from the spec text.
+4. **Empty arrays (`meshes: []`, `buffers: []`, ...) are themselves
+   errors (`EMPTY_ENTITY`) -- the geometry-free document must OMIT those
+   keys entirely, not set them to `[]`.** `writeEmptyScene` was designed
+   against this measured result, not the (wrong) intuition that an empty
+   array is the "obviously correct" way to say "no geometry".
+5. **float32 is the ONLY component type glTF supports for `POSITION`/
+   `NORMAL` -- there is no double variant.** `TriangleMesh` is `Double`
+   throughout (matching every other native-boundary type in
+   `kstep-geometry`); the narrowing to `Float` happens exactly once, at
+   the point each vertex is written into the output buffer in
+   `GlbWriter.write`, never earlier. Every test comparing a written
+   position must compare against `value.toFloat().toDouble()`, never the
+   original `Double` -- see Stolperfalle 1 for why getting this backwards
+   is easy to miss.
+6. **GLB chunk padding: JSON pads with `0x20` (space), BIN pads with
+   `0x00` -- swapping them breaks a parser that reads the JSON chunk as a
+   plain string.** Both chunk lengths must independently be multiples of
+   4; `bufferView.byteOffset` alignment falls out automatically here
+   because every `POSITION`/`NORMAL` block length (`vertexCount * 12`
+   bytes) is already a multiple of 4.
+7. **`RenderContent.Geometry` did not carry the unprojected `TriangleMesh`
+   before this wave -- only its already-2D-projected triangles.** Anyone
+   touching only `RenderFormat`/`writeContainer` without also adding
+   `Geometry.mesh` will find the GLB branch has literally no mesh data to
+   write; this is the one non-obvious CLI-side change the wave needs
+   beyond the new format value itself.
+8. **`asset.extras` needs JSON escaping, not
+   `dev.kstep.render.svg.SvgEscaping`.** `SvgEscaping` both does too much
+   (replaces non-ASCII with `?`, which JSON does not need) and too little
+   (no handling for `"`/`\`/control characters, which JSON requires) --
+   see Decision and Security's Injection row.
+9. **Determinism requires no timestamp AND no version string in
+   `asset.generator`, AND a stable JSON key order.** `buildJsonObject`'s
+   underlying map preserves insertion order, which is why this writer's
+   key order is fixed by construction rather than by convention -- but a
+   future refactor that swaps to a different JSON-building approach could
+   silently lose this property without a determinism test (`GlbWriterTest`
+   A13) actually failing loudly.
+10. **The Z-up-to-Y-up conversion must be applied exactly ONCE -- either
+    as the node rotation, or baked into the buffer coordinates, never
+    both.** `GlbWriterTest`'s A14 case independently re-derives where
+    model-space `+Z` ends up after applying the written quaternion (world
+    `+Y`) rather than just comparing the quaternion's four numbers against
+    a literal, specifically to catch a "rotation applied twice" or
+    "rotation applied nowhere" regression that four correct-looking
+    numbers alone would not.
+11. **`npm ci`/`node` must never run from inside a Gradle task.** This
+    repo has no established pattern of build-time network access, and
+    introducing one here (even for a dev-only validator) would break
+    `./gradlew check` on any offline machine. `scripts/validate-gltf.mjs`
+    runs only manually or behind the `-Pkstep.gltf.validate=true` gate,
+    and that gate assumes `npm ci` was already run by hand.
+12. **The `kstep.gltf.validate` gate must HARD-FAIL, not silently skip,
+    when `node`/`scripts/node_modules` are missing while the property is
+    set to `true`.** Mirrors the exact lesson this repo already learned
+    from `-Pkstep.occt.require`/`-Pkstep.planegcs.require`: a gate that
+    can quietly no-op is not a gate. `GltfValidationExportTest`'s gated
+    case `require()`s both preconditions explicitly.
+
+== Folge-Wellen
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| G-1
+| **The actual motivation for this whole wave, and a DIFFERENT repository
+  (`kstep-lang/obsidian-kstep`, analogous to `kuml-dev/obsidian-kuml`).**
+  An Obsidian community plugin: run `kstep render -f glb` in a subprocess
+  from a ` ```kstep ` code fence, render the result via `<model-viewer>`
+  or Three.js's `GLTFLoader` for interactive orbit/zoom, fall back to
+  `-f svg` when OCCT is unavailable on the host machine, and surface
+  `asset.extras.kstep.summary` as a caption -- MUST HTML-escape that text
+  itself (see this ADR's Security "Trust boundary" row). Needs the
+  `obsidian-kstep` repo/org set up first, including the `master`-not-`main`
+  default-branch care every new `kuml-dev`/`kstep-lang` repo has needed.
+
+| G-2
+| Camera- and material-parameter CLI flags (`--base-color`,
+  `--metallic`, `--roughness`) and an optional `cameras` node carrying an
+  ADR-0012 `Camera` pose, so a glTF viewer can open on the same view
+  `-f svg` would have shown.
+
+| G-3
+| Multiple shapes as a real glTF node hierarchy (one node per
+  `ShapeAssignment`, `matrix` from `ITEM_DEFINED_TRANSFORMATION`) --
+  blocked on the same thing ADR-0011's R-3/ADR-0013's Folge-Wellen already
+  name: `ShapeAssignment` carries no placement transform yet. glTF is
+  arguably a MORE natural fit for this than the 2D path once R-3 is
+  unblocked (a node hierarchy is closer to glTF's native shape than a
+  merged 2D raster is).
+
+| G-4
+| A `mode: 1` (LINES) primitive carrying feature-edge/silhouette data --
+  the GLB counterpart to ADR-0011's still-open R-8 (edge overlay).
+
+| G-5
+| Plain-text glTF (`.gltf` + external `.bin`), under a NEW format name
+  (`gltf` is already claimed as a `GLB` alias by this wave -- see
+  Context). Only worth adding once a real caller needs the buffer as a
+  separately cacheable file.
+
+| G-6
+| Draco/meshopt compression, and/or switching the writer to OCCT's
+  `RWGltf_CafWriter` for real material/color/assembly export straight from
+  the STEP model -- this is the point at which wrapping OCCT's own writer
+  would finally pay for the native-surface cost this ADR's Decision
+  rejected paying for a plain triangle-soup preview.
+
+| G-7 (ADR-0011 R-6)
+| `kstep-asciidoc`'s `[kstep]` macro could offer GLB for interactive HTML
+  backends alongside SVG for PDF/print backends.
+|===

@@ -1,0 +1,9 @@
+{
+  "name": "kstep-gltf-validation",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only tooling that validates a kstep-cli 'render -f glb' output against the official Khronos glTF validator -- see docs/adr/ADR-0016-gltf-glb-export.adoc. Never a build or runtime dependency of any published kSTEP artifact.",
+  "dependencies": {
+    "gltf-validator": "2.0.0-dev.3.10"
+  }
+}

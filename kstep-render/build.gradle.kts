@@ -13,6 +13,15 @@ dependencies {
     // this wave -- see docs/adr/ADR-0011-headless-preview-rendering.adoc).
     api(project(":kstep-geometry"))
     implementation(libs.kotlin.logging.jvm)
+    // GlbWriter (docs/adr/ADR-0016-gltf-glb-export.adoc) builds its glTF JSON document via
+    // buildJsonObject, not a handwritten string escaper -- asset.extras carries script-supplied,
+    // attacker-reachable text, and correct JSON escaping is a security property worth getting
+    // from a maintained library rather than reimplementing (see that ADR's Decision section on
+    // why this is a deliberate, narrow exception to this module's prior "zero new external
+    // dependencies" stance -- ADR-0011). No new artifact enters kstep-cli's build: this
+    // coordinate is already on its runtimeClasspath via kstep-mcp/kstep-script and declared
+    // explicitly there for the same "used directly, not just transitively" reason as here.
+    implementation(libs.kotlinx.serialization.json)
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
     testRuntimeOnly(libs.slf4j.simple)
