@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # ci.yml pins every `uses:` reference to a full commit SHA (with a `# vX.Y.Z` comment)
+  # rather than a movable major tag -- see the comment block at the top of that job for why
+  # (tj-actions/changed-files, CVE-2025-30066). Dependabot is the update path for those pins:
+  # it opens a PR bumping the SHA (and the version comment) whenever a new release ships,
+  # so the pins don't silently rot into stale, unpatched commits.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

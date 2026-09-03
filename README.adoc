@@ -7,6 +7,7 @@ Type-safe Kotlin DSL for the STEP standard (ISO 10303).
 image:https://img.shields.io/badge/Kotlin-2.4.10-7F52FF.svg?logo=kotlin&logoColor=white[Kotlin 2.4.10,link=https://kotlinlang.org]
 image:https://img.shields.io/badge/JDK-21+-ED8B00.svg?logo=openjdk&logoColor=white[Java 21+,link=https://adoptium.net]
 image:https://img.shields.io/github/license/kstep-lang/kSTEP[Apache 2.0,link=https://github.com/kstep-lang/kSTEP/blob/master/LICENSE]
+image:https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml/badge.svg?branch=master[CI,link=https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml]
 
 WARNING: kSTEP is in early, pre-release development (M2). The API is
 unstable and no artifacts are published yet. See <<status,Status>> below
@@ -964,6 +965,48 @@ every other module's pattern (the two `*.kstep.kts` test fixtures are
 resources under `kstep-tests/src/test/resources`, loaded via
 `getResourceAsStream` — not under `kstep-script` itself, for the same
 reason).
+
+=== Building — continuous integration
+
+`.github/workflows/ci.yml` runs two jobs on every push to `master`, every
+pull request, and on demand (`workflow_dispatch`):
+
+|===
+| Job | Runner | Native deps installed | Gradle invocation | What it proves
+
+| `build`
+| `ubuntu-latest` (GA, Ubuntu 24.04 as of 09/2026)
+| Eigen, Boost, Skiko runtime libs — deliberately *not* OCCT
+| `./gradlew clean check -Pkstep.planegcs.require=true`
+| The stable gate: compilation, ktlint, `generateExpressKotlin`, the full
+  Kotest suite, real PlaneGCS coverage, and — because OCCT is absent —
+  the graceful-degradation path (`OcctAvailability.Unavailable`) that no
+  other job exercises.
+
+| `build-native`
+| `ubuntu-26.04` (public preview as of 09/2026)
+| OCCT (4 packages) + Eigen + Boost + Skiko runtime libs
+| `./gradlew clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true`
+| Real, end-to-end OCCT coverage: `OcctBridgeSmokeTest`,
+  `OcctFeatureOperationsTest`, the AP242 shape-export roundtrip, headless
+  render, and CLI render integration.
+|===
+
+The two-job split exists because there is no GitHub-hosted GA runner
+image with an OCCT new enough for this project: `ubuntu-latest`
+(Ubuntu 24.04) ships OCCT 7.6.3, whose STEP toolkits are still named
+`TKSTEP`/`TKSTEPBase`/`TKSTEPAttr` — `libTKDESTEP.so` (OCCT 7.8+, what
+`kstep-geometry/build.gradle.kts` links against via `-lTKDESTEP`) does
+not exist there. Installing the OCCT dev packages on that runner would
+make `compileOcctBridge` run (headers present) and then fail at link
+time — worse than not installing them, where the task is skipped and the
+documented graceful-degradation path runs instead. `ubuntu-26.04` is the
+only GitHub-hosted image whose OCCT (7.9.2) provides `libTKDESTEP.so`,
+matching this project's own development environment; it is in public
+preview as of this writing, so `build` on the GA label stays the gate
+that never depends on a preview image. If the preview label ever becomes
+unreliable (capacity, image regressions), the documented fallback is
+`runs-on: ubuntu-latest` with `container: ubuntu:26.04`.
 
 === Building — optional OCCT geometry bridge
 

@@ -1,0 +1,381 @@
+name: CI
+
+# Deliberately NOT pull_request_target: this workflow checks out and *executes* the
+# code of the pull request (Gradle build + a g++ compile of vendored C++ sources).
+# pull_request_target would run that fork-authored code with a read/write GITHUB_TOKEN
+# and access to repository secrets. Plain pull_request runs it in the isolated,
+# secret-less fork context, which is exactly what a build/test workflow needs.
+on:
+  push:
+    branches: [master]   # kSTEP's default branch is master, never main.
+  pull_request:
+  workflow_dispatch:     # lets a maintainer re-run CI on demand without an empty commit.
+
+# Least privilege. A build/test workflow reads the repository and nothing else:
+# no release creation, no PR comments, no dependency-graph submission
+# (gradle/actions' dependency-submission is a separate action and stays unused here --
+# it would require contents: write).
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR supersedes the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------------------------------
+  # Job 1 -- the stable gate, on the GA `ubuntu-latest` label (Ubuntu 24.04 as of 09/2026).
+  #
+  # OCCT is deliberately NOT installed here. Ubuntu 24.04 ships OCCT 7.6.3, whose STEP
+  # toolkits are still named TKSTEP/TKSTEPBase/TKSTEPAttr; libTKDESTEP.so (OCCT 7.8+, what
+  # kstep-geometry/build.gradle.kts links against) does not exist there. Installing the
+  # OCCT dev packages on this runner would therefore make compileOcctBridge *run* (headers
+  # present) and then *fail* at link time -- strictly worse than not installing them, where
+  # the task is skipped and the documented graceful-degradation path is exercised instead.
+  # Real OCCT coverage lives in the build-native job below.
+  # -------------------------------------------------------------------------------------
+  build:
+    name: check (ubuntu-latest, OCCT absent)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Do not leave the GITHUB_TOKEN in .git/config where any build script,
+          # Gradle plugin or test could read it. Nothing in this workflow pushes.
+          persist-credentials: false
+
+      - name: Install PlaneGCS build dependencies and Skiko runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libeigen3-dev libboost-dev \
+            libgl1 libfontconfig1 libfreetype6 libx11-6
+        # libeigen3-dev/libboost-dev: header-only inputs of kstep-constraints'
+        #   compilePlaneGcsBridge (no -L/-l needed, see that module's build script).
+        # libgl1/libfontconfig1/libx11-6: direct DT_NEEDED entries of Skiko's
+        #   libskiko-linux-x64.so -- libGL.so.1, libfontconfig.so.1, libX11.so.6
+        #   (verified with `ldd` on the skiko-awt-runtime-linux-x64 jar's .so) -- which
+        #   kstep-viewer's ViewerCanvasZeroSizeTest loads via ImageComposeScene even in
+        #   headless mode. libfreetype6 is not a direct DT_NEEDED entry of libskiko
+        #   itself; it is pulled in transitively by libfontconfig.so.1, but is still
+        #   needed at load time, so it stays in this list. Usually already present on
+        #   the runner image; listing them explicitly makes the job independent of
+        #   image contents.
+
+      - name: Verify OCCT headers are absent (this job's own precondition)
+        run: |
+          if [ -f /usr/include/opencascade/Standard_Version.hxx ]; then
+            echo "::error::OCCT headers unexpectedly present on this runner" \
+                 "(/usr/include/opencascade/Standard_Version.hxx exists). This flips" \
+                 "kstep-geometry/build.gradle.kts's occtHeadersPresent to true and makes" \
+                 "compileOcctBridge's onlyIf fire, so job 'build' no longer covers the" \
+                 "documented OcctAvailability.Unavailable graceful-degradation path --" \
+                 "see the job-level comment above and build-native below for real OCCT" \
+                 "coverage."
+            exit 1
+          fi
+        # Symmetric to build-native's "Verify the runner's OCCT provides the TKDESTEP
+        # toolkit" guard below: that job asserts its precondition (OCCT present) still
+        # holds; this asserts this job's precondition (OCCT absent) still holds.
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '21'
+        # kSTEP pins jvmToolchain(21) in every module and README states "Requires JDK 21".
+        # kstep-geometry/kstep-constraints additionally resolve a *JDK 21 compiler* via
+        # JavaToolchainService (for -I$jdkHome/include -> jni.h), so a JRE would not do.
+
+      - name: Set up Gradle (with dependency + build cache)
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          # Defense in depth on top of the SHA pin above: even a compromised action running
+          # under this exact pinned commit could still try to poison the Gradle
+          # dependency/build cache that setup-gradle writes on push:master runs (the cache
+          # is read-only on PRs and other branches already). Refusing to write here closes
+          # that persistence path entirely -- worth the lost cache-warming benefit on this
+          # branch-protected job.
+          cache-read-only: true
+
+      - name: ./gradlew clean check
+        run: ./gradlew clean check -Pkstep.planegcs.require=true --stacktrace
+        # -Pkstep.planegcs.require=true: PlaneGcsBridgeSmokeTest must NOT silently skip here --
+        # Eigen/Boost are installed above, so an Unavailable solver means a real regression.
+        # No -Pkstep.occt.require: OCCT is intentionally absent, the OCCT-gated tests are
+        # expected to skip, and that skip path is part of what this job verifies.
+
+      - name: Verify the PlaneGCS-gated test suites actually ran (not skipped)
+        run: |
+          shopt -s globstar nullglob
+          files=(**/build/test-results/test/TEST-*PlaneGcs*.xml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No PlaneGCS test result files matched" \
+                 "**/build/test-results/test/TEST-*PlaneGcs*.xml. Either the PlaneGCS test" \
+                 "classes were renamed/moved, or -Pkstep.planegcs.require=true never" \
+                 "reached Gradle -- this job would then give no PlaneGCS coverage at all" \
+                 "while still reporting green."
+            exit 1
+          fi
+          python3 - "${files[@]}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          # Two Kotest cases are deliberately INVERSE-gated (`.config(enabled = !available)`):
+          # PlaneGcsBridgeSmokeTest's "solving fails predictably when the native bridge is
+          # unavailable" and "planeGcsSourceCommit fails predictably ...". They assert
+          # graceful degradation when PlaneGCS is UNAVAILABLE, so in this job -- which
+          # requires PlaneGCS to be present via -Pkstep.planegcs.require=true -- they are
+          # *expected* to be skipped. Only the normal `enabled = available` cases must have
+          # actually run, so skips are only a problem for testcases that do NOT carry this
+          # marker.
+          INVERSE_GATED_MARKER = "fails predictably when the native bridge is unavailable"
+
+          unexpected_skips = []
+          for path in sys.argv[1:]:
+              root = ET.parse(path).getroot()
+              for testcase in root.iter("testcase"):
+                  if testcase.find("skipped") is None:
+                      continue
+                  name = testcase.get("name", "<unnamed>")
+                  if INVERSE_GATED_MARKER in name:
+                      continue
+                  unexpected_skips.append(f"{path}::{name}")
+
+          if unexpected_skips:
+              print(
+                  "::error::" + str(len(unexpected_skips)) + " PlaneGCS-gated test(s) were "
+                  "skipped even though this job passed -Pkstep.planegcs.require=true. The "
+                  "'-P' property name has likely drifted from what "
+                  "kstep-tests/build.gradle.kts reads (it wires it into the "
+                  "'kstep.planegcs.require' system property), so it silently fell back to "
+                  "its 'false' default and every PlaneGcsAvailability-gated case reverted "
+                  "to a silent skip. Unexpectedly skipped: " + "; ".join(unexpected_skips)
+              )
+              sys.exit(1)
+
+          print(
+              "OK: checked " + str(len(sys.argv) - 1) + " PlaneGCS test result file(s), "
+              "no unexpectedly skipped testcase."
+          )
+          PY
+        # Symmetric to build-native's "Verify the OCCT-gated test suites actually ran"
+        # guard: that step only exists in build-native (OCCT is absent here by design),
+        # but PlaneGCS is required in both jobs, so this guard applies in both.
+
+      - name: Upload test and ktlint reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-ubuntu-latest
+          path: |
+            **/build/reports/tests/**
+            **/build/reports/ktlint/**
+            **/build/test-results/**
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # -------------------------------------------------------------------------------------
+  # Job 2 -- real native coverage, on ubuntu-26.04 (OCCT 7.9.2, the same version this
+  # project is developed against). That label is in public preview as of 09/2026; it is the
+  # only GitHub-hosted image whose OCCT provides the TKDESTEP toolkit this build links
+  # against. If the preview label ever becomes a problem (capacity, image regressions), the
+  # documented fallback is `runs-on: ubuntu-latest` + `container: ubuntu:26.04` (then drop
+  # `sudo` from the apt step and add `git` to the package list).
+  # -------------------------------------------------------------------------------------
+  build-native:
+    name: check (ubuntu-26.04, OCCT + PlaneGCS required)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install OCCT, PlaneGCS and Skiko runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libocct-foundation-dev libocct-modeling-data-dev \
+            libocct-modeling-algorithms-dev libocct-data-exchange-dev \
+            libeigen3-dev libboost-dev \
+            libgl1 libfontconfig1 libfreetype6 libx11-6
+        # Exactly the package set README's "Building -- optional OCCT geometry bridge" and
+        # "Building -- optional PlaneGCS constraint solver" sections document. No cmake:
+        # both bridges are single, direct g++ invocations (see their build scripts).
+
+      - name: Verify the runner's OCCT provides the TKDESTEP toolkit
+        run: |
+          if [ ! -f /usr/lib/x86_64-linux-gnu/libTKDESTEP.so ]; then
+            echo "::error::This runner's OCCT predates 7.8 (no libTKDESTEP.so)." \
+                 "kstep-geometry links -lTKDESTEP and cannot build here."
+            find /usr/lib/x86_64-linux-gnu -maxdepth 1 -iname 'libTK*.so' -printf '%f\n' || true
+            exit 1
+          fi
+          grep -m1 'OCC_VERSION_COMPLETE  *"' /usr/include/opencascade/Standard_Version.hxx || true
+        # Turns a future silent image change into one explicit line instead of an opaque
+        # "cannot find -lTKDESTEP" deep inside a Gradle Exec task's output.
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with dependency + build cache)
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          # See the identical comment on job 'build''s setup-gradle step: defense in depth
+          # against cache poisoning surviving beyond a single (even correctly SHA-pinned)
+          # compromised run.
+          cache-read-only: true
+
+      - name: ./gradlew clean check (native paths required)
+        run: |
+          ./gradlew clean check \
+            -Pkstep.occt.require=true \
+            -Pkstep.planegcs.require=true \
+            --stacktrace
+
+      - name: Verify the OCCT-gated test suites actually ran (not skipped)
+        run: |
+          shopt -s globstar nullglob
+          files=(**/build/test-results/test/TEST-*Occt*.xml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No OCCT test result files matched" \
+                 "**/build/test-results/test/TEST-*Occt*.xml. Either the OCCT test" \
+                 "classes were renamed/moved, or -Pkstep.occt.require=true never" \
+                 "reached Gradle -- this job would then give no OCCT coverage at all" \
+                 "while still reporting green."
+            exit 1
+          fi
+          python3 - "${files[@]}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          # Three Kotest cases are deliberately INVERSE-gated (`.config(enabled = !available)`):
+          # OcctBridgeSmokeTest's "makeBox fails predictably when the native bridge is
+          # unavailable" and "occtVersion fails predictably ...", plus
+          # OcctFeatureOperationsTest's "extrudeProfile fails predictably ...". They assert
+          # graceful degradation when OCCT is UNAVAILABLE, so in this job -- which requires
+          # OCCT to be present via -Pkstep.occt.require=true -- they are *expected* to be
+          # skipped. Only the normal `enabled = available` cases must have actually run, so
+          # skips are only a problem for testcases that do NOT carry this marker.
+          INVERSE_GATED_MARKER = "fails predictably when the native bridge is unavailable"
+
+          unexpected_skips = []
+          for path in sys.argv[1:]:
+              root = ET.parse(path).getroot()
+              for testcase in root.iter("testcase"):
+                  if testcase.find("skipped") is None:
+                      continue
+                  name = testcase.get("name", "<unnamed>")
+                  if INVERSE_GATED_MARKER in name:
+                      continue
+                  unexpected_skips.append(f"{path}::{name}")
+
+          if unexpected_skips:
+              print(
+                  "::error::" + str(len(unexpected_skips)) + " OCCT-gated test(s) were "
+                  "skipped even though this job passed -Pkstep.occt.require=true. The "
+                  "'-P' property name has likely drifted from what "
+                  "kstep-tests/build.gradle.kts and/or kstep-render/build.gradle.kts read "
+                  "(they wire it into the 'kstep.occt.require' system property), so it "
+                  "silently fell back to its 'false' default and every "
+                  "OcctAvailability-gated case reverted to a silent skip. Unexpectedly "
+                  "skipped: " + "; ".join(unexpected_skips)
+              )
+              sys.exit(1)
+
+          print(
+              "OK: checked " + str(len(sys.argv) - 1) + " OCCT test result file(s), "
+              "no unexpectedly skipped testcase."
+          )
+          PY
+        # The TKDESTEP guard above only checks that this runner's shared libraries are
+        # new enough; it says nothing about whether the -P flag this step relies on
+        # still reaches Gradle. Renaming kstep.occt.require in the build scripts
+        # without updating this workflow would otherwise regress silently to green.
+        #
+        # Parses each result file's <testcase> elements individually (rather than summing
+        # the suite-level `skipped="N"` attribute) so the three intentionally
+        # inverse-gated "fails predictably when the native bridge is unavailable" cases --
+        # which MUST skip whenever OCCT is present, i.e. exactly the state this job runs
+        # in -- don't get counted as a regression. xml.etree over grep also means a
+        # result file in an unexpected shape (missing/reordered attributes, a different
+        # report layout) raises a Python traceback instead of silently short-circuiting
+        # the pipeline under `bash -e` and swallowing the intended ::error:: diagnostic.
+
+      - name: Verify the PlaneGCS-gated test suites actually ran (not skipped)
+        run: |
+          shopt -s globstar nullglob
+          files=(**/build/test-results/test/TEST-*PlaneGcs*.xml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No PlaneGCS test result files matched" \
+                 "**/build/test-results/test/TEST-*PlaneGcs*.xml. Either the PlaneGCS test" \
+                 "classes were renamed/moved, or -Pkstep.planegcs.require=true never" \
+                 "reached Gradle -- this job would then give no PlaneGCS coverage at all" \
+                 "while still reporting green."
+            exit 1
+          fi
+          python3 - "${files[@]}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          # Two Kotest cases are deliberately INVERSE-gated (`.config(enabled = !available)`):
+          # PlaneGcsBridgeSmokeTest's "solving fails predictably when the native bridge is
+          # unavailable" and "planeGcsSourceCommit fails predictably ...". They assert
+          # graceful degradation when PlaneGCS is UNAVAILABLE, so in this job -- which
+          # requires PlaneGCS to be present via -Pkstep.planegcs.require=true -- they are
+          # *expected* to be skipped. Only the normal `enabled = available` cases must have
+          # actually run, so skips are only a problem for testcases that do NOT carry this
+          # marker.
+          INVERSE_GATED_MARKER = "fails predictably when the native bridge is unavailable"
+
+          unexpected_skips = []
+          for path in sys.argv[1:]:
+              root = ET.parse(path).getroot()
+              for testcase in root.iter("testcase"):
+                  if testcase.find("skipped") is None:
+                      continue
+                  name = testcase.get("name", "<unnamed>")
+                  if INVERSE_GATED_MARKER in name:
+                      continue
+                  unexpected_skips.append(f"{path}::{name}")
+
+          if unexpected_skips:
+              print(
+                  "::error::" + str(len(unexpected_skips)) + " PlaneGCS-gated test(s) were "
+                  "skipped even though this job passed -Pkstep.planegcs.require=true. The "
+                  "'-P' property name has likely drifted from what "
+                  "kstep-tests/build.gradle.kts reads (it wires it into the "
+                  "'kstep.planegcs.require' system property), so it silently fell back to "
+                  "its 'false' default and every PlaneGcsAvailability-gated case reverted "
+                  "to a silent skip. Unexpectedly skipped: " + "; ".join(unexpected_skips)
+              )
+              sys.exit(1)
+
+          print(
+              "OK: checked " + str(len(sys.argv) - 1) + " PlaneGCS test result file(s), "
+              "no unexpectedly skipped testcase."
+          )
+          PY
+        # Symmetric to the OCCT guard above, for the same reason: -Pkstep.planegcs.require
+        # is also passed in this job, so its skip-suppression path deserves the same proof
+        # that it actually ran rather than silently degrading to a no-op skip.
+
+      - name: Upload test and ktlint reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-ubuntu-2604-native
+          path: |
+            **/build/reports/tests/**
+            **/build/reports/ktlint/**
+            **/build/test-results/**
+          retention-days: 7
+          if-no-files-found: ignore
