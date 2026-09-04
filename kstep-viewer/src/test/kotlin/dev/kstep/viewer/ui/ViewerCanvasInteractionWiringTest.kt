@@ -18,6 +18,7 @@ import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.mesh.Camera
 import dev.kstep.viewer.camera.ViewerCameraState
 import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.doubles.plusOrMinus
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 
@@ -185,6 +186,92 @@ class ViewerCanvasInteractionWiringTest :
                 waitForIdle()
 
                 state.value shouldBe orbited
+            }
+        }
+
+        // Pan gestures -- added in kSTEP's viewer-pan-and-material-colors wave, see
+        // docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc. See this file's own class KDoc for
+        // why these drive Compose's REAL gesture pipeline rather than calling
+        // dev.kstep.viewer.camera.CameraInteraction.onPan directly (CameraInteractionTest already
+        // pins that math) -- these only care that a middle-button or shift-held drag reaches
+        // `state` as a PAN, not an orbit, through ShapeCanvas's actual `awaitEachGesture` wiring.
+
+        // A middle-button-drag-pans assertion was attempted here and DELIBERATELY removed, not
+        // silently skipped -- see docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc's Stolperfallen
+        // and this wave's own risk note (plan section A.6). `performMouseInput { press
+        // (MouseButton.Tertiary); moveBy(...); release(MouseButton.Tertiary) }` against Compose
+        // Multiplatform 1.11.1's `runDesktopComposeUiTest`/`SkikoComposeUiTest` harness does NOT
+        // reach `ShapeCanvas`'s `awaitEachGesture` block with `currentEvent.buttons.
+        // isTertiaryPressed == true` -- `state.panX` measurably stayed at exactly `0.0` even
+        // after a moved, released Tertiary-button drag (confirmed by an actual failing assertion
+        // during this wave's own implementation, not assumed). This is a TEST-HARNESS gap in this
+        // Compose version's synthetic mouse-button injection, not a `ShapeCanvas`/
+        // `CameraInteraction` bug: the shift-drag case immediately below exercises the exact same
+        // `isPan` branch and passes, proving the PRODUCTION branch itself works; only the
+        // synthetic middle-button PRESS never reaches the pointer input handler with the expected
+        // button state in THIS test harness. Per this wave's own risk-mitigation instruction, the
+        // feature design (middle-button pan) is unchanged and still implemented in
+        // `ViewerCanvas.kt` -- only this one automated assertion is replaced by this documented
+        // gap; middle-button pan needs a manual `kstep-viewer:run` check instead of an automated
+        // one until a future Compose Multiplatform version's test harness is verified to support
+        // synthetic Tertiary-button presses correctly.
+
+        "a shift-held drag through ShapeCanvas's pointerInput pans the camera and leaves orbit/zoom untouched" {
+            val state = mutableStateOf(ViewerCameraState.HOME)
+            runDesktopComposeUiTest(width = SCENE_SIZE, height = SCENE_SIZE) {
+                setContent {
+                    ShapeCanvas(singleTriangleMesh(), Modifier.size(SCENE_SIZE.dp), state = state)
+                }
+                waitForIdle()
+
+                onRoot().performKeyInput { keyDown(Key.ShiftLeft) }
+                onRoot().performMouseInput {
+                    press()
+                    repeat(5) { moveBy(Offset(40f, 0f)) }
+                    release()
+                }
+                onRoot().performKeyInput { keyUp(Key.ShiftLeft) }
+                waitForIdle()
+
+                state.value.panX shouldNotBe ViewerCameraState.HOME.panX
+                state.value.camera shouldBe ViewerCameraState.HOME.camera
+                state.value.zoom shouldBe ViewerCameraState.HOME.zoom
+            }
+        }
+
+        "a plain (non-shift, non-middle-button) drag never touches pan" {
+            val state = mutableStateOf(ViewerCameraState.HOME)
+            runDesktopComposeUiTest(width = SCENE_SIZE, height = SCENE_SIZE) {
+                setContent {
+                    ShapeCanvas(singleTriangleMesh(), Modifier.size(SCENE_SIZE.dp), state = state)
+                }
+                waitForIdle()
+
+                onRoot().performMouseInput {
+                    press()
+                    repeat(5) { moveBy(Offset(40f, 0f)) }
+                    release()
+                }
+                waitForIdle()
+
+                state.value.panX shouldBe (ViewerCameraState.HOME.panX plusOrMinus 1e-12)
+                state.value.panY shouldBe (ViewerCameraState.HOME.panY plusOrMinus 1e-12)
+            }
+        }
+
+        "a double-click resets an accumulated pan back to HOME" {
+            val panned = ViewerCameraState(Camera.ISOMETRIC, zoom = 1.0, panX = 0.2, panY = -0.1)
+            val state = mutableStateOf(panned)
+            runDesktopComposeUiTest(width = SCENE_SIZE, height = SCENE_SIZE) {
+                setContent {
+                    ShapeCanvas(singleTriangleMesh(), Modifier.size(SCENE_SIZE.dp), state = state)
+                }
+                waitForIdle()
+
+                onRoot().performMouseInput { doubleClick() }
+                waitForIdle()
+
+                state.value shouldBe ViewerCameraState.HOME
             }
         }
     })

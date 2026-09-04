@@ -36,8 +36,18 @@ object TriangleRasterizer {
                 path.lineTo(t.bx, t.by)
                 path.lineTo(t.cx, t.cy)
                 path.closePath()
-                val gray = (t.shade.coerceIn(0.0, 1.0) * 255.0).toInt()
-                val color = Color(gray, gray, gray)
+                // litR/litG/litB combine shade with the triangle's MeshColor multiplicatively
+                // (see ProjectedTriangle's own KDoc) -- at MeshColor.NEUTRAL (the pre-wave
+                // default), litR == litG == litB == shade, so this stays byte-identical to the
+                // plain grayscale rendering this codebase used before kSTEP's
+                // viewer-pan-and-material-colors wave (see
+                // docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc). Still explicitly coerced
+                // here (not just trusted) as defense-in-depth against a future MeshColor/shade
+                // combination this file cannot itself see is always in range.
+                val red = (t.litR.coerceIn(0.0, 1.0) * 255.0).toInt()
+                val green = (t.litG.coerceIn(0.0, 1.0) * 255.0).toInt()
+                val blue = (t.litB.coerceIn(0.0, 1.0) * 255.0).toInt()
+                val color = Color(red, green, blue)
                 g.color = color
                 g.fill(path)
                 g.draw(path)

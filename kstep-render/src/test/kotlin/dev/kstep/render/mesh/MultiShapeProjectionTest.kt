@@ -1,11 +1,13 @@
 package dev.kstep.render.mesh
 
+import dev.kstep.geometry.MeshColor
 import dev.kstep.geometry.MeshComposition
 import dev.kstep.geometry.PlacedMesh
 import dev.kstep.geometry.Placement
 import dev.kstep.geometry.TriangleMesh
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 
 private const val CANVAS_WIDTH = 800.0
 private const val CANVAS_HEIGHT = 600.0
@@ -98,5 +100,43 @@ class MultiShapeProjectionTest :
                 listOf(t.ax, t.bx, t.cx).forEach { x -> (x in 0.0..CANVAS_WIDTH) shouldBe true }
                 listOf(t.ay, t.by, t.cy).forEach { y -> (y in 0.0..CANVAS_HEIGHT) shouldBe true }
             }
+        }
+
+        "project(ColoredMesh, ...) at all-NEUTRAL colors is exactly identical to project(TriangleMesh, ...)" {
+            val merged =
+                MeshComposition.merge(
+                    listOf(
+                        PlacedMesh(unitSquareMesh()),
+                        PlacedMesh(unitSquareMesh(), Placement.translation(5.0, 0.0, 0.0)),
+                    ),
+                )
+            val coloredMerged =
+                MeshComposition.mergeColored(
+                    listOf(
+                        PlacedMesh(unitSquareMesh()),
+                        PlacedMesh(unitSquareMesh(), Placement.translation(5.0, 0.0, 0.0)),
+                    ),
+                )
+            val plain = MeshProjection.project(merged, CANVAS_WIDTH, CANVAS_HEIGHT)
+            val colored = MeshProjection.project(coloredMerged, CANVAS_WIDTH, CANVAS_HEIGHT)
+            plain.size shouldBe colored.size
+            plain.zip(colored).forEach { (a, b) ->
+                a.ax shouldBe b.ax
+                a.ay shouldBe b.ay
+                a.shade shouldBe b.shade
+                a.color shouldBe MeshColor.NEUTRAL
+                b.color shouldBe MeshColor.NEUTRAL
+            }
+        }
+
+        "project(ColoredMesh, ...) carries each triangle's own color from its source part" {
+            val redPart = PlacedMesh(unitSquareMesh(), color = MeshColor(0.9, 0.1, 0.1))
+            val bluePart = PlacedMesh(unitSquareMesh(), Placement.translation(50.0, 0.0, 0.0), MeshColor(0.1, 0.1, 0.9))
+            val coloredMerged = MeshComposition.mergeColored(listOf(redPart, bluePart))
+            val projected = MeshProjection.project(coloredMerged, CANVAS_WIDTH, CANVAS_HEIGHT)
+
+            val colorsUsed = projected.map { it.color }.toSet()
+            colorsUsed shouldBe setOf(redPart.color, bluePart.color)
+            projected.forEach { t -> t.color shouldNotBe MeshColor.NEUTRAL }
         }
     })

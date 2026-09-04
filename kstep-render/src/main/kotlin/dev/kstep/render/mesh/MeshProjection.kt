@@ -1,5 +1,7 @@
 package dev.kstep.render.mesh
 
+import dev.kstep.geometry.ColoredMesh
+import dev.kstep.geometry.MeshColor
 import dev.kstep.geometry.TriangleMesh
 import kotlin.math.max
 import kotlin.math.min
@@ -130,6 +132,7 @@ object MeshProjection {
         val cy: Double,
         val shade: Double,
         val depth: Double,
+        val color: MeshColor,
     )
 
     /** The resolved screen basis + key-light and fill-light directions for one [Camera] pose. */
@@ -209,6 +212,9 @@ object MeshProjection {
         canvasHeight: Double,
         camera: Camera,
         requestedScale: Double?,
+        panX: Double,
+        panY: Double,
+        colorAt: (Int) -> MeshColor,
     ): ProjectionResult {
         require(canvasWidth > 0.0 && canvasHeight > 0.0) {
             "canvasWidth/canvasHeight must be positive, got ($canvasWidth, $canvasHeight)"
@@ -228,6 +234,10 @@ object MeshProjection {
         val c = mesh.coordinates
         var i = 0
         while (i < c.size) {
+            // Captured BEFORE i += 9 below: colorAt indexes by TRIANGLE, not by coordinate
+            // offset. Capturing this after the increment would shift every triangle's color by
+            // one triangle -- see ADR-0017's Stolperfallen.
+            val triangleIndex = i / 9
             val v0 = Vec3(c[i], c[i + 1], c[i + 2])
             val v1 = Vec3(c[i + 3], c[i + 4], c[i + 5])
             val v2 = Vec3(c[i + 6], c[i + 7], c[i + 8])
@@ -274,7 +284,7 @@ object MeshProjection {
             val centroid = Vec3((v0.x + v1.x + v2.x) / 3.0, (v0.y + v1.y + v2.y) / 3.0, (v0.z + v1.z + v2.z) / 3.0)
             val depth = centroid dot basis.view
 
-            raw.add(RawTriangle(ax, ay, bx, by, cx, cy, shade, depth))
+            raw.add(RawTriangle(ax, ay, bx, by, cx, cy, shade, depth, colorAt(triangleIndex)))
         }
 
         if (raw.isEmpty()) return ProjectionResult(emptyList(), requestedScale ?: 1.0)
@@ -303,19 +313,28 @@ object MeshProjection {
         val centerY = (minY + maxY) / 2.0
         val halfW = canvasWidth / 2.0
         val halfH = canvasHeight / 2.0
+        // originX/originY fold panX/panY into the canvas-center origin BEFORE scaling is applied
+        // to any vertex coordinate -- panX/panY are already caller-side pixel offsets (see
+        // `project`'s KDoc), so adding them here keeps pan a pure, scale-independent screen-space
+        // translation instead of scaling along with zoom. At panX = panY = 0.0 this is bit-for-bit
+        // identical to `halfW`/`halfH` alone (0.0 is IEEE-754-exact for `+`), preserving every
+        // pre-pan caller's output exactly.
+        val originX = halfW + panX
+        val originY = halfH + panY
 
         val triangles =
             raw
                 .map { t ->
                     ProjectedTriangle(
-                        ax = (t.ax - centerX) * effectiveScale + halfW,
-                        ay = (t.ay - centerY) * effectiveScale + halfH,
-                        bx = (t.bx - centerX) * effectiveScale + halfW,
-                        by = (t.by - centerY) * effectiveScale + halfH,
-                        cx = (t.cx - centerX) * effectiveScale + halfW,
-                        cy = (t.cy - centerY) * effectiveScale + halfH,
+                        ax = (t.ax - centerX) * effectiveScale + originX,
+                        ay = (t.ay - centerY) * effectiveScale + originY,
+                        bx = (t.bx - centerX) * effectiveScale + originX,
+                        by = (t.by - centerY) * effectiveScale + originY,
+                        cx = (t.cx - centerX) * effectiveScale + originX,
+                        cy = (t.cy - centerY) * effectiveScale + originY,
                         shade = t.shade,
                         depth = t.depth,
+                        color = t.color,
                     )
                 }.sortedByDescending { it.depth }
 
@@ -342,7 +361,16 @@ object MeshProjection {
         canvasWidth: Double,
         canvasHeight: Double,
         camera: Camera = Camera.ISOMETRIC,
-    ): Double = projectInternal(mesh, canvasWidth, canvasHeight, camera, requestedScale = null).scale
+    ): Double =
+        projectInternal(
+            mesh,
+            canvasWidth,
+            canvasHeight,
+            camera,
+            requestedScale = null,
+            panX = 0.0,
+            panY = 0.0,
+        ) { MeshColor.NEUTRAL }.scale
 
     /**
      * Projects [mesh] as seen from [camera] onto a [canvasWidth] x [canvasHeight] canvas,
@@ -358,6 +386,11 @@ object MeshProjection {
      *   only behavior before this wave. A non-null value is used AS THE SCALE FACTOR directly
      *   (e.g. `fitScale(...) * zoomFactor` from a caller that wants to zoom around the auto-fit
      *   size) -- must be finite and strictly positive.
+     * @param panX @param panY Screen-space pixel offset added to the canvas-center origin AFTER
+     *   scaling, i.e. `originX = canvasWidth / 2.0 + panX` (see `dev.kstep.viewer.camera.
+     *   CameraInteraction.onPan`'s KDoc for the resize-/zoom-invariant fraction unit callers
+     *   convert from). Both default to `0.0` -- the pre-pan center-only behavior -- and both must
+     *   be finite.
      */
     fun project(
         mesh: TriangleMesh,
@@ -365,10 +398,45 @@ object MeshProjection {
         canvasHeight: Double,
         camera: Camera = Camera.ISOMETRIC,
         scale: Double? = null,
+        panX: Double = 0.0,
+        panY: Double = 0.0,
     ): List<ProjectedTriangle> {
         require(scale == null || (scale.isFinite() && scale > 0.0)) {
             "scale must be null (auto-fit) or a finite, positive value, got $scale"
         }
-        return projectInternal(mesh, canvasWidth, canvasHeight, camera, scale).triangles
+        require(panX.isFinite() && panY.isFinite()) { "panX/panY must be finite, got ($panX, $panY)" }
+        return projectInternal(mesh, canvasWidth, canvasHeight, camera, scale, panX, panY) {
+            MeshColor.NEUTRAL
+        }.triangles
+    }
+
+    /**
+     * Overload of [project] for a [ColoredMesh] (see `dev.kstep.geometry.MeshComposition.mergeColored`)
+     * -- identical projection/shading pipeline, but each [ProjectedTriangle.color] comes from
+     * [ColoredMesh.colorAt] instead of defaulting to [MeshColor.NEUTRAL].
+     */
+    fun project(
+        coloredMesh: ColoredMesh,
+        canvasWidth: Double,
+        canvasHeight: Double,
+        camera: Camera = Camera.ISOMETRIC,
+        scale: Double? = null,
+        panX: Double = 0.0,
+        panY: Double = 0.0,
+    ): List<ProjectedTriangle> {
+        require(scale == null || (scale.isFinite() && scale > 0.0)) {
+            "scale must be null (auto-fit) or a finite, positive value, got $scale"
+        }
+        require(panX.isFinite() && panY.isFinite()) { "panX/panY must be finite, got ($panX, $panY)" }
+        return projectInternal(
+            coloredMesh.mesh,
+            canvasWidth,
+            canvasHeight,
+            camera,
+            scale,
+            panX,
+            panY,
+            coloredMesh::colorAt,
+        ).triangles
     }
 }

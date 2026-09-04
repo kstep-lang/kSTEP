@@ -6,6 +6,19 @@ import io.kotest.matchers.doubles.plusOrMinus
 import io.kotest.matchers.shouldBe
 
 private const val TOLERANCE = 1e-9
+private const val CW = 800.0
+private const val CH = 600.0
+
+/** Shorthand for [CameraInteraction.onPan] with this file's fixed [CW]/[CH] canvas size, so the
+ *  pan test bodies below stay within ktlint's line-length limit without losing the named-argument
+ *  clarity at each call site. */
+private fun pan(
+    state: ViewerCameraState,
+    dx: Float,
+    dy: Float,
+    width: Double = CW,
+    height: Double = CH,
+): ViewerCameraState = CameraInteraction.onPan(state, dx, dy, width, height)
 
 /**
  * No `androidx.compose.*` import in this file -- [CameraInteraction] is deliberately
@@ -112,5 +125,61 @@ class CameraInteractionTest :
             state = CameraInteraction.onDrag(state, dx = 250f, dy = -80f)
             state = CameraInteraction.onScroll(state, scrollDeltaY = -3f)
             CameraInteraction.reset() shouldBe ViewerCameraState.HOME
+        }
+
+        "a rightward pan from HOME increases panX by dx / (canvasWidth * zoom)" {
+            val next = pan(ViewerCameraState.HOME, dx = 80f, dy = 0f)
+            next.panX shouldBe (80.0 / CW plusOrMinus TOLERANCE)
+            next.panY shouldBe (0.0 plusOrMinus TOLERANCE)
+            // Orbit/zoom must stay untouched by a pan.
+            next.camera shouldBe ViewerCameraState.HOME.camera
+            next.zoom shouldBe ViewerCameraState.HOME.zoom
+        }
+
+        "pan accumulates across multiple events" {
+            var state = ViewerCameraState.HOME
+            state = pan(state, dx = 40f, dy = 20f)
+            state = pan(state, dx = 40f, dy = 20f)
+            state.panX shouldBe (80.0 / CW plusOrMinus TOLERANCE)
+            state.panY shouldBe (40.0 / CH plusOrMinus TOLERANCE)
+        }
+
+        "pan is clamped at exactly +0.5 and -0.5, never overshoots" {
+            var state = ViewerCameraState.HOME
+            repeat(1_000) { state = pan(state, dx = 10_000f, dy = 10_000f) }
+            state.panX shouldBe (0.5 plusOrMinus TOLERANCE)
+            state.panY shouldBe (0.5 plusOrMinus TOLERANCE)
+
+            var negative = ViewerCameraState.HOME
+            repeat(1_000) { negative = pan(negative, dx = -10_000f, dy = -10_000f) }
+            negative.panX shouldBe (-0.5 plusOrMinus TOLERANCE)
+            negative.panY shouldBe (-0.5 plusOrMinus TOLERANCE)
+        }
+
+        "the same pixel drag pans half as far in fraction units at 2x zoom as at 1x zoom" {
+            val atZoom1 = pan(ViewerCameraState.HOME, dx = 100f, dy = 0f)
+            val homeAtZoom2 = ViewerCameraState.HOME.copy(zoom = 2.0)
+            val atZoom2 = pan(homeAtZoom2, dx = 100f, dy = 0f)
+            atZoom2.panX shouldBe (atZoom1.panX / 2.0 plusOrMinus TOLERANCE)
+        }
+
+        "a NaN/infinite pan delta or a non-positive canvas size leaves the state exactly unchanged" {
+            val start = ViewerCameraState.HOME
+            pan(start, dx = Float.NaN, dy = 0f) shouldBe start
+            pan(start, dx = 0f, dy = Float.NaN) shouldBe start
+            pan(start, dx = Float.POSITIVE_INFINITY, dy = 0f) shouldBe start
+            pan(start, dx = 0f, dy = 0f, width = Double.NaN) shouldBe start
+            pan(start, dx = 0f, dy = 0f, width = Double.POSITIVE_INFINITY) shouldBe start
+            pan(start, dx = 0f, dy = 0f, width = 0.0) shouldBe start
+            pan(start, dx = 0f, dy = 0f, width = -CW) shouldBe start
+            pan(start, dx = 0f, dy = 0f, height = 0.0) shouldBe start
+        }
+
+        "reset zeroes an accumulated pan" {
+            var state = ViewerCameraState.HOME
+            state = pan(state, dx = 50f, dy = 50f)
+            CameraInteraction.reset() shouldBe ViewerCameraState.HOME
+            ViewerCameraState.HOME.panX shouldBe 0.0
+            ViewerCameraState.HOME.panY shouldBe 0.0
         }
     })

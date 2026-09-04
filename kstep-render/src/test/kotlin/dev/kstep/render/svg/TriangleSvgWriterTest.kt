@@ -1,5 +1,6 @@
 package dev.kstep.render.svg
 
+import dev.kstep.geometry.MeshColor
 import dev.kstep.render.mesh.ProjectedTriangle
 import dev.kstep.render.parseXmlSecurely
 import io.kotest.core.spec.style.StringSpec
@@ -9,7 +10,18 @@ import io.kotest.matchers.string.shouldContain
 private fun triangle(
     depth: Double,
     shade: Double = 0.5,
-) = ProjectedTriangle(ax = 0.0, ay = 0.0, bx = 10.0, by = 0.0, cx = 5.0, cy = 10.0, shade = shade, depth = depth)
+    color: MeshColor = MeshColor.NEUTRAL,
+) = ProjectedTriangle(
+    ax = 0.0,
+    ay = 0.0,
+    bx = 10.0,
+    by = 0.0,
+    cx = 5.0,
+    cy = 10.0,
+    shade = shade,
+    depth = depth,
+    color = color,
+)
 
 class TriangleSvgWriterTest :
     StringSpec({
@@ -53,5 +65,17 @@ class TriangleSvgWriterTest :
             // gray = (0.5 * 255.0).toInt() == 127 == 0x7f.
             svg shouldContain "fill=\"#7f7f7f\""
             svg shouldContain "stroke=\"#7f7f7f\""
+        }
+
+        "a triangle's own MeshColor tints its fill/stroke, not just grayscale" {
+            // shade = 1.0, color = (1.0, 0.0, 0.0) -> litR=1.0, litG=0.0, litB=0.0 -> pure red.
+            val svg =
+                TriangleSvgWriter.render(
+                    listOf(triangle(depth = 1.0, shade = 1.0, color = MeshColor(1.0, 0.0, 0.0))),
+                    200,
+                    100,
+                )
+            svg shouldContain "fill=\"#ff0000\""
+            svg shouldContain "stroke=\"#ff0000\""
         }
     })

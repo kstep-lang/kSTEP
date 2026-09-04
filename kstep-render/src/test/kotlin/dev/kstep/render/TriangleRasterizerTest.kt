@@ -1,8 +1,10 @@
 package dev.kstep.render
 
+import dev.kstep.geometry.MeshColor
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.image.TriangleRasterizer
 import dev.kstep.render.mesh.MeshProjection
+import dev.kstep.render.mesh.ProjectedTriangle
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import java.awt.image.BufferedImage
@@ -111,5 +113,49 @@ class TriangleRasterizerTest :
             ImageIO.write(image, "png", outFile)
             outFile.exists() shouldBe true
             (outFile.length() > 0) shouldBe true
+        }
+
+        "a triangle with a non-NEUTRAL MeshColor rasterizes in that color, not grayscale" {
+            // shade = 1.0, color = (0.0, 1.0, 0.0) (pure green) -> litR=0.0, litG=1.0, litB=0.0.
+            val greenTriangle =
+                ProjectedTriangle(
+                    ax = 10.0,
+                    ay = 10.0,
+                    bx = 90.0,
+                    by = 10.0,
+                    cx = 50.0,
+                    cy = 90.0,
+                    shade = 1.0,
+                    depth = 1.0,
+                    color = MeshColor(0.0, 1.0, 0.0),
+                )
+            val image = TriangleRasterizer.render(listOf(greenTriangle), 100, 100)
+            val rgb = image.getRGB(50, 40) // interior point of the triangle
+            val red = (rgb shr 16) and 0xFF
+            val green = (rgb shr 8) and 0xFF
+            val blue = rgb and 0xFF
+            red shouldBe 0
+            green shouldBe 255
+            blue shouldBe 0
+        }
+
+        "a NEUTRAL-colored triangle rasterizes byte-identically to the pre-wave grayscale default" {
+            val triangles = MeshProjection.project(unitCubeMesh(), WIDTH.toDouble(), HEIGHT.toDouble())
+            triangles.forEach { it.color shouldBe MeshColor.NEUTRAL }
+            val image = TriangleRasterizer.render(triangles, WIDTH, HEIGHT)
+            // Every non-background pixel must be a true gray (r == g == b), exactly this
+            // codebase's pre-wave rendering contract.
+            for (y in 0 until image.height step 17) {
+                for (x in 0 until image.width step 17) {
+                    val rgb = image.getRGB(x, y)
+                    if (rgb != -1) {
+                        val r = (rgb shr 16) and 0xFF
+                        val g = (rgb shr 8) and 0xFF
+                        val b = rgb and 0xFF
+                        r shouldBe g
+                        g shouldBe b
+                    }
+                }
+            }
         }
     })

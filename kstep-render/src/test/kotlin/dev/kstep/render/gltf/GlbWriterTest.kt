@@ -1,6 +1,9 @@
 package dev.kstep.render.gltf
 
+import dev.kstep.geometry.MeshColor
+import dev.kstep.geometry.MeshComposition
 import dev.kstep.geometry.OcctKernel
+import dev.kstep.geometry.PlacedMesh
 import dev.kstep.geometry.TriangleMesh
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
@@ -365,5 +368,112 @@ class GlbWriterTest :
             primitive["attributes"]!!.jsonObject["NORMAL"]!!.jsonPrimitive.int shouldBe 1
             val material = parsed.json["materials"]!!.jsonArray[0].jsonObject
             material["doubleSided"]!!.jsonPrimitive.boolean shouldBe false
+        }
+
+        // B: write(ColoredMesh, ...) -- kSTEP's viewer-pan-and-material-colors wave, see
+        // docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc.
+
+        // B1
+        "write(ColoredMesh) with only NEUTRAL colors is byte-identical to write(TriangleMesh)" {
+            val mesh = singleTriangleMesh()
+            val coloredMesh = MeshComposition.mergeColored(listOf(PlacedMesh(mesh)))
+            val extras = GlbExtras(scriptName = "a.kstep.kts")
+
+            val plain = GlbWriter.write(mesh, extras)
+            val colored = GlbWriter.write(coloredMesh, extras)
+
+            plain.bytes.contentEquals(colored.bytes) shouldBe true
+        }
+
+        // B2
+        "write(ColoredMesh) with a real color emits a COLOR_0 attribute and a neutral baseColorFactor" {
+            val part = PlacedMesh(singleTriangleMesh(), color = MeshColor(0.8, 0.2, 0.1))
+            val coloredMesh = MeshComposition.mergeColored(listOf(part))
+            val result = GlbWriter.write(coloredMesh)
+            val parsed = parseGlb(result.bytes)
+
+            val primitive =
+                parsed.json["meshes"]!!
+                    .jsonArray[0]
+                    .jsonObject["primitives"]!!
+                    .jsonArray[0]
+                    .jsonObject
+            primitive["attributes"]!!.jsonObject["COLOR_0"]!!.jsonPrimitive.int shouldBe 2
+
+            val accessors = parsed.json["accessors"]!!.jsonArray
+            accessors.size shouldBe 3
+            accessors[2].jsonObject["count"]!!.jsonPrimitive.int shouldBe result.vertexCount
+            accessors[2].jsonObject["type"]!!.jsonPrimitive.content shouldBe "VEC3"
+
+            val bufferViews = parsed.json["bufferViews"]!!.jsonArray
+            bufferViews.size shouldBe 3
+
+            val material = parsed.json["materials"]!!.jsonArray[0].jsonObject
+            val factor =
+                material["pbrMetallicRoughness"]!!
+                    .jsonObject["baseColorFactor"]!!
+                    .jsonArray
+                    .map { it.jsonPrimitive.double }
+            factor shouldBe listOf(1.0, 1.0, 1.0, 1.0)
+        }
+
+        // B3
+        "write(ColoredMesh)'s COLOR_0 bytes carry the actual per-triangle color, float32-narrowed" {
+            val color = MeshColor(0.8, 0.25, 0.1)
+            val coloredMesh = MeshComposition.mergeColored(listOf(PlacedMesh(singleTriangleMesh(), color = color)))
+            val result = GlbWriter.write(coloredMesh)
+            val parsed = parseGlb(result.bytes)
+
+            // BIN layout: positions (9 floats), normals (9 floats), colors (9 floats).
+            val colorBytes = parsed.binChunk!!.copyOfRange(18 * 4, 27 * 4)
+            val colors = readFloatsLe(colorBytes)
+            for (corner in 0 until 3) {
+                colors[corner * 3].toDouble() shouldBe (color.r plusOrMinus 1e-6)
+                colors[corner * 3 + 1].toDouble() shouldBe (color.g plusOrMinus 1e-6)
+                colors[corner * 3 + 2].toDouble() shouldBe (color.b plusOrMinus 1e-6)
+            }
+        }
+
+        // B4
+        "write(ColoredMesh) with two differently-colored parts writes one COLOR_0 value set per part" {
+            val redPart = PlacedMesh(singleTriangleMesh(), color = MeshColor(0.9, 0.1, 0.1))
+            val bluePart =
+                PlacedMesh(
+                    TriangleMesh(doubleArrayOf(5.0, 0.0, 0.0, 6.0, 0.0, 0.0, 5.0, 1.0, 0.0)),
+                    color = MeshColor(0.1, 0.1, 0.9),
+                )
+            val coloredMesh = MeshComposition.mergeColored(listOf(redPart, bluePart))
+            val result = GlbWriter.write(coloredMesh)
+            result.triangleCount shouldBe 2
+            val parsed = parseGlb(result.bytes)
+
+            // BIN layout: positions (vertexCount*3 floats), normals (vertexCount*3 floats), then
+            // colors (vertexCount*3 floats) -- colors start after BOTH preceding buffers, not
+            // after positions alone.
+            val colorByteOffset = result.vertexCount * 3 * 4 * 2
+            val colorByteLength = result.vertexCount * 3 * 4
+            val colorBytes = parsed.binChunk!!.copyOfRange(colorByteOffset, colorByteOffset + colorByteLength)
+            val colors = readFloatsLe(colorBytes)
+            // First triangle's 3 corners -> redPart's color.
+            for (corner in 0 until 3) {
+                colors[corner * 3].toDouble() shouldBe (0.9 plusOrMinus 1e-6)
+                colors[corner * 3 + 1].toDouble() shouldBe (0.1 plusOrMinus 1e-6)
+            }
+            // Second triangle's 3 corners -> bluePart's color.
+            for (corner in 3 until 6) {
+                colors[corner * 3].toDouble() shouldBe (0.1 plusOrMinus 1e-6)
+                colors[corner * 3 + 2].toDouble() shouldBe (0.9 plusOrMinus 1e-6)
+            }
+        }
+
+        // B5
+        "write(ColoredMesh) on an all-degenerate mesh writes the same empty scene as write(TriangleMesh)" {
+            val degenerate = TriangleMesh(doubleArrayOf(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0))
+            val part = PlacedMesh(degenerate, color = MeshColor(0.5, 0.5, 0.5))
+            val coloredMesh = MeshComposition.mergeColored(listOf(part))
+            val result = GlbWriter.write(coloredMesh)
+            result.triangleCount shouldBe 0
+            result.droppedTriangleCount shouldBe 1
+            parseGlb(result.bytes).json.containsKey("meshes") shouldBe false
         }
     })

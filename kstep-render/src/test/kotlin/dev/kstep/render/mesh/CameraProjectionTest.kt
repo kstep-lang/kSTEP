@@ -221,4 +221,48 @@ class CameraProjectionTest :
             val distinctShades = triangles.map { it.shade }.toSet()
             (distinctShades.size >= 3) shouldBe true
         }
+
+        "a project() call with panX = panY = 0.0 is identical to the no-pan-argument call" {
+            val mesh = unitCubeMesh()
+            val noPanArgs = MeshProjection.project(mesh, CANVAS_WIDTH, CANVAS_HEIGHT)
+            val explicitZeroPan = MeshProjection.project(mesh, CANVAS_WIDTH, CANVAS_HEIGHT, panX = 0.0, panY = 0.0)
+            noPanArgs.size shouldBe explicitZeroPan.size
+            noPanArgs.zip(explicitZeroPan).forEach { (a, b) -> a shouldBe b }
+        }
+
+        "a non-zero pan shifts every coordinate by exactly (panX, panY), leaving shade/depth/order untouched" {
+            val mesh = unitCubeMesh()
+            val unpanned = MeshProjection.project(mesh, CANVAS_WIDTH, CANVAS_HEIGHT)
+            val panned = MeshProjection.project(mesh, CANVAS_WIDTH, CANVAS_HEIGHT, panX = 37.0, panY = -11.0)
+            unpanned.size shouldBe panned.size
+            unpanned.zip(panned).forEach { (a, b) ->
+                b.ax shouldBe (a.ax + 37.0 plusOrMinus TOLERANCE)
+                b.ay shouldBe (a.ay - 11.0 plusOrMinus TOLERANCE)
+                b.bx shouldBe (a.bx + 37.0 plusOrMinus TOLERANCE)
+                b.by shouldBe (a.by - 11.0 plusOrMinus TOLERANCE)
+                b.cx shouldBe (a.cx + 37.0 plusOrMinus TOLERANCE)
+                b.cy shouldBe (a.cy - 11.0 plusOrMinus TOLERANCE)
+                b.shade shouldBe (a.shade plusOrMinus TOLERANCE)
+                b.depth shouldBe (a.depth plusOrMinus TOLERANCE)
+            }
+        }
+
+        "fitScale is unaffected by pan (pan has no fitScale parameter at all)" {
+            val mesh = unitCubeMesh()
+            val fitScale = MeshProjection.fitScale(mesh, CANVAS_WIDTH, CANVAS_HEIGHT)
+            val pannedFirstAx =
+                MeshProjection.project(mesh, CANVAS_WIDTH, CANVAS_HEIGHT, panX = 100.0, panY = 0.0).first().ax
+            val unpannedFirstAx = MeshProjection.project(mesh, CANVAS_WIDTH, CANVAS_HEIGHT).first().ax
+            (pannedFirstAx - unpannedFirstAx) shouldBe (100.0 plusOrMinus TOLERANCE)
+            (fitScale > 0.0) shouldBe true
+        }
+
+        "a non-finite pan is rejected" {
+            shouldThrow<IllegalArgumentException> {
+                MeshProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT, panX = Double.NaN)
+            }
+            shouldThrow<IllegalArgumentException> {
+                MeshProjection.project(unitCubeMesh(), CANVAS_WIDTH, CANVAS_HEIGHT, panY = Double.POSITIVE_INFINITY)
+            }
+        }
     })

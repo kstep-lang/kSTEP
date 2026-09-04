@@ -7,12 +7,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import dev.kstep.geometry.ColoredMesh
+import dev.kstep.geometry.MeshColor
 import dev.kstep.geometry.MeshComposition
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.PlacedMesh
 import dev.kstep.geometry.Placement
-import dev.kstep.geometry.TriangleMesh
 
 /**
  * Opens a real, on-screen window showing a static isometric demo assembly. Opt-in only -- run
@@ -23,11 +24,13 @@ import dev.kstep.geometry.TriangleMesh
  * multi-shape-composition-and-fill-light wave, see
  * `docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc`) -- a base plate, a pillar
  * standing on it, and a filleted block next to the pillar -- rather than the single static box
- * every prior viewer wave showed. [ShapeCanvas] itself needed NO change for this: it still takes
- * one plain [TriangleMesh], built here via [MeshComposition.merge] before the first composition,
- * not per frame.
+ * every prior viewer wave showed. Since kSTEP's viewer-pan-and-material-colors wave (see
+ * docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc), each part also carries its own [MeshColor]
+ * and the three are merged via [MeshComposition.mergeColored] into a [ColoredMesh] instead of a
+ * plain `TriangleMesh` -- [ShapeCanvas]'s `ColoredMesh` overload draws the result, one call still
+ * built here before the first composition, not per frame.
  */
-private fun buildDemoMesh(): TriangleMesh {
+private fun buildDemoMesh(): ColoredMesh {
     // Each part is triangulated and its OcctShape closed before the next part is built -- see
     // this wave's ADR's Security section for why sequential `use { }` blocks (rather than holding
     // all three shapes open at once) are the leak-safe shape here: a `use { }` block closes its
@@ -47,11 +50,16 @@ private fun buildDemoMesh(): TriangleMesh {
             OcctKernel.fillet(box, edgeIndex = 0, radius = 3.0).use { it.triangulate() }
         }
 
-    return MeshComposition.merge(
+    // Colors chosen for a mid-range, roughly evenly-spaced luminance spread (relative
+    // luminance L = 0.2126*r + 0.7152*g + 0.0722*b) so all three parts stay visually distinct
+    // in the same isometric key/fill lighting -- plate ~=0.474, pillar ~=0.808, rounded block
+    // ~=0.656 -- and every channel sits inside MeshColor's own recommended 0.40..0.95 band (see
+    // that class's KDoc) so no part's shadow side goes unreadably dark.
+    return MeshComposition.mergeColored(
         listOf(
-            PlacedMesh(plateMesh),
-            PlacedMesh(pillarMesh, Placement.translation(10.0, 15.0, 6.0)),
-            PlacedMesh(roundedMesh, Placement.translation(32.0, 10.0, 6.0)),
+            PlacedMesh(plateMesh, color = MeshColor(0.42, 0.48, 0.58)),
+            PlacedMesh(pillarMesh, Placement.translation(10.0, 15.0, 6.0), MeshColor(0.92, 0.80, 0.55)),
+            PlacedMesh(roundedMesh, Placement.translation(32.0, 10.0, 6.0), MeshColor(0.50, 0.70, 0.68)),
         ),
     )
 }

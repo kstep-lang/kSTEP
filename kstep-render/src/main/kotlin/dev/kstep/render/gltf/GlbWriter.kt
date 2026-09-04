@@ -1,5 +1,7 @@
 package dev.kstep.render.gltf
 
+import dev.kstep.geometry.ColoredMesh
+import dev.kstep.geometry.MeshColor
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.RenderLimits
@@ -117,32 +119,92 @@ object GlbWriter {
         mesh: TriangleMesh,
         extras: GlbExtras = GlbExtras.EMPTY,
     ): GlbWriteResult {
-        require(mesh.triangleCount <= OcctKernel.MAX_TRIANGLES) {
-            "mesh.triangleCount must be at most ${OcctKernel.MAX_TRIANGLES}, got ${mesh.triangleCount}"
+        validateAndWarnSize(mesh.triangleCount)
+        val kept = collectTriangles(mesh) { MeshColor.NEUTRAL }
+        val droppedTriangleCount = mesh.triangleCount - kept.size
+        if (kept.isEmpty()) {
+            warnIfAllDropped(mesh.triangleCount)
+            return buildEmptyScene(extras, droppedTriangleCount)
         }
-        if (mesh.triangleCount > RenderLimits.GLB_TRIANGLE_WARN_THRESHOLD) {
+        return buildPopulatedScene(kept, extras, droppedTriangleCount, includeColor = false)
+    }
+
+    /**
+     * Overload of [write] for a [ColoredMesh] (see `dev.kstep.geometry.MeshComposition.
+     * mergeColored`), added in kSTEP's viewer-pan-and-material-colors wave (see
+     * docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc) -- emits a `COLOR_0` vertex attribute
+     * (per-triangle, non-indexed, exactly like `POSITION`/`NORMAL`) so a glTF viewer tints each
+     * triangle by [ColoredMesh.colorAt] instead of the single uniform [BASE_COLOR_FACTOR].
+     *
+     * If every kept triangle's color is [MeshColor.NEUTRAL] (the all-default case -- e.g. a
+     * [ColoredMesh] built from parts that never set a [dev.kstep.geometry.PlacedMesh.color]),
+     * this delegates to [write]'s plain [TriangleMesh] overload and returns its BYTE-IDENTICAL
+     * output -- no `COLOR_0` attribute, no `materials[0].baseColorFactor` change -- rather than
+     * writing a technically-equivalent-but-differently-shaped document for a scene that carries
+     * no actual color information. `GlbWriterTest`'s `NEUTRAL`-equivalence case pins this.
+     *
+     * **Known gap** (see this wave's ADR, Folge-Wellen): the `COLOR_0` path has NOT been checked
+     * against the official Khronos `gltf-validator` (no network access in this environment,
+     * unlike the rest of this file's structural choices -- see this file's own KDoc). Named as an
+     * explicit release gate, not silently skipped.
+     */
+    fun write(
+        coloredMesh: ColoredMesh,
+        extras: GlbExtras = GlbExtras.EMPTY,
+    ): GlbWriteResult {
+        val mesh = coloredMesh.mesh
+        validateAndWarnSize(mesh.triangleCount)
+        val kept = collectTriangles(mesh, coloredMesh::colorAt)
+        val droppedTriangleCount = mesh.triangleCount - kept.size
+        if (kept.isEmpty()) {
+            warnIfAllDropped(mesh.triangleCount)
+            return buildEmptyScene(extras, droppedTriangleCount)
+        }
+        if (kept.all { it.color == MeshColor.NEUTRAL }) {
+            // Byte-identical to the plain-TriangleMesh path -- see this function's own KDoc.
+            // Recomputes `collectTriangles` a second time inside `write(mesh, extras)` rather than
+            // reusing `kept` here: correctness (guaranteed identical output to the plain overload)
+            // over avoiding one redundant pass over an already-small in-memory list.
+            return write(mesh, extras)
+        }
+        return buildPopulatedScene(kept, extras, droppedTriangleCount, includeColor = true)
+    }
+
+    private fun validateAndWarnSize(triangleCount: Int) {
+        require(triangleCount <= OcctKernel.MAX_TRIANGLES) {
+            "mesh.triangleCount must be at most ${OcctKernel.MAX_TRIANGLES}, got $triangleCount"
+        }
+        if (triangleCount > RenderLimits.GLB_TRIANGLE_WARN_THRESHOLD) {
             logger.warn {
-                "GlbWriter: writing ${mesh.triangleCount} triangles, above the " +
+                "GlbWriter: writing $triangleCount triangles, above the " +
                     "GLB_TRIANGLE_WARN_THRESHOLD of ${RenderLimits.GLB_TRIANGLE_WARN_THRESHOLD} -- output GLB " +
                     "will be large"
             }
         }
+    }
 
-        val kept = collectTriangles(mesh)
-        val droppedTriangleCount = mesh.triangleCount - kept.size
-        if (kept.isEmpty()) {
-            if (mesh.triangleCount > 0) {
-                logger.warn {
-                    "GlbWriter: all ${mesh.triangleCount} triangle(s) were dropped as degenerate or " +
-                        "non-finite -- writing an empty scene instead"
-                }
+    private fun warnIfAllDropped(triangleCount: Int) {
+        if (triangleCount > 0) {
+            logger.warn {
+                "GlbWriter: all $triangleCount triangle(s) were dropped as degenerate or " +
+                    "non-finite -- writing an empty scene instead"
             }
-            return buildEmptyScene(extras, droppedTriangleCount)
         }
+    }
 
+    /** Shared by both [write] overloads once at least one triangle survived [collectTriangles] --
+     *  builds the position/normal (and, if [includeColor], `COLOR_0`) buffers and the
+     *  corresponding glTF JSON document. */
+    private fun buildPopulatedScene(
+        kept: List<KeptTriangle>,
+        extras: GlbExtras,
+        droppedTriangleCount: Int,
+        includeColor: Boolean,
+    ): GlbWriteResult {
         val vertexCount = kept.size * VERTICES_PER_TRIANGLE
         val positions = FloatArray(vertexCount * COMPONENTS_PER_VEC3)
         val normals = FloatArray(vertexCount * COMPONENTS_PER_VEC3)
+        val colors = if (includeColor) FloatArray(vertexCount * COMPONENTS_PER_VEC3) else null
         var vertex = 0
         for (triangle in kept) {
             for (corner in 0 until VERTICES_PER_TRIANGLE) {
@@ -153,6 +215,11 @@ object GlbWriter {
                 normals[base] = triangle.normal[0].toFloat()
                 normals[base + 1] = triangle.normal[1].toFloat()
                 normals[base + 2] = triangle.normal[2].toFloat()
+                if (colors != null) {
+                    colors[base] = triangle.color.r.toFloat()
+                    colors[base + 1] = triangle.color.g.toFloat()
+                    colors[base + 2] = triangle.color.b.toFloat()
+                }
                 vertex++
             }
         }
@@ -160,7 +227,9 @@ object GlbWriter {
         val (positionMin, positionMax) = float32Bounds(positions)
         val positionBytes = floatsToLittleEndianBytes(positions)
         val normalBytes = floatsToLittleEndianBytes(normals)
-        val binChunk = padTo(positionBytes + normalBytes, ALIGNMENT, BIN_CHUNK_PAD_BYTE)
+        val colorBytes = colors?.let { floatsToLittleEndianBytes(it) }
+        val rawBin = if (colorBytes != null) positionBytes + normalBytes + colorBytes else positionBytes + normalBytes
+        val binChunk = padTo(rawBin, ALIGNMENT, BIN_CHUNK_PAD_BYTE)
 
         val document =
             buildJsonObject {
@@ -180,6 +249,7 @@ object GlbWriter {
                                 putJsonObject("attributes") {
                                     put("POSITION", 0)
                                     put("NORMAL", 1)
+                                    if (colorBytes != null) put("COLOR_0", 2)
                                 }
                                 put("mode", PRIMITIVE_MODE_TRIANGLES)
                                 put("material", 0)
@@ -190,7 +260,15 @@ object GlbWriter {
                 putJsonArray("materials") {
                     addJsonObject {
                         putJsonObject("pbrMetallicRoughness") {
-                            putJsonArray("baseColorFactor") { BASE_COLOR_FACTOR.forEach { add(it) } }
+                            // A COLOR_0 attribute is multiplied into the material's own
+                            // baseColorFactor by every conformant glTF renderer (core spec,
+                            // "vertex color" section) -- so once COLOR_0 carries the real
+                            // per-triangle color, baseColorFactor must be neutral (1,1,1,1) rather
+                            // than the plain-mesh path's cool-grey BASE_COLOR_FACTOR, or every
+                            // color would be tinted by that grey on top of its own MeshColor.
+                            val factor =
+                                if (colorBytes != null) doubleArrayOf(1.0, 1.0, 1.0, 1.0) else BASE_COLOR_FACTOR
+                            putJsonArray("baseColorFactor") { factor.forEach { add(it) } }
                             put("metallicFactor", METALLIC_FACTOR)
                             put("roughnessFactor", ROUGHNESS_FACTOR)
                         }
@@ -212,6 +290,14 @@ object GlbWriter {
                         put("count", vertexCount)
                         put("type", "VEC3")
                     }
+                    if (colorBytes != null) {
+                        addJsonObject {
+                            put("bufferView", 2)
+                            put("componentType", ACCESSOR_COMPONENT_TYPE_FLOAT)
+                            put("count", vertexCount)
+                            put("type", "VEC3")
+                        }
+                    }
                 }
                 putJsonArray("bufferViews") {
                     addJsonObject {
@@ -225,6 +311,14 @@ object GlbWriter {
                         put("byteOffset", positionBytes.size)
                         put("byteLength", normalBytes.size)
                         put("target", BUFFER_VIEW_TARGET_ARRAY_BUFFER)
+                    }
+                    if (colorBytes != null) {
+                        addJsonObject {
+                            put("buffer", 0)
+                            put("byteOffset", positionBytes.size + normalBytes.size)
+                            put("byteLength", colorBytes.size)
+                            put("target", BUFFER_VIEW_TARGET_ARRAY_BUFFER)
+                        }
                     }
                 }
                 putJsonArray("buffers") {
@@ -308,16 +402,35 @@ object GlbWriter {
         /** The triangle's unit-length, outward-facing normal (3 doubles), shared by all three
          *  of its corners -- flat shading needs no per-vertex smoothing. */
         val normal: DoubleArray,
+        /** This triangle's [MeshColor] -- [MeshColor.NEUTRAL] for the plain [TriangleMesh]
+         *  overload of [write], or [ColoredMesh.colorAt] for the [ColoredMesh] overload. Added in
+         *  kSTEP's viewer-pan-and-material-colors wave, see
+         *  docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc. */
+        val color: MeshColor,
     )
 
-    /** Filters [mesh]'s triangle soup down to the triangles this writer can actually emit --
-     *  see [write]'s KDoc for what "degenerate or non-finite" means and why a dropped triangle is
-     *  not an error. */
-    private fun collectTriangles(mesh: TriangleMesh): List<KeptTriangle> {
+    /**
+     * Filters [mesh]'s triangle soup down to the triangles this writer can actually emit -- see
+     * [write]'s KDoc for what "degenerate or non-finite" means and why a dropped triangle is not
+     * an error.
+     *
+     * @param colorAt Looks up the [MeshColor] for the triangle at a given SOURCE index (0-based,
+     *   into [mesh]'s triangle soup -- NOT an index into the returned, possibly-shorter, kept
+     *   list). Captured as `offset / 9` BEFORE `offset` is advanced past this triangle below --
+     *   capturing it after the advance would shift every kept triangle's color by one triangle
+     *   (see ADR-0017-viewer-pan-and-part-colors.adoc's Stolperfallen, and
+     *   `dev.kstep.render.mesh.MeshProjection`'s identical, independently-made fix for the same
+     *   hazard).
+     */
+    private fun collectTriangles(
+        mesh: TriangleMesh,
+        colorAt: (Int) -> MeshColor,
+    ): List<KeptTriangle> {
         val coordinates = mesh.coordinates
         val kept = ArrayList<KeptTriangle>(mesh.triangleCount)
         var offset = 0
         while (offset < coordinates.size) {
+            val triangleIndex = offset / 9
             val v0x = coordinates[offset]
             val v0y = coordinates[offset + 1]
             val v0z = coordinates[offset + 2]
@@ -344,7 +457,12 @@ object GlbWriter {
             val length = sqrt(nx * nx + ny * ny + nz * nz)
             if (!length.isFinite() || length <= DEGENERATE_NORMAL_LENGTH_EPSILON) continue
 
-            kept += KeptTriangle(triangleCoordinates, doubleArrayOf(nx / length, ny / length, nz / length))
+            kept +=
+                KeptTriangle(
+                    triangleCoordinates,
+                    doubleArrayOf(nx / length, ny / length, nz / length),
+                    colorAt(triangleIndex),
+                )
         }
         return kept
     }

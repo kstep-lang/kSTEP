@@ -109,4 +109,52 @@ class MeshCompositionTest :
                 MeshComposition.merge(listOf(PlacedMesh(hugeMesh)))
             }
         }
+
+        "PlacedMesh defaults to MeshColor.NEUTRAL when no color is given" {
+            PlacedMesh(oneTriangleMesh()).color shouldBe MeshColor.NEUTRAL
+        }
+
+        "mergeColored's mesh is identical to merge's for the same parts" {
+            val parts =
+                listOf(
+                    PlacedMesh(oneTriangleMesh(), color = MeshColor(0.5, 0.5, 0.5)),
+                    PlacedMesh(twoTriangleMesh(), Placement.translation(10.0, 0.0, 0.0), MeshColor(0.2, 0.3, 0.4)),
+                )
+            val plain = MeshComposition.merge(parts)
+            val colored = MeshComposition.mergeColored(parts)
+            colored.mesh.coordinates.size shouldBe plain.coordinates.size
+            colored.mesh.coordinates.indices.forEach { i ->
+                colored.mesh.coordinates[i] shouldBe (plain.coordinates[i] plusOrMinus TOLERANCE)
+            }
+        }
+
+        "mergeColored's colorAt returns each part's own color for its own triangles" {
+            val redPart = PlacedMesh(oneTriangleMesh(), color = MeshColor(0.9, 0.2, 0.2))
+            val bluePart =
+                PlacedMesh(twoTriangleMesh(), Placement.translation(100.0, 0.0, 0.0), MeshColor(0.2, 0.2, 0.9))
+            val colored = MeshComposition.mergeColored(listOf(redPart, bluePart))
+
+            // redPart contributes triangle 0, bluePart contributes triangles 1 and 2.
+            colored.colorAt(0) shouldBe redPart.color
+            colored.colorAt(1) shouldBe bluePart.color
+            colored.colorAt(2) shouldBe bluePart.color
+        }
+
+        "mergeColored deduplicates two parts sharing the exact same color onto one palette entry" {
+            val sharedColor = MeshColor(0.6, 0.6, 0.6)
+            val partA = PlacedMesh(oneTriangleMesh(), color = sharedColor)
+            val partB = PlacedMesh(oneTriangleMesh(), Placement.translation(5.0, 0.0, 0.0), sharedColor)
+            val colored = MeshComposition.mergeColored(listOf(partA, partB))
+
+            // Both triangles report the identical MeshColor VALUE -- this is the observable proof
+            // of dedup available through the public colorAt API (the palette itself is private).
+            colored.colorAt(0) shouldBe sharedColor
+            colored.colorAt(1) shouldBe sharedColor
+            colored.colorAt(0) shouldBe colored.colorAt(1)
+        }
+
+        "mergeColored(emptyList()) returns an empty ColoredMesh" {
+            val colored = MeshComposition.mergeColored(emptyList())
+            colored.mesh.triangleCount shouldBe 0
+        }
     })

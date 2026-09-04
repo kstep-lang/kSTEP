@@ -3,8 +3,11 @@ package dev.kstep.viewer.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -34,19 +37,23 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.isShiftPressed
+import androidx.compose.ui.input.pointer.isTertiaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import dev.kstep.geometry.ColoredMesh
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.mesh.Camera
 import dev.kstep.render.mesh.MeshProjection
 import dev.kstep.viewer.camera.CameraInteraction
 import dev.kstep.viewer.camera.ViewerCameraState
 
-private const val HINT_TEXT = "Drag to orbit · Scroll to zoom · Double-click or R to reset"
+private const val HINT_TEXT = "Drag to orbit · Shift-drag to pan · Scroll to zoom · Double-click or R to reset"
 
 /**
  * Renders [mesh] as an interactive, orbitable projection, painter's-algorithm-ordered and
@@ -62,17 +69,38 @@ private const val HINT_TEXT = "Drag to orbit · Scroll to zoom · Double-click o
  * future caller (e.g. a V-2d toolbar) that needs to read or drive the camera from outside can
  * hoist its own [MutableState] and pass it in instead.
  *
- * @param state The full camera pose (orbit angles + zoom). Deliberately a raw [MutableState]
+ * @param state The full camera pose (orbit angles + zoom + pan). Deliberately a raw [MutableState]
  *   rather than this composable owning a private one unconditionally -- see the class doc above.
  */
-@OptIn(ExperimentalComposeUiApi::class) // Modifier.onPointerEvent (scroll-to-zoom) is experimental
-// in this Compose Multiplatform version -- no unstable behavior relied on beyond the API shape
-// itself, and there is no stable scroll-event API in this version to use instead.
 @Composable
 fun ShapeCanvas(
     mesh: TriangleMesh,
     modifier: Modifier = Modifier,
     state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) },
+) = ShapeCanvasInternal(mesh, coloredMesh = null, modifier, state)
+
+/**
+ * Overload of [ShapeCanvas] for a [ColoredMesh] (see `dev.kstep.geometry.MeshComposition.
+ * mergeColored`), added in kSTEP's viewer-pan-and-material-colors wave (see
+ * docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc) -- draws each triangle in its own
+ * [ColoredMesh.colorAt] color instead of the plain-[TriangleMesh] overload's uniform grayscale.
+ */
+@Composable
+fun ShapeCanvas(
+    coloredMesh: ColoredMesh,
+    modifier: Modifier = Modifier,
+    state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) },
+) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state)
+
+@OptIn(ExperimentalComposeUiApi::class) // Modifier.onPointerEvent (scroll-to-zoom) is experimental
+// in this Compose Multiplatform version -- no unstable behavior relied on beyond the API shape
+// itself, and there is no stable scroll-event API in this version to use instead.
+@Composable
+private fun ShapeCanvasInternal(
+    mesh: TriangleMesh,
+    coloredMesh: ColoredMesh?,
+    modifier: Modifier,
+    state: MutableState<ViewerCameraState>,
 ) {
     val focusRequester = remember { FocusRequester() }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
@@ -124,9 +152,37 @@ fun ShapeCanvas(
                 .fillMaxSize()
                 .onSizeChanged { canvasSize = it }
                 .pointerInput(Unit) {
-                    detectDragGestures { change, drag ->
-                        change.consume()
-                        state.value = CameraInteraction.onDrag(state.value, drag.x, drag.y)
+                    // ONE gesture handler for both orbit and pan -- not a second, competing
+                    // pointerInput(Unit) block armed with its own detectDragGestures -- so exactly
+                    // one of onDrag/onPan runs per drag, decided once at the initial press by
+                    // whether it looks like a "pan" gesture (middle-button OR held Shift; see
+                    // HINT_TEXT and docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc). Built from
+                    // the same public gesture-detection primitives detectDragGestures itself uses
+                    // internally (awaitFirstDown/awaitTouchSlopOrCancel/drag), so touch-slop
+                    // behavior (no jitter-orbit from a near-stationary press) is preserved exactly.
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val isPan =
+                            currentEvent.buttons.isTertiaryPressed || currentEvent.keyboardModifiers.isShiftPressed
+                        val slopChange = awaitTouchSlopOrCancellation(down.id) { change, _ -> change.consume() }
+                        if (slopChange != null) {
+                            drag(down.id) { change ->
+                                val amount = change.positionChange()
+                                change.consume()
+                                state.value =
+                                    if (isPan) {
+                                        CameraInteraction.onPan(
+                                            state.value,
+                                            amount.x,
+                                            amount.y,
+                                            size.width.toDouble(),
+                                            size.height.toDouble(),
+                                        )
+                                    } else {
+                                        CameraInteraction.onDrag(state.value, amount.x, amount.y)
+                                    }
+                            }
+                        }
                     }
                 }.pointerInput(Unit) {
                     detectTapGestures(onDoubleTap = { state.value = CameraInteraction.reset() })
@@ -166,14 +222,34 @@ fun ShapeCanvas(
             // frame rather than falling back to an arbitrary scale; the very next frame has it.
             val fitScale = homeFitScale ?: return@Canvas
             val cameraState = state.value
+            // panX/panY are stored on ViewerCameraState as a width/height FRACTION at zoom 1.0
+            // (see ViewerCameraState's own KDoc) -- converted to MeshProjection's pixel-space
+            // panX/panY here, at draw time, the same way `fitScale * cameraState.zoom` converts
+            // the auto-fit scale into this frame's actual scale.
+            val panXPixels = cameraState.panX * size.width.toDouble() * cameraState.zoom
+            val panYPixels = cameraState.panY * size.height.toDouble() * cameraState.zoom
             val triangles =
-                MeshProjection.project(
-                    mesh,
-                    size.width.toDouble(),
-                    size.height.toDouble(),
-                    cameraState.camera,
-                    scale = fitScale * cameraState.zoom,
-                )
+                if (coloredMesh != null) {
+                    MeshProjection.project(
+                        coloredMesh,
+                        size.width.toDouble(),
+                        size.height.toDouble(),
+                        cameraState.camera,
+                        scale = fitScale * cameraState.zoom,
+                        panX = panXPixels,
+                        panY = panYPixels,
+                    )
+                } else {
+                    MeshProjection.project(
+                        mesh,
+                        size.width.toDouble(),
+                        size.height.toDouble(),
+                        cameraState.camera,
+                        scale = fitScale * cameraState.zoom,
+                        panX = panXPixels,
+                        panY = panYPixels,
+                    )
+                }
             for (t in triangles) {
                 val path =
                     Path().apply {
@@ -182,8 +258,12 @@ fun ShapeCanvas(
                         lineTo(t.cx.toFloat(), t.cy.toFloat())
                         close()
                     }
-                val shade = t.shade.toFloat()
-                val color = Color(shade, shade, shade)
+                // litR/litG/litB already combine shade with the triangle's MeshColor
+                // multiplicatively (see ProjectedTriangle's own KDoc) -- both already in [0, 1]
+                // by construction (shade is coerced in MeshProjection, color channels are
+                // guaranteed in 0.0..1.0 by MeshColor's own init check), so no extra coerceIn is
+                // needed here, matching this file's pre-wave style.
+                val color = Color(t.litR.toFloat(), t.litG.toFloat(), t.litB.toFloat())
                 drawPath(path, color, style = Fill)
                 // Same color, 1px stroke -- closes the antialiasing seams between coplanar
                 // neighboring triangles (Atkinson's "haarriss" fix, see ADR-0010).

@@ -1,5 +1,6 @@
 package dev.kstep.render
 
+import dev.kstep.geometry.MeshColor
 import dev.kstep.geometry.MeshComposition
 import dev.kstep.geometry.PlacedMesh
 import dev.kstep.geometry.Placement
@@ -115,5 +116,26 @@ class MultiShapeRasterTest :
             ImageIO.write(image, "png", outFile)
             outFile.exists() shouldBe true
             (outFile.length() > 0) shouldBe true
+        }
+
+        "a merged two-cube ColoredMesh rasterizes each cube in its own distinct color" {
+            val redCube = PlacedMesh(unitCubeMesh(), color = MeshColor(0.9, 0.15, 0.15))
+            val blueCube = PlacedMesh(unitCubeMesh(), Placement.translation(6.0, -6.0, 0.0), MeshColor(0.15, 0.15, 0.9))
+            val coloredMerged = MeshComposition.mergeColored(listOf(redCube, blueCube))
+            val triangles = MeshProjection.project(coloredMerged, WIDTH.toDouble(), HEIGHT.toDouble())
+            val image = TriangleRasterizer.render(triangles, WIDTH, HEIGHT)
+
+            val row = HEIGHT / 2
+            val nonBackgroundPixels =
+                (0 until image.width)
+                    .map { x -> image.getRGB(x, row) }
+                    .filter { it != -1 }
+            nonBackgroundPixels.isEmpty() shouldBe false
+            // At least one sampled pixel should read as red-dominant and one as blue-dominant --
+            // proof the two cubes are NOT rendered in the same (or plain grayscale) color.
+            val anyRedDominant = nonBackgroundPixels.any { rgb -> ((rgb shr 16) and 0xFF) > ((rgb) and 0xFF) + 20 }
+            val anyBlueDominant = nonBackgroundPixels.any { rgb -> (rgb and 0xFF) > ((rgb shr 16) and 0xFF) + 20 }
+            anyRedDominant shouldBe true
+            anyBlueDominant shouldBe true
         }
     })

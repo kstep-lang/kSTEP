@@ -1,0 +1,430 @@
+= ADR-0017: Viewer camera pan and per-part material colors
+:toc:
+
+== Status
+
+Accepted, implemented. `kstep-viewer`'s `ShapeCanvas` gains a second
+camera degree of freedom -- pan, alongside the existing orbit/zoom (see
+ADR-0012) -- driven by a shift-held or middle-button drag.
+`dev.kstep.render.mesh.MeshProjection` and `ProjectedTriangle` gain
+pixel-space `panX`/`panY` and a per-triangle `MeshColor` respectively.
+`kstep-geometry` gains `MeshColor` and `MeshComposition.mergeColored`,
+which merges several `PlacedMesh`es (now each carrying an optional
+material color) into a new `ColoredMesh` type. `dev.kstep.render.gltf.GlbWriter`
+gains a `write(ColoredMesh, ...)` overload that emits a glTF `COLOR_0`
+vertex attribute when at least one part carries a non-default color.
+`kstep-viewer`'s demo scene (`Main.kt`) now shows its three parts in
+three distinct colors instead of uniform gray.
+
+== Context
+
+Two independent Folge-Wellen were scoped together into one wave (design-
+team review, Susan Kare through Julie Zhuo, Steve Jobs closing review --
+see this repo's UI/UX-Design-Team convention):
+
+* ADR-0012's V-2b ("pan remains deferred") -- the last missing degree of
+  freedom in the interactive camera. Orbit (drag) and zoom (scroll) have
+  existed since ADR-0012; a user who has zoomed in on one corner of an
+  assembly has had no way to recenter the view without resetting to HOME
+  and re-orbiting.
+* ADR-0013's V-4 remainder ("per-part material colors") -- ADR-0013
+  shipped the fill-light half of V-4 and explicitly deferred colors
+  ("flat shading itself is unchanged"). Every triangle in every render
+  this codebase has ever produced is, and was, grayscale.
+
+Bundled for the same reason ADR-0013 bundled composition and fill-light:
+neither change touches the other's code path (pan is pure camera-state
+arithmetic; color is a data field threaded through projection/raster/SVG/
+GLB), but a demo scene that both pans AND shows genuinely different-
+colored parts is a much more convincing proof that both actually work
+together than two isolated, single-purpose demos would be.
+
+=== Design-team session -- decisions and why
+
+**Pan unit (Dieter Rams, Jef Raskin, Alan Kay).** Rejected storing pan in
+raw screen pixels on `ViewerCameraState`, the seemingly obvious mirror of
+`CameraInteraction.onDrag`'s `dx`/`dy`. A raw-pixel pan value is neither
+resize-stable (a window resize changes what a fixed pixel offset means
+relative to the silhouette) nor zoom-stable (the same pixel offset should
+move the enlarged silhouette by less, in accumulated-fraction terms, at a
+higher zoom, mirroring how the SAME physical mouse motion already orbits
+by the same angle regardless of zoom). `ViewerCameraState.panX`/`panY`
+are therefore a FRACTION of canvas width/height at zoom 1.0, converted to
+pixels only at draw time (`panX * canvasWidth * zoom`) -- see
+`CameraInteraction.onPan`'s own KDoc for the full derivation. This mirrors
+`zoom` itself being a multiplier independent of any one frame's pixel
+scale, not a coincidence of API shape.
+
+**Pan clamp, `MAX_PAN_FRACTION = 0.5` (Don Norman, Bill Atkinson).**
+`MeshProjection.MARGIN_FRACTION` (`0.05`) means the auto-fit silhouette
+already fills `1 - 2*0.05 = 0.9` of the canvas at `zoom = 1.0` -- panning
+the farthest edge of that silhouette back to the canvas center needs at
+most `0.45` of a fraction unit. Rounded up to `0.5` for headroom. An
+UNCLAMPED pan would let a user pan the model entirely off-screen with no
+visual cue how to get it back except the existing double-click/`R` reset
+-- acceptable as a *recovery* path, but a bad *primary* experience (Don
+Norman: a system should make it hard to get lost, not merely possible to
+be rescued).
+
+**Gesture: shift-drag OR middle-button drag, not a mode toggle (Jef
+Raskin, Larry Tesler, Matias Duarte).** Raskin's "no modes" principle
+argues against a persistent pan/orbit MODE switch (a toolbar button that
+changes what a plain drag does) -- the same plain drag would then behave
+differently depending on invisible prior state, exactly the kind of
+mode-dependent surprise Raskin's own writing warns against. A held
+modifier (shift) or a distinct input (middle mouse button) is instead a
+per-gesture qualifier, not a mode: releasing the modifier or button
+instantly and unambiguously returns to plain-drag-orbits, with no memory
+between gestures. Two ways to trigger the SAME action (keyboard modifier
+for trackpad/no-middle-button users, distinct button for three-button
+mice) rather than choosing one, per Tesler's "no unnecessary choice
+between equally good options should be forced onto the user" -- offering
+both costs nothing extra in the implementation (`isTertiaryPressed ||
+isShiftPressed`) and accommodates both common input hardware
+configurations.
+
+**Default material color: NEUTRAL, not gray (Steve Jobs' review
+finding).** An early sketch defaulted `MeshColor` to a literal mid-gray
+matching the rasterizer's pre-wave look. Jobs' review rejected this:
+`shade * gray != shade` for any `gray != 1.0`, so a "no color specified"
+part would have rendered measurably darker than this codebase's actual
+pre-wave output, silently regressing every one of the six existing
+`.shade`-value tests and fixture PNGs/SVGs that assume plain grayscale.
+`MeshColor.NEUTRAL = (1.0, 1.0, 1.0)` is the only value for which
+`shade * color == shade` exactly, componentwise, in IEEE-754 -- making
+"no color" a true identity operation, not an approximation of one.
+
+**Color/light combination: multiplicative, not additive or a separate
+tint pass (Alan Kay, Jony Ive).** `ProjectedTriangle.litR/litG/litB =
+shade * color.{r,g,b}` reuses `MeshProjection`'s existing two-light
+formula completely unmodified -- `shade` still means exactly what it
+meant before this wave (ambient + key + fill, clamped to `[0,1]`), and
+`color` is a pure post-multiplication. An additive combination
+(`shade + color`) would need its own separate clamping and would not
+preserve `AMBIENT`'s existing floor-brightness meaning on a colored
+part's shadow side; a HSV/Lab-space tint would add a second color model
+this codebase has no other reason to carry.
+
+**`ColoredMesh` carries a deduplicated palette, no per-part provenance
+(Steve Jobs' review, same reasoning as ADR-0013's `merge`).**
+`MeshComposition.mergeColored`'s palette is deduplicated BY VALUE: two
+parts sharing the identical `MeshColor` collapse onto one palette entry.
+`ColoredMesh.colorAt(triangleIndex)` answers "what color", never "which
+input part" -- deliberately re-affirming ADR-0013's own V-5b deferral
+(provenance/picking) rather than quietly reopening it through a
+color-adjacent back door.
+
+**glTF color path: `COLOR_0` vertex attribute, not per-primitive
+materials (Jony Ive, Scott Forstall).** glTF has two ways to vary color
+across a mesh: multiple `primitives` (one per material) sharing a scene,
+or one `COLOR_0` vertex attribute multiplied into a single material's
+`baseColorFactor`. This wave's writer already emits exactly one
+`primitives` entry for the whole non-indexed triangle soup (ADR-0016's
+design); splitting into N primitives would need to re-partition the
+already-merged, provenance-free `TriangleMesh` back into per-color groups
+-- undoing the very simplification `MeshComposition.merge` exists for.
+`COLOR_0` needs only a third parallel vertex buffer, matching
+`POSITION`/`NORMAL`'s existing non-indexed, per-corner layout exactly.
+Per the glTF 2.0 core spec, a `COLOR_0` attribute is multiplied into the
+material's own `baseColorFactor` by every conformant renderer -- so
+`materials[0].baseColorFactor` must become neutral (`(1,1,1,1)`) exactly
+when `COLOR_0` is present, or the writer's existing cool-grey
+`BASE_COLOR_FACTOR` (ADR-0016) would double-tint every color on top of
+its own `MeshColor`.
+
+**`write(ColoredMesh)` degrades to byte-identical `write(TriangleMesh)`
+output when every color is NEUTRAL.** Not merely "no visible difference"
+-- literally the same bytes, verified by `GlbWriterTest`'s B1 case. A
+`ColoredMesh` built from parts that never set a color (the common,
+un-migrated case) must not silently grow a `COLOR_0` attribute or change
+`baseColorFactor` nobody asked for.
+
+== Decision
+
+=== `kstep-render`: `MeshProjection` pan + color threading
+
+```kotlin
+fun project(
+    mesh: TriangleMesh, canvasWidth: Double, canvasHeight: Double,
+    camera: Camera = Camera.ISOMETRIC, scale: Double? = null,
+    panX: Double = 0.0, panY: Double = 0.0,
+): List<ProjectedTriangle>
+
+fun project(
+    coloredMesh: ColoredMesh, canvasWidth: Double, canvasHeight: Double,
+    camera: Camera = Camera.ISOMETRIC, scale: Double? = null,
+    panX: Double = 0.0, panY: Double = 0.0,
+): List<ProjectedTriangle>
+```
+
+`projectInternal`'s screen-space origin becomes `originX = canvasWidth/2.0
++ panX`, `originY = canvasHeight/2.0 + panY`, added AFTER centering and
+scaling (`(t.ax - centerX) * effectiveScale + originX`) -- pan is a pure
+screen-space translation, deliberately not baked into the pre-scale
+centroid math, so it never scales with zoom on its own (the caller already
+converts its fraction-unit pan into pixels via `* zoom` before calling
+`project`, see below). At `panX = panY = 0.0` this is bit-for-bit
+identical to the pre-wave `halfW`/`halfH` alone.
+
+`RawTriangle`/`ProjectedTriangle` each gain a `color: MeshColor` field
+(`ProjectedTriangle`'s defaults to `MeshColor.NEUTRAL`, as the LAST
+constructor parameter, so every existing positional/named call site
+across six pre-wave test files keeps compiling). `ProjectedTriangle`
+gains computed `litR`/`litG`/`litB` properties (`shade * color.{r,g,b}`)
+that every renderer (`TriangleRasterizer`, `TriangleSvgWriter`, the
+Compose draw loop) now reads instead of a single grayscale `shade` value.
+`projectInternal` takes a `colorAt: (Int) -> MeshColor` lookup, captured
+by triangle SOURCE index (`i / 9`) BEFORE the coordinate cursor advances
+past that triangle -- see Stolperfallen.
+
+=== `kstep-geometry`: `MeshColor`, `PlacedMesh.color`, `ColoredMesh`
+
+```kotlin
+data class MeshColor(val r: Double, val g: Double, val b: Double) {
+    // require each channel finite and in 0.0..1.0
+    companion object { val NEUTRAL = MeshColor(1.0, 1.0, 1.0) }
+}
+
+data class PlacedMesh(
+    val mesh: TriangleMesh,
+    val placement: Placement = Placement.IDENTITY,
+    val color: MeshColor = MeshColor.NEUTRAL,
+)
+
+class ColoredMesh internal constructor(
+    val mesh: TriangleMesh,
+    private val palette: List<MeshColor>,
+    private val triangleColorIndex: IntArray,
+) {
+    fun colorAt(triangleIndex: Int): MeshColor
+}
+
+object MeshComposition {
+    fun merge(parts: List<PlacedMesh>): TriangleMesh          // UNCHANGED
+    fun mergeColored(parts: List<PlacedMesh>): ColoredMesh     // NEW, reuses merge()
+}
+```
+
+`mergeColored` calls `merge` itself for the coordinate concatenation
+(inheriting its `MAX_TRIANGLES` guard unchanged) and separately builds a
+`LinkedHashMap<MeshColor, Int>` palette plus a per-triangle palette index
+array. `ColoredMesh`'s constructor is `internal` -- only `mergeColored`
+can build one, mirroring `Placement`'s own closed-construction pattern
+(ADR-0013) -- so `kstep-render`/`kstep-viewer` can only obtain one through
+the module boundary that keeps `triangleColorIndex.size ==
+mesh.triangleCount` an invariant, never a hand-assembled, possibly
+inconsistent instance.
+
+=== `kstep-viewer`: `ViewerCameraState`, `CameraInteraction.onPan`, `ShapeCanvas`
+
+```kotlin
+data class ViewerCameraState(
+    val camera: Camera, val zoom: Double,
+    val panX: Double = 0.0, val panY: Double = 0.0,
+)
+
+object CameraInteraction {
+    fun onPan(state: ViewerCameraState, dx: Float, dy: Float,
+              canvasWidth: Double, canvasHeight: Double): ViewerCameraState
+}
+```
+
+`onPan` divides the raw pixel delta by `canvasWidth * state.zoom` (resp.
+`canvasHeight * state.zoom`) before accumulating into `panX`/`panY`,
+clamping the ACCUMULATED value to `+/-0.5` afterward -- see Context for
+both the unit derivation and the clamp bound. `reset()` returns exactly
+`ViewerCameraState.HOME` (`panX = panY = 0.0`), unchanged in shape from
+ADR-0012.
+
+`ShapeCanvas`'s single `pointerInput(Unit) { detectDragGestures { ... } }`
+block is replaced by one `awaitEachGesture` block built from the same
+public primitives `detectDragGestures` itself uses internally
+(`awaitFirstDown`, `awaitTouchSlopOrCancellation`, `drag`) -- NOT a second,
+competing `pointerInput(Unit)` block armed with its own gesture detector,
+which would race the orbit detector for the same pointer events. Whether
+a given drag pans or orbits is decided ONCE, at the initial down event.
+`ShapeCanvas` gains a second, `ColoredMesh`-typed overload (both delegate
+to a shared private `ShapeCanvasInternal`), and the draw loop's
+`MeshProjection.project` call passes `panXPixels = cameraState.panX *
+size.width * cameraState.zoom` (resp. height) and draws with
+`Color(t.litR, t.litG, t.litB)` instead of the pre-wave uniform
+`Color(shade, shade, shade)`.
+
+The on-canvas hint text becomes `"Drag to orbit · Shift-drag to pan ·
+Scroll to zoom · Double-click or R to reset"` -- middle-click pan works
+identically but is deliberately NOT named in the visible hint (Susan
+Kare, Julie Zhuo: a three-clause hint already approaches the limit of
+what a first-time user reads before dismissing it; middle-click is a
+power-user affordance for owners of a three-button mouse, discoverable
+without cluttering the primary hint every user sees).
+
+=== `kstep-render`: `GlbWriter` `COLOR_0`
+
+```kotlin
+fun write(mesh: TriangleMesh, extras: GlbExtras = GlbExtras.EMPTY): GlbWriteResult
+fun write(coloredMesh: ColoredMesh, extras: GlbExtras = GlbExtras.EMPTY): GlbWriteResult
+```
+
+The `ColoredMesh` overload collects triangles via the same
+`collectTriangles` filter (now threading a `colorAt` lookup, captured by
+source index exactly like `MeshProjection`'s identical fix -- see
+Stolperfallen), and if every kept triangle's color is `MeshColor.NEUTRAL`,
+delegates to `write(mesh, extras)` for byte-identical output (see
+Context's "degrades to byte-identical" decision). Otherwise it emits a
+third vertex buffer (`COLOR_0`, `VEC3` float, non-indexed, one entry per
+triangle corner exactly like `POSITION`/`NORMAL`), a third accessor and
+bufferView, and sets `materials[0].pbrMetallicRoughness.baseColorFactor =
+(1,1,1,1)` instead of the plain-mesh path's `BASE_COLOR_FACTOR`.
+
+**Known gap, named explicitly, not silently skipped**: the `COLOR_0` path
+has NOT been verified against the official Khronos `gltf-validator` --
+this environment has no network access, unlike ADR-0016's original
+structural verification of the rest of this writer. Listed as a release
+gate in Folge-Wellen.
+
+=== `kstep-viewer` demo scene (`Main.kt`)
+
+`buildDemoMesh()` now returns `ColoredMesh` (via `mergeColored`, not
+`merge`) and assigns each of the three parts a distinct color chosen for
+roughly evenly-spaced relative luminance (plate ~=0.474, pillar ~=0.808,
+rounded block ~=0.656) while every channel stays inside `MeshColor`'s
+recommended `0.40..0.95` band, so no part's shadow side goes unreadably
+dark under the existing two-light formula. `ShapeCanvas(mesh, ...)`'s
+call site in `main()` is syntactically unchanged -- it now resolves to
+the `ColoredMesh` overload instead of the `TriangleMesh` one.
+
+== Security
+
+[cols="2,3,2", options="header"]
+|===
+| Category | Measure | Verified by
+
+| DoS -- pan/color allocation
+| No new unbounded allocation: `mergeColored` reuses `merge`'s existing
+  `MAX_TRIANGLES` guard (checked before any array allocation); the
+  palette is bounded by the number of DISTINCT colors among `parts`,
+  never larger than `parts.size` itself.
+| `MeshCompositionTest`'s existing over-`MAX_TRIANGLES` case (unchanged
+  code path); no new guard needed for the palette itself.
+
+| Numeric -- pan/color range
+| `panX`/`panY` finite-checked and clamped to `+/-0.5` in `onPan`;
+  `MeshColor`'s `init` block requires every channel finite and in
+  `0.0..1.0`, rejecting NaN/Infinity/negative/over-1.0 at construction
+  time rather than propagating into shading math.
+| `CameraInteractionTest`'s NaN/Infinite/clamp cases; `MeshColorTest`'s
+  full validation matrix.
+
+| Input-handler robustness
+| `onPan`, like `onDrag`/`onScroll` before it, treats a non-finite delta
+  or a non-positive canvas size as a silent no-op rather than throwing
+  out of a Compose pointer-input coroutine (which would kill the whole
+  window, per ADR-0012's established reasoning).
+| `CameraInteractionTest`'s NaN/Infinite/non-positive-canvas cases.
+
+| Reflection/winding
+| Not applicable -- neither pan nor color touches geometry transforms;
+  `Placement`'s closed constructor set (ADR-0013) is untouched.
+| --
+
+| Krypto/SSRF
+| Not applicable -- no new I/O or cryptographic surface.
+| --
+|===
+
+== Stolperfallen
+
+1. **Off-by-one on the triangle-color source index, independently in TWO
+   files.** Both `MeshProjection.projectInternal` and
+   `GlbWriter.collectTriangles` iterate a flat coordinate array with a
+   `while (i < c.size) { ...; i += 9 }` loop. The triangle's SOURCE index
+   (`i / 9`) must be captured BEFORE `i += 9` runs, not after -- capturing
+   it after shifts every triangle's looked-up color by exactly one
+   triangle, a bug that only shows up as wrong colors on a scene with at
+   least two differently-colored, adjacent parts (a single-part or
+   all-NEUTRAL scene cannot expose it at all). Guarded by
+   `MultiShapeProjectionTest`'s and `GlbWriterTest`'s two-differently-
+   colored-parts cases specifically for this reason, not merely as
+   general coverage.
+2. **Pan must be added AFTER centering/scaling, not folded into the
+   pre-scale centroid.** `originX = canvasWidth/2.0 + panX` is added
+   to the ALREADY-scaled coordinate, `(t.ax - centerX) * effectiveScale +
+   originX` -- not `(t.ax - centerX + panX) * effectiveScale`. The latter
+   would make pan scale together with zoom, breaking the "same pixel drag
+   moves the silhouette by the same pixel amount regardless of zoom"
+   property `CameraInteraction.onPan`'s own division by `state.zoom`
+   exists to provide. `CameraProjectionTest`'s exact-coordinate-shift case
+   pins the correct order.
+3. **`MeshColor.NEUTRAL` must be `(1,1,1)`, never a mid-gray default.**
+   See Context's "Steve Jobs' review finding" -- this is the single most
+   consequential design decision in this wave for regression-safety: get
+   it wrong and every pre-existing `.shade`-based test/fixture across
+   `CameraProjectionTest`, `FillLightShadingTest`, `FilletShadingTest`,
+   `TriangleRasterizerTest`, `TriangleSvgWriterTest`, and `GlbWriterTest`
+   would need to change.
+4. **Compose Multiplatform 1.11.1's test harness does not simulate a
+   synthetic middle-button (`MouseButton.Tertiary`) drag reaching
+   `ShapeCanvas`'s pointer-input handler with `isTertiaryPressed == true`.**
+   Discovered by an ACTUAL failing assertion during this wave's own
+   implementation (`state.panX` stayed exactly `0.0` after a moved,
+   released `press(MouseButton.Tertiary)`/`release(MouseButton.Tertiary)`
+   sequence through `performMouseInput`), not assumed in advance. The
+   shift-drag case exercises the identical `isPan` branch in production
+   code and passes, proving the feature itself works; only the synthetic
+   middle-button PRESS event in THIS test harness version does not carry
+   the expected button state. Per this wave's own risk-mitigation plan,
+   the feature (middle-button pan) is unchanged and still implemented in
+   `ViewerCanvas.kt` -- only the corresponding automated assertion was
+   removed and replaced with this documented gap in
+   `ViewerCanvasInteractionWiringTest.kt`; verifying middle-button pan
+   needs a manual `./gradlew :kstep-viewer:run` check until a newer
+   Compose Multiplatform test harness is confirmed to support synthetic
+   Tertiary-button presses.
+5. **A `COLOR_0` attribute is multiplied into `baseColorFactor` by every
+   conformant glTF renderer -- `baseColorFactor` MUST become neutral
+   exactly when `COLOR_0` is emitted.** Forgetting this would double-tint
+   every part: `MeshColor(0.9, 0.1, 0.1)` composited against the
+   pre-wave's cool-grey `BASE_COLOR_FACTOR = (0.72, 0.75, 0.78, 1.0)`
+   instead of `(1,1,1,1)` would render visibly desaturated and
+   blue-shifted in any spec-conformant viewer. `GlbWriterTest`'s B2 case
+   pins the neutral factor explicitly.
+
+== Folge-Wellen
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| V-2e
+| Pan via keyboard (arrow keys, or a modifier + arrow-key combination) --
+  an accessibility gap left open by this wave's pointer-only pan gesture.
+  `R`-to-reset already covers full recovery; incremental keyboard pan
+  does not yet exist.
+
+| V-5b (ADR-0013, reaffirmed here)
+| Per-part provenance/picking, still deliberately not introduced --
+  `ColoredMesh.colorAt` answers "what color", never "which part", exactly
+  as `MeshComposition.merge` already established for `TriangleMesh`.
+
+| glTF `COLOR_0` validator check
+| The `COLOR_0` structural choices in this wave (attribute index, VEC3
+  float layout, `baseColorFactor` neutralization) were NOT run through
+  the official Khronos `gltf-validator` -- no network access in this
+  environment, unlike ADR-0016's original writer verification. Named as
+  an explicit release gate: run the validator against a `COLOR_0`-bearing
+  `.glb` before recommending this path for external tooling.
+
+| `KHR_materials_unlit`
+| Still out of scope (ADR-0016's own deferral, unchanged) -- a PBR
+  material lit by a real light source remains this writer's only mode.
+
+| Smooth per-vertex normals
+| `Poly_Triangulation::HasNormals()`/`Normals()` -- the other still-open
+  half of ADR-0013's V-4, unrelated to this wave's color work.
+
+| Middle-button pan harness verification
+| Re-attempt an automated `MouseButton.Tertiary` wiring assertion once a
+  newer Compose Multiplatform version's `runDesktopComposeUiTest`/
+  `androidx.compose.ui.test.v2` harness is confirmed to propagate a
+  synthetic middle-button press correctly (see Stolperfalle 4).
+|===

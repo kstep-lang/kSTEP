@@ -51,8 +51,14 @@ object TriangleSvgWriter {
         )
         sb.append("<rect x=\"0\" y=\"0\" width=\"$width\" height=\"$height\" fill=\"#ffffff\"/>\n")
         for (t in triangles) {
-            val gray = (t.shade.coerceIn(0.0, 1.0) * 255.0).toInt()
-            val color = String.format(Locale.ROOT, "#%02x%02x%02x", gray, gray, gray)
+            // See TriangleRasterizer's identical comment: litR/litG/litB combine shade with the
+            // triangle's MeshColor multiplicatively, and are byte-identical to plain shade at
+            // MeshColor.NEUTRAL (this file's pre-wave-and-still-default case) -- see
+            // docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc.
+            val r = (t.litR.coerceIn(0.0, 1.0) * 255.0).toInt()
+            val g = (t.litG.coerceIn(0.0, 1.0) * 255.0).toInt()
+            val b = (t.litB.coerceIn(0.0, 1.0) * 255.0).toInt()
+            val color = String.format(Locale.ROOT, "#%02x%02x%02x", r, g, b)
             val points =
                 listOf(t.ax to t.ay, t.bx to t.by, t.cx to t.cy)
                     .joinToString(" ") { (x, y) -> "${round(x)},${round(y)}" }
