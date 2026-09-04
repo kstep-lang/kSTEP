@@ -133,6 +133,7 @@ object MeshProjection {
         val shade: Double,
         val depth: Double,
         val color: MeshColor,
+        val vertexShades: VertexShades?,
     )
 
     /** The resolved screen basis + key-light and fill-light directions for one [Camera] pose. */
@@ -206,6 +207,42 @@ object MeshProjection {
         val scale: Double,
     )
 
+    /**
+     * The same additive two-light shading formula [projectInternal] uses for [ProjectedTriangle.shade]
+     * (`AMBIENT + KEY_WEIGHT * key + FILL_WEIGHT * fill`, clamped to `[0, 1]`), evaluated against
+     * ONE vertex normal instead of the triangle's flat face normal -- added in a later wave, see
+     * docs/adr/ADR-0018-smooth-vertex-normals.adoc.
+     *
+     * Defensive, not merely optimistic: a hand-built [dev.kstep.geometry.TriangleMesh] is not
+     * required to carry unit-length normals (only [dev.kstep.geometry.OcctShape.triangulate]'s own
+     * native output is), so this normalizes on every call, and falls back to [fallback] (the
+     * triangle's already-computed flat [ProjectedTriangle.shade]) for a degenerate (near-zero)
+     * normal rather than dividing by (near) zero.
+     *
+     * @param vn the source mesh's [dev.kstep.geometry.TriangleMesh.vertexNormals] array (never
+     *   `null` at the call site -- callers only invoke this once they have already checked that).
+     * @param offset index of this vertex's `x` component into [vn] (`y`/`z` follow at `+1`/`+2`).
+     */
+    private fun vertexShadeAt(
+        vn: DoubleArray,
+        offset: Int,
+        negLightDirection: Vec3,
+        negFillDirection: Vec3,
+        fallback: Double,
+    ): Double {
+        val nx = vn[offset]
+        val ny = vn[offset + 1]
+        val nz = vn[offset + 2]
+        val length = Math.sqrt(nx * nx + ny * ny + nz * nz)
+        if (!length.isFinite() || length <= DEGENERATE_LENGTH) return fallback
+        val unit = Vec3(nx / length, ny / length, nz / length)
+        return (
+            AMBIENT +
+                KEY_WEIGHT * max(0.0, unit dot negLightDirection) +
+                FILL_WEIGHT * max(0.0, unit dot negFillDirection)
+        ).coerceIn(0.0, 1.0)
+    }
+
     private fun projectInternal(
         mesh: TriangleMesh,
         canvasWidth: Double,
@@ -232,12 +269,17 @@ object MeshProjection {
         var maxY = Double.NEGATIVE_INFINITY
 
         val c = mesh.coordinates
+        val vn = mesh.vertexNormals
         var i = 0
         while (i < c.size) {
             // Captured BEFORE i += 9 below: colorAt indexes by TRIANGLE, not by coordinate
             // offset. Capturing this after the increment would shift every triangle's color by
-            // one triangle -- see ADR-0017's Stolperfallen.
+            // one triangle -- see ADR-0017's Stolperfallen. `base` is the identical offset into
+            // `vn` (vertexNormals is exactly as long as coordinates, see TriangleMesh's own
+            // invariant) -- captured here for the SAME reason, one wave later (see ADR-0018's
+            // Stolperfallen, which names this exact precedent).
             val triangleIndex = i / 9
+            val base = i
             val v0 = Vec3(c[i], c[i + 1], c[i + 2])
             val v1 = Vec3(c[i + 3], c[i + 4], c[i + 5])
             val v2 = Vec3(c[i + 6], c[i + 7], c[i + 8])
@@ -269,6 +311,23 @@ object MeshProjection {
                         FILL_WEIGHT * max(0.0, unitNormal dot negFillDirection)
                 ).coerceIn(0.0, 1.0)
 
+            // Per-vertex ("smooth"/Gouraud) shading, added in a later wave -- see
+            // docs/adr/ADR-0018-smooth-vertex-normals.adoc. `shade` above (the flat, face-normal
+            // shade) is computed FIRST and is NEVER touched by this block -- Jobs' condition that
+            // flat shading stay byte-for-byte identical whether or not the mesh carries vertex
+            // normals. `vn == null` (the overwhelmingly common case, and every pre-wave mesh) is
+            // the cheapest possible path: no allocation, `vertexShades` stays `null`.
+            val vertexShades =
+                if (vn == null) {
+                    null
+                } else {
+                    VertexShades(
+                        vertexShadeAt(vn, base, negLightDirection, negFillDirection, fallback = shade),
+                        vertexShadeAt(vn, base + 3, negLightDirection, negFillDirection, fallback = shade),
+                        vertexShadeAt(vn, base + 6, negLightDirection, negFillDirection, fallback = shade),
+                    )
+                }
+
             val ax = v0 dot basis.right
             val ay = -(v0 dot basis.trueUp)
             val bx = v1 dot basis.right
@@ -284,7 +343,7 @@ object MeshProjection {
             val centroid = Vec3((v0.x + v1.x + v2.x) / 3.0, (v0.y + v1.y + v2.y) / 3.0, (v0.z + v1.z + v2.z) / 3.0)
             val depth = centroid dot basis.view
 
-            raw.add(RawTriangle(ax, ay, bx, by, cx, cy, shade, depth, colorAt(triangleIndex)))
+            raw.add(RawTriangle(ax, ay, bx, by, cx, cy, shade, depth, colorAt(triangleIndex), vertexShades))
         }
 
         if (raw.isEmpty()) return ProjectionResult(emptyList(), requestedScale ?: 1.0)
@@ -335,6 +394,7 @@ object MeshProjection {
                         shade = t.shade,
                         depth = t.depth,
                         color = t.color,
+                        vertexShades = t.vertexShades,
                     )
                 }.sortedByDescending { it.depth }
 

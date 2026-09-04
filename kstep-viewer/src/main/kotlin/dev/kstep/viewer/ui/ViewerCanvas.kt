@@ -30,6 +30,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.skiaCanvas
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -52,6 +54,10 @@ import dev.kstep.render.mesh.Camera
 import dev.kstep.render.mesh.MeshProjection
 import dev.kstep.viewer.camera.CameraInteraction
 import dev.kstep.viewer.camera.ViewerCameraState
+import org.jetbrains.skia.BlendMode
+import org.jetbrains.skia.VertexMode
+import org.jetbrains.skia.Color as SkiaColor
+import org.jetbrains.skia.Paint as SkiaPaint
 
 private const val HINT_TEXT = "Drag to orbit · Shift-drag to pan · Scroll to zoom · Double-click or R to reset"
 
@@ -250,24 +256,79 @@ private fun ShapeCanvasInternal(
                         panY = panYPixels,
                     )
                 }
-            for (t in triangles) {
-                val path =
-                    Path().apply {
-                        moveTo(t.ax.toFloat(), t.ay.toFloat())
-                        lineTo(t.bx.toFloat(), t.by.toFloat())
-                        lineTo(t.cx.toFloat(), t.cy.toFloat())
-                        close()
+            // Two DISJOINT draw paths, never mixed within one frame's triangle list -- see
+            // docs/adr/ADR-0018-smooth-vertex-normals.adoc. `triangles` is homogeneous by
+            // construction: `MeshProjection.projectInternal` sets EVERY triangle's
+            // `vertexShades` from the SAME source mesh's `vertexNormals` (either every surviving
+            // triangle gets one, or `mesh.vertexNormals` was `null` and none do) -- so checking
+            // just the first triangle correctly decides the whole frame.
+            if (triangles.isNotEmpty() && triangles[0].vertexShades != null) {
+                // Smooth (Gouraud) shading, via Skia's drawVertices -- ONE batched draw call for
+                // every triangle, in the SAME painter's-algorithm (depth-descending) order
+                // `triangles` is already sorted in, so array order alone reproduces correct
+                // back-to-front overlap (empirically verified: later-listed triangles win on
+                // overlap within a single drawVertices call, exactly like drawPath called
+                // sequentially would). BlendMode.DST is REQUIRED, not a stylistic choice --
+                // empirically verified against this project's pinned Skiko 0.144.6: with a
+                // colors array present, DST reproduces the vertex-interpolated colors verbatim,
+                // while SRC/SRC_OVER/MODULATE-with-a-non-white-paint would tint or discard them.
+                // No 1px stroke pass here (unlike the flat path below) -- drawVertices rasterizes
+                // adjacent triangles without an antialiasing seam between them, and adding a
+                // flat-color stroke on top would paint OVER the smooth interpolation right at
+                // every triangle edge.
+                val positions = FloatArray(triangles.size * 6)
+                val colors = IntArray(triangles.size * 3)
+                var pIndex = 0
+                var cIndex = 0
+                for (t in triangles) {
+                    positions[pIndex++] = t.ax.toFloat()
+                    positions[pIndex++] = t.ay.toFloat()
+                    positions[pIndex++] = t.bx.toFloat()
+                    positions[pIndex++] = t.by.toFloat()
+                    positions[pIndex++] = t.cx.toFloat()
+                    positions[pIndex++] = t.cy.toFloat()
+                    for (corner in 0..2) {
+                        val rgb = t.litRgbAt(corner)
+                        colors[cIndex++] =
+                            SkiaColor.makeARGB(
+                                255,
+                                (rgb[0].coerceIn(0.0, 1.0) * 255.0).toInt(),
+                                (rgb[1].coerceIn(0.0, 1.0) * 255.0).toInt(),
+                                (rgb[2].coerceIn(0.0, 1.0) * 255.0).toInt(),
+                            )
                     }
-                // litR/litG/litB already combine shade with the triangle's MeshColor
-                // multiplicatively (see ProjectedTriangle's own KDoc) -- both already in [0, 1]
-                // by construction (shade is coerced in MeshProjection, color channels are
-                // guaranteed in 0.0..1.0 by MeshColor's own init check), so no extra coerceIn is
-                // needed here, matching this file's pre-wave style.
-                val color = Color(t.litR.toFloat(), t.litG.toFloat(), t.litB.toFloat())
-                drawPath(path, color, style = Fill)
-                // Same color, 1px stroke -- closes the antialiasing seams between coplanar
-                // neighboring triangles (Atkinson's "haarriss" fix, see ADR-0010).
-                drawPath(path, color, style = Stroke(width = 1f))
+                }
+                drawIntoCanvas { canvas ->
+                    canvas.skiaCanvas.drawVertices(
+                        VertexMode.TRIANGLES,
+                        positions,
+                        colors,
+                        null,
+                        null,
+                        BlendMode.DST,
+                        SkiaPaint(),
+                    )
+                }
+            } else {
+                for (t in triangles) {
+                    val path =
+                        Path().apply {
+                            moveTo(t.ax.toFloat(), t.ay.toFloat())
+                            lineTo(t.bx.toFloat(), t.by.toFloat())
+                            lineTo(t.cx.toFloat(), t.cy.toFloat())
+                            close()
+                        }
+                    // litR/litG/litB already combine shade with the triangle's MeshColor
+                    // multiplicatively (see ProjectedTriangle's own KDoc) -- both already in [0, 1]
+                    // by construction (shade is coerced in MeshProjection, color channels are
+                    // guaranteed in 0.0..1.0 by MeshColor's own init check), so no extra coerceIn is
+                    // needed here, matching this file's pre-wave style.
+                    val color = Color(t.litR.toFloat(), t.litG.toFloat(), t.litB.toFloat())
+                    drawPath(path, color, style = Fill)
+                    // Same color, 1px stroke -- closes the antialiasing seams between coplanar
+                    // neighboring triangles (Atkinson's "haarriss" fix, see ADR-0010).
+                    drawPath(path, color, style = Stroke(width = 1f))
+                }
             }
         }
 

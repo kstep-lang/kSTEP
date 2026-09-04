@@ -97,9 +97,18 @@ object OcctKernel {
      *  7.9.2, see docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc): the most expensive shape
      *  reachable through this module's own public API (a 198-face prism with 64 fillets --
      *  [MAX_FILLET_INPUT_FACES]/[MAX_FILLET_EDGES] at their limits) triangulates to 6 332
-     *  triangles in 52.6 ms; 130 000 is roughly 20x that (a 9.4 MB return array). The time bound
-     *  is transitively [MAX_FILLET_INPUT_FACES]/[MAX_PROFILE_POINTS], not this value -- this
-     *  constant is a pure memory guard on the JNI return array.
+     *  triangles in 52.6 ms; 130 000 is roughly 20x that. The time bound is transitively
+     *  [MAX_FILLET_INPUT_FACES]/[MAX_PROFILE_POINTS], not this value -- this constant is a pure
+     *  memory guard on the JNI return array.
+     *
+     *  Since ADR-0018 (smooth vertex normals), the JNI return array is `1 + 18*N` doubles in the
+     *  with-normals layout (it was `1 + 9*N` before) -- ADR-0018's Security section notes "peak
+     *  native allocation roughly doubles". At the 130 000 cap that is `1 + 18*130 000 =
+     *  2 340 001` doubles, ~18.7 MB, not the ~9.4 MB this guard was originally sized against. JVM
+     *  side, the peak is higher still: [decodeTriangles] slices that array into two fresh
+     *  `copyOfRange` copies (positions + normals, ~9.4 MB each) while the original ~18.7 MB array
+     *  is still reachable, so a single concurrent `triangulate()` call can peak around ~37 MB of
+     *  JVM heap, not the ~18.7 MB the native-side array alone would suggest.
      *
      *  Untested by construction, not by oversight: the "6 332 is the most expensive shape
      *  reachable through this module's own public API" measurement above means this guard's

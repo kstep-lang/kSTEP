@@ -560,10 +560,12 @@ wave's actual surface:
 | V-4
 | Shading: smooth per-vertex normals
   (`Poly_Triangulation::HasNormals()`/`Normals()`), material colors. The
-  fill-light slice of this entry shipped in kSTEP's
-  multi-shape-composition-and-fill-light wave (see
-  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc) --
-  smooth normals and material colors remain open.
+  fill-light slice shipped in kSTEP's multi-shape-composition-and-
+  fill-light wave (ADR-0013); material colors shipped in the viewer-
+  pan-and-part-colors wave (ADR-0017); smooth per-vertex normals shipped
+  in the smooth-vertex-normals wave (see
+  docs/adr/ADR-0018-smooth-vertex-normals.adoc) -- V-4 is now fully
+  closed.
 
 | V-5
 | Multi-shape scenes / a scene graph, wired into `kstep-shape`'s assembly

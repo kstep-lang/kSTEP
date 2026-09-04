@@ -1,0 +1,552 @@
+= ADR-0018: Smooth per-vertex normals
+:toc:
+
+== Status
+
+Accepted, implemented. `kstep_occt_bridge.cpp`'s `nativeShapeTriangles`
+now optionally computes and returns per-vertex normals
+(`BRepLib_ToolTriangulatedShape::ComputeNormals`), behind a
+header-prefixed return layout. `TriangleMesh` gains an optional
+`vertexNormals: DoubleArray?`. `Placement` gains `applyToDirection` for
+rotating (never translating) a normal. `MeshComposition.merge`/
+`transformedBy` propagate `vertexNormals` all-or-nothing.
+`ProjectedTriangle` gains a `vertexShades: VertexShades?` alongside its
+existing, untouched `shade`. `GlbWriter` writes real per-corner normals
+into the existing `NORMAL` accessor instead of always replicating the
+flat face normal. `kstep-viewer`'s `ShapeCanvas` gains a second,
+Gouraud-shaded draw path via Skia's `drawVertices`, used only when the
+projected mesh actually carries `vertexShades`. `TriangleRasterizer`
+(PNG) and `TriangleSvgWriter` (SVG) are UNCHANGED -- both stay
+byte-identical whether or not the source mesh carries vertex normals.
+
+== Context
+
+The last still-open half of ADR-0013's V-4 (see that ADR's Folge-Wellen,
+and ADR-0017's Folge-Wellen entry that reaffirmed the deferral): kSTEP's
+shading has always been flat, one shade per triangle from its own face
+normal, even for a genuinely curved OCCT surface (a fillet, a rounded
+edge) where a real CAD viewer's expectation is a smooth, continuous
+falloff. `docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc`
+established the triangle-extraction pipeline (REVERSED-winding fix,
+`TopLoc_Location` application) but never touched normals -- OCCT's
+`BRepMesh_IncrementalMesh` does not compute them on its own.
+
+=== Empirically verified, not assumed
+
+Two standalone C++ programs were compiled and run against the real
+installed OCCT 7.9.2 (the same headers/libraries
+`kstep-geometry/build.gradle.kts` links against) before any Kotlin or
+native-bridge code was written, to settle every load-bearing claim below
+with a measurement rather than documentation-reading:
+
+[cols="3,2,4", options="header"]
+|===
+| Question | Finding | Evidence
+
+| Does `BRepMesh_IncrementalMesh` compute normals itself?
+| No -- `HasNormals() == 0` on every face after meshing, box or fillet
+  alike.
+| Direct probe against a `BRepPrimAPI_MakeBox` result.
+
+| Does `BRepLib_ToolTriangulatedShape::ComputeNormals(face, tri,
+  polyConnect)` fix that?
+| Yes -- `HasNormals() == 1` on every face afterward.
+| Same probe, after calling `ComputeNormals`.
+
+| Correct header/symbol?
+| `BRepLib_ToolTriangulatedShape.hxx`; symbol already resolves in
+  `libTKTopAlgo.so` (already linked). `Poly_Connect` already resolves in
+  `libTKMath.so` (already linked). No new `-l` flag needed.
+| `nm -D -C libTKTopAlgo.so \| grep ComputeNormals`;
+  `nm -D -C libTKMath.so \| grep Poly_Connect::Poly_Connect`.
+
+| Are `ComputeNormals`' vertex normals already winding-corrected for a
+  `REVERSED` face?
+| **No.** A box's `REVERSED` face (x=0) and its `FORWARD` opposite
+  (x=1... the adjacent one sharing the same outward-normal axis) both
+  produced the raw normal `(1,0,0)` -- for a closed convex box, both
+  cannot point the same way if both are meant to point outward. Negating
+  for `REVERSED`, exactly like this codebase's pre-existing triangle-
+  winding fix (ADR-0010), is mandatory, not defensive.
+| Direct comparison of `ComputeNormals`' raw output across a box's six
+  faces, cross-referenced against each face's known `Orientation()`.
+
+| Planar face: does the vertex normal equal the flat face normal
+  exactly?
+| Yes -- `dot(faceNormal, vertexNormal) == 1.0000` on every one of a
+  box's 6 faces / 24 (pre-smoothing, per-face-duplicated) nodes.
+| Same box probe.
+
+| Curved face: is there a real smoothing signal?
+| Yes -- measured up to ~6.9 degrees of divergence between a triangle's
+  own flat face normal and its vertex normals, on a cylindrical fillet
+  surface.
+| Separate cylinder-surface probe, `cylinderSmoothness()`.
+
+| Does OCCT smooth across `TopoDS_Face` boundaries?
+| **No** -- each face keeps its own separate `Poly_Triangulation`; nodes
+  at a shared edge between two DIFFERENT faces are DUPLICATED, not
+  shared, and each face's `ComputeNormals` pass only ever sees its own
+  triangulation. A box's 6 faces produce 24 nodes (4 per face), not 8.
+  Confirmed again, independently, while writing `OcctVertexNormalsTest`
+  (see Stolperfallen 6): an early version of that test bucketed vertices
+  by rounded 3D position across the WHOLE mesh and failed on a real
+  fillet, because it was unknowingly comparing two different faces'
+  boundary nodes, which legitimately disagree.
+| Box probe (24 vs. 8 nodes); `OcctVertexNormalsTest`'s own iteration.
+
+| `gp_Vec::Transform(trsf)`: does it apply `trsf`'s translation?
+| **No** -- with `trsf` = a 90-degree Z rotation composed with a
+  `(100,200,300)` translation, a transformed direction vector's length
+  stayed exactly `1.0`, only its direction rotated. Correct: a normal is
+  a direction, not a point.
+| Second probe, `gp_Vec::Transform` vs. `gp_Pnt::Transform`.
+|===
+
+=== Design-team session -- decisions and why
+
+**Real per-vertex normals, not an averaged per-triangle normal (Bill
+Atkinson, Steve Jobs' review).** The cheaper alternative -- average each
+triangle's face normal with its neighbors' and still emit ONE shade per
+triangle -- was considered and rejected: it produces a step-function
+approximation of smoothing, not the real thing, and OCCT already computes
+the real thing for free once `ComputeNormals` is called. Kares's own
+tessellation concern (more data per triangle) is real but bounded by the
+existing `MAX_TRIANGLES` guard either way.
+
+**No "smooth shading on/off" toggle (Jef Raskin).** The presence of
+`vertexNormals` on the source `TriangleMesh` is the ONLY switch -- OCCT
+triangulation always produces them (when available), so every real
+CAD-shape render gets smooth shading automatically; a hand-built
+`TriangleMesh(coords)` (every existing test fixture, and `kstep-cli`'s
+synthetic scenes) gets flat shading automatically, with zero code
+required at any call site to pick one or the other.
+
+**Header-prefixed native return layout, not the length-`9*N`-vs-`18*N`
+scheme the initial design sketch proposed.** `18*(N/2) == 9*N` for any
+even `N` -- a 2-triangle mesh without normals (18 doubles) is
+byte-length-identical to a 1-triangle mesh with normals (also 18
+doubles). Silently ambiguous, a latent data-corruption bug waiting for
+the right triangle count. `nativeShapeTriangles` now always returns
+`[triangleCount, position doubles..., normal doubles (if any)...]` --
+one `Double` header element resolves the ambiguity for every `N`, at the
+cost of an off-by-one everywhere the array is sliced (see
+Stolperfallen). `decodeTriangles` (new, `internal`, in `OcctShape.kt`)
+is the one place that offset lives.
+
+**`TriangleMesh.vertexNormals` as a second, nullable, DEFAULTED
+constructor parameter -- not a new `NormalMesh` beitype (Larry Tesler,
+Steve Jobs' review).** Tesler's `merge`-argument precedent (ADR-0013,
+reaffirmed at ADR-0017): a parallel type would force every consumer
+(`MeshComposition`, `MeshProjection`, `GlbWriter`, `ShapeCanvas`) to
+handle two mesh shapes instead of one nullable field on the one shape
+they already handle. Verified before writing a single line of the
+change: every existing `TriangleMesh(...)` call site in the repository
+is single-argument, so the new parameter's default (`null`) leaves all
+of them compiling unchanged.
+
+**All-or-nothing normals, never partially filled (Don Norman, Dieter
+Rams' consistency instinct).** A merged multi-part mesh
+(`MeshComposition.merge`) carries `vertexNormals` only if EVERY part's
+mesh has them; mixing collapses to `null` for the whole merge. A
+per-triangle mixed state (some triangles smooth, some flat, silently, in
+the same mesh) would be a much harder invariant for every downstream
+consumer to reason about than "smooth everywhere or flat everywhere,
+decided once."
+
+**`Placement.applyToDirection`, not a separate inverse-transpose normal
+matrix (verified via the empirical `gp_Vec::Transform` finding above).**
+Every `Placement` this closed type can construct has determinant exactly
+`+1` and no scaling (ADR-0013's own closed-construction rationale) -- the
+machinery a general renderer needs for correct normal transformation
+under non-uniform scale is provably unnecessary here. `applyToDirection`
+reuses the SAME rotation block `apply` already has, just without adding
+the translation.
+
+**`VertexShades` value type, not a raw `DoubleArray` field on
+`ProjectedTriangle` (Steve Jobs' review, catching the same trap
+`TriangleMesh` itself was designed around).** `ProjectedTriangle` is a
+`data class`; a `DoubleArray` property on it would get the compiler-
+generated, REFERENCE-based `equals()`/`hashCode()` -- the exact bug
+`TriangleMesh`'s own KDoc documents avoiding by NOT being a `data class`
+at all. Rather than hand-write `equals`/`hashCode` for one field, a small
+`data class VertexShades(a, b, c)` closes the gap structurally and keeps
+`ProjectedTriangle` itself a `data class`.
+
+**`shade` is computed FIRST and never touched by `vertexShades`' own
+code path (Steve Jobs' review, condition 6).** `MeshProjection.
+projectInternal` computes the flat `shade` exactly as before this wave,
+then, ONLY if `mesh.vertexNormals != null`, computes THREE additional
+per-corner values from the SAME two-light formula evaluated against each
+corner's own normal. `TriangleRasterizer` and `TriangleSvgWriter` read
+only `litR`/`litG`/`litB` (which derive from `shade`, never
+`vertexShades`) and are therefore provably, not just probably, unaffected
+-- pinned by `PngSvgBitIdentityTest`'s byte-identity assertions,
+including one case with genuinely divergent vertex normals (ruling out a
+vacuous pass).
+
+**Viewer: Skia `drawVertices`, empirically measured before implementing
+anything else in `kstep-viewer` (per this wave's own risk-mitigation
+plan).** Three properties of Skiko 0.144.6's `Canvas.drawVertices`
+were unverified by documentation alone and measured directly with
+`ImageComposeScene` before writing `ShapeCanvas`'s draw-loop change:
+
+[cols="3,3,3", options="header"]
+|===
+| Question | Finding | How measured
+
+| Which `BlendMode` reproduces vertex-interpolated colors verbatim (not
+  tinted or discarded by the paint's own color)?
+| `BlendMode.DST`. With a `colors` array present, Skia's `drawVertices`
+  treats the PAINT's color/shader as "src" and the VERTEX colors as
+  "dst" -- `DST` keeps the vertex colors, discarding the paint's color
+  entirely; `SRC`/`SRC_OVER` do the opposite (plain paint color, vertex
+  colors discarded); `MODULATE` multiplies them (equivalent to `DST`
+  only when the paint color happens to be pure white).
+| A one-triangle-per-call probe with three saturated, very different
+  vertex colors (red/green/blue) and a white paint, sampled at each
+  corner for `DST`/`SRC`/`MODULATE`/`SRC_OVER`.
+
+| Does array order within ONE `drawVertices` batch call preserve
+  painter's-algorithm ordering (a later-listed triangle overwrites an
+  earlier, overlapping one)?
+| Yes. Two fully-overlapping triangles (red listed first, blue listed
+  second) in a SINGLE `drawVertices` call: the overlapping pixel is pure
+  blue, i.e. the later-listed triangle wins -- exactly like calling
+  `drawPath` twice, sequentially, would.
+| Two-triangle single-call probe, center-pixel sample.
+|===
+
+Both findings are pinned as permanent regression tests
+(`ViewerCanvasSmoothShadingTest`'s direct-Skia cases) precisely because
+they are Skiko-version-dependent behavior, not documented Skia API
+contract -- a future Skiko upgrade that silently changes either would
+fail these tests first, before silently mis-rendering every smooth-shaded
+scene.
+
+**No 1px stroke pass in the Gouraud path (Bill Atkinson's own
+"haarriss"-fix precedent, ADR-0010, correctly NOT reapplied here).** The
+flat path's existing 1px stroke closes antialiasing seams between
+adjacent `drawPath` calls. `drawVertices` rasterizes a whole batch of
+triangles in one call with no such seam to begin with -- adding a
+flat-color stroke on top of a Gouraud-interpolated edge would paint a
+visible flat-color line directly over the smooth interpolation it exists
+to produce, the opposite of the intended effect.
+
+**Viewer output is visually, not bit-, identical for a planar-normals
+mesh (Steve Jobs' review, explicitly scoped narrower than condition 6).**
+Condition 6 ("byte-identical regardless of vertex normals") was stated
+for PNG/SVG specifically and is met exactly, byte-for-byte, by both.
+`ShapeCanvas` itself is a deliberate, named exception: switching from
+`drawPath`+stroke to `drawVertices` changes HOW Skia rasterizes the
+SAME triangle, even when all three corner colors are identical (no
+antialiasing stroke pass, different internal rasterization path) --
+`ViewerCanvasSmoothShadingTest`'s planar-equivalence case (test `gg`)
+therefore asserts a mean absolute per-channel pixel difference under
+`2/255`, not exact byte equality, and this scoping is written down here
+so a future reader does not mistake the narrower viewer guarantee for a
+regression in the wider, exact PNG/SVG one.
+
+== Decision
+
+=== `kstep_occt_bridge.cpp`
+
+New includes: `BRepLib_ToolTriangulatedShape.hxx`, `Poly_Connect.hxx`,
+`gp_Vec3f.hxx` -- all three already resolve against toolkits this module
+already links (`TKTopAlgo`, `TKMath`); no `build.gradle.kts` change.
+
+`nativeShapeTriangles` gains a normal-computation pass between its
+existing counting pass and extraction pass, using ONE reused
+`Poly_Connect` instance across every face (the 3-argument
+`ComputeNormals` overload, not the 2-argument convenience overload that
+would allocate a fresh `Poly_Connect` per face):
+
+```cpp
+bool allFacesHaveNormals = true;
+Poly_Connect polyConnect;
+for (each face) {
+    if (!tri->HasNormals() && tri->HasUVNodes()) {
+        BRepLib_ToolTriangulatedShape::ComputeNormals(face, tri, polyConnect);
+    }
+    if (!tri->HasNormals()) allFacesHaveNormals = false;
+}
+```
+
+All-or-nothing: the normal block is only emitted if EVERY non-null
+triangulation ends up with normals. During extraction, for each of a
+triangle's three (already REVERSED-swapped) node indices:
+
+```cpp
+gp_Vec3f raw; tri->Normal(nodeIndex, raw);       // never throws
+gp_Vec v(raw.x(), raw.y(), raw.z());
+if (reversed) v.Reverse();                        // mandatory, see Context
+if (!identity) v.Transform(trsf);                  // rotation/scale only
+if (v.Magnitude() > kMinNormalLength) v.Divide(v.Magnitude());
+else v = fallbackFaceNormal;                        // (p2-p1) x (p3-p1), normalized
+```
+
+`tri->Normal(index, gp_Vec3f&)` (the reference-out overload) is used
+deliberately over `tri->Normal(index) -> gp_Dir`, which throws
+`Standard_ConstructionError` for a near-zero-magnitude stored normal --
+the reference-out overload is a plain field read that cannot throw, and
+the degenerate case is instead handled explicitly with the same
+fallback-to-face-normal rule `GlbWriter` already uses for a bad
+per-corner normal.
+
+Return layout: `result[0] = triangleCount` (as a `Double`, exact for any
+value up to `kMaxTriangles`), followed by `9*N` position doubles,
+followed by `9*N` normal doubles IF the normal pass succeeded for every
+face. `result.size == 1` means zero triangles (still valid,
+non-exceptional).
+
+=== `kstep-geometry`
+
+```kotlin
+class TriangleMesh(
+    val coordinates: DoubleArray,
+    val vertexNormals: DoubleArray? = null,   // parallel to coordinates, or null
+) {
+    val hasVertexNormals: Boolean get() = vertexNormals != null
+}
+
+class Placement {
+    internal fun applyToDirection(x: Double, y: Double, z: Double): DoubleArray  // rotation only
+}
+
+fun TriangleMesh.transformedBy(placement: Placement): TriangleMesh   // now also rotates vertexNormals
+
+object MeshComposition {
+    fun merge(parts: List<PlacedMesh>): TriangleMesh   // vertexNormals: all-or-nothing across parts
+}
+
+internal fun decodeTriangles(raw: DoubleArray): TriangleMesh   // in OcctShape.kt; header-layout decoder
+```
+
+`OcctShape.triangulate()` now calls `decodeTriangles(rawArray)` instead
+of constructing `TriangleMesh(rawArray)` directly.
+`OcctBridge.nativeShapeTriangles`'s KDoc documents the new layout in
+full (see that file).
+
+=== `kstep-render`
+
+```kotlin
+data class VertexShades(val a: Double, val b: Double, val c: Double)
+
+data class ProjectedTriangle(
+    // ... unchanged existing properties, shade untouched ...
+    val vertexShades: VertexShades? = null,   // LAST parameter, defaulted
+) {
+    fun litRgbAt(corner: Int): DoubleArray   // vertexShades?.{a,b,c} ?: shade, times color
+}
+```
+
+`MeshProjection.projectInternal` computes `vertexShades` right after the
+existing flat `shade` calculation, from `mesh.vertexNormals` at the same
+`base`/`base+3`/`base+6` offsets as the position triangle currently being
+processed -- captured BEFORE `i += 9`, exactly like `ADR-0017`'s
+`colorAt`/`triangleIndex` capture (see Stolperfallen). A private
+`vertexShadeAt` helper re-normalizes each raw normal defensively (a
+hand-built `TriangleMesh` is not required to carry unit-length normals)
+and falls back to the triangle's own flat `shade` for a degenerate
+(near-zero) one.
+
+`GlbWriter.collectTriangles`' `KeptTriangle.normal: DoubleArray` (3
+doubles, shared) becomes `normals: DoubleArray` (9 doubles, one per
+corner). For a source mesh with no `vertexNormals`, all three corners
+still get the SAME flat face normal -- byte-identical to this writer's
+pre-wave output. For a mesh WITH `vertexNormals`, each corner's own
+normal is used if finite and non-degenerate, else that ONE corner falls
+back to the flat face normal (never the whole triangle -- the
+finite/non-degenerate FACE-normal check that can drop a triangle is
+completely unaffected by vertex-normal quality).
+
+=== `kstep-viewer`
+
+`ShapeCanvas`'s draw loop branches on whether `triangles[0].vertexShades
+!= null` (the whole list is homogeneous by construction -- every
+triangle from one `MeshProjection.project` call shares one source mesh's
+`vertexNormals` presence):
+
+* `null` (the pre-wave, and still by far the common, case): unchanged
+  `drawPath(Fill)` + `drawPath(Stroke(1f))` per triangle.
+* Non-null: ONE batched `Canvas.drawVertices(VertexMode.TRIANGLES,
+  positions, colors, null, null, BlendMode.DST, Paint())` call for the
+  WHOLE triangle list, in the SAME depth-descending order the list is
+  already sorted in (array order alone reproduces correct painter's-
+  algorithm overlap, per the empirical finding above) -- no per-triangle
+  stroke pass.
+
+== Security
+
+[cols="2,3,2", options="header"]
+|===
+| Category | Measure | Verified by
+
+| DoS / memory
+| Peak native allocation roughly doubles when normals are present
+  (position `std::vector` + normal `std::vector` simultaneously, plus
+  the JVM-side array of the same combined size) -- bounded by the
+  UNCHANGED `kMaxTriangles = 130,000` guard, itself enforced BEFORE any
+  `coords`/`normals` vector `reserve()` call (the counting pass, and the
+  normal-computation pass gated on its result, both run first).
+| `OcctVertexNormalsTest`'s shapes stay well under the guard; the guard
+  value itself is unchanged from ADR-0010.
+
+| Header-element integer overflow / oversized allocation
+| `decodeTriangles` validates the header value (finite, exactly
+  integral, in `[0, OcctKernel.MAX_TRIANGLES]`) BEFORE any multiplication
+  (`1 + 9*n`, `1 + 18*n`) or `copyOfRange` call -- closes the path a
+  corrupted/hostile header element would otherwise have to force an
+  oversized allocation or an `Int` overflow.
+| `MeshCompositionTest`'s `decodeTriangles` cases (out-of-range,
+  negative, non-integral, and mismatched-length headers all rejected
+  with `IllegalStateException`, never an unchecked
+  `IndexOutOfBoundsException` or a silent wraparound).
+
+| C++ exception safety
+| `ComputeNormals` can throw `Standard_Failure`; it runs entirely inside
+  `nativeShapeTriangles`'s existing top-level `try`/`catch` cascade --
+  no new catch site, no new invariant.
+| Existing `OcctBridgeSmokeTest`-style coverage; unchanged catch
+  structure.
+
+| Locking
+| The normal-computation pass runs in the SAME `g_mutex` critical
+  section, inside the SAME `TriangulationCleanupGuard` lifetime, as the
+  existing counting/extraction passes -- no new lock, no new
+  `registerShape` call (this function still produces no new native
+  shape), so the existing self-deadlock analysis (ADR-0008) is
+  unaffected.
+| Unchanged locking structure; code review.
+
+| Resource leaks
+| `Poly_Connect polyConnect;` is stack-allocated (RAII) -- no new heap
+  handle, no new cleanup obligation.
+| Code review.
+
+| Supply chain
+| No new Gradle or linker dependency. `StdPrs_ToolTriangulatedShape` was
+  deliberately NOT used (it would pull in `TKV3d`/`TKService`, toolkits
+  this module has no other reason to link) in favor of
+  `BRepLib_ToolTriangulatedShape`, which resolves in an already-linked
+  toolkit.
+| `nm -D -C libTKTopAlgo.so \| grep ComputeNormals`
+  (see Context's Measurements table).
+|===
+
+== Stolperfallen
+
+1. **`ComputeNormals` ignores `TopAbs_REVERSED` entirely.** Empirically
+   verified (Context): without negating for a `REVERSED` face, half of a
+   closed solid's vertex normals point inward. `OcctVertexNormalsTest`'s
+   "every vertex normal of a closed box points outward from its
+   centroid" case is the regression guard for exactly this.
+2. **Header-less `9*N`-vs-`18*N` length is ambiguous for any even `N`.**
+   `18*(N/2) == 9*N`. The header element (Decision) closes this;
+   `MeshCompositionTest`'s explicit `N=2`-without-normals-vs-`N=1`-with-
+   normals case pins the disambiguation.
+3. **`copyOfRange` throws the WRONG exception type for a malformed
+   length.** An early version of `decodeTriangles` computed the header
+   `n` and immediately sliced `raw.copyOfRange(1, 1+9*n)` before
+   checking whether `raw.size` actually matched either valid layout --
+   for a too-short array this threw `IndexOutOfBoundsException`, not
+   this function's own documented `IllegalStateException` contract.
+   Fixed by validating the TOTAL length against both valid layouts
+   BEFORE any `copyOfRange` call. Caught by
+   `MeshCompositionTest`'s own "a length matching neither 1+9N nor
+   1+18N is rejected" case during this wave's own implementation.
+4. **`gp_Pnt::Transform` vs. `gp_Vec::Transform`.** A point transliates;
+   a direction vector does not. Verified directly (Context); using the
+   wrong one for a normal is the classic version of this bug.
+5. **`Placement.apply` vs. `applyToDirection`.** The identical bug one
+   layer higher, in Kotlin. `MeshCompositionTest`'s
+   rotation-plus-translation case (checking unit length survives, not
+   just direction) is the regression guard.
+6. **A vertex position shared by two DIFFERENT `TopoDS_Face`s does NOT
+   have to carry the same normal -- and asserting otherwise is a test
+   bug, not a code bug.** Discovered while writing
+   `OcctVertexNormalsTest`: an initial version bucketed observed vertex
+   normals by rounded 3D position across the WHOLE mesh and asserted
+   equality for any two triangles sharing a bucket. It failed on a real
+   fillet -- correctly, once understood -- because OCCT keeps a
+   SEPARATE `Poly_Triangulation` per face (Context's own "does OCCT
+   smooth across face boundaries" finding), so two different faces
+   meeting at an edge legitimately produce two different, independently
+   smoothed normals at coincident 3D positions. The fixed test instead
+   checks divergence WITHIN one triangle's own vertex-normal-vs-face-
+   normal reading, which needs no cross-face assumption at all.
+7. **Basis offset (`base`) must be captured BEFORE `i += 9`, exactly
+   like ADR-0017's `triangleIndex`/`colorAt` trap.** `MeshProjection.
+   projectInternal`'s `vertexShadeAt` calls index into `vn` at `base`,
+   `base+3`, `base+6` -- captured in the SAME statement as
+   `triangleIndex`, before the coordinate cursor advances. A shift here
+   silently gives every triangle its NEIGHBOR's normals; on a smoothly
+   triangulated surface this is nearly invisible visually but is still
+   wrong.
+8. **`data class` + `DoubleArray` field is a silent `equals()`/
+   `hashCode()` trap -- same reason `TriangleMesh` itself is not a
+   `data class`.** Solved via the `VertexShades` value type rather than
+   a raw array field on `ProjectedTriangle` (Decision).
+9. **`Poly_Connect`'s 2-argument `ComputeNormals` convenience overload
+   allocates a fresh `Poly_Connect` PER CALL.** At up to `kMaxTriangles`
+   triangles across potentially many faces, this is avoidable overhead;
+   the 3-argument overload with one reused instance (Decision) avoids
+   it.
+10. **Skia `drawVertices`' blend-mode semantics for vertex colors are
+    Skiko-version behavior, not documented API contract, and are
+    counter-intuitive by normal `BlendMode` naming (`DST` keeps the
+    vertex colors, `SRC` keeps the PAINT's color).** Measured directly
+    against this project's pinned Skiko 0.144.6 (Context); pinned as a
+    permanent regression test specifically because a future Skiko
+    upgrade could silently change it.
+11. **No 1px stroke pass in the Gouraud path.** Unlike the flat path's
+    existing seam-closing stroke (ADR-0010), adding one here would paint
+    a flat-color line directly over the interpolated edge it exists to
+    smooth. Deliberately omitted (Decision).
+12. **`MeshComposition.merge` losing `vertexNormals` on any mixed
+    (with/without) part list is deliberate, not a bug to "fix" toward
+    partial-fill.** Documented here so a future "why does merging a
+    normals-bearing part with a plain one silently drop normals"
+    question has an answer on record, and so a later refactor toward
+    `ColoredMesh`-style structural consistency does not reintroduce a
+    partially-filled array instead.
+
+== Folge-Wellen
+
+[cols="1,4", options="header"]
+|===
+| Wave | Content
+
+| Gouraud shading in PNG (`TriangleRasterizer`)
+| Java2D/`Graphics2D` has no baryzentric-interpolation primitive; would
+  need a hand-written scanline rasterizer plus a replacement for the
+  current supersampling-AA approach. Stays flat, byte-identical, for
+  now.
+
+| Gouraud shading in SVG (`TriangleSvgWriter`)
+| SVG 1.1 has no per-triangle gradient primitive. Stays flat, byte-
+  identical, for now. **Explicitly noted (Dieter Rams' dissent during
+  design review):** the resulting PNG/SVG-vs-viewer shading inequality
+  (viewer smooth, exports flat) is a real, user-visible asymmetry a
+  future reader may mistake for an oversight rather than a deliberate,
+  format-capability-driven scope boundary. Written down here precisely
+  so that mistake does not happen: "in six months someone will find this
+  inequality and think it's a bug" (Steve Jobs' closing-review
+  condition) -- it is not; it is SVG's and Java2D's own limitation, not
+  this codebase's.
+
+| Phong / per-pixel normal interpolation, specular highlights
+| Not attempted -- Gouraud (per-vertex, interpolated per-pixel by Skia's
+  own rasterizer) is the ceiling for a `drawVertices`-based
+  implementation without a custom shader.
+
+| Crease-angle heuristic
+| Not needed -- OCCT does not smooth across `TopoDS_Face` boundaries by
+  construction (Context), so kSTEP's existing "edges stay sharp" property
+  (CLAUDE.md's Renderer-Sizing-Heuristik note) already holds without any
+  additional angle threshold.
+
+| A "smooth shading on/off" toggle
+| Deliberately not introduced (Decision, Raskin) -- there is no
+  user-facing switch to add.
+|===

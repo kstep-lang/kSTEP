@@ -372,7 +372,8 @@ new wording as a regression guard.
 | Smooth per-vertex normals (`Poly_Triangulation::HasNormals()`/
   `Normals()`) and per-part material colors -- this wave's fill light is
   the shading slice of V-4 that ships now; flat shading itself is
-  unchanged.
+  unchanged. Material colors shipped in ADR-0017; smooth per-vertex
+  normals shipped in ADR-0018 -- V-4 is now fully closed.
 
 | V-5b
 | Per-part provenance/offset tracking out of `MeshComposition.merge` --

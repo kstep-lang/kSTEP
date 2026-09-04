@@ -170,7 +170,7 @@ class OcctShape internal constructor(
      */
     fun triangulate(): TriangleMesh =
         withHandle { h ->
-            val coords =
+            val raw =
                 try {
                     OcctBridge.nativeShapeTriangles(h)
                 } catch (e: IllegalArgumentException) {
@@ -182,7 +182,7 @@ class OcctShape internal constructor(
                 } catch (e: RuntimeException) {
                     throw OcctGeometryException("OCCT failed to triangulate shape (handle=$handle)", e)
                 }
-            TriangleMesh(coords)
+            decodeTriangles(raw)
         }
 
     /**
@@ -238,4 +238,57 @@ class OcctShape internal constructor(
             }
         }
     }
+}
+
+/**
+ * Decodes [OcctBridge.nativeShapeTriangles]'s header-prefixed return layout (see that function's
+ * KDoc) into a [TriangleMesh]. `internal`, not `private` to [OcctShape.triangulate]: a dedicated
+ * set of unit tests exercises this decoding logic directly against hand-built `DoubleArray`s,
+ * without needing OCCT itself -- see the `decodeTriangles: ...` tests in `MeshCompositionTest`.
+ *
+ * The triangle-count header ([raw]'s first element) is validated BEFORE it is used in any
+ * multiplication or array-slicing arithmetic ([OcctKernel.MAX_TRIANGLES] bound, non-negative,
+ * exactly integral) -- this is the actual security boundary against a corrupted/hostile header
+ * value forcing an oversized allocation or an integer overflow in `1 + 18*n`; see
+ * docs/adr/ADR-0018-smooth-vertex-normals.adoc's Security section. The native side already
+ * enforces the same [OcctKernel.MAX_TRIANGLES] bound on its own triangle count before it ever
+ * writes this header, so a legitimate caller never trips this -- it exists for a caller that
+ * bypasses [OcctShape] entirely and calls [OcctBridge.nativeShapeTriangles] (or a hand-rolled
+ * `DoubleArray`) directly.
+ *
+ * @throws IllegalStateException if [raw] is empty (every real result -- including "zero
+ *   triangles" -- carries at least the one header element), if the header value is not a
+ *   non-negative integer within `[0, OcctKernel.MAX_TRIANGLES]`, or if [raw]'s total length
+ *   matches neither the no-normals layout (`1 + 9*N`) nor the with-normals layout (`1 + 18*N`)
+ *   for the decoded `N`.
+ */
+internal fun decodeTriangles(raw: DoubleArray): TriangleMesh {
+    check(
+        raw.isNotEmpty(),
+    ) { "native triangle payload must carry a header element (triangle count), got an empty array" }
+    val headerValue = raw[0]
+    val n = headerValue.toInt()
+    check(headerValue.isFinite() && n.toDouble() == headerValue && n in 0..OcctKernel.MAX_TRIANGLES) {
+        "malformed or out-of-range triangle count header: $headerValue (must be an integer in [0, ${OcctKernel.MAX_TRIANGLES}])"
+    }
+    // Length validated BEFORE any copyOfRange call below -- copyOfRange itself throws
+    // IndexOutOfBoundsException (not this function's own IllegalStateException) for an
+    // out-of-range slice, which would leak an implementation-detail exception type for a
+    // malformed payload instead of this function's own documented contract.
+    val noNormalsLength = 1 + 9 * n
+    val withNormalsLength = 1 + 18 * n
+    val hasNormals =
+        when (raw.size) {
+            noNormalsLength -> false
+            withNormalsLength -> true
+            else ->
+                error(
+                    "malformed native triangle payload: size=${raw.size} matches neither the no-normals " +
+                        "layout ($noNormalsLength) nor the with-normals layout ($withNormalsLength) for " +
+                        "triangleCount=$n",
+                )
+        }
+    val positions = raw.copyOfRange(1, noNormalsLength)
+    val normals = if (hasNormals) raw.copyOfRange(noNormalsLength, withNormalsLength) else null
+    return TriangleMesh(positions, normals)
 }

@@ -42,6 +42,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
+#include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -51,6 +52,7 @@
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <Poly_Connect.hxx>
 #include <Poly_Triangle.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
@@ -70,6 +72,7 @@
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <gp_Vec3f.hxx>
 
 #include <vector>
 
@@ -186,6 +189,18 @@ constexpr double kMaxFilletRadius = 1e7;
 // dev.kstep.geometry.OcctKernel.MAX_TRIANGLES (hand-synchronized pair, same pattern
 // ADR-0007's NativeConstraintKind already uses).
 constexpr jint kMaxTriangles = 130000;
+
+// ------------------------------------------------------------------------------------------
+// Viewer-Folge-Welle (smooth per-vertex normals). See docs/adr/ADR-0018-smooth-vertex-normals.adoc.
+// ------------------------------------------------------------------------------------------
+
+// Below this length, a per-vertex normal extracted from OCCT's own Poly_Triangulation is treated
+// as degenerate and the triangle's flat face normal is substituted instead -- see
+// nativeShapeTriangles's normal-extraction pass below. Same order of magnitude as
+// DEGENERATE_NORMAL_LENGTH_EPSILON in kstep-render's GlbWriter.kt (independent, Kotlin-side
+// degenerate-normal guard over user-supplied TriangleMesh data -- this one guards the native
+// OCCT-computed normal instead).
+constexpr double kMinNormalLength = 1e-9;
 
 // Kein Qualitaetsparameter an der API-Grenze -- die Abweichung wird nativ aus der
 // Bounding-Box-Diagonale abgeleitet. Ein Aufrufer mit deflection=1e-9 WAERE der DoS.
@@ -897,7 +912,10 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
 // Viewer-Welle 1: OCCT triangulation. See docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc
 // for the design rationale, the DoS measurements behind kMaxTriangles, and the two classic OCCT
 // pitfalls (REVERSED-face winding, TopLoc_Location transforms) this function's regression tests
-// specifically prove it avoids.
+// specifically prove it avoids. Extended with smooth per-vertex normals in a later wave -- see
+// docs/adr/ADR-0018-smooth-vertex-normals.adoc for the header-prefixed return layout, the
+// BRepLib_ToolTriangulatedShape::ComputeNormals pass, and why REVERSED faces need their computed
+// normal negated (empirically verified: ComputeNormals ignores TopAbs_REVERSED entirely).
 // ------------------------------------------------------------------------------------------
 
 JNIEXPORT jdoubleArray JNICALL
@@ -910,6 +928,10 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobjec
         int unmeshedFaces = 0;
         long long triangleCount = 0;
         std::vector<double> coords;
+        // Non-empty only when EVERY non-null triangulation in this shape carries per-vertex
+        // normals after the ComputeNormals pass below -- all-or-nothing, never partially filled.
+        // See docs/adr/ADR-0018-smooth-vertex-normals.adoc's Decision.
+        std::vector<double> normals;
         {
             // Lookup AND every OCCT call that dereferences `shape` happen inside this one
             // critical section, exactly like every other reader in this file -- see the
@@ -991,8 +1013,47 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobjec
                     // with nothing to mesh, and that must NOT be reinterpreted as a failure.
                     meshingIncomplete = totalFaces > 0 && (!meshDone || unmeshedFaces > 0);
 
+                    // Normal-computation pass: runs BEFORE extraction, over the same faces map,
+                    // so allFacesHaveNormals is fully decided before a single coordinate or
+                    // normal is written -- same "decide first, extract second" shape as the
+                    // counting pass above. Skipped entirely when the shape is already going to be
+                    // rejected (tooManyTriangles) or has no triangles at all -- no point paying
+                    // for ComputeNormals in either case. One Poly_Connect instance reused across
+                    // every face via the 3-argument ComputeNormals overload -- the 2-argument
+                    // convenience overload would construct a fresh Poly_Connect per face, avoidable
+                    // allocation overhead at up to kMaxTriangles triangles. See
+                    // docs/adr/ADR-0018-smooth-vertex-normals.adoc.
+                    bool allFacesHaveNormals = false;
+                    if (!tooManyTriangles && triangleCount > 0) {
+                        allFacesHaveNormals = true;
+                        Poly_Connect polyConnect;
+                        for (int i = 1; i <= faces.Extent(); ++i) {
+                            const TopoDS_Face& face = TopoDS::Face(faces(i));
+                            TopLoc_Location loc;
+                            const auto& tri = BRep_Tool::Triangulation(face, loc);
+                            if (tri.IsNull()) {
+                                continue;
+                            }
+                            if (!tri->HasNormals()) {
+                                // ComputeNormals derives normals from UV coordinates + the
+                                // face's underlying surface -- undocumented without UV nodes, so
+                                // this guard makes the (empirically always-true, see the ADR's
+                                // Measurements table) precondition explicit rather than implicit.
+                                if (tri->HasUVNodes()) {
+                                    BRepLib_ToolTriangulatedShape::ComputeNormals(face, tri, polyConnect);
+                                }
+                            }
+                            if (!tri->HasNormals()) {
+                                allFacesHaveNormals = false;
+                            }
+                        }
+                    }
+
                     if (!tooManyTriangles && triangleCount > 0) {
                         coords.reserve(static_cast<size_t>(triangleCount) * 9);
+                        if (allFacesHaveNormals) {
+                            normals.reserve(static_cast<size_t>(triangleCount) * 9);
+                        }
                         for (int i = 1; i <= faces.Extent(); ++i) {
                             const TopoDS_Face& face = TopoDS::Face(faces(i));
                             TopLoc_Location loc;
@@ -1019,6 +1080,53 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobjec
                                     p1.Transform(trsf);
                                     p2.Transform(trsf);
                                     p3.Transform(trsf);
+                                }
+                                if (allFacesHaveNormals) {
+                                    // Fallback face normal, computed lazily (only if a degenerate
+                                    // per-vertex normal is actually encountered below) from the
+                                    // ALREADY-TRANSFORMED positions, so it is consistent with what
+                                    // this same function already writes into `coords`.
+                                    gp_Vec fallbackFaceNormal;
+                                    bool fallbackComputed = false;
+                                    int nodeIndices[3] = {n1, n2, n3};
+                                    for (int corner = 0; corner < 3; ++corner) {
+                                        gp_Vec3f raw;
+                                        tri->Normal(nodeIndices[corner], raw);
+                                        gp_Vec v(static_cast<double>(raw.x()), static_cast<double>(raw.y()),
+                                                 static_cast<double>(raw.z()));
+                                        // ComputeNormals derives the surface normal from the
+                                        // face's underlying geometry and ignores TopAbs_REVERSED
+                                        // entirely -- empirically verified (see the ADR's
+                                        // Measurements table: a REVERSED and a FORWARD box face
+                                        // produce IDENTICAL raw normals). Without this negation,
+                                        // half of a closed solid's vertex normals point inward.
+                                        if (reversed) {
+                                            v.Reverse();
+                                        }
+                                        if (!identity) {
+                                            v.Transform(trsf); // rotation/scale only -- gp_Vec::Transform
+                                                                // never applies trsf's translation part.
+                                        }
+                                        double len = v.Magnitude();
+                                        if (len > kMinNormalLength) {
+                                            v.Divide(len);
+                                        } else {
+                                            if (!fallbackComputed) {
+                                                gp_Vec u12(p1, p2);
+                                                gp_Vec u13(p1, p3);
+                                                fallbackFaceNormal = u12.Crossed(u13);
+                                                double faceLen = fallbackFaceNormal.Magnitude();
+                                                if (faceLen > kMinNormalLength) {
+                                                    fallbackFaceNormal.Divide(faceLen);
+                                                }
+                                                fallbackComputed = true;
+                                            }
+                                            v = fallbackFaceNormal;
+                                        }
+                                        normals.push_back(v.X());
+                                        normals.push_back(v.Y());
+                                        normals.push_back(v.Z());
+                                    }
                                 }
                                 coords.push_back(p1.X());
                                 coords.push_back(p1.Y());
@@ -1070,14 +1178,29 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobjec
             return nullptr;
         }
 
-        // An empty array (0 triangles, e.g. a shape with no faces) is a valid, non-exceptional
-        // result -- see this function's Kotlin-side KDoc.
-        jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(coords.size()));
+        // Header-prefixed layout: result[0] = triangleCount (exact as a double -- triangleCount
+        // is bounded by kMaxTriangles, far below 2^53), followed by the 9*triangleCount position
+        // doubles (unchanged order/content), followed by 9*triangleCount normal doubles IF
+        // `normals` is non-empty. Without this header element, a caller cannot distinguish "no
+        // normals, N triangles" from "normals present, N/2 triangles" for any even N -- both
+        // encode to the same array length 9*N. See docs/adr/ADR-0018-smooth-vertex-normals.adoc's
+        // Decision for the full rationale (this replaces the pre-Welle header-less
+        // length-9*triangleCount layout). An empty array's worth of geometry (0 triangles, e.g. a
+        // shape with no faces) is still a valid, non-exceptional result -- it now carries just the
+        // one header element instead of zero elements total.
+        size_t totalLength = 1 + coords.size() + normals.size();
+        jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(totalLength));
         if (result == nullptr) {
             return nullptr;  // OutOfMemoryError already pending, thrown by the JVM itself
         }
+        jdouble header = static_cast<jdouble>(coords.size() / 9);
+        env->SetDoubleArrayRegion(result, 0, 1, &header);
         if (!coords.empty()) {
-            env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(coords.size()), coords.data());
+            env->SetDoubleArrayRegion(result, 1, static_cast<jsize>(coords.size()), coords.data());
+        }
+        if (!normals.empty()) {
+            env->SetDoubleArrayRegion(
+                result, static_cast<jsize>(1 + coords.size()), static_cast<jsize>(normals.size()), normals.data());
         }
         return result;
     } catch (const Standard_Failure& e) {

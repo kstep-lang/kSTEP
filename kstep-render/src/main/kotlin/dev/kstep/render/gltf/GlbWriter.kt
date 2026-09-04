@@ -212,9 +212,9 @@ object GlbWriter {
                 positions[base] = triangle.coordinates[corner * 3].toFloat()
                 positions[base + 1] = triangle.coordinates[corner * 3 + 1].toFloat()
                 positions[base + 2] = triangle.coordinates[corner * 3 + 2].toFloat()
-                normals[base] = triangle.normal[0].toFloat()
-                normals[base + 1] = triangle.normal[1].toFloat()
-                normals[base + 2] = triangle.normal[2].toFloat()
+                normals[base] = triangle.normals[corner * 3].toFloat()
+                normals[base + 1] = triangle.normals[corner * 3 + 1].toFloat()
+                normals[base + 2] = triangle.normals[corner * 3 + 2].toFloat()
                 if (colors != null) {
                     colors[base] = triangle.color.r.toFloat()
                     colors[base + 1] = triangle.color.g.toFloat()
@@ -399,9 +399,13 @@ object GlbWriter {
         /** 9 doubles: `x0,y0,z0, x1,y1,z1, x2,y2,z2`, copied verbatim from the source
          *  [TriangleMesh]. */
         val coordinates: DoubleArray,
-        /** The triangle's unit-length, outward-facing normal (3 doubles), shared by all three
-         *  of its corners -- flat shading needs no per-vertex smoothing. */
-        val normal: DoubleArray,
+        /** 9 doubles: one unit-length normal PER CORNER (`n0x,n0y,n0z, n1x,n1y,n1z,
+         *  n2x,n2y,n2z`), added in a later wave (see docs/adr/ADR-0018-smooth-vertex-normals.adoc).
+         *  For a source [TriangleMesh] with no [TriangleMesh.vertexNormals] (every mesh before
+         *  that wave, and any mesh without them since), all three corners hold the SAME triangle
+         *  face normal -- byte-identical to this writer's pre-wave output, which always wrote
+         *  that one shared normal into every corner. */
+        val normals: DoubleArray,
         /** This triangle's [MeshColor] -- [MeshColor.NEUTRAL] for the plain [TriangleMesh]
          *  overload of [write], or [ColoredMesh.colorAt] for the [ColoredMesh] overload. Added in
          *  kSTEP's viewer-pan-and-material-colors wave, see
@@ -427,6 +431,7 @@ object GlbWriter {
         colorAt: (Int) -> MeshColor,
     ): List<KeptTriangle> {
         val coordinates = mesh.coordinates
+        val vertexNormals = mesh.vertexNormals
         val kept = ArrayList<KeptTriangle>(mesh.triangleCount)
         var offset = 0
         while (offset < coordinates.size) {
@@ -443,6 +448,10 @@ object GlbWriter {
             offset += 9
 
             val triangleCoordinates = doubleArrayOf(v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z)
+            // This finite/float32-range check governs whether the TRIANGLE is written at all --
+            // deliberately unaffected by [vertexNormals]'s own quality, so the emitted triangle
+            // count never depends on how good the (optional) per-vertex normals happen to be. See
+            // this function's own KDoc.
             if (triangleCoordinates.any { !it.isFinite() || abs(it) > FLOAT_MAX_ABS }) continue
 
             val ux = v1x - v0x
@@ -456,13 +465,36 @@ object GlbWriter {
             val nz = ux * wy - uy * wx
             val length = sqrt(nx * nx + ny * ny + nz * nz)
             if (!length.isFinite() || length <= DEGENERATE_NORMAL_LENGTH_EPSILON) continue
+            val faceNormal = doubleArrayOf(nx / length, ny / length, nz / length)
 
-            kept +=
-                KeptTriangle(
-                    triangleCoordinates,
-                    doubleArrayOf(nx / length, ny / length, nz / length),
-                    colorAt(triangleIndex),
-                )
+            val normals = DoubleArray(9)
+            for (corner in 0 until VERTICES_PER_TRIANGLE) {
+                val cornerBase = corner * COMPONENTS_PER_VEC3
+                val outBase = corner * COMPONENTS_PER_VEC3
+                // A corner's OWN vertex normal is used only if it is itself finite and
+                // non-degenerate -- a broken vertex normal falls back to the flat face normal for
+                // just that corner, exactly like a broken flat normal would have dropped the
+                // whole triangle above; this is a per-corner analogue, not a triangle-wide one, so
+                // one bad vertex normal never changes the emitted triangle count (see [write]'s
+                // KDoc: only a degenerate FACE normal or a bad POSITION drops a triangle).
+                val vnx = vertexNormals?.get(offset - 9 + cornerBase)
+                val vny = vertexNormals?.get(offset - 9 + cornerBase + 1)
+                val vnz = vertexNormals?.get(offset - 9 + cornerBase + 2)
+                if (vnx != null && vny != null && vnz != null && vnx.isFinite() && vny.isFinite() && vnz.isFinite()) {
+                    val vLength = sqrt(vnx * vnx + vny * vny + vnz * vnz)
+                    if (vLength.isFinite() && vLength > DEGENERATE_NORMAL_LENGTH_EPSILON) {
+                        normals[outBase] = vnx / vLength
+                        normals[outBase + 1] = vny / vLength
+                        normals[outBase + 2] = vnz / vLength
+                        continue
+                    }
+                }
+                normals[outBase] = faceNormal[0]
+                normals[outBase + 1] = faceNormal[1]
+                normals[outBase + 2] = faceNormal[2]
+            }
+
+            kept += KeptTriangle(triangleCoordinates, normals, colorAt(triangleIndex))
         }
         return kept
     }

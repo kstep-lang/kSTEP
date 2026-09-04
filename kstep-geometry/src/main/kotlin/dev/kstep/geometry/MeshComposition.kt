@@ -16,7 +16,10 @@ data class PlacedMesh(
 
 /** Returns a new [TriangleMesh] with every vertex of this mesh transformed by [placement]. Always
  *  allocates a fresh coordinate array (even for [Placement.IDENTITY]) -- this is a plain data
- *  transformation, not an identity-preserving cache. */
+ *  transformation, not an identity-preserving cache. If this mesh carries [TriangleMesh.vertexNormals],
+ *  they are transformed too, via [Placement.applyToDirection] -- NEVER [Placement.apply] --
+ *  because a normal is a direction, not a point, and must rotate with the mesh without being
+ *  translated by it (see [Placement]'s own KDoc). */
 fun TriangleMesh.transformedBy(placement: Placement): TriangleMesh {
     val source = coordinates
     val out = DoubleArray(source.size)
@@ -28,7 +31,23 @@ fun TriangleMesh.transformedBy(placement: Placement): TriangleMesh {
         out[i + 2] = transformed[2]
         i += 3
     }
-    return TriangleMesh(out)
+    val sourceNormals = vertexNormals
+    val outNormals =
+        if (sourceNormals == null) {
+            null
+        } else {
+            val n = DoubleArray(sourceNormals.size)
+            var j = 0
+            while (j < sourceNormals.size) {
+                val rotated = placement.applyToDirection(sourceNormals[j], sourceNormals[j + 1], sourceNormals[j + 2])
+                n[j] = rotated[0]
+                n[j + 1] = rotated[1]
+                n[j + 2] = rotated[2]
+                j += 3
+            }
+            n
+        }
+    return TriangleMesh(out, outNormals)
 }
 
 /**
@@ -45,9 +64,17 @@ fun TriangleMesh.transformedBy(placement: Placement): TriangleMesh {
  * once a real caller needs it.
  */
 object MeshComposition {
-    /** @throws IllegalArgumentException if the combined triangle count of [parts] would exceed
+    /**
+     * @throws IllegalArgumentException if the combined triangle count of [parts] would exceed
      *   [OcctKernel.MAX_TRIANGLES] -- checked BEFORE allocating the merged coordinate array, so a
-     *   maliciously long [parts] list cannot force a large allocation before this guard runs. */
+     *   maliciously long [parts] list cannot force a large allocation before this guard runs.
+     *
+     * Vertex normals: the merged mesh carries [TriangleMesh.vertexNormals] ONLY if every single
+     * part's mesh has them ([TriangleMesh.hasVertexNormals] `== true` for all of `parts`) --
+     * mixing a part with normals and a part without collapses the whole merge to `null` rather
+     * than producing a partially-filled normals array (same all-or-nothing rule
+     * [TriangleMesh.vertexNormals]'s own KDoc documents for a single mesh).
+     */
     fun merge(parts: List<PlacedMesh>): TriangleMesh {
         if (parts.isEmpty()) return TriangleMesh(DoubleArray(0))
 
@@ -56,14 +83,19 @@ object MeshComposition {
             "merged triangle count must be at most ${OcctKernel.MAX_TRIANGLES}, got $totalTriangles"
         }
 
+        val allHaveNormals = parts.all { it.mesh.hasVertexNormals }
         val out = DoubleArray((totalTriangles * 9L).toInt())
+        val outNormals = if (allHaveNormals) DoubleArray((totalTriangles * 9L).toInt()) else null
         var offset = 0
         for (part in parts) {
             val transformed = part.mesh.transformedBy(part.placement)
             System.arraycopy(transformed.coordinates, 0, out, offset, transformed.coordinates.size)
+            if (outNormals != null) {
+                System.arraycopy(transformed.vertexNormals!!, 0, outNormals, offset, transformed.vertexNormals.size)
+            }
             offset += transformed.coordinates.size
         }
-        return TriangleMesh(out)
+        return TriangleMesh(out, outNormals)
     }
 
     /**

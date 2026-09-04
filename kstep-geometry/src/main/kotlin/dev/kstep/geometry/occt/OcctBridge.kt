@@ -71,9 +71,9 @@ object OcctBridge {
     ): Long
 
     /**
-     * Triangulates the surface of the shape (`BRepMesh_IncrementalMesh`) and returns an
-     * index-free triangle soup: 9 [Double]s per triangle, vertices in world coordinates,
-     * winding normalized to point outward.
+     * Triangulates the surface of the shape (`BRepMesh_IncrementalMesh`) and returns a
+     * header-prefixed, index-free triangle soup with an OPTIONAL per-vertex-normal block: winding
+     * normalized to point outward, vertices in world coordinates.
      *
      * DELIBERATELY WITHOUT a quality parameter: the linear deflection is derived natively from
      * the shape's bounding-box diagonale (x 0.005, clamped to `[1e-5, 1e3]`). The only input is
@@ -84,7 +84,26 @@ object OcctBridge {
      * extraction, so the shape does not grow with every call -- this makes the call repeatable
      * and idempotent, but not free (re-meshed every time).
      *
-     * @return length `9 * triangleCount`; empty if OCCT produced no triangulation at all.
+     * Per-vertex normals were added in a later wave (see
+     * docs/adr/ADR-0018-smooth-vertex-normals.adoc): the native side runs
+     * `BRepLib_ToolTriangulatedShape::ComputeNormals` per face (only where OCCT's own mesher did
+     * not already attach normals) and, if and ONLY if *every* face in the shape ends up with
+     * normals, extracts a per-vertex normal for each triangle corner alongside its position --
+     * all-or-nothing, exactly like [dev.kstep.geometry.TriangleMesh.vertexNormals]'s own KDoc
+     * documents. `ComputeNormals` itself does NOT respect `TopAbs_REVERSED` (empirically
+     * verified against OCCT 7.9.2 -- a REVERSED and a FORWARD face of the same box produce
+     * IDENTICAL raw normals), so a REVERSED face's normals are negated natively, the same way its
+     * triangle winding already is.
+     *
+     * @return a `DoubleArray` laid out as: `result[0]` = triangle count `N` (exact, as a
+     *   `Double`); `result[1 .. 9N]` = positions, 9 doubles per triangle (unchanged content and
+     *   order from before this header element existed); `result[9N+1 .. 18N]` = per-vertex
+     *   normals, 9 doubles per triangle, present ONLY if the shape's normals were fully computed.
+     *   `result.size == 1` means zero triangles (still a valid, non-exceptional result). This
+     *   header element exists because, without it, `9*N` doubles (no normals) and `18*N` doubles
+     *   (normals) collide for any even `N` -- see [dev.kstep.geometry.OcctShape]'s
+     *   `decodeTriangles` for the decoder and docs/adr/ADR-0018-smooth-vertex-normals.adoc's
+     *   Stolperfallen for the ambiguity this closes.
      * @throws IllegalArgumentException if the shape would triangulate to more than
      *   [dev.kstep.geometry.OcctKernel.MAX_TRIANGLES] triangles.
      * @throws IllegalStateException if `handle` is unknown, or if `BRepMesh_IncrementalMesh`

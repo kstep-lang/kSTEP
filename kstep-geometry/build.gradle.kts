@@ -22,6 +22,17 @@ dependencies {
     // default main/test associated compilation. See OcctNativeLibraryResolveLibraryPathTest.
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
+    // Without an SLF4J backend on the test runtime classpath, merely LOADING a class that
+    // contains a top-level `KotlinLogging.logger {}` (e.g. OcctShape.kt, whose file-level
+    // `decodeTriangles` this module's own MeshCompositionTest exercises directly, OCCT-free) hits
+    // kotlin-logging's Slf4jLoggerFactory internals and fails with NoClassDefFoundError on
+    // org.slf4j.LoggerFactory itself -- NOT merely "falls back to a NOP logger" (that milder
+    // failure mode is what CLAUDE.md's Kotlin-logging convention describes for a *missing
+    // backend* with slf4j-api still present; this module was missing slf4j-api's own presence on
+    // the classpath entirely, a strictly worse gap this dependency closes). Same
+    // testRuntimeOnly(libs.slf4j.simple) kstep-viewer's build.gradle.kts already carries, added
+    // here for the identical reason (see docs/adr/ADR-0018-smooth-vertex-normals.adoc).
+    testRuntimeOnly(libs.slf4j.simple)
 }
 
 tasks.withType<Test>().configureEach {

@@ -476,4 +476,116 @@ class GlbWriterTest :
             result.droppedTriangleCount shouldBe 1
             parseGlb(result.bytes).json.containsKey("meshes") shouldBe false
         }
+
+        // ---------------------------------------------------------------------------------------
+        // Smooth per-vertex normals (see docs/adr/ADR-0018-smooth-vertex-normals.adoc).
+        // ---------------------------------------------------------------------------------------
+
+        // C1 (test x): a mesh with no vertexNormals writes BYTE-IDENTICAL output to before this
+        // wave -- every corner's normal is still the SAME replicated flat face normal (A5's own
+        // assertion is the pre-wave proof that this stays true).
+        "write(TriangleMesh) with no vertexNormals writes the same replicated flat normal at every corner" {
+            val mesh = TriangleMesh(doubleArrayOf(1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0))
+            val result = GlbWriter.write(mesh)
+            val parsed = parseGlb(result.bytes)
+            val normals = readFloatsLe(parsed.binChunk!!.copyOfRange(9 * 4, 18 * 4))
+            for (corner in 1 until 3) {
+                normals[corner * 3].toDouble() shouldBe (normals[0].toDouble() plusOrMinus 1e-6)
+                normals[corner * 3 + 1].toDouble() shouldBe (normals[1].toDouble() plusOrMinus 1e-6)
+                normals[corner * 3 + 2].toDouble() shouldBe (normals[2].toDouble() plusOrMinus 1e-6)
+            }
+        }
+
+        // C2 (test y): a mesh WITH genuinely divergent vertexNormals writes DIFFERENT values per
+        // corner into the NORMAL buffer -- the actual smooth-shading payoff for a glTF viewer.
+        "write(TriangleMesh) with divergent vertexNormals writes different values at each corner" {
+            val coords = doubleArrayOf(1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+            val vertexNormals = doubleArrayOf(1.0, 0.0, 0.0, 0.9, 0.3, 0.1, 0.9, -0.2, 0.2)
+            val mesh = TriangleMesh(coords, vertexNormals)
+            val result = GlbWriter.write(mesh)
+            result.triangleCount shouldBe 1
+            val parsed = parseGlb(result.bytes)
+            val normals = readFloatsLe(parsed.binChunk!!.copyOfRange(9 * 4, 18 * 4))
+
+            // Structure (JSON/accessor/bufferView count) unchanged from the no-normals case.
+            val accessors = parsed.json["accessors"]!!.jsonArray
+            accessors.size shouldBe 2
+            accessors[1].jsonObject["count"]!!.jsonPrimitive.int shouldBe 3
+
+            for (corner in 0 until 3) {
+                val expected =
+                    normalize(
+                        vertexNormals[corner * 3],
+                        vertexNormals[corner * 3 + 1],
+                        vertexNormals[
+                            corner *
+                                3 +
+                                2,
+                        ],
+                    )
+                normals[corner * 3].toDouble() shouldBe (expected[0] plusOrMinus 1e-3)
+                normals[corner * 3 + 1].toDouble() shouldBe (expected[1] plusOrMinus 1e-3)
+                normals[corner * 3 + 2].toDouble() shouldBe (expected[2] plusOrMinus 1e-3)
+            }
+            // The whole point: corner 0's normal must differ from corner 1's.
+            (normals[0].toDouble() != normals[3].toDouble() || normals[1].toDouble() != normals[4].toDouble()) shouldBe
+                true
+        }
+
+        // C3 (test z): every written normal round-trips through float32 at (comfortably) unit
+        // length -- the same glTF-validator ACCESSOR_VECTOR3_NON_UNIT tolerance A5 already checks
+        // for the flat-normal case.
+        "write(TriangleMesh) with vertexNormals writes unit-length normals after float32 narrowing" {
+            val coords = doubleArrayOf(1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+            val vertexNormals = doubleArrayOf(1.0, 0.0, 0.0, 0.9, 0.3, 0.1, 0.9, -0.2, 0.2)
+            val mesh = TriangleMesh(coords, vertexNormals)
+            val result = GlbWriter.write(mesh)
+            val parsed = parseGlb(result.bytes)
+            val normals = readFloatsLe(parsed.binChunk!!.copyOfRange(9 * 4, 18 * 4))
+            for (corner in 0 until 3) {
+                val nx = normals[corner * 3].toDouble()
+                val ny = normals[corner * 3 + 1].toDouble()
+                val nz = normals[corner * 3 + 2].toDouble()
+                sqrt(nx * nx + ny * ny + nz * nz) shouldBe (1.0 plusOrMinus 5e-3)
+            }
+        }
+
+        // C4 (test aa): a degenerate PER-CORNER vertex normal falls back to the triangle's flat
+        // face normal for just that corner -- and, crucially, does NOT drop the triangle (only a
+        // degenerate FACE normal or a bad position does that, per this file's own KDoc).
+        "a degenerate vertex normal at one corner falls back to the flat face normal without dropping the triangle" {
+            val coords = doubleArrayOf(1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+            val vertexNormals = doubleArrayOf(0.0, 0.0, 0.0, 0.9, 0.3, 0.1, 0.9, -0.2, 0.2) // corner 0 degenerate
+            val mesh = TriangleMesh(coords, vertexNormals)
+            val result = GlbWriter.write(mesh)
+            result.triangleCount shouldBe 1
+            result.droppedTriangleCount shouldBe 0
+            val parsed = parseGlb(result.bytes)
+            val normals = readFloatsLe(parsed.binChunk!!.copyOfRange(9 * 4, 18 * 4))
+            // Corner 0 falls back to the flat face normal, (1,0,0) -- see A5's identical shape.
+            normals[0].toDouble() shouldBe (1.0 plusOrMinus 1e-6)
+            normals[1].toDouble() shouldBe (0.0 plusOrMinus 1e-6)
+            normals[2].toDouble() shouldBe (0.0 plusOrMinus 1e-6)
+        }
+
+        // C5: a mesh with vertexNormals whose triangle count matches an all-degenerate case still
+        // routes through the SAME dropped-triangle bookkeeping (unaffected by vertexNormals).
+        "vertexNormals on an all-degenerate mesh does not prevent the empty-scene path" {
+            val coords = doubleArrayOf(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0) // collinear
+            val vertexNormals = doubleArrayOf(0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
+            val mesh = TriangleMesh(coords, vertexNormals)
+            val result = GlbWriter.write(mesh)
+            result.triangleCount shouldBe 0
+            result.droppedTriangleCount shouldBe 1
+            parseGlb(result.bytes).json.containsKey("meshes") shouldBe false
+        }
     })
+
+private fun normalize(
+    x: Double,
+    y: Double,
+    z: Double,
+): DoubleArray {
+    val len = sqrt(x * x + y * y + z * z)
+    return doubleArrayOf(x / len, y / len, z / len)
+}

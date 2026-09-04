@@ -23,6 +23,13 @@ import kotlin.math.sin
  * `internal fun apply` (not `private`): [TriangleMesh.transformedBy], in [MeshComposition.kt],
  * needs to transform each of a mesh's vertices individually -- exposing the full [m] array itself
  * would leak this type's row-major storage choice; exposing just point application does not.
+ *
+ * Every [Placement] this type can produce has determinant exactly `+1` and applies no scaling (see
+ * above) -- so for a *direction* vector (a vertex normal, not a point), the correct transform is
+ * the SAME rotation block [apply] already uses, with the translation dropped: no separate
+ * inverse-transpose normal matrix is needed (that machinery exists only to correct for
+ * non-uniform scaling and reflection, neither of which this closed [Placement] set can ever
+ * produce), and a unit-length input stays exactly unit length. See [applyToDirection].
  */
 class Placement private constructor(
     private val m: DoubleArray,
@@ -60,6 +67,18 @@ class Placement private constructor(
         val rotated = applyRotation(m, x, y, z)
         return doubleArrayOf(rotated[0] + m[9], rotated[1] + m[10], rotated[2] + m[11])
     }
+
+    /**
+     * Applies ONLY this transform's rotation block to one direction vector `(x, y, z)`, returning
+     * `[x', y', z']` -- for a vertex normal, which must rotate along with a mesh but must NEVER be
+     * translated by it. See this class's KDoc above for why no inverse-transpose normal matrix is
+     * needed here. `internal`, same visibility rationale as [apply].
+     */
+    internal fun applyToDirection(
+        x: Double,
+        y: Double,
+        z: Double,
+    ): DoubleArray = applyRotation(m, x, y, z)
 
     companion object {
         /** The no-op transform: rotation = identity, translation = zero. */

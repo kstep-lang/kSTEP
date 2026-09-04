@@ -420,7 +420,9 @@ the `ColoredMesh` overload instead of the `TriangleMesh` one.
 
 | Smooth per-vertex normals
 | `Poly_Triangulation::HasNormals()`/`Normals()` -- the other still-open
-  half of ADR-0013's V-4, unrelated to this wave's color work.
+  half of ADR-0013's V-4, unrelated to this wave's color work. Shipped in
+  the smooth-vertex-normals wave, see
+  docs/adr/ADR-0018-smooth-vertex-normals.adoc.
 
 | Middle-button pan harness verification
 | Re-attempt an automated `MouseButton.Tertiary` wiring assertion once a
