@@ -1,9 +1,11 @@
 package dev.kstep.tests
 
+import dev.kstep.asciidoc.OnErrorPolicy
+import dev.kstep.cli.AsciidocMode
 import dev.kstep.cli.CliCommand
-import dev.kstep.cli.RenderFormat
 import dev.kstep.cli.USAGE_TEXT
 import dev.kstep.cli.resolveCommand
+import dev.kstep.preview.RenderFormat
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
@@ -218,5 +220,142 @@ class CliMainTest :
 
         "USAGE_TEXT documents the render subcommand" {
             USAGE_TEXT shouldContain "kstep render"
+        }
+
+        "\"asciidoc --input a.adoc --output b.adoc\" resolves to Asciidoc single-file mode with defaults" {
+            resolveCommand(arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc")) shouldBe
+                CliCommand.Asciidoc(
+                    mode = AsciidocMode.SingleFile("a.adoc", "b.adoc"),
+                    format = RenderFormat.SVG,
+                    width = 1024,
+                    height = 768,
+                    requireGeometry = false,
+                    onError = OnErrorPolicy.FAIL,
+                )
+        }
+
+        "\"asciidoc --input-dir in --output-dir out\" resolves to Asciidoc tree mode" {
+            resolveCommand(arrayOf("asciidoc", "--input-dir", "in", "--output-dir", "out")) shouldBe
+                CliCommand.Asciidoc(
+                    mode = AsciidocMode.Tree("in", "out"),
+                    format = RenderFormat.SVG,
+                    width = 1024,
+                    height = 768,
+                    requireGeometry = false,
+                    onError = OnErrorPolicy.FAIL,
+                )
+        }
+
+        "\"asciidoc\" parses -f/-w/--height/--require-geometry/--on-error together" {
+            resolveCommand(
+                arrayOf(
+                    "asciidoc",
+                    "--input",
+                    "a.adoc",
+                    "--output",
+                    "b.adoc",
+                    "-f",
+                    "png",
+                    "-w",
+                    "800",
+                    "--height",
+                    "600",
+                    "--require-geometry",
+                    "--on-error",
+                    "card",
+                ),
+            ) shouldBe
+                CliCommand.Asciidoc(
+                    mode = AsciidocMode.SingleFile("a.adoc", "b.adoc"),
+                    format = RenderFormat.PNG,
+                    width = 800,
+                    height = 600,
+                    requireGeometry = true,
+                    onError = OnErrorPolicy.CARD,
+                )
+        }
+
+        "\"asciidoc\" with both --input and --input-dir resolves to ShowUsage with exit code 1" {
+            resolveCommand(
+                arrayOf("asciidoc", "--input", "a.adoc", "--input-dir", "in", "--output-dir", "out"),
+            ) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc\" with neither --input nor --input-dir resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("asciidoc")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc --input a.adoc\" without --output resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("asciidoc", "--input", "a.adoc")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc --input-dir in\" without --output-dir resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("asciidoc", "--input-dir", "in")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc --input a.adoc --output b.adoc --output-dir out\" resolves ShowUsage, not discarding --output-dir" {
+            resolveCommand(
+                arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--output-dir", "out"),
+            ) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc --input-dir in --output-dir out --output x.adoc\" resolves to ShowUsage, not discarding --output" {
+            resolveCommand(
+                arrayOf("asciidoc", "--input-dir", "in", "--output-dir", "out", "--output", "x.adoc"),
+            ) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc\" with --format auto/text/glb/gltf all resolve to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--format", "auto")) shouldBe
+                CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--format", "text")) shouldBe
+                CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--format", "glb")) shouldBe
+                CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--format", "gltf")) shouldBe
+                CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc\" with --format png is accepted" {
+            resolveCommand(arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--format", "png")) shouldBe
+                CliCommand.Asciidoc(
+                    mode = AsciidocMode.SingleFile("a.adoc", "b.adoc"),
+                    format = RenderFormat.PNG,
+                    width = 1024,
+                    height = 768,
+                    requireGeometry = false,
+                    onError = OnErrorPolicy.FAIL,
+                )
+        }
+
+        "\"asciidoc\" with an unknown --on-error value resolves to ShowUsage with exit code 1" {
+            resolveCommand(
+                arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--on-error", "bogus"),
+            ) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc\" with a non-numeric --width resolves to ShowUsage with exit code 1" {
+            resolveCommand(
+                arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--width", "notanumber"),
+            ) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc\" with a stray positional argument resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "extra")) shouldBe
+                CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc --input\" with no value resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("asciidoc", "--input")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"asciidoc\" with an unknown flag resolves to ShowUsage with exit code 1" {
+            resolveCommand(
+                arrayOf("asciidoc", "--input", "a.adoc", "--output", "b.adoc", "--bogus"),
+            ) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "USAGE_TEXT documents the asciidoc subcommand" {
+            USAGE_TEXT shouldContain "kstep asciidoc"
         }
     })

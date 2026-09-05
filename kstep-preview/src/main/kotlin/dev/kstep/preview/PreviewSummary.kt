@@ -1,4 +1,4 @@
-package dev.kstep.cli
+package dev.kstep.preview
 
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.script.KStepModel
@@ -23,7 +23,7 @@ object RenderFallbackReasons {
  * deterministic given a fixed [model] (its [dev.kstep.step21.Part21Header.timestamp] is already
  * defaulted by [dev.kstep.script.KStepScriptHost] before this is ever called). Reused verbatim by
  * ALL three containers ([RenderFormat.SVG]/[RenderFormat.PNG]/[RenderFormat.TEXT]) via
- * `dev.kstep.render.text.TextCardRenderer` -- see [RenderCommand].
+ * `dev.kstep.render.text.TextCardRenderer` -- see [PreviewRenderer].
  *
  * ASCII-only throughout (`--` instead of an em dash, `...` instead of an ellipsis) -- mirrors
  * `Part21EncodingException`'s own encoding stance and keeps generated SVG/`.txt` output free of
@@ -66,7 +66,7 @@ object PreviewSummary {
         }
 
     /** Renders a model that DID produce previewable content -- either a real geometry render
-     *  (see [RenderCommand]) or a plain product-structure summary (no shapes registered). Both
+     *  (see [PreviewRenderer]) or a plain product-structure summary (no shapes registered). Both
      *  share this one header/instance-list rendering; [contentLines] carries whatever differs
      *  (a "geometry" section vs. a "product structure only" line). */
     fun modelLines(
@@ -107,7 +107,7 @@ object PreviewSummary {
     /** Renders the "geometry present, but could not be rendered this run" fallback -- the
      *  Pflicht-Fallback content, painted into whichever container was requested (see
      *  `RenderFormat`'s "Container-Regel"). [model] is `null` only when the script never even
-     *  finished evaluating far enough to produce a [KStepModel] -- not a case [RenderCommand]
+     *  finished evaluating far enough to produce a [KStepModel] -- not a case [PreviewRenderer]
      *  currently reaches (an evaluation failure short-circuits before this is called), kept
      *  nullable so this function's contract does not silently assume otherwise. */
     fun noticeLines(
@@ -172,7 +172,7 @@ object PreviewSummary {
     }
 
     /** `--with-step`'s addition: the full rendered Part-21 text, or a one-line explanation if
-     *  [Part21Writer.write] itself fails for this model (see [RenderCommand]'s KDoc on why that
+     *  [Part21Writer.write] itself fails for this model (see [PreviewRenderer]'s KDoc on why that
      *  must never abort the whole preview). */
     private fun part21TextLines(model: KStepModel): List<String> {
         val text =

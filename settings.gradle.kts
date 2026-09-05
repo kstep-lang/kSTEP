@@ -41,6 +41,13 @@ include(
     "kstep-constraints",
     "kstep-shape",
     "kstep-render",
+    // Shared preview pipeline extracted from kstep-cli's RenderCommand.kt so `kstep render`
+    // and `kstep asciidoc` share ONE implementation of ADR-0011's Container-Regel/
+    // Pflicht-Fallback instead of two copies drifting apart -- see ADR-0019.
+    "kstep-preview",
     "kstep-viewer",
+    // Grouping directory mirroring kuml-dev/kUML's own kuml-docs/ layout. `:kstep-docs`
+    // itself has no build file -- it is a pure namespace project, not a Kotlin module.
+    "kstep-docs:kstep-asciidoc",
     "kstep-tests",
 )

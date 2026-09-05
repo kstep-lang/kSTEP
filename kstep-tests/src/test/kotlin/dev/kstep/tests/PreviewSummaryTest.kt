@@ -1,7 +1,7 @@
 package dev.kstep.tests
 
-import dev.kstep.cli.PreviewSummary
 import dev.kstep.geometry.OcctAvailability
+import dev.kstep.preview.PreviewSummary
 import dev.kstep.script.KStepScriptHost
 import dev.kstep.script.KStepScriptOutcome
 import io.kotest.core.spec.style.StringSpec

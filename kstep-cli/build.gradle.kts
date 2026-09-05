@@ -38,12 +38,18 @@ dependencies {
     implementation(project(":kstep-script"))
     // `kstep render` (headless-preview-rendering wave, see
     // docs/adr/ADR-0011-headless-preview-rendering.adoc): RenderCommand.kt calls
-    // OcctKernel.availability()/OcctShape.triangulate directly (not just transitively through
-    // kstep-script's api chain), and TriangleSvgWriter/TriangleRasterizer/TextCardRenderer/
-    // RenderLimits from kstep-render -- both declared explicitly here for the same reason
-    // kotlinx-coroutines-core is above (this module uses them directly, not just transitively).
+    // OcctKernel.availability() directly (not just transitively) for its `--output json`
+    // `putOcct`, and reads GlbWriteResult fields for the same JSON document -- both declared
+    // explicitly here for the same reason kotlinx-coroutines-core is above (this module uses
+    // them directly, not just transitively).
     implementation(project(":kstep-geometry"))
     implementation(project(":kstep-render"))
+    // kstep-asciidoc/kstep-preview extraction (see docs/adr/ADR-0019-kstep-asciidoc.adoc): `api`,
+    // not `implementation` -- RenderFormat/PreviewRenderer/PreviewOutcome/PreviewWriter appear in
+    // CliCommand.Render's public signature and RenderCommand.kt's own public functions, and
+    // `kstep-tests`' CliMainTest constructs CliCommand.Render/CliCommand.Asciidoc directly.
+    api(project(":kstep-preview"))
+    api(project(":kstep-docs:kstep-asciidoc"))
     // Main.kt sets KotlinLoggingConfiguration.logStartupMessage = false as its very first
     // statement -- see that assignment's KDoc for why. Declared explicitly here (not just
     // transitively via kstep-script/kstep-geometry's own `implementation` deps, which do NOT

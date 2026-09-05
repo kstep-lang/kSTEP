@@ -1,0 +1,635 @@
+= ADR-0019: Asciidoctor pre-processing integration (`kstep asciidoc`)
+:toc:
+
+== Status
+
+Accepted, implemented. Adds `kstep asciidoc`, a new `kstep-docs:kstep-asciidoc`
+module, and a new `kstep-preview` module (a pure extraction of `kstep
+render`'s previously `kstep-cli`-internal rendering pipeline, now shared by
+both commands). Closes ADR-0011's Folge-Welle R-6, whose original wording
+("a `[kstep]` Asciidoctor macro, mirroring `kuml-dev/kUML`'s `kuml-asciidoc`
+extension") is corrected below (see Decision 1) — that wording described a
+*live* Asciidoctor extension, which is not what either this wave or the
+`kuml-asciidoc` precedent it names actually is.
+
+== Context
+
+kSTEP's own documentation, and any Asciidoctor-based documentation project
+that wants to embed a `kstep` diagram/preview the way `kuml-dev/kUML`
+projects embed `[kuml]` diagrams, needs a way to turn a `*.kstep.kts` script
+into an `image::` reference at build time. Two designs exist for this in the
+Asciidoctor ecosystem:
+
+1. A *live* `AsciidoctorJ` extension, registered into Asciidoctor's own
+   conversion pipeline (`org.asciidoctor.extension.BlockProcessor` or
+   similar) and invoked automatically whenever `asciidoctor`/`asciidoctorj`
+   converts a document.
+2. A *pre-processing* CLI: a separate tool run BEFORE Asciidoctor, which
+   rewrites `.adoc` source text (or a whole tree of it) by replacing
+   recognized blocks with `image::` references, leaving a plain `.adoc`
+   file for Asciidoctor to convert completely unaware anything happened.
+
+`kuml-dev/kUML`'s own `kuml-asciidoc` extension is form (2), not form (1) —
+verified directly against that project's live README, which documents it as
+a CLI (`kuml-asciidoc --input file.adoc --output file.adoc`, plus
+`--input-dir`/`--output-dir`), not a JAR registered into Asciidoctor's own
+classpath. The reason, per that project's own documentation: **Antora
+renders documentation through its own Node.js/Asciidoctor.js pipeline**,
+which has no mechanism to load a JVM Asciidoctor extension at all — a live
+`AsciidoctorJ` `BlockProcessor` would work for a plain `asciidoctor` CLI
+build, but not for the Antora-based documentation site kUML (and, by the
+same reasoning, any future kSTEP documentation site) actually publishes
+with. A pre-processing CLI works identically regardless of which Asciidoctor
+implementation eventually converts the rewritten `.adoc` — it never touches
+Asciidoctor's own extension API at all.
+
+This ADR adopts the identical shape for kSTEP: `kstep asciidoc` is a
+pre-processing CLI, not a live macro/extension.
+
+=== Correcting ADR-0011's R-6
+
+ADR-0011's Folge-Wellen table listed:
+
+> `kstep-asciidoc`: a `[kstep]` Asciidoctor macro, mirroring
+> `kuml-dev/kUML`'s `kuml-asciidoc` extension.
+
+"a `[kstep]` Asciidoctor macro" describes a live-extension shape. The
+`kuml-asciidoc` precedent it cites is, as established above, a
+pre-processing CLI — so the comparison was accurate in spirit (mirror what
+`kuml-asciidoc` does) but wrong in the specific mechanism named. That R-6
+row is corrected in place to point here; see the entry in ADR-0011's own
+Folge-Wellen table.
+
+== Decision
+
+=== 1. Pre-processing CLI, three interchangeable block forms
+
+`kstep asciidoc` reads one `.adoc` file (`--input`/`--output`) or a whole
+directory tree (`--input-dir`/`--output-dir`), scans each `.adoc` for `kstep`
+preview blocks, renders each one, and rewrites the document with `image::`
+references in place of the block — exactly the `kuml-asciidoc` shape,
+kSTEP-specific syntax. Three forms are recognized, all producing identical
+`BlockAttributes`:
+
+[source,asciidoc]
+----
+```kstep
+... inline *.kstep.kts source, no attributes ...
+```
+
+[kstep,target,format,width=…,height=…,alt="…",title="…"]
+----
+... inline *.kstep.kts source ...
+----
+
+[source,kstep]
+----
+... inline *.kstep.kts source (Asciidoctor-canonical spelling) ...
+----
+
+kstep::path/to/script.kstep.kts[format=…,target=…,alt="…",title="…"]
+----
+
+Only `svg`/`png` are valid block image formats — `text`/`glb`/`auto` are
+rejected outright, even though `dev.kstep.preview.RenderFormat.parse`
+recognizes them for `kstep render`'s own `--format` flag. `image::foo.txt[]`
+and `image::foo.glb[]` are not embeddable images, and `AUTO`'s
+content-driven fallback to `TEXT` is exactly the trap this restriction
+avoids. The Container-Regel is still fully honored: a script with no
+renderable geometry becomes a text CARD painted into the requested SVG/PNG
+container — embeddable, as promised, never a bare `.txt`.
+
+A `target=`/positional target names the output image file (validated by
+`AsciidocPaths.validateTargetName` — a single safe path segment, no `/`, no
+`..`); without one, the default is `<adoc-basename>-<1-based block index>`.
+`:imagesdir:` (an AsciiDoc document attribute) routes the image BYTES into a
+subfolder under the output document's directory while the `image::`
+reference itself stays bare (`image::name.svg[]`) — Asciidoctor resolves
+`imagesdir` at conversion time, so the pre-processor must not bake it into
+the reference text itself.
+
+`AsciidocScanner` tracks `:imagesdir:` POSITIONALLY, matching how Asciidoctor
+itself evaluates the attribute at each `image::` macro's own location rather
+than once for the whole document: each scanned `kstep` block carries the
+`:imagesdir:` value in effect strictly BEFORE it (`null` if none has been
+set yet), and a later `:imagesdir:` line never retroactively applies to an
+earlier block. A bare `:imagesdir:` with no value, and AsciiDoc's canonical
+UNSET spellings `:imagesdir!:`/`:!imagesdir:`, are all accepted as
+Asciidoctor's own reset-to-document-directory idiom (not a malformed path),
+and a trailing slash (`:imagesdir: images/`) is tolerated the same way
+Asciidoctor tolerates it — none of these fail the scan of a document that
+never even uses the value for a kstep block, preserving Pass-Through. A
+value containing an attribute reference (e.g. `:imagesdir: {partsdir}/
+images`) is never materialized verbatim: this scanner has no attribute
+table to expand it against, and writing a literal directory named
+`{partsdir}` while Asciidoctor's own later conversion resolves the
+reference somewhere else entirely would silently produce a broken image
+with no warning. But rejecting it is only warranted once a kstep block
+would actually need to route a rendered image through it — a `----`/`....`/
+etc. document that merely sets such a value for OTHER (non-`kstep`)
+AsciiDoc content, e.g. the common Antora `:imagesdir: {partsdir}/images`
+idiom, is exactly the kind of unrelated, legitimate document Pass-Through
+exists to protect, and `processTree` aborts the WHOLE tree on the first
+scan failure — so failing here would take down every other, unrelated
+document in the same run too. The value is therefore recorded as unusable
+rather than failing the scan immediately, and only turned into a hard
+failure, at that block's own line, once a kstep block in scope actually
+tries to use it.
+
+Any OTHER Asciidoctor delimited/comment block (`----`/`....`/`====`/
+`****`/`____`/`++++`/`////`, not opened by a `kstep`/`source,kstep` attribute
+line) is passed through completely untouched by `AsciidocScanner`'s state
+machine — including any `kstep::…[]`-looking text inside it. This is not
+optional: this project's OWN documentation (this file, the README) will
+demonstrate the `kstep` block syntax inside literal/listing blocks, and
+without this rule `kstep asciidoc` would rewrite its own documentation's
+example blocks the first time it processed them.
+
+=== 2. A new `kstep-preview` module, not `kstep-render`
+
+`kstep render`'s pre-existing implementation (`kstep-cli`'s
+`RenderCommand.kt`) already contained the ENTIRE Container-Regel/
+Pflicht-Fallback pipeline this wave needed to reuse for `kstep asciidoc`. It
+was extracted into a new module, `kstep-preview`
+(`PreviewRenderer.render(PreviewRequest): PreviewOutcome`), rather than
+copied — `kstep-cli`'s `RenderCommand.kt` is now a thin ~180-line adapter
+that builds a `PreviewRequest`, calls `PreviewRenderer.render`, and renders
+the CLI-specific text/JSON report; `kstep-docs:kstep-asciidoc`'s
+`AsciidocRewriter` calls the exact same function per block.
+`RenderExtractionParityTest` (`kstep-tests`) pins this: `kstep render`
+(subprocess) and `PreviewRenderer.render` (in-process) must produce
+byte-identical bytes for the identical script.
+
+This new module deliberately does NOT live inside `kstep-render`, even
+though the names are easy to confuse:
+
+* `PreviewRenderer` needs `dev.kstep.script.KStepModel` (from `kstep-script`)
+  and `dev.kstep.step21.Part21Writer` (from `kstep-step21`) to evaluate a
+  script and render its text-card content. `kstep-render` today depends on
+  nothing but `kstep-geometry` + `kotlinx-serialization-json` +
+  `kotlin-logging` — deliberately dependency-lean (see ADR-0011's own
+  Decision section).
+* `kstep-viewer` depends on `kstep-render`. If `kstep-render` pulled in
+  `kstep-script`, `kstep-viewer` would gain `kotlin-compiler-embeddable`
+  (Kotlin's scripting compiler, multiple megabytes) on its runtime
+  classpath for a Compose Desktop window that never evaluates a script.
+
+`kstep-preview` sits strictly ABOVE `kstep-render` in the dependency graph
+instead (`kstep-script` + `kstep-render` + `kstep-geometry` + `kstep-step21`
+→ `kstep-preview` → `kstep-cli` and `kstep-docs:kstep-asciidoc`). No new
+external dependency coordinate enters the build at all — every artifact
+`kstep-preview` needs was already resolved transitively via `kstep-cli`'s
+pre-existing dependency set. Verified (not assumed):
+`./gradlew :kstep-cli:dependencies --configuration runtimeClasspath | grep
+-iE "skiko|compose|androidx"` stays empty after this wave, exactly as it did
+before it.
+
+`RenderFormat`/`PreviewSummary`/`RenderFallbackReasons` moved into
+`kstep-preview` unchanged — a pure package rename
+(`dev.kstep.cli` → `dev.kstep.preview`), not a behavior change. Since kSTEP
+publishes no artifacts yet (see README's own opening line), this is not a
+breaking change for anything outside this repository — only four
+`kstep-tests` import lines needed updating.
+
+`PreviewRenderer.render` itself never calls `exitProcess`, never writes a
+file, and never prints — every `OcctShape` a rendered model registered is
+closed in a `finally`, on EVERY path (success, notice, and an exception)
+rather than the pre-extraction code's three separate `exitProcess`-adjacent
+`closeShapes()` call sites. `PreviewWriter` is the small, separate piece
+that actually writes a `Rendered` outcome's bytes to a file — only
+`kstep-cli` calls it (`kstep asciidoc` writes its own image tree directly
+via `AsciidocProcessor`, since an `.adoc` document produces MANY images from
+one render pass, not one).
+
+=== 3. Two failure classes, two behaviors
+
+A block's script can fail in two categorically different ways, handled
+differently on purpose:
+
+[cols="1,2,2"]
+|===
+| Failure class | Example | Behavior
+
+| **Environment** — geometry not renderable this run
+| OCCT unavailable, `triangulate()` throws, shape already closed by the
+  script
+| Notice text card in the requested container, exit 0 (exit 1 with
+  `--require-geometry`) — identical to `kstep render`'s own Pflicht-Fallback,
+  because it goes through the exact same `PreviewRenderer` code path.
+
+| **Author** — the script itself is broken
+| Compile error, WHERE-rule violation, `NoModelProduced`, a runtime
+  exception, a macro pointing at a missing file, an unknown block attribute,
+  an unclosed fence
+| `--on-error fail` (default): abort the WHOLE document — no output `.adoc`,
+  no images, for THIS file. `--on-error card`: render an error card (the
+  same text `kstep export`'s `errorText` would print) for that one block and
+  continue with the rest of the document.
+|===
+
+The reasoning: a documentation build that silently ships an "error" image
+in place of a broken diagram is worse than a build that fails loudly — the
+same instinct that makes a compiler reject a syntax error rather than
+guessing. `--on-error card` exists for the iterative-authoring case, where a
+red build on every keystroke is unhelpful.
+
+**Partial-output guarantee**: every block in one document is rendered into
+memory before ANYTHING is written for that file. Under `fail`, the first
+script failure aborts before the rewritten `.adoc` or any of its images
+reach disk — never a half-written result.
+
+=== 4. Trust boundary unchanged
+
+A `*.kstep.kts` script is, by construction, arbitrary Kotlin code
+(`wholeClasspath = true`, no sandbox — see `KStepScriptHost`'s own KDoc and
+ADR-0011). `kstep asciidoc` adds a second OUTPUT form of that same trusted
+evaluation (an embedded image instead of a written `.step` file); it does
+not widen what code is allowed to run. Handing `kstep asciidoc` an `.adoc`
+file is handing it Kotlin code to run, exactly like handing a build system a
+`build.gradle.kts` — no new sandboxing is introduced, deliberately.
+
+== Security
+
+[cols="1,2,2"]
+|===
+| Category | Measure | Verified by
+
+| Path traversal (write)
+| `target=`/positional target must be a single strict path segment
+  (`^[A-Za-z0-9._-]{1,100}$`, `.`/`..` explicitly rejected); `:imagesdir:`
+  must normalize to a location inside the output root, actually enforced at
+  write time via `OutputRoot.resolveTarget` for every image
+  `AsciidocProcessor.writeRendered` is about to write (not just checked
+  lexically at scan time). The physical layer walks up from the target to
+  its nearest EXISTING ancestor and real-path-checks THAT ancestor, so a
+  symlinked directory placed inside `--output-dir` is caught even when the
+  file being written through it does not exist yet. `processTree` applies
+  the identical check to EVERY mirrored output path, not only rendered
+  images — a copied plain file, a rewritten `.adoc`, and a mirrored directory
+  entry are all resolved through it before any write, so a symlink placed
+  inside a not-yet-visited part of `--output-dir` cannot be escaped through
+  via the mirror path either. That ancestor-walk alone still treats a
+  DANGLING symlink sitting at the LEAF write position itself (the `.adoc`
+  output file, or one rendered image) as "not yet existing" and steps past
+  it — `writeRendered` therefore separately rejects any write target that
+  `Files.isSymbolicLink` reports as a symlink, dangling or not, right before
+  the write loop runs. `Files.copy(..., REPLACE_EXISTING)` in `processTree`'s
+  plain-file-copy branch needs no such extra check — `REPLACE_EXISTING`
+  unlinks the target instead of following it. Single-file mode
+  (`--input`/`--output`) additionally refuses to run when `--output` is the
+  SAME physical file as `--input` (would otherwise silently destroy the
+  source script the moment the first block renders), and — like tree mode —
+  tracks a rendered image against the `.adoc` output's own path in a
+  (per-document, non-`null`) collision set
+| `AsciidocScannerTest` A18/A19, `AsciidocPathsTest` C1/C6,
+  `AsciidocProcessorTest` D10/D12/D15/D16/D23/D24
+
+| Path traversal (read)
+| A `kstep::path[]` macro path is checked in two independent layers:
+  lexical (`normalize().startsWith(root)`) and physical
+  (`toRealPath().startsWith(root.toRealPath())`, which additionally catches
+  a symlink inside the tree pointing outside it)
+| `AsciidocPathsTest` C2, `AsciidocProcessorTest` D6,
+  `CliAsciidocIntegrationTest` F3
+
+| Symlinks
+| `Files.walk` (does not follow directory symlinks); every symlink
+  encountered is skipped and reported, never followed or copied. Never
+  `File.walkTopDown()`, which DOES follow directory symlinks
+| `AsciidocProcessorTest` D4
+
+| Tree self-clobbering
+| `--output-dir` may not nest inside `--input-dir`, nor the reverse — checked
+  TWICE: lexically before anything touches the filesystem, and again
+  physically (real-path, via `OutputRoot.overlapsWith`) BEFORE
+  `Files.createDirectories` ever runs (a Round 5 finding, "H2": an earlier
+  revision ran this physical check AFTER creating the output root, which
+  could plant a directory INSIDE `--input-dir` through a symlinked
+  intermediate `--output-dir` component even on a run ultimately rejected).
+  Independently, EVERY output path `processTree` produces (a mirrored/copied
+  file, a rewritten `.adoc`, or a rendered image) is tracked, by its
+  REAL-path `WriteTarget.identity` (never the lexical path — see the
+  "Round 5: `OutputRoot`" note below, "H1"), in one whole-tree set for the
+  duration of the run — a later entry may never silently overwrite an
+  earlier one, e.g. a copied `logo.svg` followed by a kstep block whose
+  `target` also resolves to `logo.svg`, two documents both using
+  `target=shared`, or two different input files that alias the SAME
+  physical output file through a directory symlink placed INSIDE
+  `--output-dir` itself. The per-document `usedNames` check in
+  `AsciidocRewriter` only catches a collision WITHIN one document
+| `AsciidocProcessorTest` D5/D11/D20/D21
+
+| Uncaught I/O exceptions
+| Every `IOException` reachable from a path-resolution or tree-walk call is
+  caught and turned into a clean `ProcessFailure`/`null` instead of an
+  uncaught stack trace reaching `main()` — this includes
+  `Files.walk(inRoot)`'s own lazy enumeration (an unreadable subdirectory
+  throws `UncheckedIOException` partway through `.toList()`, a Round 5
+  finding, "H3"), `Path.toRealPath()` inside
+  `AsciidocPaths.realPathOfNearestExistingAncestor`/`resolveScriptPath`, and
+  `Files.size` in both single-file and tree mode
+| `AsciidocPathsTest` C6, `AsciidocProcessorTest` D22
+
+| DoS — image size
+| The same `RenderLimits.MIN_DIMENSION_PX`/`MAX_DIMENSION_PX`/
+  `MAX_TOTAL_PIXELS` `kstep render` enforces, additionally checked per block
+  attribute at scan time
+| `AsciidocScannerTest` A17
+
+| DoS — memory
+| `AsciidocLimits.MAX_BLOCKS_PER_DOCUMENT` (200) bounds the partial-output
+  buffer; `MAX_ADOC_BYTES` (8 MiB) bounds one scanned document;
+  `MAX_FILES_IN_TREE` (10 000) bounds a tree walk -- enforced by applying
+  `.limit(MAX + 1)` to the lazy `Files.walk` stream itself, BEFORE
+  `.sorted()` materializes anything, so an oversized tree is never fully
+  read into memory just to find out it is oversized
+| `AsciidocScannerTest` A22, `AsciidocProcessorTest` D7/D14
+
+| Write I/O failures
+| Every actual filesystem write in `AsciidocProcessor` (directory creation,
+  file copy, image write, `.adoc` write) is wrapped in
+  `try`/`catch(IOException)` and turned into a `ProcessFailure` -- a dangling
+  `:imagesdir:` symlink, a read-only `--output-dir`, or a concurrent
+  deletion all surface as a clean CLI error instead of a raw stack trace.
+  Within `writeRendered`, every image is written BEFORE the `.adoc` text (not
+  after), so an I/O failure partway through the image loop can never leave a
+  `.adoc` on disk that references an image which was never written
+| `AsciidocProcessorTest` D13
+
+| SVG/XML injection
+| Inherited unchanged: every interpolated string in `TriangleSvgWriter`/
+  `TextCardRenderer` output runs through `SvgEscaping`; no script source
+  text ever reaches the rendered output
+| `CliAsciidocIntegrationTest` F1 (`parseXml`)
+
+| AsciiDoc attribute injection
+| `alt=`/`title=` are emitted quoted and reject `"`, `]`, newlines, and
+  control characters — otherwise a crafted value could escape the `image::`
+  attribute list
+| `AsciidocRewriterTest` B4
+
+| Path leak in artifacts
+| `PreviewSummary.redactPaths` (unchanged, inherited from ADR-0011) still
+  redacts absolute filesystem paths out of every notice/summary card —
+  these cards land in committed documentation
+| `CliAsciidocIntegrationTest` F5 (`shouldNotContain("/nonexistent")`)
+
+| Resource leaks
+| `PreviewRenderer` closes every `OcctShape` in a `finally` on every path —
+  strictly more robust than the pre-extraction code, which needed three
+  separate explicit close calls next to its `exitProcess` sites
+| Review + `PreviewRendererTest`
+
+| Trust boundary
+| Unchanged — see Decision 4
+| N/A, documented above
+
+| Supply chain
+| Zero new external dependencies; `gradle/libs.versions.toml` unchanged by
+  this wave
+| Diff review
+|===
+
+=== Round 5: `OutputRoot`, and closing H1-H4
+
+A fifth review round, run against the freshly built CLI rather than only the
+unit-test suite, found FOUR further gaps -- all four confirmed empirically
+(a real `kstep asciidoc` invocation reproducing each) before any fix was
+written:
+
+* **H1 (MAJOR)** -- `processTree`'s whole-tree collision set
+  (`reservedOutputPaths`) was keyed by `target.toAbsolutePath().normalize()`,
+  a LEXICAL path. A directory symlink placed INSIDE `--output-dir` (e.g.
+  `out/link -> out/a`, both existing before the run) let two different input
+  files ("in/a/page.adoc" and "in/link/page.adoc") both resolve to the SAME
+  physical output file with no collision ever detected -- `kstep asciidoc`
+  reported `exit 0`, "Rewrote 2 file(s)", while one file's rendered content
+  had silently overwritten the other's on disk.
+* **H2 (MAJOR)** -- `processTree` called `Files.createDirectories(outRoot)`
+  BEFORE its physical (real-path) overlap re-check, so a not-yet-existing
+  `--output-dir` whose intermediate component was a symlink into
+  `--input-dir` got a directory planted INSIDE the input tree even though
+  the run was, correctly, ultimately rejected -- violating the "no write on
+  reject" guarantee `AsciidocProcessorTest` D5 already asserted for the
+  simpler (immediately-existing) case.
+* **H3 (MAJOR)** -- `Files.walk(inRoot).limit(...).toList()`'s lazy
+  enumeration throws `UncheckedIOException` for an unreadable subdirectory,
+  uncaught -- surfacing as a raw `Exception in thread "main"` stack trace
+  instead of the clean `Error: ...` line every other failure mode in this
+  module produces.
+* **H4 (MAJOR)** -- single-file mode (`--input`/`--output`) had no guard at
+  all against `--output` naming the SAME file as `--input`: the rewritten
+  `.adoc` text (with the `kstep` block already replaced by `image::...[]`)
+  silently overwrote the original script, unrecoverably, the moment the
+  first block rendered.
+
+**Root cause, and why a fourth point patch was rejected**: R2's dangling
+leaf symlink, R3's pre-existing output-dir-internal directory symlink, R4's
+raw-vs-normalized single-file `..`-through-symlink mismatch, and R5's H1
+above are the SAME underlying defect recurring in four different shapes --
+this module kept two independent, ad-hoc notions of "the path I am about to
+write": a LEXICAL one (`target.toAbsolutePath().normalize()`, used for
+collision tracking) and a PHYSICAL, real-path one (an inline ancestor-walk
+duplicated at each write-site, used for containment). Every previous
+round patched one call site where they had drifted apart; nothing stopped
+the NEXT call site from drifting the same way. `OutputRoot`/`WriteTarget`
+(`OutputRoot.kt`) replace this pattern module-wide: every output-path
+resolution in `AsciidocProcessor` (single-file AND tree mode, the `.adoc`
+text AND every one of its images) now goes through
+`OutputRoot.resolveTarget`, which returns BOTH the lexical `path` actually
+written through and the real-path `identity` used for every collision
+check -- the two can no longer be computed independently, and so can no
+longer disagree.
+
+Fixes, in the same order:
+
+* H1: `reservedOutputPaths`/the per-document collision set are keyed by
+  `WriteTarget.identity` (real path), never `WriteTarget.path` (lexical).
+* H2: the physical overlap re-check
+  (`AsciidocPaths.realPathOfNearestExistingAncestor` on both roots, via
+  `OutputRoot.overlapsWith`) now runs BEFORE `Files.createDirectories`, not
+  after -- it tolerates a not-yet-existing `--output-dir` by walking up to
+  whichever ancestor does exist, so it needs no directory created first.
+* H3: `Files.walk(inRoot)` itself and its `.limit(...).toList()`
+  enumeration are both wrapped in `try`/`catch(IOException,
+  UncheckedIOException)`; `AsciidocPaths.realPathOfNearestExistingAncestor`
+  (the shared helper `OutputRoot` now uses exclusively for every write-path
+  resolution) also catches `IOException` from `toRealPath()` rather than
+  propagating it, and `Files.size` calls in both `processFile` and
+  `processTree` are guarded the same way.
+* H4: `processFile` real-paths `--input` and compares it against the
+  resolved `--output` target's identity, refusing to run on a match; single-
+  file mode also passes a fresh (never `null`) collision set into
+  `writeRendered`, so a rendered image can no longer clobber the `.adoc`
+  output's own path either (see the "F1"/"F4" decisions below).
+
+**Decisions settled while closing this round** (raised as open questions in
+the review, resolved here rather than left for a future round):
+
+* **In-place single-file rewriting** (`--input x.adoc --output x.adoc`) is
+  REFUSED, not silently allowed -- consistent with tree mode's existing hard
+  overlap guard, and because there is no legitimate reason to want the
+  original script text replaced by the rendered `image::` reference with no
+  way back.
+* **Hardlinks** are explicitly OUT OF SCOPE, same as before this round: none
+  of the guards above detect a hardlink aliasing two output paths (only a
+  symlink). Real-path resolution cannot distinguish a hardlink from a
+  genuinely separate file at all -- catching this would need an inode-level
+  comparison this module does not perform. Accepted risk for a local,
+  single-user authoring CLI.
+* **`PreviewRenderer.render` has no execution timeout.** A `.kstep.kts`
+  script that never returns (an infinite loop, a blocking I/O call) hangs
+  `kstep asciidoc` indefinitely for that block. Given Decision 4's already-
+  accepted trust boundary (a script runs with full process rights, no
+  sandbox), this is treated as an availability/DX concern rather than a
+  security one -- a `--timeout` flag is left to a future wave rather than
+  added here.
+* **TOCTOU** between a `realPathOfNearestExistingAncestor` real-path check
+  and the actual write remains open, as it was before this round (see
+  Stolperfalle 10 below) -- explicitly accepted, not overlooked.
+
+== Stolperfallen
+
+1. **A `ByteArray` in a `data class`** compares by reference identity.
+   `PreviewOutcome.Rendered` and `RenderedImage` are therefore plain
+   classes, not data classes.
+2. **`[source,kstep]` normally means "syntax-highlight this as kstep"**, not
+   "replace this with an image" — this pre-processor changes that meaning,
+   exactly like `kuml-asciidoc` does for `[source,kuml]`. Documented here and
+   in the README so a document author is not surprised their source listing
+   disappeared.
+3. **This project's own documentation demonstrates the block syntax.**
+   Without `AsciidocScanner`'s foreign-block passthrough (any delimited/
+   comment block not opened by a recognized `kstep` attribute line), running
+   `kstep asciidoc` over this repository's own docs would rewrite the
+   example blocks in this very file. `AsciidocScannerTest`'s A12/A13/A14
+   cases exist specifically to pin this.
+4. **`File.walkTopDown()` follows directory symlinks; `Files.walk` (default
+   options) does not.** Only the latter is used in `AsciidocProcessor`.
+5. **PNG bytes must be produced in memory, not via
+   `ImageIO.write(RenderedImage, String, File)`.** That overload's internal
+   `output.delete()` call is the exact directory-deletion bug ADR-0011's
+   R20b regression test guards against for `kstep render`; `PreviewRenderer`
+   never calls it (it writes to a `ByteArrayOutputStream` instead), and
+   `PreviewWriter`'s own `isDirectory` guard is now belt-and-braces rather
+   than the only line of defence.
+6. **Non-deterministic Summary/Notice cards.** `KStepScriptHost` defaults a
+   BLANK `Part21Header.timestamp` to `Instant.now()`, and
+   `PreviewSummary.modelLines` prints that timestamp — so a documentation
+   build that renders a product-structure-only or Pflicht-Fallback card
+   produces different bytes on every run, causing Git churn in a docs repo.
+   Geometry renders are unaffected (no timestamp appears in that content).
+   For this wave: documented here and in the README (give `stepFile` an
+   explicit `timestamp` for a reproducible doc build); a `--deterministic`/
+   timestamp-override flag is Folge-Welle A-7.
+7. **The kotlin-logging startup banner prints to STDOUT.** Inherited from
+   ADR-0011's own Stolperfalle 5 — `kstep-cli`'s `Main.kt` still disables it
+   as the very first statement in `main()`; no logger in
+   `kstep-docs:kstep-asciidoc` is instantiated at class-load time in a way
+   that could race it.
+8. **`include("kstep-docs:kstep-asciidoc")` creates an implicit
+   `:kstep-docs` project with no build file of its own** — a pure namespace
+   directory, verified not to break `./gradlew clean check`.
+9. **`--require-geometry` applies to every block in the document**, not
+   per-block — there is deliberately no per-block override attribute for it.
+10. **TOCTOU between a real-path check and the actual write is open, by
+    design.** `OutputRoot`/`AsciidocPaths.realPathOfNearestExistingAncestor`
+    resolve every guard's real path, then the actual `Files.write`/
+    `Files.writeString`/`Files.copy` runs afterwards, as a separate
+    filesystem call — a symlink swapped into place in between (a
+    classic time-of-check-to-time-of-use race) is not detected. Accepted for
+    a local, single-user authoring CLI with no concurrent untrusted writer;
+    would need atomic open-and-verify primitives (not available portably via
+    `java.nio.file`) to close fully. Explicitly re-affirmed, not
+    rediscovered, during Round 5 (see that section's own Decisions).
+11. **`Files.createDirectories` on a pre-existing directory SYMLINK is a
+    no-op — but only when the symlink actually resolves.** A *dangling*
+    directory symlink at that exact position throws `FileAlreadyExistsException`
+    instead (the leaf "exists" as a filesystem entry, but resolving it as a
+    directory fails). A relative symlink's target text is resolved against
+    the symlink's OWN parent directory by the OS, never against the
+    creating process's current working directory — a symlink built from a
+    `File`/`Path` that is itself still relative at symlink-creation time
+    silently produces a target text that resolves to the WRONG location
+    once the symlink sits somewhere other than directly under that relative
+    root (a mistake made once while writing this ADR's own Round 5
+    regression tests, caught immediately by an unexpectedly-thrown
+    `FileAlreadyExistsException`, and fixed by real-pathing the target
+    before creating the symlink). Test fixtures that build a symlink
+    programmatically must use an absolute target.
+12. **A two-line ("setext") AsciiDoc section title underline
+    (`Title\n-----------\n`) is syntactically indistinguishable, at the
+    single-regex level, from an opening AsciiDoc delimited-block marker** --
+    three of `FOREIGN_DELIM`'s seven characters (`-`, `=`, `+`) double as
+    valid setext underline characters. `AsciidocScanner` resolves this
+    exactly the way Asciidoctor itself does: it consults the line
+    immediately above and only treats the run as a genuine delimiter opener
+    when that line is absent, blank, or itself another special line (a
+    delimiter, attribute line, fence opener, macro line, block title, or
+    attribute entry), OR the underline's length differs from that line's by
+    more than one character, OR the candidate title line itself is not at
+    document start and not directly preceded by a blank line (Asciidoctor
+    never recognizes a setext title anywhere else, e.g. mid-paragraph).
+    Getting this wrong bites in three directions -- all three regressions
+    this fix protects against were found by review, not written
+    intentionally into any earlier commit:
+    * Two setext-titled sections of matching-length titles pair up as a
+      bogus, already-"closed" foreign block, silently swallowing any real
+      kstep construct written between them with **no diagnostic at all** --
+      `kstep asciidoc` exits 0 and reports the block was never rewritten.
+      See `AsciidocScannerTest` A39.
+    * A single setext-titled section immediately above a *genuine* foreign
+      delimited block -- exactly Stolperfalle 3's "this project's own
+      documentation demonstrates the block syntax" case, just with a
+      setext title instead of a `==` one -- makes the setext underline
+      itself get misread as the delimiter's OPENER, so the real delimiter a
+      few lines later is read as (mismatched-length, so never-closing)
+      *content* instead. `AsciidocProcessor` aborts the WHOLE tree at that
+      title's line with `unclosed '...' block`, even though every document
+      in the tree, including the one at fault, is entirely legitimate. See
+      `AsciidocScannerTest` A40.
+    * (Review Round 7) The initial fix only excluded the two kstep-specific
+      attribute-line spellings (`[kstep]`/`[source,kstep]`) from being
+      mistaken for setext title TEXT, and relied on coincidental line-length
+      mismatch for everything else. A generic AsciiDoc admonition/block
+      attribute line (`[TIP]`, `[NOTE]`, `[WARNING]`, `[quote]`,
+      `[example]`, `[[anchor]]`), a block title (`.Caption`), or an
+      attribute entry (`:imagesdir:`, `:toc!:`) directly above a
+      same-length delimiter run was still misread as a setext title, so the
+      admonition's own delimiter never opened as a foreign block and a
+      kstep macro DEMONSTRATED inside it (exactly Stolperfalle 3's own
+      rationale, just for `[TIP]`/`====` instead of
+      `[source,asciidoc]`/`----`) got rendered for real instead of shielded
+      verbatim. Separately, a delimiter-shaped line in the middle of a
+      running paragraph (no blank line above, not at document start) was
+      also misread as a setext title purely by length coincidence, when
+      Asciidoctor itself would never treat it as one there and would read
+      it as a genuine listing-block opener instead. Fixed by adding the
+      three line-shape exclusions above and the blank-line/document-start
+      precondition. See `AsciidocScannerTest` A41-A44.
+
+== Folge-Wellen
+
+Deliberately NOT part of this wave:
+
+* A live `AsciidoctorJ` extension for non-Antora consumers (Decision 1
+  explains why this wave is pre-processing-only).
+* Antora component-descriptor/`modules/ROOT/` layout integration.
+* Publishing `kstep-docs:kstep-asciidoc` to Maven Central.
+* A `--report json` machine-readable summary for `kstep asciidoc` (no
+  `--output json` exists for this subcommand at all — see the CLI's own
+  `--input`/`--output` flags, which already use those names for file paths,
+  `kuml`-style, rather than `export`/`render`'s `--output json` format
+  flag).
+* An inline `kstep:path[]` macro usable inside running text (only the
+  block-macro form, `kstep::path[]`, is supported).
+* Incremental rendering/content-hash caching across repeated `kstep
+  asciidoc` runs.
+* Per-block camera attributes (`view`/`azimuth`/`elevation` — blocked on
+  ADR-0011's own still-open R-2) and multi-shape scenes (still blocked on
+  R-3, unchanged by this wave).
+* Deterministic Summary/Notice cards (Stolperfalle 6) — geometry renders are
+  already deterministic; a `--deterministic` timestamp override is future
+  work.
+* A Gradle plugin wiring `kstep asciidoc` automatically into an
+  Antora/Asciidoctor build step.

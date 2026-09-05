@@ -1,7 +1,7 @@
 package dev.kstep.tests
 
-import dev.kstep.cli.RenderFormat
-import dev.kstep.cli.deriveRenderOutputPath
+import dev.kstep.preview.RenderFormat
+import dev.kstep.preview.deriveRenderOutputPath
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe

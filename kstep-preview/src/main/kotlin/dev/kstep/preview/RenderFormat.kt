@@ -1,4 +1,4 @@
-package dev.kstep.cli
+package dev.kstep.preview
 
 private const val SCRIPT_EXTENSION = ".kstep.kts"
 
@@ -38,7 +38,7 @@ enum class RenderFormat {
 
         /** Format implied by an explicit `--out` path's extension. `null` if the extension is
          *  not one of `.svg`/`.png`/`.txt`/`.glb` -- callers fall through to the next resolution
-         *  step (see [RenderCommand]'s format-resolution order). Deliberately does NOT recognize
+         *  step (see [PreviewRenderer]'s format-resolution order). Deliberately does NOT recognize
          *  `.gltf`: this writer only ever produces the binary container, and resolving a
          *  `.gltf`-named `--out` to [GLB] via `--format auto` would silently write binary data
          *  into a file extension that conventionally means plain-text JSON. */
@@ -62,7 +62,7 @@ enum class RenderFormat {
  *
  * [format] must already be resolved to a concrete container ([RenderFormat.SVG]/[RenderFormat.PNG]/
  * [RenderFormat.TEXT]/[RenderFormat.GLB]) -- passing [RenderFormat.AUTO] is a programming error (this function has
- * no content to resolve `auto` against; that resolution happens earlier, see [RenderCommand]).
+ * no content to resolve `auto` against; that resolution happens earlier, see [PreviewRenderer]).
  */
 fun deriveRenderOutputPath(
     scriptPath: String,

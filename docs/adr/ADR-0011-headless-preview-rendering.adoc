@@ -434,7 +434,14 @@ cleanly on a machine without OCCT and still produce a `summary` (not a
 
 | R-6
 | `kstep-asciidoc`: a `[kstep]` Asciidoctor macro, mirroring
-  `kuml-dev/kUML`'s `kuml-asciidoc` extension.
+  `kuml-dev/kUML`'s `kuml-asciidoc` extension. DONE, see
+  docs/adr/ADR-0019-kstep-asciidoc.adoc -- corrected there: both this
+  entry's wording and the `kuml-asciidoc` precedent it names are a
+  PRE-PROCESSING CLI (`kstep asciidoc --input/--output`), not a live
+  Asciidoctor macro/extension registered into the conversion pipeline --
+  Antora's own Node.js/Asciidoctor.js pipeline cannot load a JVM extension
+  at all, which is the whole reason `kuml-asciidoc` itself is a
+  pre-processing CLI.
 
 | R-7
 | Robustness pass on `kstep export`: catch `IOException` on write and

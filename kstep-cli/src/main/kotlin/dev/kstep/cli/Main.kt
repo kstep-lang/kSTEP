@@ -1,6 +1,8 @@
 package dev.kstep.cli
 
+import dev.kstep.asciidoc.OnErrorPolicy
 import dev.kstep.mcp.runStdioServer
+import dev.kstep.preview.RenderFormat
 import dev.kstep.script.KStepScriptHost
 import dev.kstep.script.KStepScriptOutcome
 import dev.kstep.script.KStepScriptOutcomeCodes
@@ -41,6 +43,18 @@ Usage:
           --with-step                      Include the Part-21 text in the preview (svg/png/text)
           --require-geometry               Fail (exit 1) instead of silently falling back to text
           --output json                    Emit the result as a JSON document instead of text
+  kstep asciidoc [opts]                    Pre-render kstep blocks/macros in AsciiDoc files
+      --input <file.adoc>                  Single-file mode (requires --output)
+      --output <file.adoc>                 Output path for --input
+      --input-dir <dir>                    Directory mode (requires --output-dir); mirrors the
+                                            tree, copying non-.adoc files unchanged
+      --output-dir <dir>                   Output root for --input-dir
+      -f, --format <svg|png>               Default image format (default: svg), per-block
+                                            overridable via a block/macro attribute
+      -w, --width <px>                     Default image width, 16..4096 (default: 1024)
+          --height <px>                    Default image height, 16..4096 (default: 768)
+          --require-geometry               Fail instead of embedding a geometry-unavailable card
+          --on-error <fail|card>           Invalid script: abort (default) or embed an error card
   kstep help                                Show this message
 """
 
@@ -64,9 +78,32 @@ sealed interface CliCommand {
         val jsonOutput: Boolean,
     ) : CliCommand
 
+    data class Asciidoc(
+        val mode: AsciidocMode,
+        val format: RenderFormat,
+        val width: Int,
+        val height: Int,
+        val requireGeometry: Boolean,
+        val onError: OnErrorPolicy,
+    ) : CliCommand
+
     data class ShowUsage(
         val exitCode: Int,
     ) : CliCommand
+}
+
+/** Exactly one of two modes -- a sealed type makes "single-file XOR tree, never both, never
+ *  neither" structurally impossible to get wrong, unlike four nullable Strings would. */
+sealed interface AsciidocMode {
+    data class SingleFile(
+        val inputPath: String,
+        val outputPath: String,
+    ) : AsciidocMode
+
+    data class Tree(
+        val inputDir: String,
+        val outputDir: String,
+    ) : AsciidocMode
 }
 
 // Pure Array<String> -> CliCommand mapping, deliberately free of I/O/coroutines/exitProcess side
@@ -80,6 +117,7 @@ fun resolveCommand(args: Array<String>): CliCommand =
         args.size == 1 && (args[0] == "help" || args[0] == "--help") -> CliCommand.ShowUsage(exitCode = 0)
         args[0] == "export" -> resolveExportCommand(args.drop(1))
         args[0] == "render" -> resolveRenderCommand(args.drop(1))
+        args[0] == "asciidoc" -> resolveAsciidocCommand(args.drop(1))
         else -> CliCommand.ShowUsage(exitCode = 1)
     }
 
@@ -190,6 +228,113 @@ private fun resolveRenderCommand(rest: List<String>): CliCommand {
     )
 }
 
+// Same "any malformed combination -> ShowUsage(1), never a partially-filled command" discipline
+// as resolveExportCommand/resolveRenderCommand above. Two mutually exclusive modes (single-file
+// via --input/--output, or a whole tree via --input-dir/--output-dir) -- mixing them, giving
+// neither, or giving one half of a pair without the other, all resolve to ShowUsage(1). This
+// subcommand takes no positional argument at all (unlike export/render, whose script path IS
+// positional) -- ANY bare argument is rejected, not silently accepted as a script path.
+// --format is deliberately restricted to svg/png here (auto/text/glb/gltf are rejected, even
+// though RenderFormat.parse itself recognizes them) -- see
+// docs/adr/ADR-0019-kstep-asciidoc.adoc's Decision 3 on why an embeddable image format is the
+// only sensible default container for this subcommand.
+private fun resolveAsciidocCommand(rest: List<String>): CliCommand {
+    var inputPath: String? = null
+    var outputPath: String? = null
+    var inputDir: String? = null
+    var outputDir: String? = null
+    var format: RenderFormat = RenderFormat.SVG
+    var width = DEFAULT_RENDER_WIDTH
+    var height = DEFAULT_RENDER_HEIGHT
+    var requireGeometry = false
+    var onError = OnErrorPolicy.FAIL
+    var i = 0
+    while (i < rest.size) {
+        when (rest[i]) {
+            "--input" -> {
+                inputPath = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--output" -> {
+                outputPath = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--input-dir" -> {
+                inputDir = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--output-dir" -> {
+                outputDir = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "-f", "--format" -> {
+                val value = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                format =
+                    when (value.lowercase()) {
+                        "svg" -> RenderFormat.SVG
+                        "png" -> RenderFormat.PNG
+                        else -> return CliCommand.ShowUsage(1)
+                    }
+                i += 2
+            }
+            "-w", "--width" -> {
+                width = rest.getOrNull(i + 1)?.toIntOrNull() ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--height" -> {
+                height = rest.getOrNull(i + 1)?.toIntOrNull() ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--require-geometry" -> {
+                requireGeometry = true
+                i += 1
+            }
+            "--on-error" -> {
+                val value = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                onError =
+                    when (value.lowercase()) {
+                        "fail" -> OnErrorPolicy.FAIL
+                        "card" -> OnErrorPolicy.CARD
+                        else -> return CliCommand.ShowUsage(1)
+                    }
+                i += 2
+            }
+            else -> return CliCommand.ShowUsage(1)
+        }
+    }
+
+    val mode =
+        when {
+            inputPath != null && inputDir != null -> return CliCommand.ShowUsage(1)
+            inputPath != null -> {
+                // --input pairs only with --output -- a stray --output-dir alongside it must be
+                // rejected, not silently discarded (see this function's own KDoc: "mixing them,
+                // giving neither, or giving one half of a pair without the other, all resolve to
+                // ShowUsage(1)" already promised this for the FULL half-mix case, not just the
+                // pure inputPath/inputDir mix checked above).
+                if (outputDir != null) return CliCommand.ShowUsage(1)
+                val resolvedOutput = outputPath ?: return CliCommand.ShowUsage(1)
+                AsciidocMode.SingleFile(inputPath, resolvedOutput)
+            }
+            inputDir != null -> {
+                // Symmetric guard: --input-dir pairs only with --output-dir.
+                if (outputPath != null) return CliCommand.ShowUsage(1)
+                val resolvedOutputDir = outputDir ?: return CliCommand.ShowUsage(1)
+                AsciidocMode.Tree(inputDir, resolvedOutputDir)
+            }
+            else -> return CliCommand.ShowUsage(1)
+        }
+
+    return CliCommand.Asciidoc(
+        mode = mode,
+        format = format,
+        width = width,
+        height = height,
+        requireGeometry = requireGeometry,
+        onError = onError,
+    )
+}
+
 fun main(args: Array<String>) {
     // kotlin-logging prints a one-line "kotlin-logging: initializing... active logger factory:
     // ..." banner to STDOUT (not stderr) the very first time ANY KotlinLogging.logger{} call
@@ -207,6 +352,7 @@ fun main(args: Array<String>) {
         CliCommand.StartMcpServer -> runBlocking { runStdioServer() }
         is CliCommand.Export -> runExport(command)
         is CliCommand.Render -> runRender(command)
+        is CliCommand.Asciidoc -> runAsciidoc(command)
         is CliCommand.ShowUsage -> {
             println(USAGE_TEXT)
             if (command.exitCode != 0) exitProcess(command.exitCode)

@@ -592,6 +592,23 @@ scan before either lands.
   the content varies. See the ADR for the full content/exit-code matrix
   and the two distinct "OCCT is unavailable" failure points this wave had
   to fall back from cleanly.
+* Asciidoctor pre-processing integration (see
+  `docs/adr/ADR-0019-kstep-asciidoc.adoc`): a new `kstep asciidoc` subcommand
+  pre-renders `kstep` preview blocks (a markdown fence, an AsciiDoc
+  `[kstep]`/`[source,kstep]` delimited block, or a `kstep::path[]` block
+  macro) in `.adoc` files into `image::` references -- mirroring
+  `kuml-dev/kUML`'s `kuml-asciidoc` pre-processing approach, since a JVM
+  Asciidoctor extension cannot run inside Antora's own Node.js pipeline. Two
+  new modules: `kstep-preview` (the headless-preview pipeline extracted,
+  unchanged in behavior, out of `kstep-cli`'s former `RenderCommand.kt`, now
+  shared by both `kstep render` and `kstep asciidoc`) and
+  `kstep-docs:kstep-asciidoc` (the scanner/rewriter/file-tree processor
+  itself, depending only on `kstep-preview` -- never on `kstep-cli`).
+  `RenderExtractionParityTest` pins the two callers' output as byte-identical
+  subprocess-vs-in-process. Pure source move for `RenderFormat`/
+  `PreviewSummary` (`dev.kstep.cli` -> `dev.kstep.preview`) -- no published
+  artifacts exist yet, so this is not a breaking change for anyone outside
+  this repo.
 
 See <<roadmap,Roadmap>> for what's planned next.
 
@@ -864,6 +881,61 @@ See <<roadmap,Roadmap>> for what's planned next.
   JSON document, deliberately not a handwritten escaper (correct JSON
   escaping of script-supplied `asset.extras` text is a security property,
   not a style choice). See docs/adr/ADR-0016-gltf-glb-export.adoc.
+
+| `kstep-preview`
+| Shared headless-preview pipeline extracted from `kstep-cli`'s former
+  `RenderCommand.kt` -- kstep-asciidoc wave (`dev.kstep.preview`)
+| Working: `PreviewRenderer.render(PreviewRequest): PreviewOutcome` is the ONE
+  implementation of ADR-0011's Container-Regel and Pflicht-Fallback -- evaluate
+  a `*.kstep.kts` script (from a file or inline source text), detect geometry,
+  resolve the SVG/PNG/text/GLB container, render bytes, close every shape it
+  triangulated, all with no file I/O, no `exitProcess`, no `println`. `kstep
+  render` (`kstep-cli`) and `kstep asciidoc` (`kstep-docs/kstep-asciidoc`)
+  both call it instead of each carrying their own copy -- see
+  `RenderExtractionParityTest` (`kstep-tests`), which pins the two callers'
+  output as byte-identical. `PreviewWriter` is the small, separate piece that
+  actually writes a `Rendered` outcome's bytes to disk (only `kstep-cli`
+  calls it -- `kstep asciidoc` writes its own image tree via
+  `kstep-docs/kstep-asciidoc`'s `AsciidocProcessor` instead). `RenderFormat`/
+  `PreviewSummary`/`RenderFallbackReasons` moved here unchanged (only their
+  package changed, `dev.kstep.cli` -> `dev.kstep.preview`) from `kstep-cli`.
+  See docs/adr/ADR-0019-kstep-asciidoc.adoc for why this module exists
+  separately from `kstep-render` (so `kstep-viewer` never gains a
+  `kotlin-compiler-embeddable` dependency through it).
+
+| `kstep-docs:kstep-asciidoc`
+| Pre-processing Asciidoctor integration -- `kstep asciidoc` -- kstep-asciidoc
+  wave (`dev.kstep.asciidoc`)
+| Working: `kstep asciidoc --input <f.adoc> --output <f.adoc>` (or
+  `--input-dir`/`--output-dir` for a whole tree) pre-renders `kstep` preview
+  blocks into `image::` references, exactly the way `kuml-dev/kUML`'s own
+  `kuml-asciidoc` pre-processes `[kuml]` blocks for Antora (a JVM Asciidoctor
+  extension cannot run inside Antora's Node.js/Asciidoctor.js pipeline -- see
+  the ADR's Context section). Recognizes three block forms carrying identical
+  semantics -- a `` ```kstep ``` `` markdown fence, an AsciiDoc
+  `[kstep,target,format]`/`[source,kstep]` delimited block, and a
+  `kstep::path.kstep.kts[]` block macro -- via `AsciidocScanner`, a pure,
+  I/O-free, script-free line scanner that leaves any OTHER AsciiDoc delimited/
+  comment block untouched (including this project's own documentation, which
+  demonstrates the syntax). `AsciidocRewriter` renders each recognized block
+  through `kstep-preview`'s `PreviewRenderer` and reassembles the document;
+  `AsciidocProcessor` is the file-tree layer (symlinks skipped and reported,
+  never followed or copied; `--output-dir` may not nest inside `--input-dir`
+  or vice versa). Every macro/attribute path is checked against its
+  containment root through two independent layers -- lexical
+  (`normalize().startsWith(root)`) and physical (`toRealPath()`, which also
+  catches a symlink pointing outside the tree) -- see `AsciidocPaths` and the
+  ADR's Security section. Two failure classes, two behaviors: an
+  environment-side failure (OCCT unavailable, a shape that would not
+  triangulate) degrades to a notice card in the same container, exit 0 (exit
+  1 with `--require-geometry`) -- identical to `kstep render`'s own
+  Pflicht-Fallback; an author-side failure (a script that fails to compile/
+  validate/run) aborts the whole document by default (`--on-error fail`), or
+  renders an error card and continues (`--on-error card`). Depends only on
+  `kstep-preview` -- never on `kstep-cli` (`kstep-cli` depends on THIS
+  module to expose the subcommand; the reverse edge would be a build cycle,
+  enforced by `AsciidocModuleBoundaryTest`). See
+  docs/adr/ADR-0019-kstep-asciidoc.adoc.
 
 | `kstep-viewer`
 | Interactive OCCT shape viewer -- Viewer-Welle 1
@@ -1150,6 +1222,16 @@ directly, deliberately NOT on `kstep-viewer` — verify that stays true
 after any dependency change with
 `./gradlew :kstep-cli:dependencies --configuration runtimeClasspath |
 grep -iE "skiko|compose|androidx"` (must be empty).
+
+=== Building — Asciidoctor pre-processing (`kstep asciidoc`)
+
+`kstep-preview` (the shared pipeline `kstep render`/`kstep asciidoc` both
+call) and `kstep-docs:kstep-asciidoc` (the scanner/rewriter/processor) need
+no extra setup beyond `kstep-render`'s own — no Compose, no OCCT-specific
+build step. `:kstep-docs` itself carries no `build.gradle.kts`; it is a pure
+Gradle namespace directory grouping `:kstep-docs:kstep-asciidoc`, mirroring
+`kuml-dev/kUML`'s own `kuml-docs/` layout. See
+docs/adr/ADR-0019-kstep-asciidoc.adoc.
 
 === Building — glTF/GLB validation (optional)
 
@@ -1774,6 +1856,81 @@ a CI step that must guarantee a real render happened. A script without
 any `shape(...)` call at all (like `bracket.kstep.kts` above) renders a
 product-structure summary card the same way, `content = summary`, exit 0
 — `kstep render` never requires geometry to succeed.
+
+(kstep-asciidoc wave, see docs/adr/ADR-0019-kstep-asciidoc.adoc)
+Pre-rendering `kstep` preview blocks in an AsciiDoc document — the
+DSL-file-per-block-macro equivalent of `kuml-dev/kUML`'s `kuml-asciidoc`
+pre-processor. Three interchangeable block forms; a document can mix all
+three:
+
+[source,asciidoc]
+-----
+// bracket-doc.adoc
+
+A markdown fence, no attributes:
+
+```kstep
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext { name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical" }.getOrThrow()
+val defCtx = productDefinitionContext { name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design" }.getOrThrow()
+val bracket = product("BRK-001") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+val bracketFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
+val definition = productDefinition("BRK-001-D") { formation = bracketFormation; frameOfReference = defCtx }.getOrThrow()
+stepFile(fileName = "bracket.step") { root(definition) }
+```
+
+An AsciiDoc-native delimited block, with attributes:
+
+[kstep,bracket,format=png,width=800,height=600,alt="Bracket assembly"]
+----
+... same script as above ...
+----
+
+A block macro pointing at an existing script file:
+
+kstep::bracket.kstep.kts[format=svg]
+-----
+
+[source,shell]
+----
+kstep asciidoc --input bracket-doc.adoc --output bracket-doc.rendered.adoc
+# Wrote bracket-doc.rendered.adoc (3 block(s))
+# -> bracket-doc.rendered.adoc now has three `image::...[]` lines, and the
+#    corresponding bracket-doc-1.svg/bracket.png/bracket-doc-3.svg files
+#    (named from the INPUT document's basename, and from the second
+#    block's explicit `target=bracket`) sit next to it (or under
+#    `:imagesdir:`, if the document sets one).
+
+kstep asciidoc --input-dir docs/src --output-dir docs/build --format png
+# Mirrors the whole tree: every .adoc is rewritten, every other file
+# (images, includes, ...) is copied unchanged. Symlinks are skipped and
+# reported, never followed.
+----
+
+Only `svg`/`png` are accepted as a block's image format (`auto`/`text`/`glb`
+are rejected outright — an embeddable image is the only sensible container
+here); `--format` sets the document-wide default, overridable per block via
+`format=`. The same Container-Regel/Pflicht-Fallback `kstep render` follows
+applies here too (via the shared `kstep-preview` module) — a script whose
+geometry cannot be rendered this run becomes a notice card in the requested
+image format, exit 0, unless `--require-geometry` is given. A script that
+fails to *compile/validate/run* is a different failure class entirely: by
+default it aborts the WHOLE document (`--on-error fail`, matching a
+compiler's own instinct to stop on a syntax error) — pass `--on-error card`
+to instead embed an error card for that one block and keep going, useful
+while iterating on a document's scripts. Under the default `fail` policy, a
+document with one good block and one broken block writes NEITHER the
+rewritten `.adoc` NOR any of its images — never a half-written result.
+
+Any OTHER AsciiDoc delimited block (`----`/`....`/`====`/`****`/`____`/
+`++++`/`////`) not opened by a recognized `[kstep]`/`[source,kstep]`
+attribute line passes through untouched — including one that happens to
+contain `kstep::path[]`-looking text, e.g. this project's own docs showing
+the syntax (see `docs/adr/ADR-0019-kstep-asciidoc.adoc`'s Stolperfalle 3).
+A two-line ("setext") section title underline (`Title\n-----------\n`) is
+never mistaken for such a delimiter opener, even though a `-----------` run
+alone is indistinguishable from one — the scanner checks the line above it
+first, matching Asciidoctor's own rule (Stolperfalle 12 in the ADR).
 
 [#roadmap]
 == Roadmap (V1 scope)
