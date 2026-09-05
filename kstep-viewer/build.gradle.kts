@@ -22,6 +22,15 @@ dependencies {
     // owning the projection math itself.
     implementation(project(":kstep-render"))
     implementation(libs.kotlin.logging.jvm)
+    // Real runtime dependency, not just testRuntimeOnly below: this module's `application` plugin
+    // makes `:kstep-viewer:run` a genuine long-running process (the on-screen demo viewer), the
+    // same category `kstep-mcp`'s build.gradle.kts already covers with its own `runtimeOnly`.
+    // Without an SLF4J backend on THIS classpath (not just the test one), `:kstep-viewer:run`
+    // fails at startup with NoClassDefFoundError on org.slf4j.LoggerFactory the moment
+    // `OcctNativeLibrary.kt`'s top-level `KotlinLogging.logger {}` is loaded -- discovered
+    // 2026-09-05 when `:kstep-viewer:run` was exercised for the first time since ADR-0018 wired
+    // kotlin-logging into `kstep-geometry`.
+    runtimeOnly(libs.slf4j.simple)
     implementation(compose.desktop.currentOs)
     implementation(libs.compose.material3)
     testImplementation(libs.kotest.runner.junit5)
