@@ -141,8 +141,8 @@ codegen level instead of losing it by switching to generated types.
 * *Breaking changes, no migration path needed.* The Part-21 wire format
   (`kstep-step21`) and the `kstep-mcp` tool contract both change
   incompatibly (new/changed argument arity and shapes throughout). No
-  migration path is provided or needed: the project is pre-1.0
-  (`0.1.0-SNAPSHOT`), unreleased, with no persisted `.step` files or
+  migration path is provided or needed: at the time of this
+  decision the project was pre-1.0 (`0.1.0-SNAPSHOT`) and unreleased, with no persisted `.step` files or
   deployed MCP clients to preserve compatibility for.
 * *No schema or license-boundary change.* All twelve entities' EXPRESS
   declarations were already vendored in `ap242-v1-entities.exp` and

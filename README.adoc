@@ -10,8 +10,10 @@ image:https://img.shields.io/github/license/kstep-lang/kSTEP[Apache 2.0,link=htt
 image:https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml/badge.svg?branch=master[CI,link=https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml]
 
 WARNING: kSTEP is in early, pre-release development (M2). The API is
-unstable and no artifacts are published yet. See <<status,Status>> below
-for what actually works today.
+unstable and no artifacts are published yet; the first tagged release,
+https://github.com/kstep-lang/kSTEP/releases/tag/v0.1.0[v0.1.0], is a
+source-only pre-release (see link:CHANGELOG.adoc[CHANGELOG]). See
+<<status,Status>> below for what actually works today.
 
 Licensed under the Apache License, Version 2.0. See link:LICENSE[LICENSE].
 
