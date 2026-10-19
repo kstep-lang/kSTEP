@@ -4,10 +4,19 @@ import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.KModifier
 import com.squareup.kotlinpoet.STRING
 import dev.kstep.express.codegen.Ap242V1CodeGen
+import dev.kstep.express.codegen.CodeGenException
+import dev.kstep.express.codegen.CodeGenOptions
+import dev.kstep.express.semantic.ExpressSemanticModelBuilder
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.maps.shouldBeEmpty
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
+import java.io.File
+import java.net.JarURLConnection
+import java.net.URL
 
 /**
  * M1 Welle 4, deliverable 3: regenerates the six V1 AP242 entities from the real-schema
@@ -17,6 +26,42 @@ import io.kotest.matchers.shouldBe
  * entities generate (previously five of six; `next_assembly_usage_occurrence`'s real SUBTYPE OF
  * chain now flattens via `dev.kstep.express.semantic.InheritanceResolver` instead of throwing).
  */
+private fun syntheticSchema(body: String) =
+    ExpressSemanticModelBuilder
+        .build("SCHEMA synthetic_ap242_test;\n$body\nEND_SCHEMA;")
+        .schemas
+        .single()
+
+private fun topLevelClassNames(packagePath: String): Set<String> {
+    val urls: List<URL> =
+        Thread
+            .currentThread()
+            .contextClassLoader
+            .getResources(packagePath)
+            .toList()
+    val names = mutableSetOf<String>()
+    urls.forEach { url ->
+        when (url.protocol) {
+            "file" -> File(url.toURI()).listFiles().orEmpty().forEach { names += it.name }
+            "jar" -> {
+                // The JarFile is cached/shared by the JVM; deliberately not closed here.
+                val jar = (url.openConnection() as JarURLConnection).jarFile
+                jar.entries().asSequence().forEach { entry ->
+                    if (entry.name.startsWith("$packagePath/") && '/' !in entry.name.removePrefix("$packagePath/")) {
+                        names += entry.name.removePrefix("$packagePath/")
+                    }
+                }
+            }
+            else -> error("unsupported classpath protocol ${url.protocol} for $url")
+        }
+    }
+    return names
+        .filter { it.endsWith(".class") }
+        .map { it.removeSuffix(".class") }
+        .filter { '$' !in it && !it.endsWith("Kt") && it != "package-info" }
+        .toSet()
+}
+
 class Ap242V1CodeGenTest :
     StringSpec({
         "codegen succeeds for all six V1 entities against real-schema ground truth" {
@@ -124,5 +169,102 @@ class Ap242V1CodeGenTest :
             coreModule.generatedEntityNames shouldContainExactlyInAnyOrder default.generatedEntityNames
             coreModule.fileSpec.typeSpecs.map { it.name } shouldContainExactlyInAnyOrder
                 default.fileSpec.typeSpecs.map { it.name }
+        }
+        "the real V1 extraction emits no ENUMERATION or SELECT type" {
+            val outcome = Ap242V1CodeGen.generate()
+
+            outcome.emittedDefinedTypeNames.shouldBeEmpty()
+            outcome.fileSpec.typeSpecs.none {
+                it.isEnum || it.kind == com.squareup.kotlinpoet.TypeSpec.Kind.INTERFACE
+            } shouldBe
+                true
+        }
+
+        "only reachable TYPEs are emitted, even when the caller passes the default ALL scope" {
+            val schema =
+                syntheticSchema(
+                    """
+                    ENTITY target_e;
+                      s : used_enum;
+                    END_ENTITY;
+                    TYPE used_enum = ENUMERATION OF (a);
+                    END_TYPE;
+                    TYPE unused_enum = ENUMERATION OF (b);
+                    END_TYPE;
+                    """.trimIndent(),
+                )
+
+            val outcome = Ap242V1CodeGen.generate(schema, listOf("target_e"), emptyList(), "x.y", CodeGenOptions())
+
+            outcome.fileSpec.typeSpecs.map { it.name } shouldContainExactlyInAnyOrder listOf("TargetE", "UsedEnum")
+            outcome.emittedDefinedTypeNames shouldBe listOf("used_enum")
+        }
+
+        "a reachable SELECT with a member entity outside targets and support entities fails loudly" {
+            val schema =
+                syntheticSchema(
+                    """
+                    ENTITY target_e;
+                      p : pick;
+                    END_ENTITY;
+                    ENTITY other_e;
+                      v : STRING;
+                    END_ENTITY;
+                    TYPE pick = SELECT (other_e);
+                    END_TYPE;
+                    """.trimIndent(),
+                )
+
+            val exception =
+                shouldThrow<CodeGenException> {
+                    Ap242V1CodeGen.generate(schema, listOf("target_e"), emptyList(), "x.y", CodeGenOptions())
+                }
+            exception.message shouldContain "no emitted Kotlin implementor"
+        }
+
+        "generated names that collide with hand-written kstep-core types are rejected" {
+            val enumCollision =
+                syntheticSchema(
+                    """
+                    ENTITY target_e;
+                      s : product_builder;
+                    END_ENTITY;
+                    TYPE product_builder = ENUMERATION OF (a);
+                    END_TYPE;
+                    """.trimIndent(),
+                )
+            val enumException =
+                shouldThrow<CodeGenException> {
+                    Ap242V1CodeGen.generate(enumCollision, listOf("target_e"), emptyList(), "x.y", CodeGenOptions())
+                }
+            enumException.message shouldContain "ProductBuilder"
+            enumException.message shouldContain "kstep-core"
+
+            val entityCollision =
+                syntheticSchema(
+                    """
+                    ENTITY validation_result;
+                      v : STRING;
+                    END_ENTITY;
+                    """.trimIndent(),
+                )
+            val entityException =
+                shouldThrow<CodeGenException> {
+                    Ap242V1CodeGen.generate(
+                        entityCollision,
+                        listOf("validation_result"),
+                        emptyList(),
+                        "x.y",
+                        CodeGenOptions(),
+                    )
+                }
+            entityException.message shouldContain "ValidationResult"
+        }
+
+        "the reserved-name list covers every hand-written top-level class of the kstep-core packages" {
+            val actual = topLevelClassNames("dev/kstep/core") + topLevelClassNames("dev/kstep/core/ap242")
+
+            actual.isNotEmpty() shouldBe true
+            (actual - Ap242V1CodeGen.KSTEP_CORE_RESERVED_CLASS_NAMES) shouldBe emptySet()
         }
     })

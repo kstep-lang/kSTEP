@@ -10,6 +10,7 @@ import dev.kstep.express.semantic.EntityTypeRef
 import dev.kstep.express.semantic.ExpressAttribute
 import dev.kstep.express.semantic.ExpressDerivedAttribute
 import dev.kstep.express.semantic.ExpressInverseAttribute
+import dev.kstep.express.semantic.ExpressSelectItem
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
 import dev.kstep.express.semantic.IntegerType
 import dev.kstep.express.semantic.InverseAggregationKind
@@ -22,6 +23,7 @@ import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.types.shouldBeInstanceOf
 
@@ -401,6 +403,113 @@ class ExpressSemanticModelTest :
 
             val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
             schema.definedTypes.single { it.name == "thing" }.underlyingSimpleType shouldBe null
+        }
+
+        "closed SELECT captures members resolved to Entity or DefinedType in declaration order" {
+            val source =
+                """
+                SCHEMA select_items_test;
+                ENTITY widget;
+                  id : STRING;
+                END_ENTITY;
+                TYPE label_t = STRING;
+                END_TYPE;
+                TYPE status_e = ENUMERATION OF (open, closed);
+                END_TYPE;
+                TYPE thing = SELECT (WIDGET, Label_T, status_e);
+                END_TYPE;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val thing =
+                ExpressSemanticModelBuilder.build(source).schemas.single().definedTypes.single {
+                    it.name ==
+                        "thing"
+                }
+            thing.selectItems shouldBe
+                listOf(
+                    ExpressSelectItem.Entity("widget"),
+                    ExpressSelectItem.DefinedType("label_t"),
+                    ExpressSelectItem.DefinedType("status_e"),
+                )
+            thing.unsupportedReason shouldBe null
+        }
+
+        "EXTENSIBLE, GENERIC_ENTITY, BASED_ON and bare SELECTs carry no item list but a reason" {
+            fun thing(decl: String) =
+                ExpressSemanticModelBuilder
+                    .build(
+                        """
+                        SCHEMA select_unsupported_test;
+                        ENTITY a;
+                          id : STRING;
+                        END_ENTITY;
+                        ENTITY b;
+                          id : STRING;
+                        END_ENTITY;
+                        TYPE base = SELECT (a);
+                        END_TYPE;
+                        TYPE thing = $decl;
+                        END_TYPE;
+                        END_SCHEMA;
+                        """.trimIndent(),
+                    ).schemas
+                    .single()
+                    .definedTypes
+                    .single { it.name == "thing" }
+
+            val extensible = thing("EXTENSIBLE SELECT (a)")
+            extensible.selectItems shouldBe null
+            extensible.unsupportedReason!! shouldContain "EXTENSIBLE"
+            val generic = thing("EXTENSIBLE GENERIC_ENTITY SELECT (a)")
+            generic.selectItems shouldBe null
+            generic.unsupportedReason!! shouldContain "EXTENSIBLE"
+            val basedOn = thing("SELECT BASED_ON base WITH (b)")
+            basedOn.selectItems shouldBe null
+            basedOn.unsupportedReason!! shouldContain "BASED_ON"
+            val bare = thing("SELECT")
+            bare.selectItems shouldBe null
+            bare.unsupportedReason shouldNotBe null
+        }
+
+        "SELECT with an unknown member throws SemanticModelException naming SELECT and member" {
+            val source =
+                """
+                SCHEMA select_unknown_member_test;
+                ENTITY a;
+                  id : STRING;
+                END_ENTITY;
+                TYPE thing = SELECT (a, ghost);
+                END_TYPE;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val exception = shouldThrow<SemanticModelException> { ExpressSemanticModelBuilder.build(source) }
+            exception.message!! shouldContain "thing"
+            exception.message!! shouldContain "ghost"
+        }
+
+        "EXTENSIBLE and BASED_ON ENUMERATIONs carry an unsupportedReason" {
+            val source =
+                """
+                SCHEMA enum_unsupported_reason_test;
+                TYPE ext = EXTENSIBLE ENUMERATION OF (a, b);
+                END_TYPE;
+                TYPE ok = ENUMERATION OF (a, b);
+                END_TYPE;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val types =
+                ExpressSemanticModelBuilder
+                    .build(source)
+                    .schemas
+                    .single()
+                    .definedTypes
+                    .associateBy { it.name }
+            types.getValue("ext").enumerationItems shouldBe null
+            types.getValue("ext").unsupportedReason!! shouldContain "EXTENSIBLE"
+            types.getValue("ok").unsupportedReason shouldBe null
         }
 
         "real AP242 ground truth captures DERIVE and UNIQUE clauses without disturbing WHERE-rule capture" {

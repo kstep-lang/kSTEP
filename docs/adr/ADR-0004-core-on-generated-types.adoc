@@ -5,6 +5,9 @@
 
 Accepted, implemented (kSTEP M2 Welle 10).
 
+Amended by ADR-0020 (entities may implement member-less marker sealed
+interfaces for SELECT membership; they remain flat `data class`es).
+
 == Context
 
 M2 Welle 8 closed the *known* gap between `kstep-core`'s six

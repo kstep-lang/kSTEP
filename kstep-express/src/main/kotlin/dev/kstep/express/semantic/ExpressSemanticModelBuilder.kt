@@ -50,7 +50,7 @@ object ExpressSemanticModelBuilder {
         val definedTypes =
             bodyDeclarations
                 .mapNotNull { it.declaration()?.typeDecl() }
-                .map { buildDefinedType(it, source) }
+                .map { buildDefinedType(it, symbols, source) }
         return ExpressSchema(
             name = name,
             entities = entities,
@@ -168,18 +168,62 @@ object ExpressSemanticModelBuilder {
     }
 
     // underlyingSimpleType is set only for the direct simple-alias case (concreteTypes ->
-    // simpleTypes). A bare typeRef is captured as aliasedTypeName and an explicit ENUMERATION
-    // item list as enumerationItems; aggregations and SELECT stay unresolved (null) — see
-    // ExpressDefinedType.
+    // simpleTypes). A bare typeRef is captured as aliasedTypeName, an explicit ENUMERATION
+    // item list as enumerationItems and a closed SELECT list as selectItems (members resolved
+    // against the symbol table: the grammar's namedTypes cannot distinguish entityRef from
+    // typeRef, so this builder never branches on .entityRef()/.typeRef()). Aggregations stay
+    // unresolved (null) -- see ExpressDefinedType.
     private fun buildDefinedType(
         ctx: ExpressParser.TypeDeclContext,
+        symbols: SchemaSymbols,
         source: String,
     ): ExpressDefinedType {
+        val typeName = ctx.typeId().text
         val concrete = ctx.underlyingType().concreteTypes()
         val simpleTypes = concrete?.simpleTypes()
-        val enumeration = ctx.underlyingType().constructedTypes()?.enumerationType()
+        val constructed = ctx.underlyingType().constructedTypes()
+        val enumeration = constructed?.enumerationType()
+        val select = constructed?.selectType()
+
+        var unsupportedReason: String? = null
+        if (enumeration != null) {
+            unsupportedReason =
+                when {
+                    enumeration.EXTENSIBLE() != null ->
+                        "EXTENSIBLE ENUMERATION is open-ended; never modeled as a closed Kotlin enum"
+                    enumeration.enumerationExtension() != null ->
+                        "ENUMERATION BASED_ON extends another enumeration; not modeled as a closed Kotlin enum"
+                    enumeration.enumerationItems() == null -> "ENUMERATION without an item list"
+                    else -> null
+                }
+        }
+        var selectItems: List<ExpressSelectItem>? = null
+        if (select != null) {
+            val selectList = select.selectList()
+            when {
+                select.EXTENSIBLE() != null ->
+                    unsupportedReason = "EXTENSIBLE SELECT is open-ended; never modeled as a closed sealed interface"
+                select.selectExtension() != null ->
+                    unsupportedReason =
+                        "SELECT BASED_ON extends another SELECT; not modeled as a closed sealed interface"
+                selectList == null -> unsupportedReason = "SELECT without a member list"
+                else ->
+                    selectItems =
+                        selectList.namedTypes().map { member ->
+                            val raw = member.text
+                            val key = raw.lowercase()
+                            symbols.entityNamesByLowerCase[key]?.let { ExpressSelectItem.Entity(it) }
+                                ?: symbols.definedTypeNamesByLowerCase[key]?.let { ExpressSelectItem.DefinedType(it) }
+                                ?: throw SemanticModelException(
+                                    "SELECT TYPE '$typeName' member '$raw' is not a known entity or TYPE in " +
+                                        "this schema (cross-schema USE/REFERENCE resolution is out of scope " +
+                                        "for V1)",
+                                )
+                        }
+            }
+        }
         return ExpressDefinedType(
-            name = ctx.typeId().text,
+            name = typeName,
             underlyingSimpleType = simpleTypes?.let { mapSimpleTypes(it, source) },
             aliasedTypeName = concrete?.typeRef()?.text,
             // EXTENSIBLE enumerations are open-ended by definition: modelling one as a closed
@@ -190,6 +234,8 @@ object ExpressSemanticModelBuilder {
                     ?.enumerationItems()
                     ?.enumerationItem()
                     ?.map { it.text },
+            selectItems = selectItems,
+            unsupportedReason = unsupportedReason,
         )
     }
 

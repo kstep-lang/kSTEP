@@ -37,9 +37,10 @@ chain resolves): `product_definition_relationship`,
 `product_definition_relationship`'s `relating_product_definition`/
 `related_product_definition` are typed `product_definition` here rather
 than the real schema's `product_definition_or_reference` SELECT type
-(SELECT types have no Kotlin mapping in this codebase and vendoring one
-plus its full member-entity list was judged to exceed the "minimal,
-gap-driven excerpt" precedent this NOTICE documents); the `SUPERTYPE OF`
+(the codegen resolves closed SELECT types since ADR-0020, but vendoring
+one plus its full member-entity list and the follow-up work in the
+builders, Part 21 writer/reader and kstep-mcp was judged to exceed the
+"minimal, gap-driven excerpt" precedent this NOTICE documents); the `SUPERTYPE OF`
 clauses of `product_definition_usage`/`assembly_component_usage`/
 `application_context_element` are kept verbatim in full but name sibling
 entities (`make_from_usage_option`, `multi_level_reference_designator`,

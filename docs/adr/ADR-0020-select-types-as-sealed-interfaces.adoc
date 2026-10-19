@@ -1,0 +1,100 @@
+= ADR-0020: EXPRESS SELECT types as Kotlin sealed interfaces
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP semantic-core Welle A). Amends ADR-0004 (generated
+entities stay flat `data class`es but may now implement marker interfaces).
+
+== Context
+
+`dev.kstep.express.codegen` could not resolve an EXPRESS `SELECT`: any attribute
+typed by one threw `CodeGenException`. The real AP242 schema uses SELECTs
+heavily (for example `product_definition_or_reference`, which the vendored excerpt
+had to narrow to `product_definition`). Resolving them is a prerequisite for
+vendoring more of AP242.
+
+The grammar cannot tell an `entityRef` from a `typeRef` inside a `selectList`
+(`namedTypes`), so the semantic model has to resolve members against the schema's
+symbol table. Kotlin offers `sealed interface` as the natural closed-sum type.
+
+== Decision
+
+A closed `TYPE s = SELECT (m1, m2, ...)` becomes `sealed interface S`. Members attach
+from their own side ("hybrid" variant):
+
+[cols="1,2"]
+|===
+| EXPRESS member | Kotlin mapping
+
+| ENTITY `e`
+| The generated `data class E` implements `S` directly (`addSuperinterface`). This
+  also applies to every instantiable subtype of `e` (EXPRESS SELECT membership
+  includes subtypes, `ResolvedEntity.ancestorChain`), so an abstract member still has
+  implementors.
+
+| ENUMERATION TYPE (explicit)
+| `enum class X : S`.
+
+| nested SELECT `t`
+| `sealed interface T : S` (interface inheritance, no wrapper).
+
+| alias TYPE (simple type, or chain ending in simple/ENUMERATION/SELECT)
+| One top-level wrapper per TYPE, shared by all SELECTs: `data class Label(val value: String) : S1, S2`.
+  It mirrors the Part 21 typed parameter `LABEL('x')`.
+
+| EXTENSIBLE / BASED_ON / GENERIC_ENTITY SELECT, EXTENSIBLE or BASED_ON ENUMERATION,
+  aggregation-backed TYPE, alias of an entity
+| Rejected with a `CodeGenException` naming the SELECT, the member and the concrete reason.
+|===
+
+EXTENSIBLE and BASED_ON forms are open-ended by definition and are never modelled as a
+closed type. The semantic model records them with `selectItems == null` and an
+`unsupportedReason`, so alias chains that end there report the failing link.
+
+Further rules:
+
+* Validation (`SelectResolution`): duplicate members (case-insensitive), SELECT cycles
+  (reported as `a -> b -> a`), nesting deeper than 32 (reported as a depth limit, not as a
+  cycle), and an entity member without any emitted implementor all fail loudly. The cycle
+  and depth walk is memoised, so diamond-shaped SELECT graphs are not re-explored.
+* Sealed interfaces require all implementors in the same module and package. The generator
+  emits one `FileSpec` per schema, so a SELECT can never be spread over two generated files.
+* Wrappers receive the same `options.constructorVisibility` / `@ConsistentCopyVisibility`
+  treatment as entities, so no unvalidated construction path is reopened (see ADR-0004).
+* Emission and resolution are separate. `CodeGenOptions.definedTypeScope` selects between
+  `ALL` (default, historic) and `REACHABLE_FROM_EMITTED_ENTITIES`. Resolution always uses the
+  full TYPE list, so `identifier`/`label`/`text` still resolve to `String` when the AP242
+  generator filters what it writes. `Ap242V1CodeGen` forces the reachable scope; a drift check
+  in its `main()` asserts that currently no ENUMERATION/SELECT is emitted.
+* `Ap242V1CodeGen` rejects any generated top-level name that equals a hand-written type of
+  `dev.kstep.core` / `dev.kstep.core.ap242` (`KSTEP_CORE_RESERVED_CLASS_NAMES`, kept in sync
+  by a classpath-scan test), because those packages import the generated package explicitly
+  and would be shadowed silently.
+
+== Consequences
+
+* The generated AP242 file is unchanged: the bundled excerpt contains neither ENUMERATION nor
+  SELECT types. The behaviour is covered by synthetic-schema tests.
+* Follow-up work is needed once a SELECT-typed attribute is actually vendored (for example
+  `product_definition_or_reference`); none of it is done in this wave:
+** `Part21Writer`: `valueArgs` must write an entity member as `Ref`, an enum member as
+   `Part21Value.Enumeration`, and a wrapper as `Part21Value.Typed(KEYWORD, [inner])` (KEYWORD =
+   upper-cased EXPRESS TYPE name); `children()` must follow entity values behind the interface.
+** `Part21GraphResolver` (reader): resolve a typed parameter to the matching wrapper; accept
+   a reference to any member entity.
+** `kstep-mcp` (`EntityStore`/`EntityStoreEntry`): unchanged while wrappers are not store
+   entries; lookups through SELECT attributes need exhaustive `when` over the sealed interface.
+* Marker interfaces have no members, so entity constructors, `equals`/`hashCode`, `copy` and
+  the `kstep-core` builders are unaffected.
+
+== Alternatives considered
+
+* *One wrapper per member, entities included* (`S.ProductDefinitionMember(val value: ProductDefinition)`).
+  Keeps entities identical to ADR-0004, but costs an allocation and a wrapping call at every
+  use site, forces the writer and `kstep-mcp` to unwrap, and cannot express subtype membership
+  without a wrapper explosion. Rejected.
+* *Kotlin class inheritance for SELECTs.* Impossible with flat, final `data class`es (ADR-0004).
+* *Per-SELECT nested wrapper classes.* Closer to a single SELECT but duplicates the Part 21
+  typed-parameter type for each SELECT that lists the same alias TYPE. Top-level, shared wrappers
+  were chosen; the price is a larger global namespace, guarded by the collision check.

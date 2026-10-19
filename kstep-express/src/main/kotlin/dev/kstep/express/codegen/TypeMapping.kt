@@ -59,11 +59,16 @@ internal fun resolveKotlinTypeName(
 // Follows a chain of `TYPE a = b; TYPE b = c; ...` (ExpressDefinedType.aliasedTypeName) until it
 // reaches a simple-type alias (resolved by recursing into resolveKotlinTypeName on that
 // underlying type, so an alias ending in LOGICAL/NUMBER/BINARY still throws the same
-// CodeGenException a direct attribute of that type would) or an ENUMERATION (mapped to the
-// Kotlin enum class ExpressKotlinCodeGenerator emits under the TYPE's own name). Cyclic chains
-// and chains longer than MAX_ALIAS_CHAIN_DEPTH throw rather than loop. Aggregation- and SELECT-
-// backed TYPEs, and aliases of entities, still throw.
+// CodeGenException a direct attribute of that type would), an ENUMERATION (mapped to the
+// Kotlin enum class ExpressKotlinCodeGenerator emits under the TYPE's own name) or a closed
+// SELECT (mapped to the sealed interface emitted under the TYPE's own name, ADR-0020).
+// Cyclic chains and chains longer than MAX_ALIAS_CHAIN_DEPTH throw rather than loop, naming the
+// link that actually failed. EXTENSIBLE/BASED_ON SELECTs and ENUMERATIONs, aggregation-backed
+// TYPEs and aliases of entities still throw, each with its own specific reason.
 internal const val MAX_ALIAS_CHAIN_DEPTH = 32
+
+/** Nesting limit for SELECT-in-SELECT membership; deliberately the same bound as alias chains. */
+internal const val MAX_SELECT_NESTING_DEPTH = MAX_ALIAS_CHAIN_DEPTH
 
 private fun resolveDefinedTypeRef(
     type: DefinedTypeRef,
@@ -75,31 +80,46 @@ private fun resolveDefinedTypeRef(
     var currentName = type.typeName
     while (true) {
         val key = currentName.lowercase()
-        if (!visited.add(key) || visited.size > MAX_ALIAS_CHAIN_DEPTH) {
+        if (key in visited) {
             throw CodeGenException(
-                "$errorContext: TYPE '${type.typeName}' has a cyclic or over-long alias chain " +
+                "$errorContext: TYPE '${type.typeName}' has a cyclic alias chain " +
+                    "(${(visited.toList() + key).joinToString(" -> ")}); codegen cannot resolve it",
+            )
+        }
+        visited.add(key)
+        if (visited.size > MAX_ALIAS_CHAIN_DEPTH) {
+            throw CodeGenException(
+                "$errorContext: TYPE '${type.typeName}' has an over-long alias chain that exceeds " +
+                    "MAX_ALIAS_CHAIN_DEPTH ($MAX_ALIAS_CHAIN_DEPTH) at '$currentName' " +
                     "(${visited.joinToString(" -> ")}); codegen cannot resolve it",
             )
         }
+        val path = visited.joinToString(" -> ")
         val definedType =
             definedTypes[key]
                 ?: throw CodeGenException(
-                    "$errorContext: attribute references TYPE '$currentName', which codegen has no " +
-                        "resolution info for (no matching ExpressDefinedType was supplied for this schema)",
+                    "$errorContext: attribute references TYPE '$currentName' (alias path $path), which " +
+                        "codegen has no resolution info for (no matching ExpressDefinedType was supplied " +
+                        "for this schema, or the name is an entity rather than a TYPE)",
                 )
+        definedType.unsupportedReason?.let { reason ->
+            throw CodeGenException(
+                "$errorContext: TYPE '$currentName' (reached from '${type.typeName}' via $path) is " +
+                    "unsupported: $reason",
+            )
+        }
         definedType.underlyingSimpleType?.let {
             return resolveKotlinTypeName(it, packageName, errorContext, definedTypes)
         }
-        if (definedType.enumerationItems != null) {
+        if (definedType.enumerationItems != null || definedType.selectItems != null) {
             return ClassName(packageName, NamingConventions.toClassName(definedType.name))
         }
         currentName =
             definedType.aliasedTypeName
                 ?: throw CodeGenException(
-                    "$errorContext: TYPE '$currentName' (reached from '${type.typeName}') does not resolve to a " +
-                        "simple STRING/INTEGER/REAL/" +
-                        "BOOLEAN alias or an ENUMERATION (it aggregates, selects, or extends another " +
-                        "enumeration); only simple-alias chains and explicit ENUMERATION OF (...) are resolved",
+                    "$errorContext: TYPE '$currentName' (reached from '${type.typeName}' via $path) is an " +
+                        "aggregation-backed TYPE (or another form with no Kotlin mapping); only simple-alias " +
+                        "chains, explicit ENUMERATION OF (...) and closed SELECT (...) are resolved",
                 )
     }
 }

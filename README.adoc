@@ -109,13 +109,21 @@ this writing:
   `LOGICAL`/`NUMBER`/`BINARY`-typed attributes, and zero-attribute
   entities — raise a structured `CodeGenException` instead of emitting
   a silently wrong or partial class. A `TYPE` reference (`DefinedTypeRef`)
-  resolves *only* the single-level simple-alias case (`TYPE x = STRING;`
-  and the other five simple EXPRESS types — `ExpressDefinedType`'s
-  `underlyingSimpleType`) to its underlying Kotlin type; anything
-  needing further indirection — an aggregation, a
-  `SELECT`/`ENUMERATION`, or a `TYPE` that itself references another
-  `TYPE` — still raises `CodeGenException`, deliberately not resolved
-  transitively (M1 Welle 4).
+  resolves transitively (cycle- and depth-guarded, depth limit 32): a
+  `TYPE` alias chain ending in a simple EXPRESS type maps to its Kotlin
+  type, an explicit `ENUMERATION OF (...)` to a Kotlin `enum class`, and
+  a closed `SELECT (...)` to a Kotlin `sealed interface` (ADR-0020:
+  member entities, including the instantiable subtypes of a member,
+  implement it directly; enum members implement it; a nested `SELECT`
+  extends it; alias members get one shared top-level wrapper
+  `data class`). Not resolved, each with a specific `CodeGenException`:
+  `EXTENSIBLE`/`BASED_ON`/`GENERIC_ENTITY` `SELECT`s,
+  `EXTENSIBLE`/`BASED_ON` enumerations, aggregation-backed `TYPE`s, and
+  aliases of entities. Note that the bundled AP242 excerpt itself
+  contains no `ENUMERATION` or `SELECT` type, so the generated
+  `kstep-core` file is unaffected by `SELECT` support (see
+  `docs/adr/ADR-0020-select-types-as-sealed-interfaces.adoc` for the
+  open follow-up work in the Part 21 writer/reader and `kstep-mcp`).
 * (M1 Welle 4) The generator has now run against **real AP242 ground
   truth** for the first time, not just the hand-written AP242-subset
   fixture. A curated excerpt of the official
@@ -647,8 +655,8 @@ See <<roadmap,Roadmap>> for what's planned next.
 | Working: parses EXPRESS source into an ANTLR parse tree (verified
   against a real-schema excerpt, not just the AP242-subset fixture);
   walks it into a semantic AST; generates Kotlin
-  `data class`es from that AST, including single-level simple `TYPE`-alias
-  resolution; evaluates the supported WHERE-rule expression subset
+  `data class`es from that AST, including transitive `TYPE`-alias,
+  `ENUMERATION` and closed `SELECT` resolution; evaluates the supported WHERE-rule expression subset
   against instance attribute values. (M2 Welle 4) Also evaluates `DERIVE`
   initializer expressions within that same supported subset, via
   `DerivedAttributeEvaluator` and the new `WhereRuleEvaluator.evaluateToValue`
@@ -1951,11 +1959,14 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   reference) is now done too — see the SUBTYPE OF
   inheritance-flattening entry in <<status,Status>> above
   (`dev.kstep.express.semantic.InheritanceResolver`). Still pending:
-  `DERIVE`/`INVERSE`/`UNIQUE` clause codegen (still not started), and
-  `SELECT`-type resolution. Transitive `TYPE`-alias chains (cycle- and
-  depth-guarded) and explicit `ENUMERATION OF (...)` types (emitted as
-  Kotlin `enum class`es; `EXTENSIBLE`/`BASED_ON` enumerations stay
-  unsupported) are now resolved by codegen.
+  `DERIVE`/`INVERSE`/`UNIQUE` clause codegen (still not started).
+  Transitive `TYPE`-alias chains (cycle- and depth-guarded), explicit
+  `ENUMERATION OF (...)` types (emitted as Kotlin `enum class`es;
+  `EXTENSIBLE`/`BASED_ON` enumerations stay unsupported) and closed
+  `SELECT` types (emitted as Kotlin `sealed interface`s, see ADR-0020;
+  `EXTENSIBLE`/`BASED_ON`/`GENERIC_ENTITY` `SELECT`s stay unsupported)
+  are now resolved by codegen. The real AP242 excerpt still contains no
+  `SELECT`; vendoring `product_definition_or_reference` is follow-up work.
   `DERIVE`/`UNIQUE`
   *evaluation* (as opposed to codegen) is now partially done — capture
   was M1 Welle 6, and M2 Welle 4 added evaluation for the WHERE-rule-

@@ -32,11 +32,13 @@
     .related_product_definition are typed `product_definition` here.
     The real schema types them `product_definition_or_reference`, a
     SELECT type (introduced in the move from AP203/214 to AP242) that
-    is not itself vendored — resolving a SELECT type has no Kotlin
-    mapping in dev.kstep.express.codegen.TypeMapping (V1 scope, see
-    README), and vendoring the SELECT plus its full list of selectable
-    entity types would balloon this excerpt well past the "minimal,
-    gap-driven" precedent NOTICE documents. `product_definition` is the
+    is not itself vendored. The codegen resolves closed SELECT types
+    since ADR-0020 (sealed interfaces), but vendoring the SELECT (plus
+    product_definition_reference) would also change the
+    next_assembly_usage_occurrence constructor types and require
+    follow-up work in kstep-core's builders, the Part 21 writer/reader
+    and kstep-mcp, and would balloon this excerpt well past the
+    "minimal, gap-driven" precedent NOTICE documents. `product_definition` is the
     common/expected case for AP242's own product-structure entities, so
     this narrows the SELECT to its most useful member rather than
     resolving it in full.

@@ -2,6 +2,7 @@ package dev.kstep.express.codegen
 
 import com.squareup.kotlinpoet.FileSpec
 import com.squareup.kotlinpoet.KModifier
+import com.squareup.kotlinpoet.TypeSpec
 import dev.kstep.express.semantic.ExpressSchema
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
 import dev.kstep.express.semantic.InheritanceResolver
@@ -15,9 +16,13 @@ import java.io.File
  * and `kstep-tests`' `Ap242V1CodeGenTest`, which drives [generate] directly for per-entity
  * assertions the Gradle task's own success/failure counts can't express.
  *
- * Note: generateFile emits every explicit ENUMERATION TYPE of the schema it is given, and this
- * object filters only `entities`. The bundled extraction currently has none; if one is ever added,
- * filter `definedTypes` here too (and watch for clashes with hand-written kstep-core classes).
+ * Only ENUMERATION/SELECT TYPEs *reachable* from the emitted entities are written out
+ * ([DefinedTypeScope.REACHABLE_FROM_EMITTED_ENTITIES], enforced here regardless of what the caller
+ * passes); the full TYPE list still serves as the resolution map. The bundled extraction has none
+ * that are reachable (see `EXPECTED_EMITTED_DEFINED_TYPES`). Every generated top-level type name is
+ * also checked against [KSTEP_CORE_RESERVED_CLASS_NAMES], the hand-written types of `dev.kstep.core`
+ * and `dev.kstep.core.ap242`, which import the generated package explicitly and would otherwise
+ * be silently shadowed or become ambiguous.
  */
 object Ap242V1CodeGen {
     const val SCHEMA_RESOURCE_PATH = "/dev/kstep/express/codegen/ap242-v1-entities.exp"
@@ -54,7 +59,7 @@ object Ap242V1CodeGen {
     // product_definition_usage, assembly_component_usage) are deliberately NOT listed here: nothing
     // in the emitted file references them as an attribute type, so emitting them would add classes
     // with no incoming reference -- they stay resolver-only ancestors, not emitted Kotlin.
-    private val SUPPORT_ENTITY_NAMES =
+    val SUPPORT_ENTITY_NAMES =
         listOf(
             "approval_status",
             "person",
@@ -68,6 +73,8 @@ object Ap242V1CodeGen {
         val fileSpec: FileSpec,
         val generatedEntityNames: List<String>,
         val skipped: Map<String, String>,
+        /** Original EXPRESS names (declaration order) of the ENUMERATION/SELECT TYPEs written to the file. */
+        val emittedDefinedTypeNames: List<String> = emptyList(),
     )
 
     fun loadSchema(): ExpressSchema {
@@ -108,20 +115,69 @@ object Ap242V1CodeGen {
     val CORE_MODULE_OPTIONS =
         CodeGenOptions(constructorVisibility = KModifier.INTERNAL, consistentCopyVisibility = true)
 
+    /**
+     * Top-level type names hand-written in kstep-core's `dev.kstep.core` and `dev.kstep.core.ap242`
+     * packages (plus their `*Kt` file facades), which import `dev.kstep.generated.ap242v1.*`
+     * explicitly; a generated type with one of these names would shadow/ambiguate silently there.
+     * Kept in sync by Ap242V1CodeGenTest's classpath scan.
+     */
+    val KSTEP_CORE_RESERVED_CLASS_NAMES: Set<String> =
+        setOf(
+            "ValidationResult",
+            "DslViolation",
+            "DslViolationCodes",
+            "ProductBuilder",
+            "ProductDefinitionBuilder",
+            "ProductDefinitionFormationBuilder",
+            "NextAssemblyUsageOccurrenceBuilder",
+            "ApprovalBuilder",
+            "ApprovalStatusBuilder",
+            "PersonBuilder",
+            "OrganizationBuilder",
+            "PersonAndOrganizationBuilder",
+            "ProductContextBuilder",
+            "ProductDefinitionContextBuilder",
+            "ApplicationContextBuilder",
+            // File facades of the hand-written Kotlin files.
+            "ValidationResultKt",
+            "DslViolationKt",
+            "ApplicationContextKt",
+            "ApprovalKt",
+            "ApprovalStatusKt",
+            "NextAssemblyUsageOccurrenceKt",
+            "OrganizationKt",
+            "PersonKt",
+            "PersonAndOrganizationKt",
+            "ProductKt",
+            "ProductContextKt",
+            "ProductDefinitionKt",
+            "ProductDefinitionContextKt",
+            "ProductDefinitionFormationKt",
+            "WhereRuleViolationMappingKt",
+        )
+
     fun generate(
         packageName: String = DEFAULT_PACKAGE_NAME,
         options: CodeGenOptions = CodeGenOptions(),
+    ): Outcome = generate(loadSchema(), TARGET_ENTITY_NAMES, SUPPORT_ENTITY_NAMES, packageName, options)
+
+    fun generate(
+        schema: ExpressSchema,
+        targetEntityNames: List<String>,
+        supportEntityNames: List<String>,
+        packageName: String,
+        options: CodeGenOptions,
+        reservedClassNames: Set<String> = KSTEP_CORE_RESERVED_CLASS_NAMES,
     ): Outcome {
-        val schema = loadSchema()
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
         val resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema)
 
         val skipped = mutableMapOf<String, String>()
         val generated = mutableListOf<String>()
-        TARGET_ENTITY_NAMES.forEach { name ->
+        targetEntityNames.forEach { name ->
             val resolved =
                 requireNotNull(resolvedEntities[name]) {
-                    "target entity '$name' not found in $SCHEMA_RESOURCE_PATH"
+                    "target entity '$name' not found in the supplied schema"
                 }
             try {
                 ExpressKotlinCodeGenerator.generateEntityType(resolved, packageName, definedTypesByLowerName, options)
@@ -131,11 +187,43 @@ object Ap242V1CodeGen {
             }
         }
 
-        val emittedNames = (generated + SUPPORT_ENTITY_NAMES).toSet()
+        val emittedNames = (generated + supportEntityNames).toSet()
         val filteredSchema = schema.copy(entities = schema.entities.filter { it.name in emittedNames })
-        val fileSpec = ExpressKotlinCodeGenerator.generateFile(filteredSchema, packageName, resolvedEntities, options)
-        return Outcome(fileSpec, generated, skipped)
+        // Scope is forced: only reachable TYPEs are emitted, whatever the caller's options say.
+        val scopedOptions = options.copy(definedTypeScope = DefinedTypeScope.REACHABLE_FROM_EMITTED_ENTITIES)
+        val fileSpec =
+            ExpressKotlinCodeGenerator.generateFile(
+                filteredSchema,
+                packageName,
+                resolvedEntities,
+                scopedOptions,
+            )
+
+        fileSpec.typeSpecs.forEach { typeSpec ->
+            val name = checkNotNull(typeSpec.name)
+            if (name in reservedClassNames) {
+                throw CodeGenException(
+                    "AP242 codegen: generated ${kindOf(typeSpec)} '$name' collides with a hand-written kstep-core " +
+                        "type of the same name (dev.kstep.core / dev.kstep.core.ap242), which imports the " +
+                        "generated package explicitly; rename/adjust before emitting",
+                )
+            }
+        }
+        val emittedDefinedTypeNames =
+            schema.definedTypes
+                .filter { dt ->
+                    (dt.enumerationItems != null || dt.selectItems != null) &&
+                        fileSpec.typeSpecs.any { it.name == NamingConventions.toClassName(dt.name) }
+                }.map { it.name }
+        return Outcome(fileSpec, generated, skipped, emittedDefinedTypeNames)
     }
+
+    private fun kindOf(typeSpec: TypeSpec): String =
+        when {
+            typeSpec.kind == TypeSpec.Kind.INTERFACE -> "SELECT type (sealed interface)"
+            typeSpec.isEnum -> "ENUMERATION type"
+            else -> "entity or wrapper class"
+        }
 
     fun generateAndWrite(
         outputDir: File,
@@ -159,6 +247,10 @@ private val EXPECTED_GENERATED =
         "person_and_organization",
     )
 private val EXPECTED_SKIPPED = emptySet<String>()
+
+// The bundled extraction has no ENUMERATION/SELECT TYPE reachable from the twelve emitted entities
+// (only STRING aliases). If that changes, the generated kstep-core file changes -- fail loudly.
+private val EXPECTED_EMITTED_DEFINED_TYPES = emptySet<String>()
 
 // Deliberately plain println, not kotlin-logging (kSTEP M2 Welle 2 scope decision): this main()
 // IS the generateExpressKotlin Gradle task's own console report, the same category of output as
@@ -199,5 +291,10 @@ fun main(args: Array<String>) {
     }
     check(outcome.skipped.keys == EXPECTED_SKIPPED) {
         "generateExpressKotlin: expected to skip $EXPECTED_SKIPPED but skipped ${outcome.skipped.keys}"
+    }
+    check(outcome.emittedDefinedTypeNames.toSet() == EXPECTED_EMITTED_DEFINED_TYPES) {
+        "generateExpressKotlin: expected to emit defined types $EXPECTED_EMITTED_DEFINED_TYPES but emitted " +
+            "${outcome.emittedDefinedTypeNames} -- the generated kstep-core file changed, update " +
+            "EXPECTED_EMITTED_DEFINED_TYPES in Ap242V1CodeGen.kt deliberately if this is intended"
     }
 }

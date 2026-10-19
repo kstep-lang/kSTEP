@@ -6,7 +6,9 @@ import com.squareup.kotlinpoet.FunSpec
 import com.squareup.kotlinpoet.KModifier
 import com.squareup.kotlinpoet.ParameterSpec
 import com.squareup.kotlinpoet.PropertySpec
+import com.squareup.kotlinpoet.TypeName
 import com.squareup.kotlinpoet.TypeSpec
+import dev.kstep.express.semantic.DefinedTypeRef
 import dev.kstep.express.semantic.ExpressDefinedType
 import dev.kstep.express.semantic.ExpressEntity
 import dev.kstep.express.semantic.ExpressSchema
@@ -33,14 +35,28 @@ import dev.kstep.express.semantic.ResolvedEntity
 data class CodeGenOptions(
     val constructorVisibility: KModifier? = null,
     val consistentCopyVisibility: Boolean = false,
+    val definedTypeScope: DefinedTypeScope = DefinedTypeScope.ALL,
 )
+
+/**
+ * Which ENUMERATION/SELECT TYPEs [ExpressKotlinCodeGenerator.generateFile] emits. Emission and
+ * *resolution* are separate: the full `schema.definedTypes` always stays available for resolving
+ * attribute types (e.g. `identifier` -> STRING); this only filters what is written out.
+ */
+enum class DefinedTypeScope {
+    /** Every explicit ENUMERATION and closed SELECT of the schema (historic behaviour). */
+    ALL,
+
+    /** Only those reachable from the emitted entities' attribute types (see [DefinedTypeReachability]). */
+    REACHABLE_FROM_EMITTED_ENTITIES,
+}
 
 /**
  * Generates idiomatic Kotlin `data class`es from an [ExpressSchema], one per *instantiable*
  * entity, using KotlinPoet's structured `FileSpec`/`TypeSpec` object model. The semantic model
  * is permissive; this layer is strict — it throws [CodeGenException] for any construct it
  * doesn't yet turn into Kotlin (redeclared attributes, LOGICAL/NUMBER/BINARY attributes,
- * defined-TYPE references, zero-attribute entities) instead of emitting silently-wrong or
+ * unsupported defined-TYPE forms, zero-attribute entities) instead of emitting silently-wrong or
  * partial classes. Constructor parameters follow the kUML "named parameters everywhere"
  * convention: every EXPRESS attribute becomes a named, and — for OPTIONAL attributes —
  * defaulted, constructor parameter, in EXPRESS declaration order.
@@ -73,58 +89,174 @@ object ExpressKotlinCodeGenerator {
         options: CodeGenOptions = CodeGenOptions(),
     ): FileSpec {
         val fileBuilder = FileSpec.builder(packageName, NamingConventions.toClassName(schema.name))
+        // Resolution map: ALWAYS the full, unfiltered TYPE list (insertion order = declaration order).
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
+
         // Declaration order is preserved for readability, but codegen must not rely on it:
         // Kotlin doesn't require forward declaration within a file, so entities can
         // reference other entities regardless of their relative order in the schema.
-        //
-        // Distinct EXPRESS entity names can collide once mapped through
-        // NamingConventions.toClassName (same underscore-collapsing/case-normalizing
-        // behavior as toPropertyName), which would otherwise make this loop silently add
-        // two same-named TypeSpecs to the same FileSpec — non-compiling Kotlin emitted with
-        // no diagnostic. Guard loudly instead, mirroring the per-entity seenPropertyNames
-        // check in generateEntityType/addAttribute.
-        val seenClassNames = mutableSetOf<String>()
-        schema.entities.forEach { entity ->
-            val resolved =
-                requireNotNull(resolvedEntities[entity.name]) {
-                    "entity '${entity.name}' has no resolved inheritance info; resolvedEntities must be " +
-                        "computed (via InheritanceResolver.resolve) against a schema that includes this entity, " +
-                        "even if that schema is then filtered before being passed to generateFile"
-                }
-            // ABSTRACT SUPERTYPE: contributes attributes to its subtypes, never emitted itself.
-            if (!resolved.isInstantiable) return@forEach
+        val emittedEntities =
+            schema.entities.mapNotNull { entity ->
+                val resolved =
+                    requireNotNull(resolvedEntities[entity.name]) {
+                        "entity '${entity.name}' has no resolved inheritance info; resolvedEntities must be " +
+                            "computed (via InheritanceResolver.resolve) against a schema that includes this " +
+                            "entity, even if that schema is then filtered before being passed to generateFile"
+                    }
+                // ABSTRACT SUPERTYPE: contributes attributes to its subtypes, never emitted itself.
+                resolved.takeIf { it.isInstantiable }
+            }
 
-            val className = NamingConventions.toClassName(entity.name)
-            if (!seenClassNames.add(className)) {
+        // Emission scope for ENUMERATION / SELECT TYPEs (independent of the resolution map above).
+        val emittableKeys =
+            definedTypesByLowerName
+                .filterValues { it.enumerationItems != null || it.selectItems != null }
+                .keys
+        val emittedTypeKeys =
+            when (options.definedTypeScope) {
+                DefinedTypeScope.ALL -> emittableKeys
+                DefinedTypeScope.REACHABLE_FROM_EMITTED_ENTITIES ->
+                    DefinedTypeReachability.reachableEmittableTypes(emittedEntities, definedTypesByLowerName)
+            }
+        // Declaration order, regardless of discovery order in the reachability walk.
+        val enumKeys =
+            definedTypesByLowerName
+                .filter { (key, dt) -> key in emittedTypeKeys && dt.enumerationItems != null }
+                .keys
+        val selectKeys =
+            definedTypesByLowerName
+                .filter { (key, dt) -> key in emittedTypeKeys && dt.selectItems != null }
+                .keys
+
+        val selectModel =
+            SelectResolution.analyze(
+                schemaName = schema.name,
+                packageName = packageName,
+                definedTypes = definedTypesByLowerName,
+                resolvedEntities = resolvedEntities,
+                emittedEntityNames = emittedEntities.map { it.entity.name.lowercase() }.toSet(),
+                selectNamesToEmit = selectKeys,
+                enumNamesToEmit = enumKeys,
+            )
+
+        // Distinct EXPRESS names can collide once mapped through NamingConventions.toClassName
+        // (same underscore-collapsing/case-normalizing behavior as toPropertyName), which would
+        // otherwise make this file silently contain two same-named TypeSpecs -- non-compiling
+        // Kotlin emitted with no diagnostic. Guard loudly instead, naming both sides.
+        val seenClassNames = mutableMapOf<String, String>()
+
+        fun claim(
+            kind: String,
+            expressName: String,
+        ) {
+            val className = NamingConventions.toClassName(expressName)
+            val previous = seenClassNames.put(className, "$kind '$expressName'")
+            if (previous != null) {
                 throw CodeGenException(
-                    "schema '${schema.name}': entity '${entity.name}' generates Kotlin class name " +
-                        "'$className', which collides with another entity in the same schema after " +
-                        "EXPRESS-to-Kotlin naming conversion (e.g. differing only in underscore run-length " +
-                        "or case); codegen refuses to emit a file with duplicate class declarations",
+                    "schema '${schema.name}': $kind '$expressName' generates Kotlin class name '$className', " +
+                        "which collides with another entity or enumeration in the same schema " +
+                        "(already generated for $previous) after EXPRESS-to-Kotlin naming conversion " +
+                        "(e.g. differing only in underscore run-length or case); codegen refuses to emit " +
+                        "a file with duplicate class declarations",
                 )
             }
-            fileBuilder.addType(generateEntityType(resolved, packageName, definedTypesByLowerName, options))
         }
-        schema.definedTypes.filter { it.enumerationItems != null }.forEach { definedType ->
-            val className = NamingConventions.toClassName(definedType.name)
-            if (!seenClassNames.add(className)) {
-                throw CodeGenException(
-                    "schema '${schema.name}': ENUMERATION TYPE '${definedType.name}' generates Kotlin class " +
-                        "name '$className', which collides with another entity or enumeration in the same schema",
+
+        emittedEntities.forEach { resolved ->
+            claim("ENTITY", resolved.entity.name)
+            fileBuilder.addType(
+                generateEntityType(
+                    resolved,
+                    packageName,
+                    definedTypesByLowerName,
+                    options,
+                    selectModel.entitySuperinterfaces[resolved.entity.name.lowercase()].orEmpty(),
+                ),
+            )
+        }
+        selectModel.selects.forEach { (key, select) ->
+            claim("SELECT TYPE", select.name)
+            fileBuilder.addType(
+                generateSelectType(select, packageName, selectModel.selectSuperinterfaces[key].orEmpty()),
+            )
+        }
+        enumKeys.forEach { key ->
+            val enumType = checkNotNull(definedTypesByLowerName[key])
+            claim("ENUMERATION TYPE", enumType.name)
+            fileBuilder.addType(generateEnumType(enumType, selectModel.enumSuperinterfaces[key].orEmpty()))
+        }
+        selectModel.wrapperSuperinterfaces.forEach { (key, supers) ->
+            val alias = checkNotNull(definedTypesByLowerName[key])
+            claim("SELECT member wrapper for TYPE", alias.name)
+            val valueType =
+                resolveKotlinTypeName(
+                    DefinedTypeRef(alias.name),
+                    packageName,
+                    "SELECT member wrapper for TYPE '${alias.name}'",
+                    definedTypesByLowerName,
                 )
-            }
-            fileBuilder.addType(generateEnumType(definedType))
+            fileBuilder.addType(generateSelectWrapperType(alias, valueType, supers, options))
         }
         return fileBuilder.build()
+    }
+
+    /**
+     * `TYPE s = SELECT (a, b, ...)` -> `sealed interface S` (ADR-0020). Members attach to it from
+     * their own side (entities/enums/wrappers list it as a superinterface); a nested SELECT lists
+     * its parent SELECT(s) in [superinterfaces].
+     */
+    fun generateSelectType(
+        definedType: ExpressDefinedType,
+        packageName: String,
+        superinterfaces: List<ClassName> = emptyList(),
+    ): TypeSpec {
+        val items = requireNotNull(definedType.selectItems) { "'${definedType.name}' is not a closed SELECT" }
+        val builder =
+            TypeSpec
+                .interfaceBuilder(NamingConventions.toClassName(definedType.name))
+                .addModifiers(KModifier.SEALED)
+        superinterfaces.forEach { builder.addSuperinterface(it) }
+        builder.addKdoc("%L", "EXPRESS SELECT (${items.joinToString(", ") { it.name }})")
+        return builder.build()
+    }
+
+    /**
+     * Part-21 typed-parameter wrapper (`LABEL('x')`) for an alias TYPE that is a SELECT member:
+     * one top-level `data class` per alias TYPE, shared by every SELECT that lists it.
+     */
+    fun generateSelectWrapperType(
+        definedType: ExpressDefinedType,
+        valueType: TypeName,
+        superinterfaces: List<ClassName>,
+        options: CodeGenOptions = CodeGenOptions(),
+    ): TypeSpec {
+        val constructorBuilder = FunSpec.constructorBuilder()
+        options.constructorVisibility?.let { constructorBuilder.addModifiers(it) }
+        constructorBuilder.addParameter("value", valueType)
+        val builder =
+            TypeSpec
+                .classBuilder(NamingConventions.toClassName(definedType.name))
+                .addModifiers(KModifier.DATA)
+        if (options.consistentCopyVisibility) {
+            builder.addAnnotation(ClassName("kotlin", "ConsistentCopyVisibility"))
+        }
+        superinterfaces.forEach { builder.addSuperinterface(it) }
+        builder.primaryConstructor(constructorBuilder.build())
+        builder.addProperty(PropertySpec.builder("value", valueType).initializer("value").build())
+        builder.addKdoc("%L", "Wrapper for EXPRESS TYPE '${definedType.name}' as a SELECT member.")
+        return builder.build()
     }
 
     // One Kotlin enum class per `TYPE x = ENUMERATION OF (a, b, ...)`, constants UPPERCASED in
     // declaration order. EXPRESS identifiers are case-insensitive, so two items differing only
     // in case would collide -- guarded loudly like every other naming collision here.
-    fun generateEnumType(definedType: ExpressDefinedType): TypeSpec {
+    fun generateEnumType(
+        definedType: ExpressDefinedType,
+        superinterfaces: List<ClassName> = emptyList(),
+    ): TypeSpec {
         val items = requireNotNull(definedType.enumerationItems) { "'${definedType.name}' is not an ENUMERATION" }
         val builder = TypeSpec.enumBuilder(NamingConventions.toClassName(definedType.name))
+        superinterfaces.forEach { builder.addSuperinterface(it) }
         val seen = mutableSetOf<String>()
         items.forEach { item ->
             val constant = item.uppercase()
@@ -177,6 +309,7 @@ object ExpressKotlinCodeGenerator {
         packageName: String,
         definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
         options: CodeGenOptions = CodeGenOptions(),
+        superinterfaces: List<ClassName> = emptyList(),
     ): TypeSpec {
         val entity = resolved.entity
         if (!resolved.isInstantiable) {
@@ -201,6 +334,7 @@ object ExpressKotlinCodeGenerator {
         if (options.consistentCopyVisibility) {
             classBuilder.addAnnotation(ClassName("kotlin", "ConsistentCopyVisibility"))
         }
+        superinterfaces.forEach { classBuilder.addSuperinterface(it) }
 
         // Distinct EXPRESS attribute names can collide once mapped through
         // NamingConventions.toPropertyName (e.g. runs of underscores are collapsed), which
