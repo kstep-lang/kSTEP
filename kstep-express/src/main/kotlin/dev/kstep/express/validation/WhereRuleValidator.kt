@@ -68,4 +68,78 @@ object WhereRuleValidator {
                 WhereRuleViolation(entityName, rule.label, rule.expressionText, rule.sourceLine)
             }
         }
+
+    /**
+     * Validates against an instance-graph [context] (ADR-0022): the rules may use
+     * `SIZEOF(USEDIN(SELF, '<role>'))`. Returns the violations together with every assumption
+     * the evaluation made. Same two failure channels as the other overloads.
+     */
+    fun validate(
+        entityName: String,
+        rules: List<WhereRuleSpec>,
+        attributeValues: Map<String, WhereRuleValue>,
+        context: InstanceEvaluationContext,
+    ): WhereRuleValidationReport {
+        val prepared =
+            rules.map {
+                prepareForInstanceGraph(it) ?: throw UnsupportedWhereExpressionException(
+                    "WHERE rule ${it.label ?: "(unlabeled)"} is outside the supported subset: ${it.expressionText}",
+                )
+            }
+        return validatePrepared(entityName, prepared, attributeValues, context)
+    }
+
+    /**
+     * Parses and builds [rule] once (with `allowInstanceGraphFunctions`) so a population-wide
+     * validation does not re-parse the same text per instance. Returns `null` when the rule is
+     * outside the supported subset (callers decide whether that is an error); a syntactically
+     * invalid rule still throws.
+     */
+    fun prepareForInstanceGraph(rule: WhereRuleSpec): PreparedWhereRule? {
+        val tree = ExpressParserFactory.parseExpression(rule.expressionText)
+        val expression =
+            try {
+                WhereRuleExpressionBuilder.build(
+                    tree,
+                    WhereRuleExpressionBuilder.BuildOptions(allowInstanceGraphFunctions = true),
+                )
+            } catch (_: UnsupportedWhereExpressionException) {
+                return null
+            }
+        return PreparedWhereRule(rule, expression)
+    }
+
+    /** As the graph-context [validate], over rules already built by [prepareForInstanceGraph]. */
+    fun validatePrepared(
+        entityName: String,
+        rules: List<PreparedWhereRule>,
+        attributeValues: Map<String, WhereRuleValue>,
+        context: InstanceEvaluationContext,
+    ): WhereRuleValidationReport {
+        val violations = mutableListOf<WhereRuleViolation>()
+        val assumptions = mutableListOf<AppliedAssumption>()
+        for (rule in rules) {
+            val result = WhereRuleEvaluator.evaluate(rule.expression, attributeValues, context, rule.spec.label)
+            assumptions += result.assumptions
+            if (!result.value) {
+                violations +=
+                    WhereRuleViolation(entityName, rule.spec.label, rule.spec.expressionText, rule.spec.sourceLine)
+            }
+        }
+        return WhereRuleValidationReport(violations, assumptions)
+    }
 }
+
+/** A WHERE rule parsed and built once; immutable and shareable between threads. */
+class PreparedWhereRule internal constructor(
+    val spec: WhereRuleSpec,
+    internal val expression: WhereRuleExpression,
+) {
+    val requiresInstanceGraph: Boolean = expression.requiresInstanceGraph()
+}
+
+/** Violations plus the assumptions made while evaluating the rules against an instance graph. */
+data class WhereRuleValidationReport(
+    val violations: List<WhereRuleViolation>,
+    val assumptions: List<AppliedAssumption>,
+)

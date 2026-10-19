@@ -322,6 +322,19 @@ fun exportFailedError(message: String?): CallToolResult {
     )
 }
 
+fun modelValidationFailedError(message: String?): CallToolResult {
+    val sanitized = sanitizeMessage(message)
+    return CallToolResult(
+        content = listOf(TextContent(text = "Model validation could not be completed: $sanitized")),
+        isError = true,
+        structuredContent =
+            buildJsonObject {
+                put("errorKind", "model_validation_failed")
+                put("message", sanitized)
+            },
+    )
+}
+
 fun internalError(exceptionClassName: String?): CallToolResult =
     CallToolResult(
         content =

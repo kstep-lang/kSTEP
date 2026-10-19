@@ -3,11 +3,13 @@ package dev.kstep.express.validation
 /**
  * The AST of the supported WHERE-rule expression subset — comparisons, `SELF.attribute`
  * references, `AND`/`OR`/`NOT` boolean combinators, string/integer/real literals, and the
- * single-argument `EXISTS(<attribute>)` presence check (kSTEP M2 Welle 10). This is
- * deliberately not a general EXPRESS expression AST: constructs outside this subset
- * (`SIZEOF()`, other built-in/user-defined function calls, aggregate/set operations, `QUERY`,
- * ...) never reach this type — [WhereRuleExpressionBuilder] throws
- * [UnsupportedWhereExpressionException] for them instead of modeling them.
+ * single-argument `EXISTS(<attribute>)` presence check (kSTEP M2 Welle 10), and — only when
+ * [WhereRuleExpressionBuilder.BuildOptions.allowInstanceGraphFunctions] is set — the
+ * instance-graph form `SIZEOF(USEDIN(SELF, '<role>'))` (ADR-0022). This is deliberately not a
+ * general EXPRESS expression AST: constructs outside this subset (other built-in/user-defined
+ * function calls, aggregate/set operations, `QUERY`, ...) never reach this type —
+ * [WhereRuleExpressionBuilder] throws [UnsupportedWhereExpressionException] for them instead of
+ * modeling them.
  */
 sealed interface WhereRuleExpression {
     data class Comparison(
@@ -59,6 +61,23 @@ sealed interface WhereRuleExpression {
         val attribute: String,
     ) : WhereRuleExpression
 
+    /** The whole-instance `SELF` — only ever produced as the first argument of `USEDIN`. */
+    data object SelfInstance : WhereRuleExpression
+
+    /**
+     * `USEDIN(SELF, '<role>')` — a BAG of the usages of the current instance in [roleText]
+     * (`SCHEMA.ENTITY.ATTRIBUTE`, or `''` for any role). Needs an instance-graph context to evaluate.
+     */
+    data class UsedIn(
+        val target: WhereRuleExpression,
+        val roleText: String,
+    ) : WhereRuleExpression
+
+    /** `SIZEOF(aggregate)` — in the supported subset the operand is always a [UsedIn]. */
+    data class SizeOf(
+        val operand: WhereRuleExpression,
+    ) : WhereRuleExpression
+
     data class StringLiteral(
         val value: String,
     ) : WhereRuleExpression
@@ -79,4 +98,37 @@ enum class ComparisonOperator {
     GREATER_THAN_OR_EQUAL,
     EQUAL,
     NOT_EQUAL,
+}
+
+/**
+ * `true` iff evaluating this expression needs an instance graph (it contains [WhereRuleExpression.UsedIn]
+ * or [WhereRuleExpression.SizeOf]). Recursion is bounded by the builder's nesting limit.
+ */
+fun WhereRuleExpression.requiresInstanceGraph(): Boolean = requiresInstanceGraph(0)
+
+private const val MAX_REQUIRES_GRAPH_DEPTH = 512
+
+private fun WhereRuleExpression.requiresInstanceGraph(depth: Int): Boolean {
+    if (depth > MAX_REQUIRES_GRAPH_DEPTH) {
+        throw UnsupportedWhereExpressionException("expression nesting exceeds $MAX_REQUIRES_GRAPH_DEPTH levels")
+    }
+    return when (this) {
+        is WhereRuleExpression.UsedIn,
+        is WhereRuleExpression.SizeOf,
+        is WhereRuleExpression.SelfInstance,
+        -> true
+        is WhereRuleExpression.Comparison ->
+            left.requiresInstanceGraph(depth + 1) ||
+                right.requiresInstanceGraph(depth + 1)
+        is WhereRuleExpression.And -> left.requiresInstanceGraph(depth + 1) || right.requiresInstanceGraph(depth + 1)
+        is WhereRuleExpression.Or -> left.requiresInstanceGraph(depth + 1) || right.requiresInstanceGraph(depth + 1)
+        is WhereRuleExpression.Not -> operand.requiresInstanceGraph(depth + 1)
+        is WhereRuleExpression.SelfAttribute,
+        is WhereRuleExpression.QualifiedSelfAttribute,
+        is WhereRuleExpression.Exists,
+        is WhereRuleExpression.StringLiteral,
+        is WhereRuleExpression.IntegerLiteral,
+        is WhereRuleExpression.RealLiteral,
+        -> false
+    }
 }

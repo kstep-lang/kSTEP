@@ -35,4 +35,9 @@ object DslViolationCodes {
     // kstep-core's move onto the codegen-generated AP242 types, whose SET-typed attributes are
     // the first ones this layer enforces a lower bound on.
     const val AGGREGATION_BOUND_VIOLATED = "KSTEP-A-001"
+
+    // An INVERSE attribute whose evaluated cardinality violates its declared bounds, e.g.
+    // application_context.context_elements : SET [1:?] with no context element referencing the
+    // application_context. Only detectable on population level (ADR-0022), never in a builder.
+    const val INVERSE_BOUND_VIOLATED = "KSTEP-I-001"
 }

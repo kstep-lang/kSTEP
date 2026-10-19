@@ -1,0 +1,186 @@
+= ADR-0022: Reverse-reference index, `SIZEOF(USEDIN(...))` and `INVERSE` on population level
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP semantic-core Welle C). Amends ADR-0004 (a new population-level
+validator in `kstep-core`; builders and constructors are unchanged) and ADR-0021 (`USEDIN` and
+`SIZEOF` stay unsupported inside `DERIVE`; that is left to a later wave).
+
+== Context
+
+Seven of the V1 schema's constraints could not be evaluated because they ask "who refers to
+me?", which a single entity cannot answer:
+
+* `SIZEOF(USEDIN(SELF, '<role>')) <= 1` -- five real WHERE rules: `application_context` WR1 and
+  WR2, `product_definition` WR1, `person_and_organization` WR1 and WR2.
+* `INVERSE context_elements : SET [1:?] OF application_context_element FOR frame_of_reference`
+  on `application_context`.
+
+Counting the rules in `ap242-v1-entities.exp` gives five `SIZEOF(USEDIN)` rules plus one
+`INVERSE`, not the seven the planning note said.
+
+The README claimed that no V1 entity has an `INVERSE` and that `product` WR1 uses
+`SIZEOF(USEDIN(...))`. Both statements are wrong against the vendored schema: `application_context`
+declares an `INVERSE`, and `product` declares **no** WHERE rule at all (the code comment in
+`Product.kt` already said so). This wave corrects the README and leaves `product.kstep_wr1`
+untouched.
+
+All five `USEDIN` rules query `name_attribute`, `description_attribute` or `id_attribute`. None of
+those entities is modelled in the V1 excerpt.
+
+== Decision
+
+=== Three layers, no new module dependency
+
+[cols="1,2,3"]
+|===
+| Layer | Module | Content
+
+| Generic index and evaluation
+| `kstep-express`, package `validation`
+| `ReverseReferenceIndex`, `UsedInRoleResolver`, the `SizeOf`/`UsedIn`/`SelfInstance` AST nodes,
+  `InverseAttributeEvaluator`. Instances are opaque `Any`; no generated type is known.
+
+| AP242 adapter and validator
+| `kstep-core`, package `ap242`
+| `Ap242InstanceDescriber`, `Ap242V1SchemaContext`, `Ap242ModelValidator`
+  (public entry point).
+
+| Consumers
+| `kstep-step21`, `kstep-mcp`
+| `Part21Reader.read(validateModel = true)` (opt-in), MCP tool `validate_model`.
+|===
+
+=== Identity-based, immutable index
+
+The generated entities are `data class`es: two `ApplicationContext("x")` are structurally equal but
+distinct entities. The index therefore uses `IdentityHashMap` everywhere (like `Part21Writer.emit`)
+and `InstanceReference` is deliberately not a data class.
+
+The index is built once per validation run from a snapshot of roots (the population is the
+transitive closure over entity references), then never modified. All state is in `val`
+fields that are not exposed mutably, so it is safely published and readable from any thread without
+locks. The evaluation trace (the list of assumptions) is local to each call.
+
+The walk is iterative with an explicit stack: a 100 000-link chain must not overflow the JVM stack.
+Cycles terminate through the visited set and are not an error for the index (the Part 21 reader
+rejects them earlier on its own).
+
+=== Roles are keyed by the declaring entity
+
+An edge records the entity that *declares* the attribute, not the referrer's concrete type.
+`product_context.frame_of_reference` and `product.frame_of_reference` share a name but are different
+roles; `product_context.frame_of_reference` is declared by `application_context_element`. A
+`USEDIN` role must name the declaring entity (`UsedInRoleResolver` rejects a role that names a
+subtype and tells the user which entity declares it).
+
+=== `USEDIN` semantics
+
+`USEDIN(SELF, 'schema.entity.attribute')` is a BAG with one entry per usage (referrer, attribute,
+occurrence). `USEDIN(SELF, '')` is any role (ISO 10303-11, section 15.26). `SIZEOF` of that BAG is
+its size. An aggregate is never comparable; only `SIZEOF` consumes it.
+
+The builder accepts exactly `SIZEOF(USEDIN(SELF, '<string literal>'))`, only behind
+`BuildOptions(allowInstanceGraphFunctions = true)`. `SIZEOF` and `USEDIN` are lexer keywords of
+`builtInFunction`, so they never reach the `entityConstructor` branch (covered by a test). The bare
+`SELF` is accepted only structurally as the first `USEDIN` argument. Without the flag nothing
+changes: `WhereRuleValidator`'s legacy overloads, `DerivedAttributeEvaluator` and the DERIVE code
+generator still reject both functions, and the sealed-`when` branches the new nodes forced into
+`DerivedAttributeCodeGen` throw an explicit "unsupported" instead of an `else` fallthrough.
+
+=== The assumption for unmodelled entities
+
+The schema excerpt does not model `name_attribute`, `description_attribute` and `id_attribute`.
+`USEDIN` over exactly these three roles (`UsedInRoleResolver.knownUnmodelledRoles`, listed in
+`Ap242V1SchemaContext`) evaluates as the **empty set**, because the population cannot contain a
+referrer of an unmodelled entity. This is an *explicit allow-list*: any other unknown entity, a
+typo (`NAME_ATRIBUTE`), an unknown schema or a missing attribute is a loud
+`WhereRuleEvaluationException`, never a silently empty set.
+
+Every evaluation under that assumption is returned to the caller as an `AppliedAssumption`
+(entity, rule label, role, reason) in `ModelValidationResult.assumptions`, in
+`WhereRuleValidationReport` and in the MCP result. The assumption is not only documented here.
+
+*Honest consequence:* with `SIZEOF = 0 <= 1` the five WHERE rules run for real but are satisfied by
+construction. The only constraint of this wave that can actually fail on V1 data is the `INVERSE`
+bound of `application_context.context_elements`. The rules become meaningful once
+`name_attribute`, `description_attribute` and `id_attribute` are vendored and modelled.
+
+=== Schema name alias
+
+The rules use `AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF`; the excerpt is called
+`ap242_v1_entities`. The resolver accepts the canonical name plus an explicit alias list
+(configured for the AP242 V1 excerpt only). An unknown schema name is an error.
+
+=== Local rules versus graph rules
+
+The builders keep checking only local rules. `Ap242ModelValidator` checks only constraints that
+need the graph: WHERE rules whose AST `requiresInstanceGraph()`, and `INVERSE` bounds. Nothing is
+reported twice (`person` WR1 stays in its builder).
+
+`INVERSE [1:?]` cannot be checked in a builder: when `applicationContext { }` runs, nobody refers to
+the instance yet, so checking there would reject every call. It is checked on population level and
+reported as `KSTEP-I-001`. Semantics follow ISO 10303-11, section 9.2.1.3: bounds default to
+`[1:1]` without an aggregation and `[0:?]` for `SET`/`BAG` without bounds; a `SET` counts distinct
+referrers, a `BAG` every reference; referrers are instances of the target entity or a subtype whose
+`FOR` attribute is the declared one. Only literal `[<int>:<int|?>]` bounds are supported;
+expression bounds and redeclared inverses throw `UnsupportedInverseException`.
+
+=== Consumers
+
+* `Part21Reader.read(..., validateModel = false)`: opt-in. When enabled, the reconstructed
+  instances are validated and the result is returned in `Part21ReadResult.modelValidation`;
+  `isFullySuccessful` is unchanged. Opaque instances (TOLERANT mode) do not take part. The default
+  keeps every existing file and test behaving exactly as before.
+* `Part21Writer` is unchanged: `INVERSE` and `DERIVE` values are never written in Part 21.
+* MCP `validate_model`: no parameters; uses `EntityStore.consistentSnapshot()` (taken under the
+  store's capacity lock; `snapshot()` on a `ConcurrentHashMap` is only weakly consistent). The
+  population is the transitive closure of the store: an overwritten entity that another stored
+  entity still refers to counts as a real referrer.
+* `kstep export` and `KStepScriptHost` do not report model-level findings yet (see Limitations).
+
+=== Limits (DoS)
+
+`ReverseReferenceIndex.Limits`: 100 000 instances, 1 000 000 references, reference chain length 64
+(the same as the Part 21 reader's chain limit), 65 536 references per attribute. The reader's own
+tokenizer cap is 10 000 instances, so the limits cannot trip on a document the reader accepts. Role
+text is limited to 512 characters; strings that come from instance data or user input are clipped
+to 200 characters in exception messages; messages never contain attribute values; the first access
+to `Ap242V1SchemaContext` parses the embedded `.exp` once (thread-safe `lazy`).
+
+== Consequences
+
+* New public API: `Ap242ModelValidator`, `ModelValidationResult`, `InstanceFinding`,
+  `ReverseReferenceIndex` and friends, `AppliedAssumption`, `InverseAttributeEvaluator`,
+  `DslViolationCodes.INVERSE_BOUND_VIOLATED` (`KSTEP-I-001`), the MCP tool `validate_model`.
+* `WhereRuleValue` and `WhereRuleExpression` gained variants. Outside `validation/` a `when` over
+  `WhereRuleValue` has to handle `InstanceAggregate` (one such test source,
+  `DerivedAttributeRuntimeParityTest`, needed an extra branch). No production code outside
+  `kstep-express` was affected.
+* The generated V1 file is byte-identical (verified by regenerating on the Welle B base commit and
+  diffing); the unsupported-expression message text was deliberately left unchanged for that reason.
+
+== Limitations (named, not hidden)
+
+* The five real `USEDIN` rules are satisfied by construction (see above) until `name_attribute`,
+  `description_attribute` and `id_attribute` are modelled.
+* `kstep export`, `KStepScriptHost` and `Part21Reader` (default) do not run the model validator.
+  Whether findings should be errors or warnings there is a follow-up decision.
+* `product` WR1 does not exist in the schema; nothing was added.
+* Out of scope for this wave: `product_definition_occurrence`, `next_assembly_usage_occurrence`
+  UR2 and `product_definition_usage` WR1, the `get_*_value` DERIVE initializers, `USEDIN` inside
+  `DERIVE`, `QUERY` and other built-in functions.
+
+== Alternatives considered
+
+* *Index inside the MCP `EntityStore`.* Wrong layer and coupled to MCP; the Part 21 reader and
+  future consumers could not share it. Rejected.
+* *A continuously maintained, mutable index with a lock.* More complex, needs invalidation when an
+  entity is overwritten, and a read-mostly validation does not need it. Rejected in favour of a
+  per-run immutable snapshot.
+* *Reflection over the generated classes.* Adds a `kotlin-reflect` dependency and cannot recover
+  the declaring entity of an inherited attribute. Rejected; a drift-guard test pins the hand-written
+  describer to the schema instead.
+* *Codegen-generated `referenceEdges()` members.* A reasonable later option; not needed to deliver
+  the semantics now.

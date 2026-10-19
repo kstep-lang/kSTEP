@@ -2,6 +2,7 @@ package dev.kstep.core.ap242
 
 import dev.kstep.core.DslViolation
 import dev.kstep.core.DslViolationCodes
+import dev.kstep.express.validation.InverseEvaluation
 import dev.kstep.express.validation.WhereRuleViolation
 
 internal fun WhereRuleViolation.toDslViolation(): DslViolation =
@@ -63,4 +64,18 @@ internal fun aggregationBoundViolation(
         message =
             "attribute '$attributeName' of entity '$entityName' declares bound $declaredBounds but was given " +
                 "$actualSize element(s)",
+    )
+
+internal fun inverseBoundViolation(
+    entityName: String,
+    evaluation: InverseEvaluation,
+): DslViolation =
+    DslViolation(
+        code = DslViolationCodes.INVERSE_BOUND_VIOLATED,
+        entityName = entityName,
+        ruleLabel = null,
+        expressionText = null,
+        message =
+            "INVERSE attribute '${evaluation.attributeName}' of entity '$entityName' violates its bounds: " +
+                evaluation.failedLink,
     )

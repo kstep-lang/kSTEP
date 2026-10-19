@@ -15,6 +15,7 @@ import dev.kstep.mcp.tools.registerBuildProductTool
 import dev.kstep.mcp.tools.registerExportPart21Tool
 import dev.kstep.mcp.tools.registerGetEntityTool
 import dev.kstep.mcp.tools.registerListEntitiesTool
+import dev.kstep.mcp.tools.registerValidateModelTool
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
@@ -59,7 +60,8 @@ fun buildServer(store: EntityStore = EntityStore()): Server {
     registerExportPart21Tool(server, store)
     registerListEntitiesTool(server, store)
     registerGetEntityTool(server, store)
-    logger.info { "kSTEP MCP server assembled: 15 tools registered" }
+    registerValidateModelTool(server, store)
+    logger.info { "kSTEP MCP server assembled: 16 tools registered" }
     return server
 }
 

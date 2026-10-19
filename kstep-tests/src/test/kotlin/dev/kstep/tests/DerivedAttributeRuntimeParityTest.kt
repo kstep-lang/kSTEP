@@ -95,6 +95,8 @@ private fun checkParity(
         val comparable: Any? =
             when (reference) {
                 WhereRuleValue.Unset -> null
+                // USEDIN/INVERSE aggregates need an instance graph; DERIVE evaluation has none (ADR-0022).
+                is WhereRuleValue.InstanceAggregate -> error("DERIVE evaluation never yields an instance aggregate")
                 is WhereRuleValue.StringValue -> reference.value
                 is WhereRuleValue.BooleanValue -> reference.value
                 is WhereRuleValue.RealValue -> reference.value

@@ -13,6 +13,10 @@ supported `DERIVE` attributes in the class body; they are not constructor parame
 not part of `equals`/`hashCode`/`copy`/`toString`; an inherited explicit attribute that a
 subtype redeclares as DERIVE leaves the constructor).
 
+Amended by ADR-0022 (a population-level `Ap242ModelValidator` checks the constraints that need
+the instance graph -- `SIZEOF(USEDIN(...))` WHERE rules and `INVERSE` bounds; builders and
+constructors are unchanged).
+
 == Context
 
 M2 Welle 8 closed the *known* gap between `kstep-core`'s six

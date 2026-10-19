@@ -7,6 +7,10 @@ Accepted, implemented (kSTEP semantic-core Welle B). Amends ADR-0004 (generated 
 stay flat `data class`es but may carry computed body properties) and ADR-0020 (a SELECT,
 ENUMERATION or entity type is only admissible in a DERIVE as a plain alias).
 
+Amended by ADR-0022: `SIZEOF` and `USEDIN` need an instance graph and stay unsupported inside
+`DERIVE` initializers (the builder is called without `allowInstanceGraphFunctions`); the sealed
+`when`s in `DerivedAttributeCodeGen` reject the new AST nodes explicitly.
+
 == Context
 
 The semantic model captured `DERIVE` clauses (M1 Welle 6) and `DerivedAttributeEvaluator`

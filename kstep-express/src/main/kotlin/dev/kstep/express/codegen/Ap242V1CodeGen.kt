@@ -143,6 +143,12 @@ object Ap242V1CodeGen {
             "ProductContextBuilder",
             "ProductDefinitionContextBuilder",
             "ApplicationContextBuilder",
+            // Population-level validation (ADR-0022).
+            "Ap242ModelValidator",
+            "Ap242InstanceDescriber",
+            "Ap242V1SchemaContext",
+            "InstanceFinding",
+            "ModelValidationResult",
             // File facades of the hand-written Kotlin files.
             "ValidationResultKt",
             "DslViolationKt",

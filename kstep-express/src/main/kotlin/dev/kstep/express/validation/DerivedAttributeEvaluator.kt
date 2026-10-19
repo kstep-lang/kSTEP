@@ -22,6 +22,9 @@ import dev.kstep.express.semantic.ExpressDerivedAttribute
  * [WhereRuleExpression.QualifiedSelfAttribute]; longer chains still fail, naming the first
  * unsupported link.
  *
+ * `SIZEOF`/`USEDIN` stay unsupported in DERIVE initializers (the builder is called without
+ * `allowInstanceGraphFunctions`; ADR-0022 deliberately leaves that to a later wave).
+ *
  * Re-parses [expressionText] on every call, no caching — same scale rationale as
  * [WhereRuleValidator]: at V1's scale there is nothing to cache against yet.
  */

@@ -79,6 +79,9 @@ internal object DerivedAttributeCodeGen {
         message: String,
     ) : RuntimeException(message)
 
+    private const val INSTANCE_GRAPH_UNSUPPORTED =
+        "SIZEOF/USEDIN need an instance graph and are unsupported in DERIVE codegen (ADR-0022)"
+
     private fun unsupported(reason: String): Nothing = throw DeriveUnsupported(reason)
 
     private sealed interface Parsed {
@@ -261,6 +264,12 @@ internal object DerivedAttributeCodeGen {
             is WhereRuleExpression.IntegerLiteral,
             is WhereRuleExpression.RealLiteral,
             -> emptyList()
+            // Unreachable in practice (the builder is invoked without allowInstanceGraphFunctions),
+            // but the sealed `when` must be exhaustive and must never silently accept these.
+            is WhereRuleExpression.SelfInstance,
+            is WhereRuleExpression.UsedIn,
+            is WhereRuleExpression.SizeOf,
+            -> throw DeriveUnsupported(INSTANCE_GRAPH_UNSUPPORTED)
         }
 
     @Suppress("LongParameterList")
@@ -400,6 +409,10 @@ internal object DerivedAttributeCodeGen {
                 is WhereRuleExpression.And -> logical(expression.left, expression.right, "&&", "AND")
                 is WhereRuleExpression.Or -> logical(expression.left, expression.right, "||", "OR")
                 is WhereRuleExpression.Comparison -> comparison(expression)
+                is WhereRuleExpression.SelfInstance,
+                is WhereRuleExpression.UsedIn,
+                is WhereRuleExpression.SizeOf,
+                -> unsupported(INSTANCE_GRAPH_UNSUPPORTED)
             }
 
         private fun lookup(name: String): Operand =

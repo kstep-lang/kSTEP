@@ -1,6 +1,7 @@
 package dev.kstep.step21
 
 import dev.kstep.core.DslViolation
+import dev.kstep.core.ap242.ModelValidationResult
 
 /**
  * The outcome of [Part21Reader.read]: the parsed [header], every successfully re-validated
@@ -23,6 +24,14 @@ data class Part21ReadResult(
     val violations: Map<Int, List<DslViolation>>,
     val skipped: Map<Int, List<Int>>,
     val opaque: Map<Int, Part21EntityInstance> = emptyMap(),
+    /**
+     * Population-level validation (ADR-0022); `null` unless requested via
+     * `Part21Reader.read(validateModel = true)`. Independent of [isFullySuccessful].
+     */
+    val modelValidation: ModelValidationResult? = null,
 ) {
     val isFullySuccessful: Boolean get() = violations.isEmpty() && skipped.isEmpty()
+
+    /** `true` when population-level validation was not requested or found nothing. */
+    val isModelValid: Boolean get() = modelValidation?.isValid ?: true
 }

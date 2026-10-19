@@ -510,6 +510,115 @@ class KStepMcpServerTest :
                 )
         }
 
+        "validate_model reports an empty, a valid and an invalid model" {
+            val server = buildServer()
+            val client = connectedClient(server)
+
+            val empty = client.callTool("validate_model", emptyMap())
+            empty.isError shouldBe null
+            empty.structuredContent!!["valid"]!!.jsonPrimitive.content shouldBe "true"
+            empty.structuredContent!!["instanceCount"]!!.jsonPrimitive.int shouldBe 0
+
+            client
+                .callTool(
+                    "build_application_context",
+                    mapOf("handle" to "AC", "application" to "cc"),
+                ).isError shouldBe
+                null
+            val orphan = client.callTool("validate_model", emptyMap())
+            orphan.isError shouldBe null
+            orphan.structuredContent!!["valid"]!!.jsonPrimitive.content shouldBe "false"
+            val finding =
+                orphan.structuredContent!!["findings"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject
+            finding["id"]!!.jsonPrimitive.content shouldBe "AC"
+            finding["entityType"]!!.jsonPrimitive.content shouldBe "application_context"
+            finding["violations"]!!
+                .jsonArray
+                .single()
+                .jsonObject["code"]!!
+                .jsonPrimitive.content shouldBe
+                DslViolationCodes.INVERSE_BOUND_VIOLATED
+            orphan.structuredContent!!["assumptions"]!!.jsonArray shouldHaveSize 2
+
+            client
+                .callTool(
+                    "build_product_context",
+                    mapOf(
+                        "handle" to "PC",
+                        "name" to "e",
+                        "frame_of_reference_handle" to "AC",
+                        "discipline_type" to "m",
+                    ),
+                ).isError shouldBe null
+            val valid = client.callTool("validate_model", emptyMap())
+            valid.structuredContent!!["valid"]!!.jsonPrimitive.content shouldBe "true"
+            valid.structuredContent!!["findings"]!!.jsonArray shouldHaveSize 0
+            valid.text() shouldContain "consistent"
+        }
+
+        "validate_model counts an overwritten but still referenced application_context as a real referrer" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client
+                .callTool(
+                    "build_application_context",
+                    mapOf("handle" to "AC", "application" to "cc"),
+                ).isError shouldBe
+                null
+            client
+                .callTool(
+                    "build_product_context",
+                    mapOf(
+                        "handle" to "PC",
+                        "name" to "e",
+                        "frame_of_reference_handle" to "AC",
+                        "discipline_type" to "m",
+                    ),
+                ).isError shouldBe null
+            // Overwrite AC with a different application; the old instance stays referenced by PC.
+            client
+                .callTool(
+                    "build_application_context",
+                    mapOf("handle" to "AC", "application" to "other"),
+                ).isError shouldBe
+                null
+            val result = client.callTool("validate_model", emptyMap())
+            // The new AC is unreferenced (violation); the old one is referenced through PC (no violation).
+            result.structuredContent!!["findings"]!!.jsonArray shouldHaveSize 1
+            result.structuredContent!!["instanceCount"]!!.jsonPrimitive.int shouldBe 3
+        }
+
+        "EntityStore.consistentSnapshot stays consistent under parallel puts" {
+            val store = EntityStore()
+            val entries =
+                (0 until 200).map { i ->
+                    val ac =
+                        dev.kstep.core.ap242
+                            .applicationContext { application = "a$i" }
+                    EntityStoreEntry.ApplicationContextEntry((ac as dev.kstep.core.ValidationResult.Valid).value)
+                }
+            coroutineScope {
+                val writers =
+                    entries.mapIndexed {
+                        i,
+                        entry,
+                        ->
+                        async(kotlinx.coroutines.Dispatchers.Default) { store.put("id$i", entry) }
+                    }
+                val readers =
+                    (1..4).map {
+                        async(kotlinx.coroutines.Dispatchers.Default) {
+                            repeat(200) { store.consistentSnapshot().size }
+                        }
+                    }
+                (writers + readers).awaitAll()
+            }
+            store.consistentSnapshot().size shouldBe 200
+        }
+
         "get_entity returns a full field dump for a known id and a structured error for an unknown id" {
             val server = buildServer()
             val client = connectedClient(server)

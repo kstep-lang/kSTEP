@@ -15,7 +15,9 @@ private const val ENTITY_NAME = "person_and_organization"
  *
  * Pre-Welle-10, this builder enforced a synthesized `wr1: NOT ((SELF.the_person = '') AND
  * (SELF.the_organization = ''))` — "at least one of the two must be non-blank" — as an
- * approximation of the real (unsupported, `SIZEOF`/`USEDIN`-based) `WR1`/`WR2`. That rule is
+ * approximation of the real (`SIZEOF`/`USEDIN`-based) `WR1`/`WR2`, which are now evaluated on
+ * population level by [Ap242ModelValidator] (ADR-0022; always satisfied there under the documented
+ * assumption for unmodelled entities). The synthesized rule is
  * dropped entirely in this wave, not relabeled: now that both attributes are typed as mandatory
  * entity references rather than optional-by-convention `String`s, "at least one set" is no
  * longer a meaningful relaxation to approximate — both are simply required, enforced the same

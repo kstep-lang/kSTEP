@@ -149,6 +149,13 @@ class EntityStore(
     fun snapshot(): Map<String, EntityStoreEntry> = entries.toMap()
 
     /**
+     * A point-in-time copy taken under [capacityLock], so no writer is half-way through a
+     * [putIfNoConflict] while it is read. [snapshot] copies a [ConcurrentHashMap] and is only
+     * weakly consistent; a population-wide validation must not run over a torn view.
+     */
+    fun consistentSnapshot(): Map<String, EntityStoreEntry> = synchronized(capacityLock) { entries.toMap() }
+
+    /**
      * Finds the store key currently holding [value] by object identity, not structural
      * equality — used only where an entity type has no natural id of its own (e.g.
      * [PersonAndOrganization], [ApprovalStatus], the `*_context` types) and the caller-supplied

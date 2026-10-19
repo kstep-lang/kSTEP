@@ -31,10 +31,14 @@ object WhereRuleExpressionBuilder {
      * Opt-in extensions of the supported subset. The default keeps the WHERE-rule behaviour
      * unchanged; DERIVE initializers (evaluator and codegen, ADR-0021) enable
      * [allowGroupQualifiedSelf] so `SELF\entity.attr` becomes a
-     * [WhereRuleExpression.QualifiedSelfAttribute].
+     * [WhereRuleExpression.QualifiedSelfAttribute]. WHERE rules over a whole population
+     * enable [allowInstanceGraphFunctions] (ADR-0022) so `SIZEOF(USEDIN(SELF, '<role>'))`
+     * becomes a [WhereRuleExpression.SizeOf] of a [WhereRuleExpression.UsedIn]; without it
+     * both functions stay unsupported, exactly as before.
      */
     data class BuildOptions(
         val allowGroupQualifiedSelf: Boolean = false,
+        val allowInstanceGraphFunctions: Boolean = false,
     )
 
     fun build(
@@ -286,10 +290,11 @@ object WhereRuleExpressionBuilder {
             )
         }
 
-        // functionCall : (builtInFunction | functionRef) actualParameterList? — the only
-        // recognized shape is EXISTS(<single attribute reference>); every other built-in
-        // (SIZEOF/HIBOUND/...), every user-defined functionRef, and any EXISTS() call with zero,
-        // two, or more arguments, or with a non-attribute-reference argument, stays unsupported.
+        // functionCall : (builtInFunction | functionRef) actualParameterList? — recognized shapes:
+        // EXISTS(<single attribute reference>) and, only with allowInstanceGraphFunctions,
+        // SIZEOF(USEDIN(SELF, '<role literal>')). SIZEOF/USEDIN are lexer keywords of
+        // builtInFunction (not entityConstructor). Every other built-in, every user-defined
+        // functionRef, and any call with the wrong argument shape stays unsupported.
         private fun buildFunctionCall(
             ctx: ExpressParser.FunctionCallContext,
             depth: Int,
@@ -306,7 +311,64 @@ object WhereRuleExpressionBuilder {
                         )
                 return WhereRuleExpression.Exists(attributeName)
             }
-            unsupported("function call '${ctx.text}' (only EXISTS(<attribute>) is supported)")
+            if (options.allowInstanceGraphFunctions && builtIn != null) {
+                if (builtIn.SIZEOF() != null && params.size == 1) {
+                    val operand = buildExpression(params[0].expression(), depth + 1)
+                    if (operand !is WhereRuleExpression.UsedIn) {
+                        unsupported("SIZEOF() argument other than USEDIN(SELF, '<role>') ('${ctx.text}')")
+                    }
+                    return WhereRuleExpression.SizeOf(operand)
+                }
+                if (builtIn.USEDIN() != null && params.size == 2) {
+                    requireBareSelf(params[0].expression(), ctx.text)
+                    val role =
+                        asSimpleStringLiteral(params[1].expression())
+                            ?: unsupported("USEDIN() role argument that is not a plain string literal ('${ctx.text}')")
+                    return WhereRuleExpression.UsedIn(WhereRuleExpression.SelfInstance, role)
+                }
+            }
+            unsupported(
+                "function call '${ctx.text}' (only EXISTS(<attribute>)" +
+                    (if (options.allowInstanceGraphFunctions) " and SIZEOF(USEDIN(SELF, '<role>'))" else "") +
+                    " is supported)",
+            )
+        }
+
+        // The first USEDIN argument must be exactly the unqualified, whole-instance SELF — checked
+        // structurally (no operators, no qualifiers) so a bare SELF is never accepted anywhere else.
+        private fun requireBareSelf(
+            expression: ExpressParser.ExpressionContext,
+            callText: String,
+        ) {
+            val primary = singlePrimary(expression)
+            val isBareSelf =
+                primary != null &&
+                    primary.qualifier().isEmpty() &&
+                    primary
+                        .qualifiableFactor()
+                        ?.constantFactor()
+                        ?.builtInConstant()
+                        ?.SELF() != null
+            if (!isBareSelf) unsupported("USEDIN() first argument other than the bare SELF ('$callText')")
+        }
+
+        private fun asSimpleStringLiteral(expression: ExpressParser.ExpressionContext): String? {
+            val literal = singlePrimary(expression)?.literal()?.stringLiteral()?.SimpleStringLiteral() ?: return null
+            val raw = literal.text
+            return raw.substring(1, raw.length - 1).replace("''", "'")
+        }
+
+        // Descends expression -> ... -> primary while every level is a single, operator-free,
+        // un-parenthesized element; null when the expression is anything more complex.
+        private fun singlePrimary(expression: ExpressParser.ExpressionContext): ExpressParser.PrimaryContext? {
+            if (expression.relOpExtended() != null) return null
+            val simple = expression.simpleExpression().singleOrNull() ?: return null
+            if (simple.addLikeOp().isNotEmpty()) return null
+            val term = simple.term().singleOrNull() ?: return null
+            if (term.multiplicationLikeOp().isNotEmpty()) return null
+            val factor = term.factor().singleOrNull() ?: return null
+            val simpleFactor = factor.simpleFactor().singleOrNull() ?: return null
+            return simpleFactor.simpleFactorExpression()?.primary()
         }
 
         // SELF-rooted references. Supported shapes: `SELF.attr` and (only with

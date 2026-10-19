@@ -31,4 +31,19 @@ sealed interface WhereRuleValue {
      * cannot participate in anything but presence-checking.
      */
     data object Unset : WhereRuleValue
+
+    /**
+     * An EXPRESS BAG/SET of entity usages (the `USEDIN` result, or an `INVERSE` attribute value).
+     * Identity semantics, hence not a data class. Never comparable: only `SIZEOF` consumes it.
+     */
+    class InstanceAggregate internal constructor(
+        val kind: AggregateKind,
+        val elements: List<InstanceReference>,
+    ) : WhereRuleValue {
+        val size: Int get() = elements.size
+
+        override fun toString(): String = "InstanceAggregate($kind, size=$size)"
+    }
 }
+
+enum class AggregateKind { BAG, SET }

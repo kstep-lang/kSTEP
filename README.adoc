@@ -150,6 +150,34 @@ this writing:
   `generateExpressKotlin`. The feature is exercised with a synthetic
   fixture schema whose generated Kotlin is compiled into the test source
   set and compared against `DerivedAttributeEvaluator`.
+* (Semantic core Welle C) Population-level validation of the constraints that
+  need the instance graph (ADR-0022). A new identity-based, immutable
+  `ReverseReferenceIndex` (`dev.kstep.express.validation`) answers "who
+  refers to this instance, in which role?"; on top of it the WHERE-rule
+  builder accepts `SIZEOF(USEDIN(SELF, '<role>'))` behind the opt-in
+  `BuildOptions(allowInstanceGraphFunctions = true)` (without the flag
+  nothing changes -- WHERE-rule validation of a single entity, the DERIVE
+  evaluator and the DERIVE code generator still reject both functions),
+  and `InverseAttributeEvaluator` evaluates `INVERSE` attributes with their
+  bounds. `kstep-core` exposes it as `Ap242ModelValidator.validate(roots)`;
+  an unsatisfied `INVERSE` bound is reported as the new code `KSTEP-I-001`.
+  Contrary to earlier notes here, the vendored schema *does* contain an
+  `INVERSE` (`application_context.context_elements : SET [1:?] OF
+  application_context_element FOR frame_of_reference`), and `product`
+  declares **no** WHERE rule at all. The five real `SIZEOF(USEDIN(...))`
+  rules (`application_context` WR1/WR2, `product_definition` WR1,
+  `person_and_organization` WR1/WR2) all query `name_attribute`,
+  `description_attribute` or `id_attribute`, which are not modelled; an
+  explicit allow-list evaluates `USEDIN` over exactly these three roles as
+  the empty set and every such evaluation is returned to the caller as an
+  `AppliedAssumption`. **Consequence, stated plainly:** those five rules
+  run but are satisfied by construction; the only graph constraint that can
+  actually fail on V1 data today is the `application_context` `INVERSE`
+  bound (an `application_context` that no `product_context` /
+  `product_definition_context` refers to). Opt-in entry points:
+  `Part21Reader.read(source, validateModel = true)` and the MCP tool
+  `validate_model`; builders, `kstep export` and `KStepScriptHost` do not
+  run it yet.
 * (M1 Welle 4) The generator has now run against **real AP242 ground
   truth** for the first time, not just the hand-written AP242-subset
   fixture. A curated excerpt of the official
@@ -225,9 +253,10 @@ this writing:
   `Map<String, WhereRuleValue>`; `WhereRuleValidator` ties both
   together into a `(entityName, rules, attributeValues) ->
   List<WhereRuleViolation>` API. Anything outside the supported subset
-  (`EXISTS()`, `SIZEOF()`, other function calls, aggregate/set
-  operations, `QUERY`, arithmetic operators, the tri-state `LOGICAL`
-  type, ...) raises a structured `UnsupportedWhereExpressionException`
+  (other function calls, `SIZEOF()`/`USEDIN()` except in the opt-in
+  `SIZEOF(USEDIN(SELF, '<role>'))` form of Semantic core Welle C,
+  aggregate/set operations, `QUERY`, arithmetic operators, the tri-state
+  `LOGICAL` type, ...) raises a structured `UnsupportedWhereExpressionException`
   instead of silently doing the wrong thing; a genuine evaluation-time
   problem (a missing attribute, a non-boolean result, an
   incompatible-type comparison) raises `WhereRuleEvaluationException`.
@@ -401,9 +430,10 @@ this writing:
   absent. DERIVE and UNIQUE assertions are cross-checked against the
   real `product_definition`, `product_definition_formation`,
   `next_assembly_usage_occurrence`, and `person_and_organization`
-  entities in `ap242-v1-entities.exp`; no V1 entity has an `INVERSE`
-  clause, so that capture is proven against a small, hand-written
-  synthetic fixture instead. A redeclared (`SELF\entity.attr`) DERIVE
+  entities in `ap242-v1-entities.exp`; this wave believed that no V1 entity has
+  an `INVERSE` clause, so that capture was proven against a small,
+  hand-written synthetic fixture instead (correction, Semantic core
+  Welle C: `application_context.context_elements` is a real `INVERSE`). A redeclared (`SELF\entity.attr`) DERIVE
   or INVERSE name throws a structured `SemanticModelException` rather
   than silently dropping the clause or NPE-ing, mirroring
   `mapParameterType`'s existing precedent for out-of-scope
@@ -420,7 +450,8 @@ this writing:
   `build_product`, `build_person_and_organization`,
   `build_product_definition_formation`, `build_product_definition`,
   `build_next_assembly_usage_occurrence`, `build_approval`,
-  `export_part21`, `list_entities`, `get_entity`. Because every MCP
+  `export_part21`, `list_entities`, `get_entity` (Semantic core Welle C adds
+  `validate_model`). Because every MCP
   tool call is stateless (JSON in, JSON out) but five of the six V1
   builders take entity-typed Kotlin references
   (`ProductDefinitionFormation.ofProduct: Product`, etc.), `kstep-mcp`
@@ -515,9 +546,10 @@ this writing:
   complete outcome for those three clauses, not a gap. A small synthetic
   fixture (`DERIVE canonical_id : STRING := SELF.id;` and similar) proves
   positive evaluation actually works when the expression is within the
-  supported subset. `INVERSE` evaluation remains explicitly out of scope
-  — no real V1 entity has an `INVERSE` clause, and `kstep-core` has no
-  bidirectional-relationship modeling to evaluate against.
+  supported subset. `INVERSE` evaluation was out of scope in this wave
+  (on the mistaken belief that no real V1 entity has an `INVERSE` clause);
+  it was delivered on population level in Semantic core Welle C
+  (ADR-0022).
 +
 Separately, `kstep-mcp`'s `build_next_assembly_usage_occurrence` tool now
 enforces the real AP242 `next_assembly_usage_occurrence` `UNIQUE UR1`
@@ -1509,7 +1541,8 @@ println(violations)
 ----
 
 A WHERE-rule expression using a construct outside the supported subset
-(`EXISTS()`, `QUERY`, arithmetic, ...) throws
+(`QUERY`, arithmetic, `SIZEOF()`/`USEDIN()` without the Semantic core
+Welle C opt-in, ...) throws
 `UnsupportedWhereExpressionException`; a genuine evaluation-time
 problem (a missing attribute, a non-boolean result, an
 incompatible-type comparison) throws `WhereRuleEvaluationException`.
@@ -2042,10 +2075,11 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   was M1 Welle 6, and M2 Welle 4 added evaluation for the WHERE-rule-
   supported expression subset (`DerivedAttributeEvaluator`) plus
   `next_assembly_usage_occurrence`'s `UNIQUE UR1` enforcement in
-  `kstep-mcp` — see <<status,Status>> above. Still open: `INVERSE`
-  evaluation (no real V1 entity has an `INVERSE` clause, and `kstep-core`
-  has no bidirectional-relationship modeling to evaluate against) and
-  NAUO's `UNIQUE UR2` (depends on `product_definition_occurrence`, an
+  `kstep-mcp` — see <<status,Status>> above. `INVERSE` evaluation and
+  `SIZEOF(USEDIN(...))` are done on population level (Semantic core
+  Welle C, ADR-0022; the `USEDIN` rules are satisfied by construction until
+  `name_attribute`/`description_attribute`/`id_attribute` are modelled).
+  Still open: NAUO's `UNIQUE UR2` (depends on `product_definition_occurrence`, an
   entity not modeled in `kstep-core`) — both carried forward explicitly
   as named limitations, not silently dropped.
 . A semantic AP242 core: product structure and metadata, without
@@ -2104,7 +2138,7 @@ row below is now resolved (see ADR-0004), not an open gap:
 | resolved — both now correctly entity-typed and mandatory
 
 | `person_and_organization`
-| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule was synthesized
+| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))`; `kstep-core`'s rule was synthesized
 | resolved differently — dropped entirely, not relabeled: both attributes are now mandatory entity references, so "at least one set" is no longer a meaningful approximation
 
 | `product`
@@ -2112,16 +2146,20 @@ row below is now resolved (see ADR-0004), not an open gap:
 | resolved — mandatory and non-empty, enforced via `KSTEP-M-001`/`KSTEP-A-001`
 
 | `product`
-| real `WR1` uses `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
-| unchanged — kept, relabeled `kstep_wr1`
+| the vendored schema declares **no** WHERE rule on `product` (earlier notes claiming a `SIZEOF(USEDIN(...))` `WR1` were wrong); `kstep-core`'s rule is synthesized
+| unchanged — kept, relabeled `kstep_wr1` (no real rule exists to align to)
 
 | `product_definition`
 | real entity has a mandatory `frame_of_reference : product_definition_context`; `kstep-core` omitted it
 | resolved — mandatory, enforced via `KSTEP-M-001`
 
 | `product_definition`
-| real `WR1` uses `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
-| unchanged — kept, relabeled `kstep_wr1`
+| real `WR1` uses `SIZEOF(USEDIN(...))`; `kstep-core`'s rule is synthesized
+| `kstep_wr1` unchanged in the builder; the real `WR1` is now evaluated on model level by `Ap242ModelValidator` (ADR-0022), always satisfied under the unmodelled-entity assumption
+
+| `application_context`
+| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))`; real `INVERSE context_elements : SET [1:?]`
+| evaluated on model level by `Ap242ModelValidator` (ADR-0022): the `INVERSE` bound can fail (`KSTEP-I-001`), the two WHERE rules are satisfied by construction
 
 | `product`, `product_definition`, `product_definition_formation`
 | real `OPTIONAL text description`; `kstep-core` modeled it as non-null `String` defaulting to `""`
@@ -2146,9 +2184,13 @@ row below is now resolved (see ADR-0004), not an open gap:
 
 Deliberately still open (named limitations, not silently dropped —
 see ADR-0004 and <<status,Status>> for `KSTEP-M-002`'s scope): the
-`SIZEOF`/`USEDIN`-based real WHERE rules on `product`,
-`product_definition`, `person_and_organization`, and `application_context`
-remain unsupported and unevaluated; NAUO's real `WR1`
+`SIZEOF`/`USEDIN`-based real WHERE rules on `product_definition`,
+`person_and_organization` and `application_context` are evaluated since
+Semantic core Welle C (ADR-0022) but are satisfied by construction because
+`name_attribute`, `description_attribute` and `id_attribute` are not
+modelled; model-level validation is not yet run by `kstep export` /
+`KStepScriptHost` (findings as error or warning is an open decision), and
+QUERY and the other built-in functions remain unsupported; NAUO's real `WR1`
 (`acyclic_product_definition_relationship`) likewise; the six real
 `DERIVE` attributes (`product_definition.name`,
 `person_and_organization.name`/`description`,
@@ -2167,8 +2209,9 @@ an entity not modeled anywhere in `kstep-core`).
 . Validation: EXPRESS `WHERE` rules surfaced as structured errors.
   Done for the supported expression subset (comparisons, `SELF.attribute`
   references, `AND`/`OR`/`NOT`, string/integer/real literals) — see
-  <<status,Status>> above. Constructs outside that subset (`EXISTS()`,
-  `SIZEOF()`, other function calls, aggregate/set operations, `QUERY`,
+  <<status,Status>> above. Constructs outside that subset (other function
+  calls, `SIZEOF(USEDIN(...))` without the population-level opt-in,
+  aggregate/set operations, `QUERY`,
   arithmetic operators, the tri-state `LOGICAL` type) are not evaluated
   and raise a structured exception instead. Note that WHERE-rule
   evaluation is not the same thing as EXPRESS mandatory-attribute-

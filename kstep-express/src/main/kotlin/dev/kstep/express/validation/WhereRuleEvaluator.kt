@@ -15,14 +15,28 @@ object WhereRuleEvaluator {
     fun evaluate(
         expression: WhereRuleExpression,
         attributeValues: Map<String, WhereRuleValue>,
-    ): Boolean {
-        val result = evaluateValue(expression, attributeValues, 0)
+    ): Boolean = evaluate(expression, attributeValues, null).value
+
+    /**
+     * As [evaluate], but with an optional instance-graph [context] enabling `SIZEOF(USEDIN(...))`
+     * (ADR-0022) and returning the assumptions made on the way (an unmodelled-entity `USEDIN`
+     * evaluated as the empty set). Without a [context], an expression containing `USEDIN` fails
+     * loudly. [ruleLabel] only labels the reported assumptions.
+     */
+    fun evaluate(
+        expression: WhereRuleExpression,
+        attributeValues: Map<String, WhereRuleValue>,
+        context: InstanceEvaluationContext?,
+        ruleLabel: String? = null,
+    ): WhereRuleEvaluationResult {
+        val trace = EvaluationTrace(context, ruleLabel)
+        val result = evaluateValue(expression, attributeValues, trace, 0)
         val booleanResult =
             result as? WhereRuleValue.BooleanValue
                 ?: throw WhereRuleEvaluationException(
                     "a WHERE-rule domain rule must evaluate to a boolean, but evaluated to $result",
                 )
-        return booleanResult.value
+        return WhereRuleEvaluationResult(booleanResult.value, trace.assumptions.toList())
     }
 
     /**
@@ -35,11 +49,26 @@ object WhereRuleEvaluator {
     fun evaluateToValue(
         expression: WhereRuleExpression,
         attributeValues: Map<String, WhereRuleValue>,
-    ): WhereRuleValue = evaluateValue(expression, attributeValues, 0)
+    ): WhereRuleValue = evaluateToValue(expression, attributeValues, null)
+
+    fun evaluateToValue(
+        expression: WhereRuleExpression,
+        attributeValues: Map<String, WhereRuleValue>,
+        context: InstanceEvaluationContext?,
+    ): WhereRuleValue = evaluateValue(expression, attributeValues, EvaluationTrace(context, null), 0)
+
+    // Per-call, never shared: holds the optional graph context and collects assumptions.
+    private class EvaluationTrace(
+        val context: InstanceEvaluationContext?,
+        val ruleLabel: String?,
+    ) {
+        val assumptions = mutableListOf<AppliedAssumption>()
+    }
 
     private fun evaluateValue(
         expression: WhereRuleExpression,
         attributeValues: Map<String, WhereRuleValue>,
+        trace: EvaluationTrace,
         depth: Int,
     ): WhereRuleValue {
         if (depth > MAX_EVALUATION_DEPTH) {
@@ -49,22 +78,22 @@ object WhereRuleEvaluator {
         }
         return when (expression) {
             is WhereRuleExpression.Comparison -> {
-                val left = evaluateValue(expression.left, attributeValues, depth + 1)
-                val right = evaluateValue(expression.right, attributeValues, depth + 1)
+                val left = evaluateValue(expression.left, attributeValues, trace, depth + 1)
+                val right = evaluateValue(expression.right, attributeValues, trace, depth + 1)
                 WhereRuleValue.BooleanValue(evaluateComparison(expression.operator, left, right))
             }
             is WhereRuleExpression.And -> {
-                val left = requireBoolean(evaluateValue(expression.left, attributeValues, depth + 1))
-                val right = requireBoolean(evaluateValue(expression.right, attributeValues, depth + 1))
+                val left = requireBoolean(evaluateValue(expression.left, attributeValues, trace, depth + 1))
+                val right = requireBoolean(evaluateValue(expression.right, attributeValues, trace, depth + 1))
                 WhereRuleValue.BooleanValue(left && right)
             }
             is WhereRuleExpression.Or -> {
-                val left = requireBoolean(evaluateValue(expression.left, attributeValues, depth + 1))
-                val right = requireBoolean(evaluateValue(expression.right, attributeValues, depth + 1))
+                val left = requireBoolean(evaluateValue(expression.left, attributeValues, trace, depth + 1))
+                val right = requireBoolean(evaluateValue(expression.right, attributeValues, trace, depth + 1))
                 WhereRuleValue.BooleanValue(left || right)
             }
             is WhereRuleExpression.Not -> {
-                val operand = requireBoolean(evaluateValue(expression.operand, attributeValues, depth + 1))
+                val operand = requireBoolean(evaluateValue(expression.operand, attributeValues, trace, depth + 1))
                 WhereRuleValue.BooleanValue(!operand)
             }
             is WhereRuleExpression.SelfAttribute -> lookupSelfAttribute(expression.name, attributeValues)
@@ -81,6 +110,47 @@ object WhereRuleEvaluator {
             is WhereRuleExpression.StringLiteral -> WhereRuleValue.StringValue(expression.value)
             is WhereRuleExpression.IntegerLiteral -> WhereRuleValue.IntegerValue(expression.value)
             is WhereRuleExpression.RealLiteral -> WhereRuleValue.RealValue(expression.value)
+            is WhereRuleExpression.SelfInstance ->
+                throw WhereRuleEvaluationException("a bare SELF instance is only valid as the first USEDIN() argument")
+            is WhereRuleExpression.UsedIn -> evaluateUsedIn(expression, trace)
+            is WhereRuleExpression.SizeOf -> {
+                val operand = evaluateValue(expression.operand, attributeValues, trace, depth + 1)
+                val aggregate =
+                    operand as? WhereRuleValue.InstanceAggregate
+                        ?: throw WhereRuleEvaluationException("SIZEOF() requires an aggregate but got $operand")
+                WhereRuleValue.IntegerValue(aggregate.size.toLong())
+            }
+        }
+    }
+
+    private fun evaluateUsedIn(
+        expression: WhereRuleExpression.UsedIn,
+        trace: EvaluationTrace,
+    ): WhereRuleValue {
+        val roleShown = clipForMessage(expression.roleText)
+        val context =
+            trace.context
+                ?: throw WhereRuleEvaluationException(
+                    "USEDIN(SELF, '$roleShown') requires an instance-graph context; none was supplied",
+                )
+        return when (val role = context.roleResolver.resolve(expression.roleText)) {
+            is ResolvedUsedInRole.AnyRole ->
+                WhereRuleValue.InstanceAggregate(AggregateKind.BAG, context.index.incoming(context.self))
+            is ResolvedUsedInRole.Modelled ->
+                WhereRuleValue.InstanceAggregate(
+                    AggregateKind.BAG,
+                    context.index.usedIn(context.self, role.declaringEntity, role.attribute),
+                )
+            is ResolvedUsedInRole.KnownUnmodelled -> {
+                trace.assumptions +=
+                    AppliedAssumption(
+                        entityName = context.selfEntity,
+                        ruleLabel = trace.ruleLabel,
+                        roleText = clipForMessage(role.roleText),
+                        reason = role.reason,
+                    )
+                WhereRuleValue.InstanceAggregate(AggregateKind.BAG, emptyList())
+            }
         }
     }
 
@@ -132,6 +202,8 @@ object WhereRuleEvaluator {
         right: WhereRuleValue,
     ): Int =
         when {
+            left is WhereRuleValue.InstanceAggregate || right is WhereRuleValue.InstanceAggregate ->
+                throw WhereRuleEvaluationException("cannot compare aggregate $left with $right — use SIZEOF()")
             left is WhereRuleValue.StringValue && right is WhereRuleValue.StringValue ->
                 left.value.compareTo(
                     right.value,
