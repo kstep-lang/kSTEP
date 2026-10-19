@@ -1,8 +1,6 @@
 package dev.kstep.step21
 
 import dev.kstep.core.ap242.Ap242ModelValidator
-import dev.kstep.core.ap242.ModelValidationResult
-import java.util.IdentityHashMap
 
 /**
  * Parses ISO 10303-21 physical exchange file text back into `kstep-core` AP242 V1 instances.
@@ -35,7 +33,9 @@ object Part21Reader {
      * instances (TOLERANT mode) and instances rejected/skipped on read do not take part, so they are
      * invisible to the reverse-reference index. To avoid false positives, findings on any instance
      * that such a non-reconstructed instance references are withheld and counted in
-     * `ModelValidationResult.suppressedFindingCount`. It never changes [Part21ReadResult.isFullySuccessful].
+     * `ModelValidationResult.suppressedFindingCount` (a cycle found by the acyclic check and a UNIQUE violation are
+     * facts about the visible instances and are not withheld; a walk through such an instance without finding a
+     * cycle is counted as indeterminate). It never changes [Part21ReadResult.isFullySuccessful].
      * The index limits (100 000 instances) exceed the tokenizer's own instance cap, so they cannot
      * trip on a document this reader accepts.
      */
@@ -45,26 +45,24 @@ object Part21Reader {
         validateModel: Boolean = false,
     ): Part21ReadResult {
         val document = Part21Tokenizer.parseDocument(source, mode)
-        val result = Part21GraphResolver.resolve(document)
-        if (!validateModel) return result
-        val validation = Ap242ModelValidator.validate(result.instances.values)
-        val unreconstructed = result.opaque.keys + result.violations.keys + result.skipped.keys
-        if (unreconstructed.isEmpty()) return result.copy(modelValidation = validation)
+        val resolved = Part21GraphResolver.resolve(document)
+        val unreconstructed = resolved.opaque.keys + resolved.violations.keys + resolved.skipped.keys
+        // Instances referenced by something that could not be reconstructed have invisible referrers; the
+        // validator withholds USEDIN/INVERSE verdicts for them and treats them as incomplete in the acyclic
+        // check and in population-dependent derived values (ADR-0022, ADR-0023).
         val shadowedIds =
             document.instances
                 .filter { it.id in unreconstructed }
                 .flatMapTo(mutableSetOf()) { it.referencedIds() }
-        val shadowed = IdentityHashMap<Any, Unit>()
-        for ((id, instance) in result.instances) if (id in shadowedIds) shadowed[instance] = Unit
-        val (withheld, kept) = validation.findings.partition { shadowed.containsKey(it.instance) }
+        val shadowed =
+            resolved.instances
+                .filterKeys { it in shadowedIds }
+                .values
+                .toList()
+        val result = resolved.copy(incompleteInstances = shadowed)
+        if (!validateModel) return result
         return result.copy(
-            modelValidation =
-                ModelValidationResult(
-                    kept,
-                    validation.assumptions,
-                    validation.instanceCount,
-                    validation.suppressedFindingCount + withheld.size,
-                ),
+            modelValidation = Ap242ModelValidator.validate(result.instances.values, incomplete = shadowed),
         )
     }
 

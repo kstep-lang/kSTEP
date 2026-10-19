@@ -7,11 +7,18 @@ import dev.kstep.express.validation.WhereRuleViolation
 
 internal fun WhereRuleViolation.toDslViolation(): DslViolation =
     DslViolation(
-        code = DslViolationCodes.WHERE_RULE_NOT_SATISFIED,
+        code =
+            if (cycle) {
+                DslViolationCodes.ACYCLIC_RELATIONSHIP_VIOLATED
+            } else {
+                DslViolationCodes.WHERE_RULE_NOT_SATISFIED
+            },
         entityName = entityName,
         ruleLabel = ruleLabel,
         expressionText = expressionText,
-        message = "WHERE rule ${ruleLabel ?: "(unlabeled)"} not satisfied: $expressionText",
+        message =
+            "WHERE rule ${ruleLabel ?: "(unlabeled)"} not satisfied: $expressionText" +
+                (detail?.let { " ($it)" } ?: ""),
     )
 
 internal fun missingMandatoryReferenceViolation(

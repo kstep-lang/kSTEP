@@ -10,6 +10,8 @@ See also ADR-0021: a DERIVE whose declared type is an entity, aggregate, ENUMERA
 SELECT (an "opaque" type) is only generated as a plain alias of an attribute with exactly the
 same Kotlin type; it cannot be computed from an expression.
 
+Amended by ADR-0023: the V1 excerpt now vendors four SELECTs (`product_definition_or_reference` and the three `*_attribute_select` types); SELECT types are therefore emitted for the AP242 excerpt and handled by `kstep-step21` and `kstep-mcp`.
+
 == Context
 
 `dev.kstep.express.codegen` could not resolve an EXPRESS `SELECT`: any attribute

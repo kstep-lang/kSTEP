@@ -110,10 +110,14 @@ class DerivedAttributeCodeGenTest :
             strictFailure("n : INTEGER := SIZEOF(USEDIN(SELF, 'X.Y.Z'));") shouldContain "SIZEOF"
         }
 
-        "STRICT rejects a multi-hop chain and names the first unsupported link" {
+        "STRICT rejects a multi-hop chain whose first attribute does not resolve, naming it" {
             val message = strictFailure("n : STRING := SELF\\a.b\\c.id;")
-            message shouldContain "unsupported link '\\c'"
-            message shouldContain "after 'SELF\\a.b'"
+            message shouldContain "SELF.b does not resolve"
+        }
+
+        "STRICT rejects a multi-hop chain that names an entity which is not in the schema" {
+            val message = strictFailure("n : STRING := SELF\\thing.count\\other.id;")
+            message shouldContain "link '\\other' is not an entity of this schema"
         }
 
         "STRICT rejects an unknown attribute, an unknown qualifier and an attribute missing on the qualifier" {

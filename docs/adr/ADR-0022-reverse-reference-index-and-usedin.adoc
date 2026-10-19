@@ -7,6 +7,8 @@ Accepted, implemented (kSTEP semantic-core Welle C). Amends ADR-0004 (a new popu
 validator in `kstep-core`; builders and constructors are unchanged) and ADR-0021 (`USEDIN` and
 `SIZEOF` stay unsupported inside `DERIVE`; that is left to a later wave).
 
+Amended by ADR-0023: `name_attribute`, `description_attribute` and `id_attribute` are now modelled, so the five `USEDIN` rules are real, not satisfied by construction; inherited rules, `UNIQUE` and the acyclic check are evaluated. The "Limitations" below describe the state before that wave.
+
 == Context
 
 Seven of the V1 schema's constraints could not be evaluated because they ask "who refers to

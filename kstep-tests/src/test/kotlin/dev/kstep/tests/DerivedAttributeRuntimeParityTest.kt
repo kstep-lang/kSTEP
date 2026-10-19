@@ -97,6 +97,7 @@ private fun checkParity(
                 WhereRuleValue.Unset -> null
                 // USEDIN/INVERSE aggregates need an instance graph; DERIVE evaluation has none (ADR-0022).
                 is WhereRuleValue.InstanceAggregate -> error("DERIVE evaluation never yields an instance aggregate")
+                WhereRuleValue.EntityReference -> error("DERIVE evaluation never yields an entity reference marker")
                 is WhereRuleValue.StringValue -> reference.value
                 is WhereRuleValue.BooleanValue -> reference.value
                 is WhereRuleValue.RealValue -> reference.value

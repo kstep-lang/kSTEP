@@ -52,6 +52,18 @@ data class ResolvedDerivedAttribute(
         get() = overrides?.originalDeclaringEntity ?: declaringEntity
 }
 
+/** A WHERE rule of a [ResolvedEntity] (own or inherited), tagged with the entity that declares it (ADR-0023). */
+data class ResolvedWhereRule(
+    val declaringEntity: String,
+    val rule: ExpressWhereRule,
+)
+
+/** A UNIQUE rule of a [ResolvedEntity] (own or inherited), tagged with the entity that declares it (ADR-0023). */
+data class ResolvedUniqueRule(
+    val declaringEntity: String,
+    val rule: ExpressUniqueRule,
+)
+
 /**
  * An [ExpressEntity] with its SUBTYPE OF chain resolved: every ancestor's explicit attributes
  * flattened into a single ordered list, supertype-most-general first, then this entity's own
@@ -70,4 +82,8 @@ data class ResolvedEntity(
     val ancestorChain: List<String>,
     /** Flattened `DERIVE` attributes, ancestors first; a redeclared one replaces its ancestor's entry in place. */
     val flattenedDerivedAttributes: List<ResolvedDerivedAttribute> = emptyList(),
+    /** Own and inherited WHERE rules, ancestors first (ADR-0023): a subtype instance must satisfy its supertypes' rules too. */
+    val flattenedWhereRules: List<ResolvedWhereRule> = emptyList(),
+    /** Own and inherited UNIQUE rules, ancestors first (ADR-0023). */
+    val flattenedUniqueRules: List<ResolvedUniqueRule> = emptyList(),
 )

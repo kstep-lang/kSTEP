@@ -10,7 +10,7 @@ import kotlin.script.experimental.jvm.jvm
  * kSTEP script definition.
  *
  * Files with the extension `*.kstep.kts` are compiled and evaluated using this definition. The
- * [defaultImports] make the twelve `kstep-core` AP242 builders (kSTEP M2 Welle 10), the
+ * [defaultImports] make the sixteen `kstep-core` AP242 builders (kSTEP M2 Welle 10, ADR-0023), the
  * codegen-generated `dev.kstep.generated.ap242v1.*` entity types, the `dev.kstep.core`/
  * `dev.kstep.step21` runtime types, and the [stepFile] DSL entry point available without
  * explicit imports.
@@ -67,11 +67,12 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
     defaultImports(
         // ValidationResult, getOrThrow, isValid, DslViolation, DslViolationCodes
         "dev.kstep.core.*",
-        // The twelve AP242 builder functions (kSTEP M2 Welle 10 — six V1 entities plus six
-        // support entities): product, personAndOrganization, approval,
+        // The sixteen AP242 builder functions (kSTEP M2 Welle 10 — six V1 entities plus six
+        // support entities; ADR-0023 adds four): product, personAndOrganization, approval,
         // productDefinitionFormation, productDefinition, nextAssemblyUsageOccurrence,
         // applicationContext, productContext, productDefinitionContext, approvalStatus,
-        // person, organization
+        // person, organization, productDefinitionOccurrence, nameAttribute,
+        // descriptionAttribute, idAttribute
         "dev.kstep.core.ap242.*",
         // The codegen-generated entity types themselves (Product, Person, ProductContext, ...)
         // — needed for scripts that write an explicit type annotation on a builder result

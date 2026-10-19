@@ -1,8 +1,11 @@
 package dev.kstep.express.validation
 
 import dev.kstep.express.semantic.AggregationType
+import dev.kstep.express.semantic.DefinedTypeRef
 import dev.kstep.express.semantic.EntityTypeRef
+import dev.kstep.express.semantic.ExpressDefinedType
 import dev.kstep.express.semantic.ExpressInverseAttribute
+import dev.kstep.express.semantic.ExpressSelectItem
 import dev.kstep.express.semantic.InverseAggregationKind
 import dev.kstep.express.semantic.ResolvedEntity
 import dev.kstep.express.semantic.SemanticModelException
@@ -82,6 +85,11 @@ object InverseAttributeEvaluator {
         inverse: ExpressInverseAttribute,
         resolvedEntities: Map<String, ResolvedEntity>,
         context: InstanceEvaluationContext,
+        /**
+         * The schema's TYPE declarations (lower-case keyed). Needed when the `FOR` attribute is typed by a
+         * SELECT (e.g. `product_definition_or_reference`): the owner must then be a member (ADR-0023).
+         */
+        definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
     ): InverseEvaluation {
         val explicit =
             inverse as? ExpressInverseAttribute.Explicit
@@ -111,9 +119,9 @@ object InverseAttributeEvaluator {
                     "INVERSE '${explicit.name}': entity '${forEntity.entity.name}' has no attribute " +
                         "'${clipForMessage(forAttribute)}'",
                 )
-        val referenced = referencedEntity(resolvedAttribute.attribute.declaredType)
+        val referenced = referencedEntities(resolvedAttribute.attribute.declaredType, definedTypes)
         val ownerNames = (ownerResolved.ancestorChain + ownerResolved.entity.name).map { it.lowercase() }
-        if (referenced == null || referenced.lowercase() !in ownerNames) {
+        if (referenced.none { it.lowercase() in ownerNames }) {
             throw SemanticModelException(
                 "INVERSE '${explicit.name}': attribute " +
                     "'${resolvedAttribute.declaringEntity}.${resolvedAttribute.attribute.name}' " +
@@ -146,12 +154,42 @@ object InverseAttributeEvaluator {
         )
     }
 
-    private fun referencedEntity(type: dev.kstep.express.semantic.ExpressType): String? =
+    // The entities an attribute type can hold: the entity itself, or every entity member of a
+    // (possibly aliased, possibly nested) SELECT. Visited-set based and depth-bounded.
+    private fun referencedEntities(
+        type: dev.kstep.express.semantic.ExpressType,
+        definedTypes: Map<String, ExpressDefinedType>,
+    ): Set<String> =
         when (type) {
-            is EntityTypeRef -> type.entityName
-            is AggregationType -> (type.elementType as? EntityTypeRef)?.entityName
-            else -> null
+            is EntityTypeRef -> setOf(type.entityName)
+            is AggregationType -> referencedEntities(type.elementType, definedTypes)
+            is DefinedTypeRef -> entitiesOfDefinedType(type.typeName, definedTypes)
+            else -> emptySet()
         }
+
+    private fun entitiesOfDefinedType(
+        typeName: String,
+        definedTypes: Map<String, ExpressDefinedType>,
+    ): Set<String> {
+        val result = linkedSetOf<String>()
+        val visited = mutableSetOf<String>()
+        val work = ArrayDeque(listOf(typeName.lowercase()))
+        while (work.isNotEmpty() && visited.size < MAX_SELECT_WALK) {
+            val key = work.removeLast()
+            if (!visited.add(key)) continue
+            val definedType = definedTypes[key] ?: continue
+            definedType.aliasedTypeName?.let { work.addLast(it.lowercase()) }
+            definedType.selectItems?.forEach { item ->
+                when (item) {
+                    is ExpressSelectItem.Entity -> result += item.name
+                    is ExpressSelectItem.DefinedType -> work.addLast(item.name.lowercase())
+                }
+            }
+        }
+        return result
+    }
+
+    private const val MAX_SELECT_WALK = 256
 
     private fun isInstanceOf(
         entityName: String,

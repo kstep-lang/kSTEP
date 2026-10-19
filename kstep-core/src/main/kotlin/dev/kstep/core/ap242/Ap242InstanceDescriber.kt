@@ -7,6 +7,9 @@ import dev.kstep.express.validation.WhereRuleValue
 import dev.kstep.generated.ap242v1.ApplicationContext
 import dev.kstep.generated.ap242v1.Approval
 import dev.kstep.generated.ap242v1.ApprovalStatus
+import dev.kstep.generated.ap242v1.DescriptionAttribute
+import dev.kstep.generated.ap242v1.IdAttribute
+import dev.kstep.generated.ap242v1.NameAttribute
 import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.generated.ap242v1.Organization
 import dev.kstep.generated.ap242v1.Person
@@ -16,9 +19,10 @@ import dev.kstep.generated.ap242v1.ProductContext
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.generated.ap242v1.ProductDefinitionContext
 import dev.kstep.generated.ap242v1.ProductDefinitionFormation
+import dev.kstep.generated.ap242v1.ProductDefinitionOccurrence
 
 /**
- * Describes the twelve generated AP242 V1 types for the reverse-reference index (ADR-0022): the
+ * Describes the sixteen generated AP242 V1 types (ADR-0023) for the reverse-reference index (ADR-0022): the
  * concrete entity name, the scalar attribute values and — per entity-typed attribute — the
  * *declaring* entity of that attribute, which differs from the instance's own type for inherited
  * attributes (`product_context.frame_of_reference` is declared by `application_context_element`).
@@ -107,6 +111,37 @@ internal object Ap242InstanceDescriber : InstanceDescriber {
                         instance.relatedProductDefinition,
                     ),
                 )
+            is ProductDefinitionOccurrence ->
+                description(
+                    "product_definition_occurrence",
+                    mapOf(
+                        "id" to str(instance.id),
+                        "name" to optional(instance.name),
+                        "description" to optional(instance.description),
+                        "definition" to optionalReference(instance.definition),
+                    ),
+                    *listOfNotNull(
+                        instance.definition?.let { ref("product_definition_occurrence", "definition", it) },
+                    ).toTypedArray(),
+                )
+            is NameAttribute ->
+                description(
+                    "name_attribute",
+                    mapOf("attribute_value" to str(instance.attributeValue)),
+                    ref("name_attribute", "named_item", instance.namedItem),
+                )
+            is DescriptionAttribute ->
+                description(
+                    "description_attribute",
+                    mapOf("attribute_value" to str(instance.attributeValue)),
+                    ref("description_attribute", "described_item", instance.describedItem),
+                )
+            is IdAttribute ->
+                description(
+                    "id_attribute",
+                    mapOf("attribute_value" to str(instance.attributeValue)),
+                    ref("id_attribute", "identified_item", instance.identifiedItem),
+                )
             is Approval ->
                 description(
                     "approval",
@@ -136,6 +171,10 @@ internal object Ap242InstanceDescriber : InstanceDescriber {
     ) = OutgoingReference(declaringEntity, attribute, listOf(target))
 
     private fun str(value: String): WhereRuleValue = WhereRuleValue.StringValue(value)
+
+    // An OPTIONAL entity-typed attribute in the value bag: only EXISTS() may look at it (WhereRuleValue.EntityReference).
+    private fun optionalReference(value: Any?): WhereRuleValue =
+        if (value == null) WhereRuleValue.Unset else WhereRuleValue.EntityReference
 
     private fun optional(value: String?): WhereRuleValue =
         if (value == null) WhereRuleValue.Unset else WhereRuleValue.StringValue(value)

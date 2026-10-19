@@ -51,11 +51,22 @@ object ExpressSemanticModelBuilder {
             bodyDeclarations
                 .mapNotNull { it.declaration()?.typeDecl() }
                 .map { buildDefinedType(it, symbols, source) }
+        val functions =
+            bodyDeclarations
+                .mapNotNull { it.declaration()?.functionDecl() }
+                .map {
+                    ExpressFunction(
+                        name = it.functionHead().functionId().text,
+                        rawText = verbatim(it, source),
+                        sourceLine = it.start.line,
+                    )
+                }
         return ExpressSchema(
             name = name,
             entities = entities,
             definedTypes = definedTypes,
             sourceLine = ctx.start.line,
+            functions = functions,
         )
     }
 

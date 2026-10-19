@@ -4,6 +4,7 @@ import dev.kstep.core.ap242.Ap242ModelValidator
 import dev.kstep.express.semantic.SemanticModelException
 import dev.kstep.express.validation.InstanceGraphException
 import dev.kstep.express.validation.UnsupportedInverseException
+import dev.kstep.express.validation.UnsupportedUniqueRuleException
 import dev.kstep.express.validation.UnsupportedWhereExpressionException
 import dev.kstep.express.validation.WhereRuleEvaluationException
 import dev.kstep.mcp.EntityStore
@@ -29,14 +30,16 @@ fun registerValidateModelTool(
         name = TOOL_NAME,
         description =
             "Validates the whole model built so far on population level — the constraints that depend on " +
-                "which entities reference which (SIZEOF(USEDIN(...)) WHERE rules and INVERSE bounds, e.g. an " +
-                "application_context that no product_context / product_definition_context refers to). " +
+                "which entities reference which (SIZEOF(USEDIN(...)) WHERE rules, INVERSE bounds, UNIQUE " +
+                "rules and the acyclic-assembly rule, e.g. an application_context that no product_context / " +
+                "product_definition_context refers to, two name_attribute entities on one product_definition, " +
+                "or a usage cycle). " +
                 "Takes no parameters. The population is every stored entity plus everything reachable from " +
                 "them: an overwritten entity that another entity still references counts as a real " +
                 "referrer. Builders never report these, because a single entity cannot know who will refer " +
                 "to it later. Returns the violations per entity (store handle where one exists) and the " +
                 "assumptions made: USEDIN over entities the AP242 V1 excerpt does not model " +
-                "(name_attribute, description_attribute, id_attribute) is evaluated as the empty set.",
+                "(configuration_design) is evaluated as the empty set.",
         inputSchema = ToolSchema(required = emptyList()),
     ) { _ ->
         mcpToolCall(TOOL_NAME) {
@@ -58,6 +61,8 @@ fun registerValidateModelTool(
                 } catch (e: WhereRuleEvaluationException) {
                     return@mcpToolCall modelValidationFailedError(e.message)
                 } catch (e: UnsupportedInverseException) {
+                    return@mcpToolCall modelValidationFailedError(e.message)
+                } catch (e: UnsupportedUniqueRuleException) {
                     return@mcpToolCall modelValidationFailedError(e.message)
                 } catch (e: SemanticModelException) {
                     return@mcpToolCall modelValidationFailedError(e.message)
@@ -89,6 +94,7 @@ fun registerValidateModelTool(
                     buildJsonObject {
                         put("valid", result.isValid)
                         put("instanceCount", result.instanceCount)
+                        put("indeterminateCount", result.indeterminateCount)
                         put(
                             "findings",
                             buildJsonArray {

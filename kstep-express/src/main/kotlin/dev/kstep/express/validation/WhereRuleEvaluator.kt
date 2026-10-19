@@ -36,7 +36,13 @@ object WhereRuleEvaluator {
                 ?: throw WhereRuleEvaluationException(
                     "a WHERE-rule domain rule must evaluate to a boolean, but evaluated to $result",
                 )
-        return WhereRuleEvaluationResult(booleanResult.value, trace.assumptions.toList())
+        return WhereRuleEvaluationResult(
+            value = booleanResult.value,
+            assumptions = trace.assumptions.toList(),
+            indeterminate = trace.indeterminate,
+            details = trace.details.toList(),
+            cycleFound = trace.cycleFound,
+        )
     }
 
     /**
@@ -63,6 +69,9 @@ object WhereRuleEvaluator {
         val ruleLabel: String?,
     ) {
         val assumptions = mutableListOf<AppliedAssumption>()
+        var indeterminate = false
+        var cycleFound = false
+        val details = mutableListOf<String>()
     }
 
     private fun evaluateValue(
@@ -113,6 +122,9 @@ object WhereRuleEvaluator {
             is WhereRuleExpression.SelfInstance ->
                 throw WhereRuleEvaluationException("a bare SELF instance is only valid as the first USEDIN() argument")
             is WhereRuleExpression.UsedIn -> evaluateUsedIn(expression, trace)
+            is WhereRuleExpression.GetAttributeValue -> evaluateGetAttributeValue(expression, trace)
+            is WhereRuleExpression.AcyclicCall -> evaluateAcyclic(expression, trace)
+            is WhereRuleExpression.QualifiedChain -> evaluateChain(expression, trace)
             is WhereRuleExpression.SizeOf -> {
                 val operand = evaluateValue(expression.operand, attributeValues, trace, depth + 1)
                 val aggregate =
@@ -121,6 +133,96 @@ object WhereRuleEvaluator {
                 WhereRuleValue.IntegerValue(aggregate.size.toLong())
             }
         }
+    }
+
+    private fun requireContext(
+        trace: EvaluationTrace,
+        construct: String,
+    ): InstanceEvaluationContext =
+        trace.context
+            ?: throw WhereRuleEvaluationException("$construct requires an instance-graph context; none was supplied")
+
+    // get_*_value(SELF): the attribute_value of the single *_attribute instance naming SELF, else
+    // EXPRESS `?` (Unset). An incomplete population throws IndeterminateDerivedValueException.
+    private fun evaluateGetAttributeValue(
+        expression: WhereRuleExpression.GetAttributeValue,
+        trace: EvaluationTrace,
+    ): WhereRuleValue {
+        val context = requireContext(trace, "${expression.function}(SELF)")
+        val function =
+            SchemaFunctionIntrinsics.ATTRIBUTE_VALUE_FUNCTIONS[expression.function]
+                ?: throw WhereRuleEvaluationException(
+                    "unknown schema function '${clipForMessage(expression.function)}'",
+                )
+        val value =
+            SchemaFunctionIntrinsics.getAttributeValue(
+                context.scope,
+                context.self,
+                function.attributeEntity,
+                function.roleAttribute,
+            )
+        return if (value == null) WhereRuleValue.Unset else WhereRuleValue.StringValue(value)
+    }
+
+    private fun evaluateAcyclic(
+        expression: WhereRuleExpression.AcyclicCall,
+        trace: EvaluationTrace,
+    ): WhereRuleValue {
+        val context = requireContext(trace, "${SchemaFunctionIntrinsics.ACYCLIC_FUNCTION}(SELF, ...)")
+        val specific = context.roleResolver.resolveEntityName(expression.specificRelation)
+        return when (val outcome = AcyclicRelationshipEvaluator.evaluate(context, specific)) {
+            AcyclicRelationshipEvaluator.Outcome.Acyclic -> WhereRuleValue.BooleanValue(true)
+            is AcyclicRelationshipEvaluator.Outcome.Cycle -> {
+                trace.cycleFound = true
+                trace.details += "cycle: " + AcyclicRelationshipEvaluator.describePath(outcome.path, context.index)
+                WhereRuleValue.BooleanValue(false)
+            }
+            is AcyclicRelationshipEvaluator.Outcome.Indeterminate -> {
+                trace.indeterminate = true
+                trace.details += "indeterminate: ${clipForMessage(outcome.reason)}"
+                WhereRuleValue.BooleanValue(true)
+            }
+        }
+    }
+
+    // SELF\a.x\b.y: navigation over entity references with a type test at every hop after the first.
+    // The result is Unset (EXPRESS `?`) when a reference is unset or an instance is not of the narrowed type.
+    private fun evaluateChain(
+        expression: WhereRuleExpression.QualifiedChain,
+        trace: EvaluationTrace,
+    ): WhereRuleValue {
+        val context = requireContext(trace, "a multi-hop SELF chain")
+        var current: Any = context.self
+        expression.links.forEachIndexed { position, link ->
+            val description =
+                context.index.describe(current)
+                    ?: throw WhereRuleEvaluationException("chain instance is not part of the population")
+            if (position > 0 &&
+                link.group != null &&
+                !context.roleResolver.isSubtypeOrSelf(description.entityName, link.group)
+            ) {
+                return WhereRuleValue.Unset
+            }
+            val attribute = link.attribute.lowercase()
+            if (position == expression.links.lastIndex) {
+                return description.attributeValues[link.attribute] ?: description.attributeValues[attribute]
+                    ?: throw WhereRuleEvaluationException(
+                        "chain attribute '${clipForMessage(link.attribute)}' of " +
+                            "'${clipForMessage(description.entityName)}' is not a value attribute",
+                    )
+            }
+            val reference = description.references.firstOrNull { it.attribute.lowercase() == attribute }
+            if (reference == null) {
+                if (description.attributeValues.containsKey(link.attribute)) {
+                    throw WhereRuleEvaluationException(
+                        "chain attribute '${clipForMessage(link.attribute)}' is not an entity reference",
+                    )
+                }
+                return WhereRuleValue.Unset
+            }
+            current = reference.targets.singleOrNull() ?: return WhereRuleValue.Unset
+        }
+        return WhereRuleValue.Unset
     }
 
     private fun evaluateUsedIn(

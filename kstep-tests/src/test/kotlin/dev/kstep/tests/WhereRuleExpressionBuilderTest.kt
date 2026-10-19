@@ -303,14 +303,19 @@ class WhereRuleExpressionBuilderTest :
                 WhereRuleExpression.SelfAttribute("level")
         }
 
-        "a multi-hop SELF chain names the first link that cannot be followed" {
+        "a multi-hop SELF chain builds pairs of (group, attribute) links, anything else names the unsupported link" {
             val options = WhereRuleExpressionBuilder.BuildOptions(allowGroupQualifiedSelf = true)
+            WhereRuleExpressionBuilder.build(ExpressParserFactory.parseExpression("SELF\\a.b\\c.id"), options) shouldBe
+                WhereRuleExpression.QualifiedChain(
+                    listOf(
+                        WhereRuleExpression.ChainLink("a", "b"),
+                        WhereRuleExpression.ChainLink("c", "id"),
+                    ),
+                )
+            // A dangling third group qualifier is not a pair: it is named as the unsupported link.
             val message =
                 shouldThrow<UnsupportedWhereExpressionException> {
-                    WhereRuleExpressionBuilder.build(
-                        ExpressParserFactory.parseExpression("SELF\\a.b\\c.id"),
-                        options,
-                    )
+                    WhereRuleExpressionBuilder.build(ExpressParserFactory.parseExpression("SELF\\a.b\\c"), options)
                 }.message!!
             message shouldContain "unsupported link '\\c' after 'SELF\\a.b'"
             // Without the option, the very first group qualifier is already the unsupported link.

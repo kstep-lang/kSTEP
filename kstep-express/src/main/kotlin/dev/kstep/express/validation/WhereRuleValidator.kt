@@ -20,6 +20,10 @@ data class WhereRuleViolation(
     val ruleLabel: String?,
     val expressionText: String,
     val sourceLine: Int,
+    /** Evidence for a failed graph rule, e.g. the cycle path of a failed acyclic check (ADR-0023); `null` otherwise. */
+    val detail: String? = null,
+    /** `true` when the rule failed because the acyclic intrinsic found a cycle (as opposed to a plain `false`). */
+    val cycle: Boolean = false,
 )
 
 /**
@@ -82,31 +86,43 @@ object WhereRuleValidator {
     ): WhereRuleValidationReport {
         val prepared =
             rules.map {
-                prepareForInstanceGraph(it) ?: throw UnsupportedWhereExpressionException(
-                    "WHERE rule ${it.label ?: "(unlabeled)"} is outside the supported subset: ${it.expressionText}",
-                )
+                when (val outcome = prepareForInstanceGraph(it)) {
+                    is PreparationOutcome.Prepared -> outcome.rule
+                    is PreparationOutcome.Unsupported ->
+                        throw UnsupportedWhereExpressionException(
+                            "WHERE rule ${it.label ?: "(unlabeled)"} is outside the supported subset: " +
+                                "${it.expressionText} (${outcome.reason})",
+                        )
+                }
             }
         return validatePrepared(entityName, prepared, attributeValues, context)
     }
 
     /**
-     * Parses and builds [rule] once (with `allowInstanceGraphFunctions`) so a population-wide
-     * validation does not re-parse the same text per instance. Returns `null` when the rule is
-     * outside the supported subset (callers decide whether that is an error); a syntactically
-     * invalid rule still throws.
+     * Parses and builds [rule] once (with `allowInstanceGraphFunctions`, and the fixed schema
+     * functions of [intrinsics], ADR-0023) so a population-wide validation does not re-parse the same
+     * text per instance. A rule outside the supported subset is reported as
+     * [PreparationOutcome.Unsupported] with the reason — never dropped silently (ADR-0023); callers
+     * decide whether that is an error. A syntactically invalid rule still throws.
      */
-    fun prepareForInstanceGraph(rule: WhereRuleSpec): PreparedWhereRule? {
+    fun prepareForInstanceGraph(
+        rule: WhereRuleSpec,
+        intrinsics: SchemaFunctionIntrinsicSet = SchemaFunctionIntrinsicSet.NONE,
+    ): PreparationOutcome {
         val tree = ExpressParserFactory.parseExpression(rule.expressionText)
         val expression =
             try {
                 WhereRuleExpressionBuilder.build(
                     tree,
-                    WhereRuleExpressionBuilder.BuildOptions(allowInstanceGraphFunctions = true),
+                    WhereRuleExpressionBuilder.BuildOptions(
+                        allowInstanceGraphFunctions = true,
+                        schemaFunctionIntrinsics = intrinsics,
+                    ),
                 )
-            } catch (_: UnsupportedWhereExpressionException) {
-                return null
+            } catch (e: UnsupportedWhereExpressionException) {
+                return PreparationOutcome.Unsupported(e.message ?: "outside the supported expression subset")
             }
-        return PreparedWhereRule(rule, expression)
+        return PreparationOutcome.Prepared(PreparedWhereRule(rule, expression))
     }
 
     /** As the graph-context [validate], over rules already built by [prepareForInstanceGraph]. */
@@ -118,15 +134,25 @@ object WhereRuleValidator {
     ): WhereRuleValidationReport {
         val violations = mutableListOf<WhereRuleViolation>()
         val assumptions = mutableListOf<AppliedAssumption>()
+        var indeterminate = 0
         for (rule in rules) {
             val result = WhereRuleEvaluator.evaluate(rule.expression, attributeValues, context, rule.spec.label)
             assumptions += result.assumptions
-            if (!result.value) {
-                violations +=
-                    WhereRuleViolation(entityName, rule.spec.label, rule.spec.expressionText, rule.spec.sourceLine)
+            when {
+                result.indeterminate -> indeterminate++
+                !result.value ->
+                    violations +=
+                        WhereRuleViolation(
+                            entityName,
+                            rule.spec.label,
+                            rule.spec.expressionText,
+                            rule.spec.sourceLine,
+                            detail = result.details.firstOrNull(),
+                            cycle = result.cycleFound,
+                        )
             }
         }
-        return WhereRuleValidationReport(violations, assumptions)
+        return WhereRuleValidationReport(violations, assumptions, indeterminate)
     }
 }
 
@@ -142,4 +168,18 @@ class PreparedWhereRule internal constructor(
 data class WhereRuleValidationReport(
     val violations: List<WhereRuleViolation>,
     val assumptions: List<AppliedAssumption>,
+    /** Rules that could not be decided because the population is incomplete (neither violated nor satisfied). */
+    val indeterminateCount: Int = 0,
 )
+
+/** The outcome of [WhereRuleValidator.prepareForInstanceGraph]. */
+sealed interface PreparationOutcome {
+    data class Prepared(
+        val rule: PreparedWhereRule,
+    ) : PreparationOutcome
+
+    /** The rule is outside the supported subset; [reason] names the first construct that is not supported. */
+    data class Unsupported(
+        val reason: String,
+    ) : PreparationOutcome
+}

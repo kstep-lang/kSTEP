@@ -35,7 +35,7 @@ class DerivedAttributeEvaluatorTest :
             }
         }
 
-        "next_assembly_usage_occurrence's real DERIVE (a two-hop SELF chain) correctly throws" {
+        "next_assembly_usage_occurrence's real DERIVE (a two-hop SELF chain) needs an instance-graph context" {
             val schema = Ap242V1CodeGen.loadSchema()
             val nauo = schema.entities.single { it.name == "next_assembly_usage_occurrence" }
             val derived = nauo.derivedAttributes.single()
@@ -44,9 +44,10 @@ class DerivedAttributeEvaluatorTest :
                 "SELF\\product_definition_relationship.related_product_definition" +
                 "\\product_definition_occurrence.id"
 
-            shouldThrow<UnsupportedWhereExpressionException> {
+            // Since ADR-0023 the chain builds (QualifiedChain) but cannot be evaluated without the instances.
+            shouldThrow<WhereRuleEvaluationException> {
                 DerivedAttributeEvaluator.evaluate(derived, emptyMap())
-            }
+            }.message!! shouldContain "instance-graph context"
         }
 
         "a synthetic DERIVE using a SELF.attribute reference (within the supported subset) evaluates correctly" {
@@ -92,15 +93,25 @@ class DerivedAttributeEvaluatorTest :
             }
         }
 
-        "next_assembly_usage_occurrence's two-hop chain error names the first unsupported link" {
+        "next_assembly_usage_occurrence's two-hop chain builds a QualifiedChain with both links" {
             val nauo = Ap242V1CodeGen.loadSchema().entities.single { it.name == "next_assembly_usage_occurrence" }
-            val message =
-                shouldThrow<UnsupportedWhereExpressionException> {
-                    DerivedAttributeEvaluator.evaluate(nauo.derivedAttributes.single(), emptyMap())
-                }.message!!
-            message shouldContain "unsupported link '\\product_definition_occurrence'"
-            message shouldContain "after 'SELF\\product_definition_relationship.related_product_definition'"
-            message shouldContain "multi-hop chain"
+            val expression =
+                dev.kstep.express.validation.WhereRuleExpressionBuilder.build(
+                    dev.kstep.express.ExpressParserFactory.parseExpression(
+                        (nauo.derivedAttributes.single() as ExpressDerivedAttribute.Explicit).expressionText,
+                    ),
+                    dev.kstep.express.validation.WhereRuleExpressionBuilder
+                        .BuildOptions(allowGroupQualifiedSelf = true),
+                )
+            expression shouldBe
+                dev.kstep.express.validation.WhereRuleExpression.QualifiedChain(
+                    listOf(
+                        dev.kstep.express.validation.WhereRuleExpression
+                            .ChainLink("product_definition_relationship", "related_product_definition"),
+                        dev.kstep.express.validation.WhereRuleExpression
+                            .ChainLink("product_definition_occurrence", "id"),
+                    ),
+                )
         }
 
         "a SELF\\entity.attribute reference evaluates like SELF.attribute, including the Unset rule" {

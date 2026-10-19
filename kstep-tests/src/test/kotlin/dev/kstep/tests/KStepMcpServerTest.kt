@@ -2,6 +2,7 @@ package dev.kstep.tests
 
 import dev.kstep.core.DslViolationCodes
 import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
+import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.mcp.EntityStore
 import dev.kstep.mcp.EntityStoreEntry
 import dev.kstep.mcp.buildServer
@@ -167,8 +168,8 @@ class KStepMcpServerTest :
                     .filterIsInstance<NextAssemblyUsageOccurrence>()
                     .single()
             nauo.id shouldBe "NAUO-001"
-            nauo.relatingProductDefinition.id shouldBe "HSG-001-D"
-            nauo.relatedProductDefinition.id shouldBe "BRK-001-D"
+            (nauo.relatingProductDefinition as ProductDefinition).id shouldBe "HSG-001-D"
+            (nauo.relatedProductDefinition as ProductDefinition).id shouldBe "BRK-001-D"
             nauo.referenceDesignator shouldBe "RD-1"
         }
 
@@ -295,6 +296,12 @@ class KStepMcpServerTest :
                     mapOf("id" to "BRK-001-D", "formation_id" to "BRK-001-F", "frame_of_reference_handle" to pdc),
                 ).isError shouldBe null
 
+            // A usage of a definition within itself would close a cycle (WR1, ADR-0023): use a second definition.
+            client
+                .callTool(
+                    "build_product_definition",
+                    mapOf("id" to "BRK-002-D", "formation_id" to "BRK-001-F", "frame_of_reference_handle" to pdc),
+                ).isError shouldBe null
             val result =
                 client.callTool(
                     "build_next_assembly_usage_occurrence",
@@ -302,7 +309,7 @@ class KStepMcpServerTest :
                         "id" to "NAUO-1",
                         "name" to "bracket usage",
                         "relating_product_definition_id" to "BRK-001-D",
-                        "related_product_definition_id" to "BRK-001-D",
+                        "related_product_definition_id" to "BRK-002-D",
                     ),
                 )
             result.isError shouldBe null
@@ -541,7 +548,8 @@ class KStepMcpServerTest :
                 .jsonObject["code"]!!
                 .jsonPrimitive.content shouldBe
                 DslViolationCodes.INVERSE_BOUND_VIOLATED
-            orphan.structuredContent!!["assumptions"]!!.jsonArray shouldHaveSize 2
+            // name/description/id_attribute are modelled since ADR-0023: no unmodelled USEDIN, no assumption.
+            orphan.structuredContent!!["assumptions"]!!.jsonArray shouldHaveSize 0
 
             client
                 .callTool(

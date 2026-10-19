@@ -16,6 +16,8 @@ import dev.kstep.express.semantic.InheritanceResolver
 import dev.kstep.express.semantic.ResolvedAttribute
 import dev.kstep.express.semantic.ResolvedDerivedAttribute
 import dev.kstep.express.semantic.ResolvedEntity
+import dev.kstep.express.validation.SchemaFunctionIntrinsicSet
+import dev.kstep.express.validation.SchemaFunctionIntrinsics
 
 /**
  * Codegen-wide emission options, additive to the "one flat `data class` per instantiable
@@ -38,6 +40,13 @@ data class CodeGenOptions(
     val consistentCopyVisibility: Boolean = false,
     val definedTypeScope: DefinedTypeScope = DefinedTypeScope.ALL,
     val derivedAttributeMode: DerivedAttributeMode = DerivedAttributeMode.STRICT,
+    /**
+     * Which fixed schema functions (`get_name_value`, ...) `DERIVE` initializers may use (ADR-0023). `NONE`
+     * (the default) keeps every function call unsupported, exactly as before. A schema that itself declares
+     * a FUNCTION of an intrinsic's name is refused when this is not `NONE`: kSTEP cannot verify that a
+     * declared body is equivalent to its native implementation.
+     */
+    val schemaFunctionIntrinsics: SchemaFunctionIntrinsicSet = SchemaFunctionIntrinsicSet.NONE,
 )
 
 /**
@@ -61,14 +70,26 @@ data class UnsupportedDerivedAttribute(
     val reason: String,
 )
 
+/** A DERIVE attribute generated as a population-dependent member function, or as a SELECT-cast chain getter. */
+data class GeneratedDerivedAttribute(
+    val entity: String,
+    val attribute: String,
+)
+
 data class EntityCodeGenResult(
     val typeSpec: TypeSpec,
     val unsupportedDerived: List<UnsupportedDerivedAttribute>,
+    /** DERIVEs generated as `fun name(scope: DerivedValueScope)` (ADR-0023). */
+    val populationDerived: List<GeneratedDerivedAttribute> = emptyList(),
+    /** DERIVEs generated as nullable `as?` chain getters (ADR-0023). */
+    val chainDerived: List<GeneratedDerivedAttribute> = emptyList(),
 )
 
 data class FileCodeGenResult(
     val fileSpec: FileSpec,
     val unsupportedDerived: List<UnsupportedDerivedAttribute>,
+    val populationDerived: List<GeneratedDerivedAttribute> = emptyList(),
+    val chainDerived: List<GeneratedDerivedAttribute> = emptyList(),
 )
 
 /**
@@ -132,7 +153,10 @@ object ExpressKotlinCodeGenerator {
         resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema),
         options: CodeGenOptions = CodeGenOptions(),
     ): FileCodeGenResult {
+        requireNoShadowedIntrinsics(schema, options)
         val unsupportedDerived = mutableListOf<UnsupportedDerivedAttribute>()
+        val populationDerived = mutableListOf<GeneratedDerivedAttribute>()
+        val chainDerived = mutableListOf<GeneratedDerivedAttribute>()
         val fileBuilder = FileSpec.builder(packageName, NamingConventions.toClassName(schema.name))
         // Resolution map: ALWAYS the full, unfiltered TYPE list (insertion order = declaration order).
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
@@ -216,9 +240,12 @@ object ExpressKotlinCodeGenerator {
                     definedTypesByLowerName,
                     options,
                     selectModel.entitySuperinterfaces[resolved.entity.name.lowercase()].orEmpty(),
+                    resolvedEntities,
                 )
             fileBuilder.addType(entityResult.typeSpec)
             unsupportedDerived += entityResult.unsupportedDerived
+            populationDerived += entityResult.populationDerived
+            chainDerived += entityResult.chainDerived
         }
         selectModel.selects.forEach { (key, select) ->
             claim("SELECT TYPE", select.name)
@@ -243,7 +270,28 @@ object ExpressKotlinCodeGenerator {
                 )
             fileBuilder.addType(generateSelectWrapperType(alias, valueType, supers, options))
         }
-        return FileCodeGenResult(fileBuilder.build(), unsupportedDerived)
+        return FileCodeGenResult(fileBuilder.build(), unsupportedDerived, populationDerived, chainDerived)
+    }
+
+    /**
+     * Refuses a schema declaring its own FUNCTION with the name of a kSTEP intrinsic when intrinsics are
+     * enabled (ADR-0023): the declared body could differ from the native implementation, and silently
+     * preferring one over the other would be wrong behaviour.
+     */
+    internal fun requireNoShadowedIntrinsics(
+        schema: ExpressSchema,
+        options: CodeGenOptions,
+    ) {
+        if (options.schemaFunctionIntrinsics == SchemaFunctionIntrinsicSet.NONE) return
+        schema.functions
+            .firstOrNull { it.name.lowercase() in SchemaFunctionIntrinsics.ALL_NAMES }
+            ?.let {
+                throw CodeGenException(
+                    "schema '${schema.name}' declares FUNCTION '${it.name}' (line ${it.sourceLine}), which kSTEP " +
+                        "implements as a fixed schema-function intrinsic; the declared body cannot be verified " +
+                        "to be equivalent to it, so codegen refuses to choose (ADR-0023)",
+                )
+            }
     }
 
     /**
@@ -356,7 +404,16 @@ object ExpressKotlinCodeGenerator {
         definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
         options: CodeGenOptions = CodeGenOptions(),
         superinterfaces: List<ClassName> = emptyList(),
-    ): TypeSpec = generateEntityTypeWithReport(resolved, packageName, definedTypes, options, superinterfaces).typeSpec
+        resolvedEntities: Map<String, ResolvedEntity> = emptyMap(),
+    ): TypeSpec =
+        generateEntityTypeWithReport(
+            resolved,
+            packageName,
+            definedTypes,
+            options,
+            superinterfaces,
+            resolvedEntities,
+        ).typeSpec
 
     /** Like [generateEntityType], additionally returning the DERIVE attributes skipped in report mode. */
     fun generateEntityTypeWithReport(
@@ -365,6 +422,8 @@ object ExpressKotlinCodeGenerator {
         definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
         options: CodeGenOptions = CodeGenOptions(),
         superinterfaces: List<ClassName> = emptyList(),
+        /** Whole-schema resolution (original-case keys), needed for multi-hop chains; empty keeps them unsupported. */
+        resolvedEntities: Map<String, ResolvedEntity> = emptyMap(),
     ): EntityCodeGenResult {
         val entity = resolved.entity
         if (!resolved.isInstantiable) {
@@ -419,37 +478,56 @@ object ExpressKotlinCodeGenerator {
         addWhereRulesKdoc(entity, classBuilder)
 
         val unsupportedDerived = mutableListOf<UnsupportedDerivedAttribute>()
-        DerivedAttributeCodeGen.plan(resolved, packageName, definedTypes).forEach { plan ->
-            when (plan) {
-                is DerivedPlan.Supported -> {
-                    val property = plan.propertySpec
-                    if (!seenPropertyNames.add(property.name)) {
-                        throw CodeGenException(
-                            "entity '${entity.name}' DERIVE '${plan.attr.name}': Kotlin identifier " +
-                                "'${property.name}' collides with another attribute in the same (flattened) " +
-                                "entity after EXPRESS-to-Kotlin naming conversion",
-                        )
+        val populationDerived = mutableListOf<GeneratedDerivedAttribute>()
+        val chainDerived = mutableListOf<GeneratedDerivedAttribute>()
+        DerivedAttributeCodeGen
+            .plan(resolved, packageName, definedTypes, resolvedEntities, options.schemaFunctionIntrinsics)
+            .forEach { plan ->
+                when (plan) {
+                    is DerivedPlan.Supported -> {
+                        val property = plan.propertySpec
+                        if (!seenPropertyNames.add(property.name)) {
+                            throw CodeGenException(
+                                "entity '${entity.name}' DERIVE '${plan.attr.name}': Kotlin identifier " +
+                                    "'${property.name}' collides with another attribute in the same (flattened) " +
+                                    "entity after EXPRESS-to-Kotlin naming conversion",
+                            )
+                        }
+                        classBuilder.addProperty(property)
+                        if (plan.selectChain) chainDerived += GeneratedDerivedAttribute(entity.name, plan.attr.name)
                     }
-                    classBuilder.addProperty(property)
-                }
-                is DerivedPlan.Unsupported -> {
-                    val message =
-                        "entity '${entity.name}' DERIVE '${plan.attr.name}' " +
-                            "(declared by '${plan.attr.declaringEntity}') is outside the supported subset: " +
-                            plan.reason
-                    if (options.derivedAttributeMode == DerivedAttributeMode.STRICT ||
-                        plan.attr.overrides is ResolvedDerivedAttribute.Override.InheritedExplicit
-                    ) {
-                        throw CodeGenException(message)
+                    is DerivedPlan.PopulationDependent -> {
+                        val function = plan.functionSpec
+                        // A function may legally share a Kotlin name with a property, but a schema where a
+                        // DERIVE shadows an attribute of the same name is almost certainly an error: refuse.
+                        if (!seenPropertyNames.add(function.name)) {
+                            throw CodeGenException(
+                                "entity '${entity.name}' DERIVE '${plan.attr.name}': Kotlin identifier " +
+                                    "'${function.name}' collides with another attribute in the same (flattened) " +
+                                    "entity after EXPRESS-to-Kotlin naming conversion",
+                            )
+                        }
+                        classBuilder.addFunction(function)
+                        populationDerived += GeneratedDerivedAttribute(entity.name, plan.attr.name)
                     }
-                    unsupportedDerived +=
-                        UnsupportedDerivedAttribute(plan.attr.declaringEntity, plan.attr.name, plan.reason)
+                    is DerivedPlan.Unsupported -> {
+                        val message =
+                            "entity '${entity.name}' DERIVE '${plan.attr.name}' " +
+                                "(declared by '${plan.attr.declaringEntity}') is outside the supported subset: " +
+                                plan.reason
+                        if (options.derivedAttributeMode == DerivedAttributeMode.STRICT ||
+                            plan.attr.overrides is ResolvedDerivedAttribute.Override.InheritedExplicit
+                        ) {
+                            throw CodeGenException(message)
+                        }
+                        unsupportedDerived +=
+                            UnsupportedDerivedAttribute(plan.attr.declaringEntity, plan.attr.name, plan.reason)
+                    }
                 }
             }
-        }
         addUnsupportedDerivedKdoc(unsupportedDerived, classBuilder)
 
-        return EntityCodeGenResult(classBuilder.build(), unsupportedDerived)
+        return EntityCodeGenResult(classBuilder.build(), unsupportedDerived, populationDerived, chainDerived)
     }
 
     private fun addAttribute(

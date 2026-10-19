@@ -10,7 +10,7 @@ licensed under the BSD 2-Clause License. The grammar file is vendored
 under kstep-express/src/main/antlr/dev/kstep/express/grammar/Express.g4.
 
 This product includes a small excerpt of the official AP242 EXPRESS
-schema — nineteen declarations total, copied (mostly verbatim, two
+schema — twenty-eight declarations total, copied (mostly verbatim, some
 spots deliberately adapted — see below) from
 ap242ed2_dis2_mim_lf_v1.101.exp — ISO TS 10303-442 AP242 "managed model
 based 3d engineering", EXPRESS MIM Long Form, v1.101 (2019) — obtained
@@ -25,30 +25,51 @@ declaration); it is not the paywalled ISO standard prose (ISO/TS
 Verbatim (copied unmodified): the six V1 entities `product`,
 `product_definition`, `product_definition_formation`,
 `next_assembly_usage_occurrence`, `approval`, `person_and_organization`;
-the three `TYPE` declarations (`identifier`, `label`, `text`); and the
-seven supporting `ENTITY` declarations `product_context`,
-`product_definition_context`, `approval_status`, `person`,
-`organization`, `application_context_element`, `application_context`.
+the entities `name_attribute`, `description_attribute`, `id_attribute`
+(ADR-0023); `product_definition_relationship` (since ADR-0023 with its
+real `product_definition_or_reference` typing); the `TYPE` declarations
+`identifier`, `label`, `text` and
+`product_definition_or_reference_or_occurrence`; and the seven supporting
+`ENTITY` declarations `product_context`, `product_definition_context`,
+`approval_status`, `person`, `organization`,
+`application_context_element`, `application_context`.
 
-Adapted (not verbatim — deliberate truncations, added for the M2
-SUBTYPE-OF-codegen wave so `next_assembly_usage_occurrence`'s SUBTYPE OF
-chain resolves): `product_definition_relationship`,
-`product_definition_usage`, `assembly_component_usage`.
-`product_definition_relationship`'s `relating_product_definition`/
-`related_product_definition` are typed `product_definition` here rather
-than the real schema's `product_definition_or_reference` SELECT type
-(the codegen resolves closed SELECT types since ADR-0020, but vendoring
-one plus its full member-entity list and the follow-up work in the
-builders, Part 21 writer/reader and kstep-mcp was judged to exceed the
-"minimal, gap-driven excerpt" precedent this NOTICE documents); the `SUPERTYPE OF`
-clauses of `product_definition_usage`/`assembly_component_usage`/
-`application_context_element` are kept verbatim in full but name sibling
-entities (`make_from_usage_option`, `multi_level_reference_designator`,
-`promissory_usage_occurrence`, `specified_higher_usage_occurrence`,
-`quantified_assembly_component_usage`, `product_concept_context`) that
-are not themselves vendored here — the same pre-existing treatment
+Verification note (ADR-0023): `product_definition_occurrence`,
+`name_attribute`, `description_attribute`, `id_attribute` and the
+`product_definition_or_reference_or_occurrence` alias were transcribed
+from the official schema as quoted in the semantic-core Welle D plan; no
+local copy of the MBx-IF file was available in that session to diff them
+mechanically. The USEDIN role strings of the vendored WHERE rules (e.g.
+`NAME_ATTRIBUTE.NAMED_ITEM`) agree with the attribute names used. Diff
+them against the official file when a copy is at hand.
+
+Adapted (not verbatim -- deliberate truncations, each marked "ADAPTED" in
+the schema file's header comment and at the spot):
+`product_definition_occurrence` omits `quantity`, the DERIVE
+`descendant_occurrences`, the INVERSE `child_occurrences` and the WHERE
+rules `WR1` and `WR3` (their exact text could not be verified against a
+local copy of the schema, so none was written); the four `SELECT` types
+`product_definition_or_reference`, `name_attribute_select`,
+`description_attribute_select` and `id_attribute_select` list only the
+members modelled in the excerpt; and the three entities
+`product_definition_usage`, `assembly_component_usage` and
+`product_definition_relationship` exist to make
+`next_assembly_usage_occurrence`'s SUBTYPE OF chain resolve. The
+`SUPERTYPE OF` clauses of
+`product_definition_usage`/`assembly_component_usage`/
+`application_context_element`/`product_definition_occurrence` are kept
+verbatim in full but name sibling entities (`make_from_usage_option`,
+`multi_level_reference_designator`, `promissory_usage_occurrence`,
+`specified_higher_usage_occurrence`,
+`quantified_assembly_component_usage`, `product_concept_context`,
+`product_definition_specified_occurrence`,
+`product_definition_occurrence_reference_with_local_representation`) that
+are not themselves vendored here -- the same pre-existing treatment
 already applied to `product_definition`'s own `SUPERTYPE OF ONEOF` list.
-See the schema file's own header comment for the full rationale.
+The schema functions `get_name_value`, `get_description_value`,
+`get_id_value` and `acyclic_product_definition_relationship` are not
+vendored; kSTEP implements them natively (ADR-0023). See the schema
+file's own header comment for the full rationale.
 
 Provenance note: the complete, unmodified schema file is not vendored
 in this repository — only the excerpt above. The decision to include

@@ -100,6 +100,48 @@ class UsedInRoleResolver(
         return ResolvedUsedInRole.Modelled(entityName, attributeName)
     }
 
+    /**
+     * `true` iff [entityName] is [ancestor] or one of its subtypes (both lower-case EXPRESS names).
+     * An entity the schema excerpt does not model is never a subtype.
+     */
+    fun isSubtypeOrSelf(
+        entityName: String,
+        ancestor: String,
+    ): Boolean {
+        val resolved = entities[entityName.lowercase()] ?: return false
+        val wanted = ancestor.lowercase()
+        return resolved.entity.name.lowercase() == wanted || resolved.ancestorChain.any { it.lowercase() == wanted }
+    }
+
+    /**
+     * Resolves an entity reference string of the form `SCHEMA.ENTITY` (the `specific_relation`
+     * argument of `acyclic_product_definition_relationship`, which EXPRESS spells with the schema
+     * name) to the lower-case name of a *modelled* entity. Anything else is a loud
+     * [WhereRuleEvaluationException]: a typo must never evaluate as "no such relations".
+     */
+    fun resolveEntityName(typeText: String): String {
+        if (typeText.length > MAX_ROLE_LENGTH) {
+            throw WhereRuleEvaluationException("entity reference text exceeds $MAX_ROLE_LENGTH characters")
+        }
+        val shown = clipForMessage(typeText)
+        val parts = typeText.split('.')
+        if (parts.size != 2 || parts.any { it.isEmpty() }) {
+            throw WhereRuleEvaluationException("entity reference '$shown' must have the form SCHEMA.ENTITY")
+        }
+        if (parts[0].uppercase() !in acceptedSchemaNames) {
+            throw WhereRuleEvaluationException(
+                "entity reference '$shown' names unknown schema '${clipForMessage(parts[0])}'",
+            )
+        }
+        val name = parts[1].lowercase()
+        if (name !in entities) {
+            throw WhereRuleEvaluationException(
+                "entity reference '$shown' names entity '${clipForMessage(parts[1])}', which is not modelled",
+            )
+        }
+        return name
+    }
+
     private companion object {
         const val MAX_ROLE_LENGTH = 512
     }

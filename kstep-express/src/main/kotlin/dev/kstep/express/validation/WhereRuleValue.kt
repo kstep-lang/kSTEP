@@ -33,6 +33,14 @@ sealed interface WhereRuleValue {
     data object Unset : WhereRuleValue
 
     /**
+     * Marks an entity-typed (reference) attribute that currently has a value. Its only use is
+     * `EXISTS(attribute)` on an OPTIONAL reference attribute (ADR-0023): the reference target itself is
+     * carried by the instance description's references, never by the value bag, so any other use
+     * (comparison, boolean operand) is a [WhereRuleEvaluationException].
+     */
+    data object EntityReference : WhereRuleValue
+
+    /**
      * An EXPRESS BAG/SET of entity usages (the `USEDIN` result, or an `INVERSE` attribute value).
      * Identity semantics, hence not a data class. Never comparable: only `SIZEOF` consumes it.
      */

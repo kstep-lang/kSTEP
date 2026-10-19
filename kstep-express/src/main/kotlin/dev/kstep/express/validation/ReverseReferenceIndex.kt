@@ -2,6 +2,12 @@ package dev.kstep.express.validation
 
 import java.util.IdentityHashMap
 
+internal fun identitySetOf(items: Collection<Any>): IdentityHashMap<Any, Unit> {
+    val set = IdentityHashMap<Any, Unit>()
+    for (item in items) set[item] = Unit
+    return set
+}
+
 /**
  * One usage: [referrer] (concrete entity [referrerEntity]) uses [target] in the role
  * `[declaringEntity].[attribute]`. Deliberately not a `data class`: instances are compared by
@@ -94,6 +100,27 @@ class ReverseReferenceIndex private constructor(
 
     /** All instances in deterministic discovery order. */
     fun instances(): List<Any> = order
+
+    /**
+     * A [DerivedValueScope] over this index. [incomplete] holds the instances (compared by identity)
+     * whose referrers are partly invisible, e.g. on a Part 21 read: opaque or rejected instances
+     * reference them.
+     */
+    fun asDerivedValueScope(incomplete: Collection<Any> = emptyList()): DerivedValueScope {
+        val incompleteSet = identitySetOf(incomplete)
+        val index = this
+        return object : DerivedValueScope {
+            override fun usedIn(
+                target: Any,
+                declaringEntity: String,
+                attribute: String,
+            ): List<InstanceReference> = index.usedIn(target, declaringEntity, attribute)
+
+            override fun describe(instance: Any): InstanceDescription? = index.describe(instance)
+
+            override fun isComplete(instance: Any): Boolean = !incompleteSet.containsKey(instance)
+        }
+    }
 
     companion object {
         fun build(

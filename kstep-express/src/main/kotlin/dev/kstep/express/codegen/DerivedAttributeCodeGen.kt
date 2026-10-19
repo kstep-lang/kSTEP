@@ -1,6 +1,7 @@
 package dev.kstep.express.codegen
 
 import com.squareup.kotlinpoet.BOOLEAN
+import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.CodeBlock
 import com.squareup.kotlinpoet.DOUBLE
 import com.squareup.kotlinpoet.FunSpec
@@ -10,10 +11,18 @@ import com.squareup.kotlinpoet.STRING
 import com.squareup.kotlinpoet.TypeName
 import dev.kstep.express.ExpressParserFactory
 import dev.kstep.express.ExpressSyntaxException
+import dev.kstep.express.semantic.AggregationType
+import dev.kstep.express.semantic.DefinedTypeRef
+import dev.kstep.express.semantic.EntityTypeRef
 import dev.kstep.express.semantic.ExpressDefinedType
+import dev.kstep.express.semantic.ExpressSelectItem
+import dev.kstep.express.semantic.ExpressType
 import dev.kstep.express.semantic.ResolvedDerivedAttribute
 import dev.kstep.express.semantic.ResolvedEntity
 import dev.kstep.express.validation.ComparisonOperator
+import dev.kstep.express.validation.DerivedValueScope
+import dev.kstep.express.validation.SchemaFunctionIntrinsicSet
+import dev.kstep.express.validation.SchemaFunctionIntrinsics
 import dev.kstep.express.validation.UnsupportedWhereExpressionException
 import dev.kstep.express.validation.WhereRuleExpression
 import dev.kstep.express.validation.WhereRuleExpressionBuilder
@@ -52,6 +61,17 @@ internal sealed interface DerivedPlan {
     data class Supported(
         override val attr: ResolvedDerivedAttribute,
         val propertySpec: PropertySpec,
+        /** `true` for a multi-hop `SELF\a.x\b.y` chain translated to a nullable SELECT-cast getter (ADR-0023). */
+        val selectChain: Boolean = false,
+    ) : DerivedPlan
+
+    /**
+     * A DERIVE whose value depends on the population (`get_name_value(SELF)` and siblings, ADR-0023):
+     * generated as a member function taking a [DerivedValueScope], not as a property getter.
+     */
+    data class PopulationDependent(
+        override val attr: ResolvedDerivedAttribute,
+        val functionSpec: FunSpec,
     ) : DerivedPlan
 
     data class Unsupported(
@@ -102,10 +122,16 @@ internal object DerivedAttributeCodeGen {
         val staticType: StaticType,
     )
 
+    private val DERIVED_VALUE_SCOPE = ClassName("dev.kstep.express.validation", "DerivedValueScope")
+    private val SCHEMA_FUNCTION_INTRINSICS = ClassName("dev.kstep.express.validation", "SchemaFunctionIntrinsics")
+
+    @Suppress("LongParameterList")
     fun plan(
         resolved: ResolvedEntity,
         packageName: String,
         definedTypes: Map<String, ExpressDefinedType>,
+        resolvedEntities: Map<String, ResolvedEntity> = emptyMap(),
+        intrinsics: SchemaFunctionIntrinsicSet = SchemaFunctionIntrinsicSet.NONE,
     ): List<DerivedPlan> {
         val derived = resolved.flattenedDerivedAttributes
         if (derived.isEmpty()) return emptyList()
@@ -138,7 +164,7 @@ internal object DerivedAttributeCodeGen {
         val parsed =
             derived.associate {
                 it.name.lowercase() to
-                    parse(it, entityName, resolved, scope, declarerByKey, derivedKeys)
+                    parse(it, entityName, resolved, scope, declarerByKey, derivedKeys, intrinsics)
             }
 
         // Dependency order (post-order DFS) with cycle and depth detection: both are schema
@@ -171,7 +197,19 @@ internal object DerivedAttributeCodeGen {
         val results = HashMap<String, DerivedPlan>()
         order.forEach { key ->
             val attr = derivedKeys.getValue(key)
-            val plan = planOne(attr, parsed.getValue(key), results, scope, entityName, packageName, definedTypes)
+            val plan =
+                planOne(
+                    PlanContext(
+                        resolved,
+                        packageName,
+                        definedTypes,
+                        resolvedEntities.values.associateBy { it.entity.name.lowercase() },
+                    ),
+                    attr,
+                    parsed.getValue(key),
+                    results,
+                    scope,
+                )
             results[key] = plan
             if (plan is DerivedPlan.Supported) {
                 val analysisOperand = plan.propertySpec
@@ -194,6 +232,7 @@ internal object DerivedAttributeCodeGen {
         scope: Map<String, Operand>,
         declarerByKey: Map<String, String>,
         derivedKeys: Map<String, ResolvedDerivedAttribute>,
+        intrinsics: SchemaFunctionIntrinsicSet,
     ): Parsed {
         if (attr.expressionText.length > MAX_DERIVE_EXPRESSION_LENGTH) {
             return Parsed.Bad(
@@ -205,7 +244,10 @@ internal object DerivedAttributeCodeGen {
             try {
                 WhereRuleExpressionBuilder.build(
                     ExpressParserFactory.parseExpression(attr.expressionText),
-                    WhereRuleExpressionBuilder.BuildOptions(allowGroupQualifiedSelf = true),
+                    WhereRuleExpressionBuilder.BuildOptions(
+                        allowGroupQualifiedSelf = true,
+                        schemaFunctionIntrinsics = intrinsics,
+                    ),
                 )
             } catch (e: UnsupportedWhereExpressionException) {
                 return Parsed.Bad(e.message ?: "outside the supported expression subset")
@@ -264,6 +306,14 @@ internal object DerivedAttributeCodeGen {
             is WhereRuleExpression.IntegerLiteral,
             is WhereRuleExpression.RealLiteral,
             -> emptyList()
+            is WhereRuleExpression.QualifiedChain ->
+                listOf(Reference(expression.links.first().attribute, expression.links.first().group))
+            is WhereRuleExpression.GetAttributeValue -> emptyList()
+            is WhereRuleExpression.AcyclicCall ->
+                throw DeriveUnsupported(
+                    "${SchemaFunctionIntrinsics.ACYCLIC_FUNCTION} is a WHERE-rule check over the population, " +
+                        "not a DERIVE value",
+                )
             // Unreachable in practice (the builder is invoked without allowInstanceGraphFunctions),
             // but the sealed `when` must be exhaustive and must never silently accept these.
             is WhereRuleExpression.SelfInstance,
@@ -272,39 +322,189 @@ internal object DerivedAttributeCodeGen {
             -> throw DeriveUnsupported(INSTANCE_GRAPH_UNSUPPORTED)
         }
 
-    @Suppress("LongParameterList")
+    private class PlanContext(
+        val resolved: ResolvedEntity,
+        val packageName: String,
+        val definedTypes: Map<String, ExpressDefinedType>,
+        /** Lower-case entity name -> resolved entity. */
+        val resolvedEntities: Map<String, ResolvedEntity>,
+    )
+
     private fun planOne(
+        plan: PlanContext,
         attr: ResolvedDerivedAttribute,
         parsed: Parsed,
         results: Map<String, DerivedPlan>,
         scope: Map<String, Operand>,
-        entityName: String,
-        packageName: String,
-        definedTypes: Map<String, ExpressDefinedType>,
     ): DerivedPlan {
+        val entityName = plan.resolved.entity.name
         val context = "entity '$entityName' DERIVE '${attr.name}'"
         val ok = parsed as? Parsed.Ok ?: return DerivedPlan.Unsupported(attr, (parsed as Parsed.Bad).reason)
         ok.dependencies.forEach { dependency ->
-            if (results[dependency] is DerivedPlan.Unsupported) {
-                val dependencyName = (results.getValue(dependency)).attr.name
-                return DerivedPlan.Unsupported(attr, "depends on unsupported DERIVE '$dependencyName'")
+            when (results[dependency]) {
+                is DerivedPlan.Unsupported -> {
+                    val dependencyName = (results.getValue(dependency)).attr.name
+                    return DerivedPlan.Unsupported(attr, "depends on unsupported DERIVE '$dependencyName'")
+                }
+                is DerivedPlan.PopulationDependent -> {
+                    val dependencyName = (results.getValue(dependency)).attr.name
+                    return DerivedPlan.Unsupported(
+                        attr,
+                        "depends on population-dependent DERIVE '$dependencyName' (a function, not a property)",
+                    )
+                }
+                else -> Unit
             }
         }
         return try {
-            val declared = resolveKotlinTypeName(attr.declaredType, packageName, context, definedTypes)
-            val analysis = analyze(ok.expression, declared, scope, context)
-            val property =
-                PropertySpec
-                    .builder(propertyNameOf(attr.name), analysis.type.copy(nullable = analysis.nullable))
-                    .getter(FunSpec.getterBuilder().addStatement("return·%L", analysis.code).build())
-                    .addKdoc("%L", kdocFor(attr))
-                    .build()
-            DerivedPlan.Supported(attr, property)
+            val declared = resolveKotlinTypeName(attr.declaredType, plan.packageName, context, plan.definedTypes)
+            when (val expression = ok.expression) {
+                is WhereRuleExpression.GetAttributeValue -> planPopulationDependent(attr, expression, declared, context)
+                is WhereRuleExpression.QualifiedChain -> planChain(plan, attr, expression, declared, context)
+                else -> {
+                    val analysis = analyze(expression, declared, scope, context)
+                    val property =
+                        PropertySpec
+                            .builder(propertyNameOf(attr.name), analysis.type.copy(nullable = analysis.nullable))
+                            .getter(FunSpec.getterBuilder().addStatement("return·%L", analysis.code).build())
+                            .addKdoc("%L", kdocFor(attr))
+                            .build()
+                    DerivedPlan.Supported(attr, property)
+                }
+            }
         } catch (e: DeriveUnsupported) {
             DerivedPlan.Unsupported(attr, e.message ?: "unsupported")
         } catch (e: CodeGenException) {
             DerivedPlan.Unsupported(attr, e.message ?: "unsupported declared type")
         }
+    }
+
+    // get_*_value(SELF) (ADR-0023 D3/D4): a member function of the population, returning String?
+    // (null = EXPRESS `?`). The AP242 functions return label/text/identifier, i.e. STRING.
+    private fun planPopulationDependent(
+        attr: ResolvedDerivedAttribute,
+        expression: WhereRuleExpression.GetAttributeValue,
+        declared: TypeName,
+        context: String,
+    ): DerivedPlan {
+        if (declared.copy(nullable = false) != STRING) {
+            unsupported("$context: ${expression.function} returns STRING but the declared type is $declared")
+        }
+        val function =
+            SchemaFunctionIntrinsics.ATTRIBUTE_VALUE_FUNCTIONS[expression.function]
+                ?: unsupported("$context: unknown schema function '${expression.function}'")
+        val spec =
+            FunSpec
+                .builder(propertyNameOf(attr.name))
+                .addParameter("scope", DERIVED_VALUE_SCOPE)
+                .returns(STRING.copy(nullable = true))
+                .addStatement(
+                    "return·%T.getAttributeValue(scope,·this,·%S,·%S)",
+                    SCHEMA_FUNCTION_INTRINSICS,
+                    function.attributeEntity,
+                    function.roleAttribute,
+                ).addKdoc("%L", kdocForPopulation(attr))
+                .build()
+        return DerivedPlan.PopulationDependent(attr, spec)
+    }
+
+    // SELF\a.x\b.y (ADR-0023 D5): x must be an entity- or SELECT-typed attribute whose type admits b;
+    // the getter is a null-safe `as?` chain, null being EXPRESS `?` (wrong subtype or unset).
+    private fun planChain(
+        plan: PlanContext,
+        attr: ResolvedDerivedAttribute,
+        chain: WhereRuleExpression.QualifiedChain,
+        declared: TypeName,
+        context: String,
+    ): DerivedPlan {
+        if (plan.resolvedEntities.isEmpty()) {
+            unsupported("$context: a multi-hop chain needs the schema's resolved entities, none were supplied")
+        }
+        val resolved = plan.resolved
+        val first = chain.links.first()
+        val firstAttribute =
+            resolved.flattenedAttributes.firstOrNull {
+                it.redeclaredAsDerived == null && it.attribute.name.equals(first.attribute, ignoreCase = true)
+            } ?: unsupported("$context: '${first.attribute}' is not an explicit attribute of '${resolved.entity.name}'")
+        var currentType: ExpressType = firstAttribute.attribute.declaredType
+        var code = CodeBlock.of("%L", propertyNameOf(firstAttribute.attribute.name))
+        for (link in chain.links.drop(1)) {
+            val group =
+                plan.resolvedEntities[link.group?.lowercase()]
+                    ?: unsupported("$context: link '\\${link.group}' is not an entity of this schema")
+            val admitted = entityNamesOf(currentType, plan.definedTypes)
+            val compatible =
+                admitted.any { member ->
+                    group.entity.name.equals(member, ignoreCase = true) ||
+                        group.ancestorChain.any { it.equals(member, ignoreCase = true) }
+                }
+            if (!compatible) {
+                unsupported(
+                    "$context: '${group.entity.name}' is not admitted by the type of the previous link " +
+                        "(admitted: ${admitted.sorted().joinToString().ifEmpty { "none" }})",
+                )
+            }
+            val member =
+                group.flattenedAttributes.firstOrNull {
+                    it.redeclaredAsDerived == null && it.attribute.name.equals(link.attribute, ignoreCase = true)
+                } ?: unsupported("$context: '${link.attribute}' is not an explicit attribute of '${group.entity.name}'")
+            code =
+                CodeBlock.of(
+                    "(%L·as?·%T)?.%L",
+                    code,
+                    ClassName(plan.packageName, NamingConventions.toClassName(group.entity.name)),
+                    propertyNameOf(member.attribute.name),
+                )
+            currentType = member.attribute.declaredType
+        }
+        val resultType = resolveKotlinTypeName(currentType, plan.packageName, context, plan.definedTypes)
+        val declaredStatic = staticTypeOf(declared.copy(nullable = false))
+        if (staticTypeOf(resultType.copy(nullable = false)) != declaredStatic) {
+            unsupported(
+                "$context: chain result type ${resultType.copy(nullable = false)} does not match the declared " +
+                    "type ${declared.copy(nullable = false)}",
+            )
+        }
+        val property =
+            PropertySpec
+                .builder(propertyNameOf(attr.name), declared.copy(nullable = true))
+                .getter(FunSpec.getterBuilder().addStatement("return·%L", code).build())
+                .addKdoc("%L", kdocFor(attr, chain = true))
+                .build()
+        return DerivedPlan.Supported(attr, property, selectChain = true)
+    }
+
+    // Entity names a (possibly aliased, possibly nested SELECT) attribute type can hold.
+    private fun entityNamesOf(
+        type: ExpressType,
+        definedTypes: Map<String, ExpressDefinedType>,
+    ): Set<String> {
+        val result = linkedSetOf<String>()
+        val visited = mutableSetOf<String>()
+        val work = ArrayDeque<String>()
+
+        fun enqueue(t: ExpressType) {
+            when (t) {
+                is EntityTypeRef -> result += t.entityName
+                is AggregationType -> enqueue(t.elementType)
+                is DefinedTypeRef -> work.addLast(t.typeName.lowercase())
+                else -> Unit
+            }
+        }
+        enqueue(type)
+        while (work.isNotEmpty() && visited.size < MAX_DERIVE_CHAIN_DEPTH * MAX_DERIVE_CHAIN_DEPTH) {
+            val key = work.removeLast()
+            if (!visited.add(key)) continue
+            val definedType = definedTypes[key] ?: continue
+            definedType.aliasedTypeName?.let { work.addLast(it.lowercase()) }
+            definedType.selectItems?.forEach {
+                when (it) {
+                    is ExpressSelectItem.Entity -> result += it.name
+                    is ExpressSelectItem.DefinedType -> work.addLast(it.name.lowercase())
+                }
+            }
+        }
+        return result
     }
 
     private fun analyze(
@@ -413,6 +613,12 @@ internal object DerivedAttributeCodeGen {
                 is WhereRuleExpression.UsedIn,
                 is WhereRuleExpression.SizeOf,
                 -> unsupported(INSTANCE_GRAPH_UNSUPPORTED)
+                is WhereRuleExpression.QualifiedChain ->
+                    unsupported("a multi-hop SELF chain is only supported as the whole DERIVE initializer")
+                is WhereRuleExpression.GetAttributeValue ->
+                    unsupported("${expression.function}(SELF) is only supported as the whole DERIVE initializer")
+                is WhereRuleExpression.AcyclicCall ->
+                    unsupported("${SchemaFunctionIntrinsics.ACYCLIC_FUNCTION} cannot be part of a DERIVE value")
             }
 
         private fun lookup(name: String): Operand =
@@ -522,7 +728,21 @@ internal object DerivedAttributeCodeGen {
     private fun propertyNameOf(expressName: String): String =
         NamingConventions.escapeIfKotlinKeyword(NamingConventions.toPropertyName(expressName))
 
-    private fun kdocFor(attr: ResolvedDerivedAttribute): String =
+    private fun kdocForPopulation(attr: ResolvedDerivedAttribute): String =
+        buildString {
+            append("DERIVE ${attr.name} := ${attr.expressionText.replace(Regex("\\s+"), " ").trim()}\n")
+            append("\nDeclared by entity '${attr.declaringEntity}'.")
+            append(
+                "\nDepends on the population (USEDIN), so it is a function of a scope rather than a property: " +
+                    "`null` is EXPRESS `?` (zero or several matches); an incomplete population throws " +
+                    "IndeterminateDerivedValueException (ADR-0023).\n",
+            )
+        }.let(::sanitizeKdoc)
+
+    private fun kdocFor(
+        attr: ResolvedDerivedAttribute,
+        chain: Boolean = false,
+    ): String =
         buildString {
             append("DERIVE ${attr.name} := ${attr.expressionText.replace(Regex("\\s+"), " ").trim()}\n")
             append("\nDeclared by entity '${attr.declaringEntity}'.")
@@ -536,6 +756,12 @@ internal object DerivedAttributeCodeGen {
                 is ResolvedDerivedAttribute.Override.InheritedDerived ->
                     append(" Overrides the DERIVE of '${override.originalDeclaringEntity}'.")
                 null -> Unit
+            }
+            if (chain) {
+                append(
+                    "\nFollows a SELECT/entity-typed attribute and narrows it by type; `null` is EXPRESS `?` " +
+                        "(the value is not of the narrowed type, ADR-0023).",
+                )
             }
             append(
                 "\nComputed from the other attributes; not part of equals/hashCode/copy/toString and " +

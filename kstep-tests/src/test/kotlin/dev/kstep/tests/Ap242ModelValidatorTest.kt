@@ -26,7 +26,7 @@ class Ap242ModelValidatorTest :
     StringSpec({
         fun appCtx() = applicationContext { application = "config control" }.getOrThrow()
 
-        "a complete product model is valid and reports exactly the expected assumptions" {
+        "a complete product model is valid and needs no assumptions (the attribute entities are modelled)" {
             val ac = appCtx()
             val pc =
                 productContext {
@@ -64,17 +64,9 @@ class Ap242ModelValidatorTest :
             result.isValid shouldBe true
             result.findings.shouldBeEmpty()
             result.instanceCount shouldBe 9
-            result.assumptions
-                .map { Triple(it.entityName, it.ruleLabel, it.roleText.substringAfter("MIM_LF.")) }
-                .toSet() shouldBe
-                setOf(
-                    Triple("application_context", "WR1", "DESCRIPTION_ATTRIBUTE.DESCRIBED_ITEM"),
-                    Triple("application_context", "WR2", "ID_ATTRIBUTE.IDENTIFIED_ITEM"),
-                    Triple("product_definition", "WR1", "NAME_ATTRIBUTE.NAMED_ITEM"),
-                    Triple("person_and_organization", "WR1", "NAME_ATTRIBUTE.NAMED_ITEM"),
-                    Triple("person_and_organization", "WR2", "DESCRIPTION_ATTRIBUTE.DESCRIBED_ITEM"),
-                )
-            result.assumptions shouldHaveSize 5
+            // name_attribute / description_attribute / id_attribute are modelled since ADR-0023, so their USEDIN
+            // roles are evaluated for real and no assumption is needed any more.
+            result.assumptions.shouldBeEmpty()
         }
 
         "an application_context nobody refers to violates INVERSE [1:?] with KSTEP-I-001" {

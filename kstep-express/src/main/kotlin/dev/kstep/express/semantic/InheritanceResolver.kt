@@ -93,10 +93,14 @@ object InheritanceResolver {
         val supertypeName = entity.supertypes.singleOrNull()
         val ancestorAttributes: List<ResolvedAttribute>
         val ancestorDerived: List<ResolvedDerivedAttribute>
+        val ancestorWhere: List<ResolvedWhereRule>
+        val ancestorUnique: List<ResolvedUniqueRule>
         val ancestorChain: List<String>
         if (supertypeName == null) {
             ancestorAttributes = emptyList()
             ancestorDerived = emptyList()
+            ancestorWhere = emptyList()
+            ancestorUnique = emptyList()
             ancestorChain = emptyList()
         } else {
             val supertypeEntity =
@@ -110,6 +114,8 @@ object InheritanceResolver {
                 resolveEntity(supertypeEntity, entitiesByLowerName, cache, ancestorPath + entity.name)
             ancestorAttributes = resolvedSupertype.flattenedAttributes
             ancestorDerived = resolvedSupertype.flattenedDerivedAttributes
+            ancestorWhere = resolvedSupertype.flattenedWhereRules
+            ancestorUnique = resolvedSupertype.flattenedUniqueRules
             ancestorChain = resolvedSupertype.ancestorChain + supertypeEntity.name
         }
 
@@ -149,6 +155,8 @@ object InheritanceResolver {
                 isInstantiable = !entity.isAbstract,
                 ancestorChain = ancestorChain,
                 flattenedDerivedAttributes = derived,
+                flattenedWhereRules = ancestorWhere + entity.whereRules.map { ResolvedWhereRule(entity.name, it) },
+                flattenedUniqueRules = ancestorUnique + entity.uniqueRules.map { ResolvedUniqueRule(entity.name, it) },
             )
         cache[key] = resolved
         return resolved

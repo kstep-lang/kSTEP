@@ -26,6 +26,7 @@ import dev.kstep.express.grammar.ExpressParser
  */
 object WhereRuleExpressionBuilder {
     private const val MAX_EXPRESSION_NESTING_DEPTH = 128
+    private const val MAX_CHAIN_QUALIFIERS = 16
 
     /**
      * Opt-in extensions of the supported subset. The default keeps the WHERE-rule behaviour
@@ -39,6 +40,11 @@ object WhereRuleExpressionBuilder {
     data class BuildOptions(
         val allowGroupQualifiedSelf: Boolean = false,
         val allowInstanceGraphFunctions: Boolean = false,
+        /**
+         * Recognise the fixed AP242 schema functions (ADR-0023): `get_name_value(SELF)` and siblings
+         * and the exact `acyclic_product_definition_relationship(SELF, [...], '...')` form.
+         */
+        val schemaFunctionIntrinsics: SchemaFunctionIntrinsicSet = SchemaFunctionIntrinsicSet.NONE,
     )
 
     fun build(
@@ -173,7 +179,12 @@ object WhereRuleExpressionBuilder {
             ctx.simpleFactorExpression()?.let { return buildSimpleFactorExpression(it, depth + 1) }
             ctx.simpleFactorUnaryExpression()?.let { return buildUnary(it, depth + 1) }
             if (ctx.aggregateInitializer() != null) unsupported("aggregate initializer '[...]'")
-            if (ctx.entityConstructor() != null) unsupported("function call or entity constructor '${ctx.text}'")
+            ctx.entityConstructor()?.let { constructor ->
+                if (options.schemaFunctionIntrinsics == SchemaFunctionIntrinsicSet.AP242) {
+                    return buildSchemaFunction(constructor)
+                }
+                unsupported("function call or entity constructor '${ctx.text}'")
+            }
             if (ctx.interval() != null) unsupported("interval expression '{...}'")
             if (ctx.queryExpression() != null) unsupported("QUERY expression")
             error("simpleFactor matched none of its seven alternatives — grammar/generated-code mismatch")
@@ -334,6 +345,68 @@ object WhereRuleExpressionBuilder {
             )
         }
 
+        // `name(args)` parses as entityConstructor (it precedes functionCall in simpleFactor), so a
+        // user-defined schema function call arrives here. Only the fixed AP242 intrinsics are
+        // recognised (ADR-0023); every other name, and every deviating argument shape, stays
+        // unsupported and names what was expected.
+        private fun buildSchemaFunction(ctx: ExpressParser.EntityConstructorContext): WhereRuleExpression {
+            val name = ctx.entityRef().text.lowercase()
+            val args = ctx.expression()
+            SchemaFunctionIntrinsics.ATTRIBUTE_VALUE_FUNCTIONS[name]?.let {
+                if (args.size != 1) unsupported("$name() with ${args.size} arguments (expected exactly SELF)")
+                requireBareSelf(args[0], ctx.text)
+                return WhereRuleExpression.GetAttributeValue(name)
+            }
+            if (name == SchemaFunctionIntrinsics.ACYCLIC_FUNCTION) return buildAcyclicCall(ctx, args)
+            unsupported(
+                "function call '${ctx.text}' (recognised schema functions: " +
+                    "${SchemaFunctionIntrinsics.ALL_NAMES.sorted().joinToString()})",
+            )
+        }
+
+        private fun buildAcyclicCall(
+            ctx: ExpressParser.EntityConstructorContext,
+            args: List<ExpressParser.ExpressionContext>,
+        ): WhereRuleExpression {
+            val form =
+                "${SchemaFunctionIntrinsics.ACYCLIC_FUNCTION}(SELF, " +
+                    "[SELF\\product_definition_relationship.related_product_definition], '<SCHEMA.ENTITY>')"
+            if (args.size != 3) unsupported("'${ctx.text}': only the exact form $form is supported")
+            requireBareSelf(args[0], ctx.text)
+            val elements =
+                singleSimpleFactor(args[1])?.aggregateInitializer()?.element()
+                    ?: unsupported("'${ctx.text}': second argument is not an aggregate initializer; expected $form")
+            val relatives =
+                elements.singleOrNull()?.takeIf { it.repetition() == null }?.expression()?.let {
+                    Walker(options.copy(allowGroupQualifiedSelf = true)).buildExpression(it, 0)
+                }
+            val expected =
+                relatives as? WhereRuleExpression.QualifiedSelfAttribute
+                    ?: unsupported("'${ctx.text}': relatives argument must be $form")
+            if (!expected.entity.equals("product_definition_relationship", ignoreCase = true) ||
+                !expected.name.equals("related_product_definition", ignoreCase = true)
+            ) {
+                unsupported("'${ctx.text}': relatives argument must be exactly the related end; expected $form")
+            }
+            val specific =
+                asSimpleStringLiteral(args[2])
+                    ?: unsupported("'${ctx.text}': third argument is not a plain string literal; expected $form")
+            return WhereRuleExpression.AcyclicCall(specific)
+        }
+
+        // Descends expression -> ... -> simpleFactor while every level is a single, operator-free element.
+        private fun singleSimpleFactor(
+            expression: ExpressParser.ExpressionContext,
+        ): ExpressParser.SimpleFactorContext? {
+            if (expression.relOpExtended() != null) return null
+            val simple = expression.simpleExpression().singleOrNull() ?: return null
+            if (simple.addLikeOp().isNotEmpty()) return null
+            val term = simple.term().singleOrNull() ?: return null
+            if (term.multiplicationLikeOp().isNotEmpty()) return null
+            val factor = term.factor().singleOrNull() ?: return null
+            return factor.simpleFactor().singleOrNull()
+        }
+
         // The first USEDIN argument must be exactly the unqualified, whole-instance SELF — checked
         // structurally (no operators, no qualifiers) so a bare SELF is never accepted anywhere else.
         private fun requireBareSelf(
@@ -382,6 +455,7 @@ object WhereRuleExpressionBuilder {
         ): WhereRuleExpression {
             val builtIn = ctx.builtInConstant()
             if (builtIn != null && builtIn.SELF() != null) {
+                buildChainOrNull(qualifiers)?.let { return it }
                 val first = qualifiers.getOrNull(0)
                 val second = qualifiers.getOrNull(1)
                 val supportedLinks: Int
@@ -431,6 +505,28 @@ object WhereRuleExpressionBuilder {
             }
             if (builtIn != null) unsupported("built-in constant '${builtIn.text}'")
             unsupported("named CONSTANT reference '${ctx.text}'")
+        }
+
+        // SELF\a.x\b.y... : strict (group, attribute) pairs, two or more of them (ADR-0023). A single
+        // pair stays the QualifiedSelfAttribute produced by the code above.
+        private fun buildChainOrNull(qualifiers: List<ExpressParser.QualifierContext>): WhereRuleExpression? {
+            if (!options.allowGroupQualifiedSelf) return null
+            if (qualifiers.size < 4 || qualifiers.size % 2 != 0) return null
+            if (qualifiers.size > MAX_CHAIN_QUALIFIERS) {
+                unsupported("SELF chain with more than ${MAX_CHAIN_QUALIFIERS / 2} links")
+            }
+            val links = mutableListOf<WhereRuleExpression.ChainLink>()
+            for (i in qualifiers.indices step 2) {
+                val group = qualifiers[i].groupQualifier()
+                val attribute = qualifiers[i + 1].attributeQualifier()
+                if (group == null || attribute == null) return null
+                links +=
+                    WhereRuleExpression.ChainLink(
+                        group = group.entityRef().text,
+                        attribute = attribute.attributeRef().attributeId().text,
+                    )
+            }
+            return WhereRuleExpression.QualifiedChain(links)
         }
 
         private fun buildLiteral(ctx: ExpressParser.LiteralContext): WhereRuleExpression {

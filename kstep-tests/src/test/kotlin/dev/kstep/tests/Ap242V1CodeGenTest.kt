@@ -6,11 +6,17 @@ import com.squareup.kotlinpoet.STRING
 import dev.kstep.express.codegen.Ap242V1CodeGen
 import dev.kstep.express.codegen.CodeGenException
 import dev.kstep.express.codegen.CodeGenOptions
+import dev.kstep.express.codegen.EXPECTED_CHAIN_DERIVED
+import dev.kstep.express.codegen.EXPECTED_EMITTED_DEFINED_TYPES
+import dev.kstep.express.codegen.EXPECTED_POPULATION_DERIVED
+import dev.kstep.express.codegen.EXPECTED_UNSUPPORTED_DERIVED
+import dev.kstep.express.codegen.ap242DriftProblems
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
+import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.maps.shouldBeEmpty
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
@@ -64,7 +70,7 @@ private fun topLevelClassNames(packagePath: String): Set<String> {
 
 class Ap242V1CodeGenTest :
     StringSpec({
-        "codegen succeeds for all six V1 entities against real-schema ground truth" {
+        "codegen succeeds for all ten target entities against real-schema ground truth" {
             val outcome = Ap242V1CodeGen.generate()
 
             outcome.generatedEntityNames shouldContainExactlyInAnyOrder
@@ -75,6 +81,10 @@ class Ap242V1CodeGenTest :
                     "next_assembly_usage_occurrence",
                     "approval",
                     "person_and_organization",
+                    "product_definition_occurrence",
+                    "name_attribute",
+                    "description_attribute",
+                    "id_attribute",
                 )
             outcome.skipped.shouldBeEmpty()
         }
@@ -93,7 +103,8 @@ class Ap242V1CodeGenTest :
                     "relatedProductDefinition",
                     "referenceDesignator",
                 )
-            val productDefinitionType = ClassName(Ap242V1CodeGen.DEFAULT_PACKAGE_NAME, "ProductDefinition")
+            // SELECT product_definition_or_reference (ADR-0023), no longer the narrowed product_definition.
+            val productDefinitionType = ClassName(Ap242V1CodeGen.DEFAULT_PACKAGE_NAME, "ProductDefinitionOrReference")
             parameters.single { it.name == "id" }.type shouldBe STRING
             parameters.single { it.name == "name" }.type shouldBe STRING
             parameters.single { it.name == "description" }.type shouldBe STRING.copy(nullable = true)
@@ -122,7 +133,7 @@ class Ap242V1CodeGenTest :
             levelParameter.type shouldBe STRING
         }
 
-        "the emitted file contains all six target entities plus support entities, fully self-contained" {
+        "the emitted file contains all target entities, support entities and the four SELECTs, fully self-contained" {
             val outcome = Ap242V1CodeGen.generate()
 
             outcome.fileSpec.typeSpecs.map { it.name } shouldContainExactlyInAnyOrder
@@ -139,6 +150,14 @@ class Ap242V1CodeGenTest :
                     "ProductContext",
                     "ProductDefinitionContext",
                     "ApplicationContext",
+                    "ProductDefinitionOccurrence",
+                    "NameAttribute",
+                    "DescriptionAttribute",
+                    "IdAttribute",
+                    "ProductDefinitionOrReference",
+                    "NameAttributeSelect",
+                    "DescriptionAttributeSelect",
+                    "IdAttributeSelect",
                 )
         }
 
@@ -163,21 +182,27 @@ class Ap242V1CodeGenTest :
                 listOf("kotlin.ConsistentCopyVisibility")
         }
 
-        "generate() with CORE_MODULE_OPTIONS still generates the same twelve entities as the default options" {
+        "generate() with CORE_MODULE_OPTIONS still generates the same sixteen types as the default options" {
             val default = Ap242V1CodeGen.generate()
             val coreModule = Ap242V1CodeGen.generate(options = Ap242V1CodeGen.CORE_MODULE_OPTIONS)
             coreModule.generatedEntityNames shouldContainExactlyInAnyOrder default.generatedEntityNames
             coreModule.fileSpec.typeSpecs.map { it.name } shouldContainExactlyInAnyOrder
                 default.fileSpec.typeSpecs.map { it.name }
         }
-        "the real V1 extraction emits no ENUMERATION or SELECT type" {
+        "the real V1 extraction emits exactly the four SELECTs as sealed interfaces and no enumeration" {
             val outcome = Ap242V1CodeGen.generate()
 
-            outcome.emittedDefinedTypeNames.shouldBeEmpty()
-            outcome.fileSpec.typeSpecs.none {
-                it.isEnum || it.kind == com.squareup.kotlinpoet.TypeSpec.Kind.INTERFACE
-            } shouldBe
-                true
+            outcome.emittedDefinedTypeNames.toSet() shouldBe EXPECTED_EMITTED_DEFINED_TYPES
+            outcome.fileSpec.typeSpecs.none { it.isEnum } shouldBe true
+            outcome.fileSpec.typeSpecs
+                .filter { it.kind == com.squareup.kotlinpoet.TypeSpec.Kind.INTERFACE }
+                .map { it.name } shouldContainExactlyInAnyOrder
+                listOf(
+                    "ProductDefinitionOrReference",
+                    "NameAttributeSelect",
+                    "DescriptionAttributeSelect",
+                    "IdAttributeSelect",
+                )
         }
 
         "only reachable TYPEs are emitted, even when the caller passes the default ALL scope" {
@@ -268,33 +293,75 @@ class Ap242V1CodeGenTest :
             (actual - Ap242V1CodeGen.KSTEP_CORE_RESERVED_CLASS_NAMES) shouldBe emptySet()
         }
 
-        "the six real V1 DERIVE clauses are reported as named limitations and never become properties" {
+        "every real V1 DERIVE clause is translated: five population-dependent functions and one SELECT-cast chain" {
             val outcome = Ap242V1CodeGen.generate()
 
-            outcome.unsupportedDerivedAttributes.map { "${it.entity}.${it.attribute}" } shouldContainExactlyInAnyOrder
+            outcome.unsupportedDerivedAttributes.shouldBeEmpty()
+            outcome.populationDerivedAttributes.map { "${it.entity}.${it.attribute}" } shouldContainExactlyInAnyOrder
                 listOf(
                     "product_definition.name",
                     "person_and_organization.name",
                     "person_and_organization.description",
                     "application_context.id",
                     "application_context.description",
-                    "next_assembly_usage_occurrence.product_definition_occurrence_id",
                 )
-            outcome.unsupportedDerivedAttributes
-                .single { it.attribute == "product_definition_occurrence_id" }
-                .reason shouldContain "unsupported link '\\product_definition_occurrence'"
-            outcome.unsupportedDerivedAttributes
-                .filter { it.attribute != "product_definition_occurrence_id" }
-                .forEach { it.reason shouldContain "get_" }
+            outcome.chainDerivedAttributes.map { "${it.entity}.${it.attribute}" } shouldBe
+                listOf("next_assembly_usage_occurrence.product_definition_occurrence_id")
+            ap242DriftProblems(outcome) shouldBe emptyList()
 
-            // No generated class gained a property beyond its constructor parameters: Part 21, the MCP
-            // server and the kstep-core builders therefore see exactly the shape they did before.
+            // Population-dependent DERIVEs are member functions taking a scope, never properties; only the
+            // chain DERIVE is a (nullable) property, so the shape seen by Part 21, MCP and the builders is unchanged.
             outcome.fileSpec.typeSpecs.filter { it.primaryConstructor != null }.forEach { type ->
-                type.propertySpecs.map { it.name } shouldBe type.primaryConstructor!!.parameters.map { it.name }
+                val extra =
+                    type.propertySpecs.map { it.name } -
+                        type.primaryConstructor!!
+                            .parameters
+                            .map { it.name }
+                            .toSet()
+                extra shouldBe
+                    if (type.name ==
+                        "NextAssemblyUsageOccurrence"
+                    ) {
+                        listOf("productDefinitionOccurrenceId")
+                    } else {
+                        emptyList()
+                    }
             }
+            val product = outcome.fileSpec.typeSpecs.single { it.name == "ProductDefinition" }
+            val name = product.funSpecs.single { it.name == "name" }
+            name.parameters.map { it.name to it.type.toString() } shouldBe
+                listOf("scope" to "dev.kstep.express.validation.DerivedValueScope")
+            name.returnType shouldBe STRING.copy(nullable = true)
             outcome.fileSpec.typeSpecs
-                .single { it.name == "PersonAndOrganization" }
-                .kdoc
-                .toString() shouldContain "person_and_organization.name"
+                .single { it.name == "NextAssemblyUsageOccurrence" }
+                .propertySpecs
+                .single { it.name == "productDefinitionOccurrenceId" }
+                .type shouldBe STRING.copy(nullable = true)
+        }
+
+        "the drift guard reports a mismatch in both directions" {
+            val outcome = Ap242V1CodeGen.generate()
+
+            ap242DriftProblems(outcome, expectedPopulation = EXPECTED_POPULATION_DERIVED - "product_definition.name")
+                .single() shouldContain "unexpected [product_definition.name]"
+            ap242DriftProblems(outcome, expectedChain = EXPECTED_CHAIN_DERIVED + "x.y").single() shouldContain
+                "missing [x.y]"
+            ap242DriftProblems(outcome, expectedUnsupported = EXPECTED_UNSUPPORTED_DERIVED + "x.z")
+                .single() shouldContain "missing [x.z]"
+            ap242DriftProblems(outcome).shouldBeEmpty()
+        }
+
+        "the generated population-dependent function documents its semantics" {
+            val outcome = Ap242V1CodeGen.generate()
+            val kdoc =
+                outcome.fileSpec.typeSpecs
+                    .single { it.name == "ApplicationContext" }
+                    .funSpecs
+                    .single { it.name == "id" }
+                    .kdoc
+                    .toString()
+            kdoc shouldContain "get_id_value(SELF)"
+            kdoc shouldContain "IndeterminateDerivedValueException"
+            outcome.fileSpec.typeSpecs.shouldNotBeEmpty()
         }
     })

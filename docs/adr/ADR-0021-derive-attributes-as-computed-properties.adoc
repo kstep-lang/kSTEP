@@ -11,6 +11,8 @@ Amended by ADR-0022: `SIZEOF` and `USEDIN` need an instance graph and stay unsup
 `DERIVE` initializers (the builder is called without `allowInstanceGraphFunctions`); the sealed
 `when`s in `DerivedAttributeCodeGen` reject the new AST nodes explicitly.
 
+Amended by ADR-0023: the real V1 DERIVEs are now translated (population-dependent member functions taking a scope, and a SELECT-cast chain getter). Statements below that none of the six is inside the subset describe the state before that wave.
+
 == Context
 
 The semantic model captured `DERIVE` clauses (M1 Welle 6) and `DerivedAttributeEvaluator`

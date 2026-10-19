@@ -155,7 +155,7 @@ class CliExportIntegrationTest :
             result.stdout shouldContain "Script failed to compile:"
         }
 
-        "a root that is not one of the twelve supported entity types renders Part21WriteException as a runtime_error" {
+        "a root that is not one of the sixteen supported entity types renders Part21WriteException as a runtime_error" {
             val script = File(workDir, "unsupported-root-type.kstep.kts")
             script.writeText(
                 """
@@ -172,7 +172,7 @@ class CliExportIntegrationTest :
             json["status"]?.jsonPrimitive?.content shouldBe "error"
             json["errorKind"]?.jsonPrimitive?.content shouldBe "runtime_error"
             json["exceptionClass"]?.jsonPrimitive?.content shouldBe "dev.kstep.step21.Part21WriteException"
-            json["message"]?.jsonPrimitive?.content shouldContain "not one of the twelve supported"
+            json["message"]?.jsonPrimitive?.content shouldContain "not one of the sixteen supported"
         }
 
         "a non-ASCII field value renders Part21EncodingException as human-readable runtime-error text" {
