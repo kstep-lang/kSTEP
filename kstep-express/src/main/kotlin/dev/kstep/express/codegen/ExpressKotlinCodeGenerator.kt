@@ -106,7 +106,37 @@ object ExpressKotlinCodeGenerator {
             }
             fileBuilder.addType(generateEntityType(resolved, packageName, definedTypesByLowerName, options))
         }
+        schema.definedTypes.filter { it.enumerationItems != null }.forEach { definedType ->
+            val className = NamingConventions.toClassName(definedType.name)
+            if (!seenClassNames.add(className)) {
+                throw CodeGenException(
+                    "schema '${schema.name}': ENUMERATION TYPE '${definedType.name}' generates Kotlin class " +
+                        "name '$className', which collides with another entity or enumeration in the same schema",
+                )
+            }
+            fileBuilder.addType(generateEnumType(definedType))
+        }
         return fileBuilder.build()
+    }
+
+    // One Kotlin enum class per `TYPE x = ENUMERATION OF (a, b, ...)`, constants UPPERCASED in
+    // declaration order. EXPRESS identifiers are case-insensitive, so two items differing only
+    // in case would collide -- guarded loudly like every other naming collision here.
+    fun generateEnumType(definedType: ExpressDefinedType): TypeSpec {
+        val items = requireNotNull(definedType.enumerationItems) { "'${definedType.name}' is not an ENUMERATION" }
+        val builder = TypeSpec.enumBuilder(NamingConventions.toClassName(definedType.name))
+        val seen = mutableSetOf<String>()
+        items.forEach { item ->
+            val constant = item.uppercase()
+            if (!seen.add(constant)) {
+                throw CodeGenException(
+                    "ENUMERATION TYPE '${definedType.name}': item '$item' collides with another item after " +
+                        "case normalization (EXPRESS identifiers are case-insensitive)",
+                )
+            }
+            builder.addEnumConstant(constant)
+        }
+        return builder.build()
     }
 
     fun generateFileSource(

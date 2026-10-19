@@ -14,6 +14,10 @@ import java.io.File
  * `generateExpressKotlin` Gradle task (see kstep-express/build.gradle.kts, via [main] below)
  * and `kstep-tests`' `Ap242V1CodeGenTest`, which drives [generate] directly for per-entity
  * assertions the Gradle task's own success/failure counts can't express.
+ *
+ * Note: generateFile emits every explicit ENUMERATION TYPE of the schema it is given, and this
+ * object filters only `entities`. The bundled extraction currently has none; if one is ever added,
+ * filter `definedTypes` here too (and watch for clashes with hand-written kstep-core classes).
  */
 object Ap242V1CodeGen {
     const val SCHEMA_RESOURCE_PATH = "/dev/kstep/express/codegen/ap242-v1-entities.exp"

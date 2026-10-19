@@ -1952,7 +1952,10 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   inheritance-flattening entry in <<status,Status>> above
   (`dev.kstep.express.semantic.InheritanceResolver`). Still pending:
   `DERIVE`/`INVERSE`/`UNIQUE` clause codegen (still not started), and
-  `SELECT`/`ENUMERATION`-type and transitive-`TYPE`-alias resolution.
+  `SELECT`-type resolution. Transitive `TYPE`-alias chains (cycle- and
+  depth-guarded) and explicit `ENUMERATION OF (...)` types (emitted as
+  Kotlin `enum class`es; `EXTENSIBLE`/`BASED_ON` enumerations stay
+  unsupported) are now resolved by codegen.
   `DERIVE`/`UNIQUE`
   *evaluation* (as opposed to codegen) is now partially done — capture
   was M1 Welle 6, and M2 Welle 4 added evaluation for the WHERE-rule-

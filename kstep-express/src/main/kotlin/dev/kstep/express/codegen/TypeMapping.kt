@@ -56,33 +56,52 @@ internal fun resolveKotlinTypeName(
         is UnsupportedType -> throw CodeGenException("$errorContext: ${type.reasonHint}")
     }
 
-// Only the single-level simple-alias case resolves (TYPE X = STRING/INTEGER/REAL/BOOLEAN/
-// NUMBER/BINARY;, ExpressDefinedType.underlyingSimpleType != null); recursing into
-// resolveKotlinTypeName on that underlying type (rather than duplicating the STRING/INTEGER/
-// etc. mapping here) means a defined type aliasing LOGICAL/NUMBER/BINARY still throws the same
-// CodeGenException a direct attribute of that type would. Anything requiring further
-// indirection (another TYPE, an aggregation, SELECT, ENUMERATION) throws — transitive
-// alias-chain and SELECT/ENUMERATION resolution are out of scope for V1, see ExpressDefinedType.
+// Follows a chain of `TYPE a = b; TYPE b = c; ...` (ExpressDefinedType.aliasedTypeName) until it
+// reaches a simple-type alias (resolved by recursing into resolveKotlinTypeName on that
+// underlying type, so an alias ending in LOGICAL/NUMBER/BINARY still throws the same
+// CodeGenException a direct attribute of that type would) or an ENUMERATION (mapped to the
+// Kotlin enum class ExpressKotlinCodeGenerator emits under the TYPE's own name). Cyclic chains
+// and chains longer than MAX_ALIAS_CHAIN_DEPTH throw rather than loop. Aggregation- and SELECT-
+// backed TYPEs, and aliases of entities, still throw.
+internal const val MAX_ALIAS_CHAIN_DEPTH = 32
+
 private fun resolveDefinedTypeRef(
     type: DefinedTypeRef,
     packageName: String,
     errorContext: String,
     definedTypes: Map<String, ExpressDefinedType>,
 ): TypeName {
-    val definedType =
-        definedTypes[type.typeName.lowercase()]
-            ?: throw CodeGenException(
-                "$errorContext: attribute references TYPE '${type.typeName}', which codegen has no " +
-                    "resolution info for (no matching ExpressDefinedType was supplied for this schema)",
+    val visited = linkedSetOf<String>()
+    var currentName = type.typeName
+    while (true) {
+        val key = currentName.lowercase()
+        if (!visited.add(key) || visited.size > MAX_ALIAS_CHAIN_DEPTH) {
+            throw CodeGenException(
+                "$errorContext: TYPE '${type.typeName}' has a cyclic or over-long alias chain " +
+                    "(${visited.joinToString(" -> ")}); codegen cannot resolve it",
             )
-    val underlying =
-        definedType.underlyingSimpleType
-            ?: throw CodeGenException(
-                "$errorContext: TYPE '${type.typeName}' is not a simple STRING/INTEGER/REAL/BOOLEAN/NUMBER/" +
-                    "BINARY alias (it aggregates, selects, enumerates, or itself references another TYPE); " +
-                    "only single-level simple aliases are resolved by codegen",
-            )
-    return resolveKotlinTypeName(underlying, packageName, errorContext, definedTypes)
+        }
+        val definedType =
+            definedTypes[key]
+                ?: throw CodeGenException(
+                    "$errorContext: attribute references TYPE '$currentName', which codegen has no " +
+                        "resolution info for (no matching ExpressDefinedType was supplied for this schema)",
+                )
+        definedType.underlyingSimpleType?.let {
+            return resolveKotlinTypeName(it, packageName, errorContext, definedTypes)
+        }
+        if (definedType.enumerationItems != null) {
+            return ClassName(packageName, NamingConventions.toClassName(definedType.name))
+        }
+        currentName =
+            definedType.aliasedTypeName
+                ?: throw CodeGenException(
+                    "$errorContext: TYPE '$currentName' (reached from '${type.typeName}') does not resolve to a " +
+                        "simple STRING/INTEGER/REAL/" +
+                        "BOOLEAN alias or an ENUMERATION (it aggregates, selects, or extends another " +
+                        "enumeration); only simple-alias chains and explicit ENUMERATION OF (...) are resolved",
+                )
+    }
 }
 
 // BAG and ARRAY both collapse to List<T>: the Kotlin stdlib has no multiset, and EXPRESS

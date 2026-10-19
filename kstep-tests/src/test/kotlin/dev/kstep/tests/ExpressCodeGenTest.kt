@@ -1,6 +1,7 @@
 package dev.kstep.tests
 
 import com.squareup.kotlinpoet.ClassName
+import com.squareup.kotlinpoet.INT
 import com.squareup.kotlinpoet.STRING
 import dev.kstep.express.codegen.CodeGenException
 import dev.kstep.express.codegen.ExpressKotlinCodeGenerator
@@ -278,16 +279,65 @@ class ExpressCodeGenTest :
             }
         }
 
-        "TYPE aliasing another TYPE (one level of indirection) throws CodeGenException, not resolved transitively" {
+        "TYPE aliasing another TYPE resolves transitively to the underlying Kotlin type" {
             val source =
                 """
                 SCHEMA transitive_type_codegen_test;
                 TYPE inner = STRING;
                 END_TYPE;
-                TYPE outer = inner;
+                TYPE middle = inner;
+                END_TYPE;
+                TYPE outer = middle;
                 END_TYPE;
                 ENTITY widget;
                   name : outer;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val fileSpec = ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+
+            val widget = fileSpec.typeSpecs.single { it.name == "Widget" }
+            val nameParameter = widget.primaryConstructor!!.parameters.single { it.name == "name" }
+            nameParameter.type shouldBe STRING
+        }
+
+        "TYPE alias is case-insensitive along the chain" {
+            val source =
+                """
+                SCHEMA case_alias_codegen_test;
+                TYPE Inner = INTEGER;
+                END_TYPE;
+                TYPE outer = inner;
+                END_TYPE;
+                ENTITY widget;
+                  n : outer;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val fileSpec = ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+
+            fileSpec.typeSpecs
+                .single { it.name == "Widget" }
+                .primaryConstructor!!
+                .parameters
+                .single()
+                .type shouldBe INT
+        }
+
+        "cyclic TYPE alias chain throws CodeGenException instead of looping" {
+            val source =
+                """
+                SCHEMA cyclic_alias_codegen_test;
+                TYPE a = b;
+                END_TYPE;
+                TYPE b = a;
+                END_TYPE;
+                ENTITY widget;
+                  x : a;
                 END_ENTITY;
                 END_SCHEMA;
                 """.trimIndent()
@@ -297,17 +347,159 @@ class ExpressCodeGenTest :
                 shouldThrow<CodeGenException> {
                     ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
                 }
-            exception.message shouldContain "outer"
+            exception.message shouldContain "cyclic"
         }
 
-        "TYPE aliasing an ENUMERATION throws CodeGenException even with a defined-type context supplied" {
+        "TYPE alias chain ending in an aggregation or an unknown name throws CodeGenException" {
+            val aggregation =
+                """
+                SCHEMA alias_to_aggregation_codegen_test;
+                TYPE ids = LIST OF STRING;
+                END_TYPE;
+                TYPE outer = ids;
+                END_TYPE;
+                ENTITY widget;
+                  x : outer;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            shouldThrow<CodeGenException> {
+                ExpressKotlinCodeGenerator.generateFile(
+                    ExpressSemanticModelBuilder.build(aggregation).schemas.single(),
+                    PACKAGE_NAME,
+                )
+            }
+        }
+
+        "TYPE ENUMERATION generates a Kotlin enum class and attributes reference it" {
             val source =
                 """
                 SCHEMA enum_type_codegen_test;
                 TYPE status = ENUMERATION OF (open, closed);
                 END_TYPE;
+                TYPE state = status;
+                END_TYPE;
                 ENTITY widget;
-                  state : status;
+                  current : status;
+                  alias_state : state;
+                  previous : OPTIONAL status;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val fileSpec = ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+
+            val statusEnum = fileSpec.typeSpecs.single { it.name == "Status" }
+            statusEnum.isEnum shouldBe true
+            statusEnum.enumConstants.keys.toList() shouldContainExactly listOf("OPEN", "CLOSED")
+
+            val statusClass = ClassName(PACKAGE_NAME, "Status")
+            val widget = fileSpec.typeSpecs.single { it.name == "Widget" }
+            val parameters = widget.primaryConstructor!!.parameters
+            parameters.single { it.name == "current" }.type shouldBe statusClass
+            parameters.single { it.name == "aliasState" }.type shouldBe statusClass
+            parameters.single { it.name == "previous" }.type shouldBe statusClass.copy(nullable = true)
+        }
+
+        "ENUMERATION items differing only in case throw CodeGenException" {
+            val source =
+                """
+                SCHEMA enum_collision_codegen_test;
+                TYPE status = ENUMERATION OF (open, OPEN);
+                END_TYPE;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            shouldThrow<CodeGenException> {
+                ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+            }
+        }
+
+        "ENUMERATION class name colliding with an entity class throws CodeGenException" {
+            val source =
+                """
+                SCHEMA enum_entity_collision_codegen_test;
+                TYPE widget = ENUMERATION OF (a, b);
+                END_TYPE;
+                ENTITY widget;
+                  x : STRING;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            shouldThrow<CodeGenException> {
+                ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+            }
+        }
+
+        "EXTENSIBLE ENUMERATION OF (...) is not emitted as a closed enum" {
+            val source =
+                """
+                SCHEMA extensible_enum_items_codegen_test;
+                TYPE status = EXTENSIBLE ENUMERATION OF (a, b);
+                END_TYPE;
+                ENTITY widget;
+                  x : status;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            shouldThrow<CodeGenException> {
+                ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+            }
+        }
+
+        "two ENUMERATION types with colliding class names throw CodeGenException" {
+            val source =
+                """
+                SCHEMA enum_enum_collision_codegen_test;
+                TYPE my_enum = ENUMERATION OF (a);
+                END_TYPE;
+                TYPE my__enum = ENUMERATION OF (b);
+                END_TYPE;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            shouldThrow<CodeGenException> {
+                ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+            }
+        }
+
+        "a non-cyclic alias chain longer than the depth limit throws CodeGenException" {
+            val types = (1..40).joinToString("\n") { "TYPE t$it = t${it + 1};\nEND_TYPE;" }
+            val source =
+                """
+                SCHEMA long_chain_codegen_test;
+                $types
+                TYPE t41 = STRING;
+                END_TYPE;
+                ENTITY widget;
+                  x : t1;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+            val schema = ExpressSemanticModelBuilder.build(source).schemas.single()
+
+            val exception =
+                shouldThrow<CodeGenException> {
+                    ExpressKotlinCodeGenerator.generateFile(schema, PACKAGE_NAME)
+                }
+            exception.message shouldContain "over-long"
+        }
+
+        "EXTENSIBLE ENUMERATION without an item list stays unsupported" {
+            val source =
+                """
+                SCHEMA extensible_enum_codegen_test;
+                TYPE status = EXTENSIBLE ENUMERATION;
+                END_TYPE;
+                ENTITY widget;
+                  x : status;
                 END_ENTITY;
                 END_SCHEMA;
                 """.trimIndent()

@@ -167,17 +167,29 @@ object ExpressSemanticModelBuilder {
         }
     }
 
-    // Only resolves the single-level simple-alias case (concreteTypes -> simpleTypes); every
-    // other underlyingType shape (aggregationTypes, typeRef, constructedTypes) yields a null
-    // underlyingSimpleType, deliberately not chased further — see ExpressDefinedType.
+    // underlyingSimpleType is set only for the direct simple-alias case (concreteTypes ->
+    // simpleTypes). A bare typeRef is captured as aliasedTypeName and an explicit ENUMERATION
+    // item list as enumerationItems; aggregations and SELECT stay unresolved (null) — see
+    // ExpressDefinedType.
     private fun buildDefinedType(
         ctx: ExpressParser.TypeDeclContext,
         source: String,
     ): ExpressDefinedType {
-        val simpleTypes = ctx.underlyingType().concreteTypes()?.simpleTypes()
+        val concrete = ctx.underlyingType().concreteTypes()
+        val simpleTypes = concrete?.simpleTypes()
+        val enumeration = ctx.underlyingType().constructedTypes()?.enumerationType()
         return ExpressDefinedType(
             name = ctx.typeId().text,
             underlyingSimpleType = simpleTypes?.let { mapSimpleTypes(it, source) },
+            aliasedTypeName = concrete?.typeRef()?.text,
+            // EXTENSIBLE enumerations are open-ended by definition: modelling one as a closed
+            // Kotlin enum would be wrong, so they carry no item list even when one is given.
+            enumerationItems =
+                enumeration
+                    ?.takeIf { it.EXTENSIBLE() == null }
+                    ?.enumerationItems()
+                    ?.enumerationItem()
+                    ?.map { it.text },
         )
     }
 
