@@ -16,10 +16,11 @@ import dev.kstep.express.codegen.NamingConventions
  * ancestor per entity — EXPRESS `AND`/`ANDOR` multiple supertypes are out of scope), and
  * redeclared (`SELF\entity.attr RENAMED ...`) attributes are never flattened (still capture-only,
  * same as `ExpressKotlinCodeGenerator`'s pre-existing handling of a non-inherited `Redeclared`
- * attribute). `DERIVE`/`INVERSE`/`UNIQUE` clauses referencing inherited attributes via
- * `SELF\entity.attr` (e.g. `next_assembly_usage_occurrence`'s real `UNIQUE`/`DERIVE`) are
- * unaffected by this resolver: those clauses remain raw captured text on [ExpressEntity], never
- * parsed or rewritten here.
+ * attribute). `DERIVE` clauses are flattened too (ADR-0021): ancestors' DERIVEs first, and a
+ * subtype's `SELF\super.attr : T := expr;` replaces an inherited DERIVE in place or marks an
+ * inherited explicit attribute as redeclared-as-derived (`RENAMED` is rejected). `INVERSE`/
+ * `UNIQUE` clauses (e.g. `next_assembly_usage_occurrence`'s real `UNIQUE`) remain raw captured
+ * text on [ExpressEntity], never parsed or rewritten here.
  */
 object InheritanceResolver {
     // Mirrors ExpressSemanticModelBuilder.MAX_TYPE_NESTING_DEPTH's role for TYPE nesting: a
@@ -91,9 +92,11 @@ object InheritanceResolver {
 
         val supertypeName = entity.supertypes.singleOrNull()
         val ancestorAttributes: List<ResolvedAttribute>
+        val ancestorDerived: List<ResolvedDerivedAttribute>
         val ancestorChain: List<String>
         if (supertypeName == null) {
             ancestorAttributes = emptyList()
+            ancestorDerived = emptyList()
             ancestorChain = emptyList()
         } else {
             val supertypeEntity =
@@ -106,6 +109,7 @@ object InheritanceResolver {
             val resolvedSupertype =
                 resolveEntity(supertypeEntity, entitiesByLowerName, cache, ancestorPath + entity.name)
             ancestorAttributes = resolvedSupertype.flattenedAttributes
+            ancestorDerived = resolvedSupertype.flattenedDerivedAttributes
             ancestorChain = resolvedSupertype.ancestorChain + supertypeEntity.name
         }
 
@@ -123,7 +127,19 @@ object InheritanceResolver {
                 }
             }
 
-        val flattened = ancestorAttributes + ownAttributes
+        val ancestorExplicitCount = ancestorAttributes.size
+        val attributes = (ancestorAttributes + ownAttributes).toMutableList()
+        val derived = ancestorDerived.toMutableList()
+        entity.derivedAttributes.forEach { clause ->
+            when (clause) {
+                is ExpressDerivedAttribute.Explicit ->
+                    addOwnDerived(entity, clause, attributes, derived)
+                is ExpressDerivedAttribute.Redeclared ->
+                    redeclareDerived(entity, clause, ancestorChain, ancestorExplicitCount, attributes, derived)
+            }
+        }
+
+        val flattened: List<ResolvedAttribute> = attributes
         checkNoCrossEntityNameCollisions(entity, flattened)
 
         val resolved =
@@ -132,10 +148,122 @@ object InheritanceResolver {
                 flattenedAttributes = flattened,
                 isInstantiable = !entity.isAbstract,
                 ancestorChain = ancestorChain,
+                flattenedDerivedAttributes = derived,
             )
         cache[key] = resolved
         return resolved
     }
+
+    // A plain (non-redeclared) DERIVE name must be new: EXPRESS requires SELF\super.attr to
+    // redefine an inherited attribute, so a bare name that already exists up the chain (explicit
+    // or derived) or on the same entity is a schema error, reported with both declaring entities.
+    private fun addOwnDerived(
+        entity: ExpressEntity,
+        clause: ExpressDerivedAttribute.Explicit,
+        attributes: List<ResolvedAttribute>,
+        derived: MutableList<ResolvedDerivedAttribute>,
+    ) {
+        val propertyName = NamingConventions.toPropertyName(clause.name)
+        val explicitClash =
+            attributes.firstOrNull { NamingConventions.toPropertyName(it.attribute.name) == propertyName }
+        val derivedClash = derived.firstOrNull { NamingConventions.toPropertyName(it.name) == propertyName }
+        val clashingEntity = explicitClash?.declaringEntity ?: derivedClash?.declaringEntity
+        if (clashingEntity != null) {
+            throw SemanticModelException(
+                "entity '${entity.name}' DERIVE '${clause.name}' collides with an attribute of the same " +
+                    "name declared by '$clashingEntity' (after EXPRESS-to-Kotlin naming conversion); " +
+                    "redefining an inherited attribute requires the SELF\\supertype.attribute form",
+            )
+        }
+        derived +=
+            ResolvedDerivedAttribute(
+                declaringEntity = entity.name,
+                name = clause.name,
+                declaredType = clause.declaredType,
+                expressionText = clause.expressionText,
+                sourceLine = clause.sourceLine,
+            )
+    }
+
+    private fun redeclareDerived(
+        entity: ExpressEntity,
+        clause: ExpressDerivedAttribute.Redeclared,
+        ancestorChain: List<String>,
+        ancestorExplicitCount: Int,
+        attributes: MutableList<ResolvedAttribute>,
+        derived: MutableList<ResolvedDerivedAttribute>,
+    ) {
+        val context = "entity '${entity.name}' DERIVE '${clause.rawText}'"
+        if (clause.renamedTo != null) {
+            throw SemanticModelException(
+                "$context RENAMED ${clause.renamedTo}: RENAMED in DERIVE redeclaration is out of scope " +
+                    "(ADR-0021); the attribute keeps its inherited name",
+            )
+        }
+        val chainIndex = ancestorChain.indexOfFirst { it.equals(clause.supertypeName, ignoreCase = true) }
+        if (chainIndex < 0) {
+            throw SemanticModelException(
+                "$context: link 'SELF\\${clause.supertypeName}': '${clause.supertypeName}' is not a " +
+                    "supertype of '${entity.name}' (ancestor chain: ${ancestorChain.joinToString(
+                        " -> ",
+                    ).ifEmpty { "none" }})",
+            )
+        }
+        // Entities whose declarations are visible through the named supertype's flat attribute set.
+        val visible = ancestorChain.subList(0, chainIndex + 1).toSet()
+        val name = clause.attributeName
+
+        val derivedIndex =
+            derived.indexOfFirst { it.name.equals(name, ignoreCase = true) && it.originalDeclaringEntity in visible }
+        val explicitIndex =
+            (0 until ancestorExplicitCount).firstOrNull { index ->
+                val candidate = attributes[index]
+                candidate.attribute.name.equals(name, ignoreCase = true) &&
+                    candidate.declaringEntity in visible &&
+                    candidate.redeclaredAsDerived == null
+            }
+        when {
+            derivedIndex >= 0 -> {
+                val previous = derived[derivedIndex]
+                val override =
+                    when (val previousOverride = previous.overrides) {
+                        is ResolvedDerivedAttribute.Override.InheritedExplicit -> previousOverride
+                        else -> ResolvedDerivedAttribute.Override.InheritedDerived(previous.originalDeclaringEntity)
+                    }
+                derived[derivedIndex] = redeclaredEntry(entity, clause, previous.name, override)
+            }
+            explicitIndex != null -> {
+                val target = attributes[explicitIndex]
+                val entry =
+                    redeclaredEntry(
+                        entity,
+                        clause,
+                        target.attribute.name,
+                        ResolvedDerivedAttribute.Override.InheritedExplicit(target.declaringEntity),
+                    )
+                attributes[explicitIndex] = target.copy(redeclaredAsDerived = entry)
+                derived += entry
+            }
+            else ->
+                throw SemanticModelException(
+                    "$context: link '.$name': '$name' is not an attribute of '${clause.supertypeName}'",
+                )
+        }
+    }
+
+    private fun redeclaredEntry(
+        entity: ExpressEntity,
+        clause: ExpressDerivedAttribute.Redeclared,
+        originalName: String,
+        override: ResolvedDerivedAttribute.Override,
+    ) = ResolvedDerivedAttribute(
+        declaringEntity = entity.name,
+        name = originalName,
+        declaredType = clause.declaredType,
+        expressionText = clause.expressionText,
+        overrides = override,
+        sourceLine = clause.sourceLine,
+    )
 
     // Only flags a collision between attributes declared on *different* entities in the SUBTYPE
     // OF chain -- a genuinely new failure mode that only flattening can produce. A collision

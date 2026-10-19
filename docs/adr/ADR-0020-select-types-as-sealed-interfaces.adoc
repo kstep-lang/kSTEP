@@ -6,6 +6,10 @@
 Accepted, implemented (kSTEP semantic-core Welle A). Amends ADR-0004 (generated
 entities stay flat `data class`es but may now implement marker interfaces).
 
+See also ADR-0021: a DERIVE whose declared type is an entity, aggregate, ENUMERATION or
+SELECT (an "opaque" type) is only generated as a plain alias of an attribute with exactly the
+same Kotlin type; it cannot be computed from an expression.
+
 == Context
 
 `dev.kstep.express.codegen` could not resolve an EXPRESS `SELECT`: any attribute

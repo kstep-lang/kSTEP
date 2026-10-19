@@ -267,4 +267,34 @@ class Ap242V1CodeGenTest :
             actual.isNotEmpty() shouldBe true
             (actual - Ap242V1CodeGen.KSTEP_CORE_RESERVED_CLASS_NAMES) shouldBe emptySet()
         }
+
+        "the six real V1 DERIVE clauses are reported as named limitations and never become properties" {
+            val outcome = Ap242V1CodeGen.generate()
+
+            outcome.unsupportedDerivedAttributes.map { "${it.entity}.${it.attribute}" } shouldContainExactlyInAnyOrder
+                listOf(
+                    "product_definition.name",
+                    "person_and_organization.name",
+                    "person_and_organization.description",
+                    "application_context.id",
+                    "application_context.description",
+                    "next_assembly_usage_occurrence.product_definition_occurrence_id",
+                )
+            outcome.unsupportedDerivedAttributes
+                .single { it.attribute == "product_definition_occurrence_id" }
+                .reason shouldContain "unsupported link '\\product_definition_occurrence'"
+            outcome.unsupportedDerivedAttributes
+                .filter { it.attribute != "product_definition_occurrence_id" }
+                .forEach { it.reason shouldContain "get_" }
+
+            // No generated class gained a property beyond its constructor parameters: Part 21, the MCP
+            // server and the kstep-core builders therefore see exactly the shape they did before.
+            outcome.fileSpec.typeSpecs.filter { it.primaryConstructor != null }.forEach { type ->
+                type.propertySpecs.map { it.name } shouldBe type.primaryConstructor!!.parameters.map { it.name }
+            }
+            outcome.fileSpec.typeSpecs
+                .single { it.name == "PersonAndOrganization" }
+                .kdoc
+                .toString() shouldContain "person_and_organization.name"
+        }
     })

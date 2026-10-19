@@ -14,6 +14,7 @@ import dev.kstep.express.semantic.ExpressEntity
 import dev.kstep.express.semantic.ExpressSchema
 import dev.kstep.express.semantic.InheritanceResolver
 import dev.kstep.express.semantic.ResolvedAttribute
+import dev.kstep.express.semantic.ResolvedDerivedAttribute
 import dev.kstep.express.semantic.ResolvedEntity
 
 /**
@@ -36,6 +37,38 @@ data class CodeGenOptions(
     val constructorVisibility: KModifier? = null,
     val consistentCopyVisibility: Boolean = false,
     val definedTypeScope: DefinedTypeScope = DefinedTypeScope.ALL,
+    val derivedAttributeMode: DerivedAttributeMode = DerivedAttributeMode.STRICT,
+)
+
+/**
+ * How [ExpressKotlinCodeGenerator] treats a `DERIVE` attribute it cannot translate (ADR-0021).
+ * A DERIVE *cycle* is a schema error and always throws [CodeGenException], in either mode, as does
+ * an unsupported redeclaration of an inherited *explicit* attribute (neither keeping nor dropping
+ * the constructor parameter would be correct).
+ */
+enum class DerivedAttributeMode {
+    /** Every unsupported DERIVE throws [CodeGenException]. */
+    STRICT,
+
+    /** Unsupported DERIVEs are listed in the class KDoc and in the report, but never become properties. */
+    GENERATE_SUPPORTED_REPORT_UNSUPPORTED,
+}
+
+/** A DERIVE attribute that was skipped (report mode), with the reason it is outside the supported subset. */
+data class UnsupportedDerivedAttribute(
+    val entity: String,
+    val attribute: String,
+    val reason: String,
+)
+
+data class EntityCodeGenResult(
+    val typeSpec: TypeSpec,
+    val unsupportedDerived: List<UnsupportedDerivedAttribute>,
+)
+
+data class FileCodeGenResult(
+    val fileSpec: FileSpec,
+    val unsupportedDerived: List<UnsupportedDerivedAttribute>,
 )
 
 /**
@@ -70,9 +103,12 @@ enum class DefinedTypeScope {
  * never itself emitted as a class — see [generateFile]'s skip and [generateEntityType]'s throw
  * for the two places that matters.
  *
- * As of M1 Welle 6, [ExpressEntity] also carries `derivedAttributes`/`inverseAttributes`/
- * `uniqueRules` — this generator still does not read them; `DERIVE`/`INVERSE`/`UNIQUE`
- * remain capture-only metadata with no Kotlin representation.
+ * `DERIVE` attributes within the supported expression subset become computed getter properties in
+ * the class body (no backing field, so not part of `equals`/`hashCode`/`copy`/`toString` and never
+ * written to Part 21; ADR-0021, see [DerivedAttributeCodeGen]); an inherited *explicit* attribute
+ * that a subtype redeclares as DERIVE (`SELF\super.attr`) is dropped from the constructor. What is
+ * outside the subset throws in [DerivedAttributeMode.STRICT] or is listed in the KDoc and the
+ * report otherwise. `INVERSE`/`UNIQUE` remain capture-only metadata with no Kotlin representation.
  */
 object ExpressKotlinCodeGenerator {
     // resolvedEntities defaults to a fresh whole-schema resolve for callers that only have a
@@ -87,7 +123,16 @@ object ExpressKotlinCodeGenerator {
         packageName: String,
         resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema),
         options: CodeGenOptions = CodeGenOptions(),
-    ): FileSpec {
+    ): FileSpec = generateFileWithReport(schema, packageName, resolvedEntities, options).fileSpec
+
+    /** Like [generateFile], additionally returning the DERIVE attributes skipped in report mode. */
+    fun generateFileWithReport(
+        schema: ExpressSchema,
+        packageName: String,
+        resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema),
+        options: CodeGenOptions = CodeGenOptions(),
+    ): FileCodeGenResult {
+        val unsupportedDerived = mutableListOf<UnsupportedDerivedAttribute>()
         val fileBuilder = FileSpec.builder(packageName, NamingConventions.toClassName(schema.name))
         // Resolution map: ALWAYS the full, unfiltered TYPE list (insertion order = declaration order).
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
@@ -164,15 +209,16 @@ object ExpressKotlinCodeGenerator {
 
         emittedEntities.forEach { resolved ->
             claim("ENTITY", resolved.entity.name)
-            fileBuilder.addType(
-                generateEntityType(
+            val entityResult =
+                generateEntityTypeWithReport(
                     resolved,
                     packageName,
                     definedTypesByLowerName,
                     options,
                     selectModel.entitySuperinterfaces[resolved.entity.name.lowercase()].orEmpty(),
-                ),
-            )
+                )
+            fileBuilder.addType(entityResult.typeSpec)
+            unsupportedDerived += entityResult.unsupportedDerived
         }
         selectModel.selects.forEach { (key, select) ->
             claim("SELECT TYPE", select.name)
@@ -197,7 +243,7 @@ object ExpressKotlinCodeGenerator {
                 )
             fileBuilder.addType(generateSelectWrapperType(alias, valueType, supers, options))
         }
-        return fileBuilder.build()
+        return FileCodeGenResult(fileBuilder.build(), unsupportedDerived)
     }
 
     /**
@@ -310,7 +356,16 @@ object ExpressKotlinCodeGenerator {
         definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
         options: CodeGenOptions = CodeGenOptions(),
         superinterfaces: List<ClassName> = emptyList(),
-    ): TypeSpec {
+    ): TypeSpec = generateEntityTypeWithReport(resolved, packageName, definedTypes, options, superinterfaces).typeSpec
+
+    /** Like [generateEntityType], additionally returning the DERIVE attributes skipped in report mode. */
+    fun generateEntityTypeWithReport(
+        resolved: ResolvedEntity,
+        packageName: String,
+        definedTypes: Map<String, ExpressDefinedType> = emptyMap(),
+        options: CodeGenOptions = CodeGenOptions(),
+        superinterfaces: List<ClassName> = emptyList(),
+    ): EntityCodeGenResult {
         val entity = resolved.entity
         if (!resolved.isInstantiable) {
             throw CodeGenException(
@@ -318,10 +373,13 @@ object ExpressKotlinCodeGenerator {
                     "via inheritance flattening but is never itself code-generated as a concrete Kotlin class",
             )
         }
-        if (resolved.flattenedAttributes.isEmpty()) {
+        val constructorAttributes = resolved.flattenedAttributes.filter { it.redeclaredAsDerived == null }
+        if (constructorAttributes.isEmpty()) {
+            val redeclared = resolved.flattenedAttributes.size - constructorAttributes.size
             throw CodeGenException(
                 "entity '${entity.name}' has no explicit attributes (including inherited ones); Kotlin data " +
-                    "classes require at least one constructor parameter",
+                    "classes require at least one constructor parameter" +
+                    if (redeclared > 0) " ($redeclared inherited attribute(s) are redeclared as DERIVE)" else "",
             )
         }
 
@@ -345,7 +403,7 @@ object ExpressKotlinCodeGenerator {
         // InheritanceResolver's own cross-entity check; this guard's remaining job is exactly
         // the same-entity case it always handled.)
         val seenPropertyNames = mutableSetOf<String>()
-        resolved.flattenedAttributes.forEach { resolvedAttribute ->
+        constructorAttributes.forEach { resolvedAttribute ->
             addAttribute(
                 resolvedAttribute,
                 entity,
@@ -360,7 +418,38 @@ object ExpressKotlinCodeGenerator {
         classBuilder.primaryConstructor(constructorBuilder.build())
         addWhereRulesKdoc(entity, classBuilder)
 
-        return classBuilder.build()
+        val unsupportedDerived = mutableListOf<UnsupportedDerivedAttribute>()
+        DerivedAttributeCodeGen.plan(resolved, packageName, definedTypes).forEach { plan ->
+            when (plan) {
+                is DerivedPlan.Supported -> {
+                    val property = plan.propertySpec
+                    if (!seenPropertyNames.add(property.name)) {
+                        throw CodeGenException(
+                            "entity '${entity.name}' DERIVE '${plan.attr.name}': Kotlin identifier " +
+                                "'${property.name}' collides with another attribute in the same (flattened) " +
+                                "entity after EXPRESS-to-Kotlin naming conversion",
+                        )
+                    }
+                    classBuilder.addProperty(property)
+                }
+                is DerivedPlan.Unsupported -> {
+                    val message =
+                        "entity '${entity.name}' DERIVE '${plan.attr.name}' " +
+                            "(declared by '${plan.attr.declaringEntity}') is outside the supported subset: " +
+                            plan.reason
+                    if (options.derivedAttributeMode == DerivedAttributeMode.STRICT ||
+                        plan.attr.overrides is ResolvedDerivedAttribute.Override.InheritedExplicit
+                    ) {
+                        throw CodeGenException(message)
+                    }
+                    unsupportedDerived +=
+                        UnsupportedDerivedAttribute(plan.attr.declaringEntity, plan.attr.name, plan.reason)
+                }
+            }
+        }
+        addUnsupportedDerivedKdoc(unsupportedDerived, classBuilder)
+
+        return EntityCodeGenResult(classBuilder.build(), unsupportedDerived)
     }
 
     private fun addAttribute(
@@ -425,6 +514,23 @@ object ExpressKotlinCodeGenerator {
                     appendLine("- ${rule.label ?: "(unlabeled)"}: ${rule.expressionText}")
                 }
             }
-        classBuilder.addKdoc("%L", kdoc)
+        classBuilder.addKdoc("%L", sanitizeKdoc(kdoc))
+    }
+
+    private fun addUnsupportedDerivedKdoc(
+        unsupported: List<UnsupportedDerivedAttribute>,
+        classBuilder: TypeSpec.Builder,
+    ) {
+        if (unsupported.isEmpty()) return
+        val kdoc =
+            buildString {
+                appendLine("DERIVE attributes not generated (outside the supported expression subset, ADR-0021):")
+                unsupported.forEach {
+                    appendLine(
+                        "- ${it.entity}.${it.attribute}: ${it.reason.replace(Regex("\\s+"), " ")}",
+                    )
+                }
+            }
+        classBuilder.addKdoc("%L", sanitizeKdoc(kdoc))
     }
 }

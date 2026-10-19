@@ -36,6 +36,18 @@ sealed interface WhereRuleExpression {
     ) : WhereRuleExpression
 
     /**
+     * `SELF\entity.attributeName` -- only produced when
+     * [WhereRuleExpressionBuilder.BuildOptions.allowGroupQualifiedSelf] is set (DERIVE initializers, ADR-0021); plain WHERE rules never see it. [WhereRuleEvaluator]
+     * resolves it by [name] alone, exactly like [SelfAttribute]: whether [entity] really is the
+     * current entity or one of its supertypes is a static schema check done by the codegen, not an
+     * evaluation-time concern.
+     */
+    data class QualifiedSelfAttribute(
+        val entity: String,
+        val name: String,
+    ) : WhereRuleExpression
+
+    /**
      * `EXISTS(attributeName)` / `EXISTS(SELF.attributeName)` — true iff the referenced OPTIONAL
      * attribute currently has a value ([WhereRuleValue.Unset] evaluates to `false` here and
      * nowhere else; every other use of an `Unset` attribute value is a

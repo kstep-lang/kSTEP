@@ -271,8 +271,18 @@ object ExpressSemanticModelBuilder {
                 sourceLine = ctx.start.line,
             )
         } else {
+            val redeclared = ctx.attributeDecl().redeclaredAttribute()
+            val qualified = redeclared.qualifiedAttribute()
             ExpressDerivedAttribute.Redeclared(
                 rawText = verbatim(ctx.attributeDecl(), source),
+                supertypeName = qualified.groupQualifier().entityRef().text,
+                attributeName =
+                    qualified
+                        .attributeQualifier()
+                        .attributeRef()
+                        .attributeId()
+                        .text,
+                renamedTo = redeclared.attributeId()?.text,
                 declaredType = declaredType,
                 expressionText = expressionText,
                 sourceLine = ctx.start.line,

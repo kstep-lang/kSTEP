@@ -8,6 +8,11 @@ Accepted, implemented (kSTEP M2 Welle 10).
 Amended by ADR-0020 (entities may implement member-less marker sealed
 interfaces for SELECT membership; they remain flat `data class`es).
 
+Amended by ADR-0021 (generated entities may carry computed getter properties for
+supported `DERIVE` attributes in the class body; they are not constructor parameters and
+not part of `equals`/`hashCode`/`copy`/`toString`; an inherited explicit attribute that a
+subtype redeclares as DERIVE leaves the constructor).
+
 == Context
 
 M2 Welle 8 closed the *known* gap between `kstep-core`'s six

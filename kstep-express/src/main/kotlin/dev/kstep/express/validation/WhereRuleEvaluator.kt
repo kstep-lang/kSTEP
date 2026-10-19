@@ -67,21 +67,8 @@ object WhereRuleEvaluator {
                 val operand = requireBoolean(evaluateValue(expression.operand, attributeValues, depth + 1))
                 WhereRuleValue.BooleanValue(!operand)
             }
-            is WhereRuleExpression.SelfAttribute -> {
-                val value =
-                    attributeValues[expression.name]
-                        ?: throw WhereRuleEvaluationException(
-                            "attribute '${expression.name}' referenced by SELF is not present in the supplied value bag",
-                        )
-                if (value is WhereRuleValue.Unset) {
-                    throw WhereRuleEvaluationException(
-                        "attribute '${expression.name}' is Unset (an EXPRESS-optional attribute that was never " +
-                            "set) and cannot be used directly in a WHERE-rule expression — only " +
-                            "EXISTS(${expression.name}) may reference an Unset attribute",
-                    )
-                }
-                value
-            }
+            is WhereRuleExpression.SelfAttribute -> lookupSelfAttribute(expression.name, attributeValues)
+            is WhereRuleExpression.QualifiedSelfAttribute -> lookupSelfAttribute(expression.name, attributeValues)
             is WhereRuleExpression.Exists -> {
                 val value =
                     attributeValues[expression.attribute]
@@ -95,6 +82,25 @@ object WhereRuleEvaluator {
             is WhereRuleExpression.IntegerLiteral -> WhereRuleValue.IntegerValue(expression.value)
             is WhereRuleExpression.RealLiteral -> WhereRuleValue.RealValue(expression.value)
         }
+    }
+
+    private fun lookupSelfAttribute(
+        name: String,
+        attributeValues: Map<String, WhereRuleValue>,
+    ): WhereRuleValue {
+        val value =
+            attributeValues[name]
+                ?: throw WhereRuleEvaluationException(
+                    "attribute '$name' referenced by SELF is not present in the supplied value bag",
+                )
+        if (value is WhereRuleValue.Unset) {
+            throw WhereRuleEvaluationException(
+                "attribute '$name' is Unset (an EXPRESS-optional attribute that was never " +
+                    "set) and cannot be used directly in a WHERE-rule expression — only " +
+                    "EXISTS($name) may reference an Unset attribute",
+            )
+        }
+        return value
     }
 
     private fun requireBoolean(value: WhereRuleValue): Boolean =

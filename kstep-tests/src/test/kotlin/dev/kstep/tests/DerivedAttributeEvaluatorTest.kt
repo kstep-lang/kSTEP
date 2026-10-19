@@ -10,6 +10,7 @@ import dev.kstep.express.validation.WhereRuleValue
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.types.shouldBeInstanceOf
 
 class DerivedAttributeEvaluatorTest :
@@ -88,6 +89,34 @@ class DerivedAttributeEvaluatorTest :
         "a DERIVE expression referencing a missing attribute throws WhereRuleEvaluationException, same as WHERE" {
             shouldThrow<WhereRuleEvaluationException> {
                 DerivedAttributeEvaluator.evaluate("SELF.missing", emptyMap())
+            }
+        }
+
+        "next_assembly_usage_occurrence's two-hop chain error names the first unsupported link" {
+            val nauo = Ap242V1CodeGen.loadSchema().entities.single { it.name == "next_assembly_usage_occurrence" }
+            val message =
+                shouldThrow<UnsupportedWhereExpressionException> {
+                    DerivedAttributeEvaluator.evaluate(nauo.derivedAttributes.single(), emptyMap())
+                }.message!!
+            message shouldContain "unsupported link '\\product_definition_occurrence'"
+            message shouldContain "after 'SELF\\product_definition_relationship.related_product_definition'"
+            message shouldContain "multi-hop chain"
+        }
+
+        "a SELF\\entity.attribute reference evaluates like SELF.attribute, including the Unset rule" {
+            DerivedAttributeEvaluator.evaluate(
+                "SELF\\base.level",
+                mapOf("level" to WhereRuleValue.IntegerValue(3)),
+            ) shouldBe WhereRuleValue.IntegerValue(3)
+            DerivedAttributeEvaluator.evaluate(
+                "SELF\\base.level > 2",
+                mapOf("level" to WhereRuleValue.IntegerValue(3)),
+            ) shouldBe WhereRuleValue.BooleanValue(true)
+            shouldThrow<WhereRuleEvaluationException> {
+                DerivedAttributeEvaluator.evaluate("SELF\\base.level", mapOf("level" to WhereRuleValue.Unset))
+            }
+            shouldThrow<WhereRuleEvaluationException> {
+                DerivedAttributeEvaluator.evaluate("SELF\\base.level", emptyMap())
             }
         }
     })

@@ -2,7 +2,8 @@ package dev.kstep.express.codegen
 
 /**
  * Thrown when the semantic model contains a construct the codegen doesn't yet turn into
- * Kotlin (e.g. `SUBTYPE OF`, `LOGICAL`-typed attributes). The semantic model layer is
+ * Kotlin (e.g. `LOGICAL`-typed attributes, an unsupported `DERIVE` initializer in strict mode, a
+ * `DERIVE` dependency cycle or limit violation). The semantic model layer is
  * permissive and captures everything losslessly; codegen is strict and refuses loudly
  * instead of emitting silently-wrong or partial classes.
  */

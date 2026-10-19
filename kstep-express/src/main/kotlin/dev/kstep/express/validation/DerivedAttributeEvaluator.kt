@@ -17,10 +17,10 @@ import dev.kstep.express.semantic.ExpressDerivedAttribute
  * `next_assembly_usage_occurrence`'s two-hop `SELF\entity.attr\entity.attr` chain) are outside
  * [WhereRuleExpressionBuilder]'s supported subset by construction and correctly throw
  * [UnsupportedWhereExpressionException] — that is this wave's expected, complete outcome for
- * those three real clauses, not a gap. (Cosmetic wart, deliberately not fixed: the builder's
- * `unsupported(...)` messages literally say "WHERE-rule expression uses ..." even when
- * triggered from here — renaming that shared, generic wording for a DERIVE-specific case is
- * unjustified scope creep; no test in this codebase depends on the exact wording.)
+ * those three real clauses, not a gap. The builder is invoked with
+ * `allowGroupQualifiedSelf = true`, so `SELF\entity.attr` parses as a
+ * [WhereRuleExpression.QualifiedSelfAttribute]; longer chains still fail, naming the first
+ * unsupported link.
  *
  * Re-parses [expressionText] on every call, no caching — same scale rationale as
  * [WhereRuleValidator]: at V1's scale there is nothing to cache against yet.
@@ -31,7 +31,11 @@ object DerivedAttributeEvaluator {
         attributeValues: Map<String, WhereRuleValue>,
     ): WhereRuleValue {
         val tree = ExpressParserFactory.parseExpression(expressionText)
-        val expression = WhereRuleExpressionBuilder.build(tree)
+        val expression =
+            WhereRuleExpressionBuilder.build(
+                tree,
+                WhereRuleExpressionBuilder.BuildOptions(allowGroupQualifiedSelf = true),
+            )
         return WhereRuleEvaluator.evaluateToValue(expression, attributeValues)
     }
 

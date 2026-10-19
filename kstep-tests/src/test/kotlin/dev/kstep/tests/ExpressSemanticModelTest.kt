@@ -650,6 +650,38 @@ class ExpressSemanticModelTest :
             }
         }
 
+        "a redeclared DERIVE exposes supertype, attribute and RENAMED target as structured fields" {
+            val source =
+                """
+                SCHEMA derive_structured;
+                ENTITY base;
+                  level : INTEGER;
+                END_ENTITY;
+                ENTITY derived SUBTYPE OF (base);
+                DERIVE
+                  SELF\base.level : INTEGER := 2;
+                  SELF\base.other RENAMED fresh_name : INTEGER := 3;
+                END_ENTITY;
+                END_SCHEMA;
+                """.trimIndent()
+
+            val derived =
+                ExpressSemanticModelBuilder
+                    .build(source)
+                    .schemas
+                    .single()
+                    .entities
+                    .single { it.name == "derived" }
+            val plain = derived.derivedAttributes[0].shouldBeInstanceOf<ExpressDerivedAttribute.Redeclared>()
+            plain.supertypeName shouldBe "base"
+            plain.attributeName shouldBe "level"
+            plain.renamedTo shouldBe null
+            val renamed = derived.derivedAttributes[1].shouldBeInstanceOf<ExpressDerivedAttribute.Redeclared>()
+            renamed.supertypeName shouldBe "base"
+            renamed.attributeName shouldBe "other"
+            renamed.renamedTo shouldBe "fresh_name"
+        }
+
         "INVERSE attribute using a redeclared (SELF\\entity.attr) name is captured as Redeclared, not thrown" {
             val source =
                 """

@@ -124,6 +124,32 @@ this writing:
   `kstep-core` file is unaffected by `SELECT` support (see
   `docs/adr/ADR-0020-select-types-as-sealed-interfaces.adoc` for the
   open follow-up work in the Part 21 writer/reader and `kstep-mcp`).
+* (Semantic core Welle B) `DERIVE` attributes inside the supported
+  expression subset (comparisons, `SELF.attr` and `SELF\entity.attr`
+  references, `AND`/`OR`/`NOT`, string/integer/real literals,
+  `EXISTS(<attribute>)`, plain aliases, chains of DERIVEs) are now
+  generated as computed Kotlin getter properties in the class body
+  (ADR-0021): no backing field, so they are not part of `equals`/
+  `hashCode`/`copy`/`toString` and are never written to Part 21. A
+  subtype's `SELF\super.attr : T := expr;` overrides an inherited DERIVE
+  in place, or turns an inherited *explicit* attribute into a derived one
+  (it leaves the constructor but keeps its Part 21 position, where a
+  generic writer would emit `*`; the hand-mapped V1 writer is not
+  affected). `CodeGenOptions.derivedAttributeMode` is `STRICT` by default
+  (an unsupported DERIVE throws `CodeGenException`);
+  `Ap242V1CodeGen` forces the report mode, which lists unsupported DERIVEs
+  in the class KDoc and in `Outcome.unsupportedDerivedAttributes`. DERIVE
+  cycles, chains longer than 32, more than 256 DERIVEs per entity and
+  initializers longer than 8 192 characters are bounded and reported.
+  **None of the six real AP242 V1 DERIVE clauses is inside the subset**
+  (`get_name_value`/`get_description_value`/`get_id_value` are functions
+  over `USEDIN`; NAUO's `product_definition_occurrence_id` is a two-hop
+  chain through the unmodelled `product_definition_occurrence`), so the
+  generated V1 classes gain no properties; the six cases are named
+  limitations with an exact reason and a drift guard in
+  `generateExpressKotlin`. The feature is exercised with a synthetic
+  fixture schema whose generated Kotlin is compiled into the test source
+  set and compared against `DerivedAttributeEvaluator`.
 * (M1 Welle 4) The generator has now run against **real AP242 ground
   truth** for the first time, not just the hand-written AP242-subset
   fixture. A curated excerpt of the official
@@ -661,7 +687,9 @@ See <<roadmap,Roadmap>> for what's planned next.
   initializer expressions within that same supported subset, via
   `DerivedAttributeEvaluator` and the new `WhereRuleEvaluator.evaluateToValue`
   entry point — reusing the WHERE-rule builder/evaluator, not a second
-  parser. The `generateExpressKotlin` Gradle task regenerates the six V1
+  parser. (Semantic core Welle B) Supported `DERIVE`s are generated as
+  computed getter properties (`DerivedAttributeCodeGen`, ADR-0021); the six
+  real V1 DERIVEs are reported as named limitations. The `generateExpressKotlin` Gradle task regenerates the six V1
   entities from a real-schema extraction as a build artifact (wired into
   `check`, not into this or any other module's own compile classpath —
   see Building below).
@@ -1005,7 +1033,12 @@ See <<roadmap,Roadmap>> for what's planned next.
   `KStepMcpServerTest` cases for NAUO's `UNIQUE UR1` enforcement (conflict,
   non-conflict, self-overwrite, and the `product_definition_formation`
   redundancy proof) — all exercised against either the hand-written
-  AP242-subset fixture or the real-schema excerpt; (M2 Welle 6)
+  AP242-subset fixture or the real-schema excerpt; (Semantic core Welle B)
+  `DerivedAttributeCodeGenTest` (strict/report modes, cycles, limits,
+  injection) and `DerivedAttributeRuntimeParityTest` (generated DERIVE
+  properties compiled from `derive-codegen-fixture.exp` against
+  `DerivedAttributeEvaluator`, including `-0.0`, `NaN` and unset
+  optionals); (M2 Welle 6)
   `KStepScriptHostTest` (every `KStepScriptOutcome` case: a valid
   multi-part-assembly script, the aggregating `root(ValidationResult)`
   form, a structural `KSTEP-M-001` violation, a `getOrThrow()` abort, a
@@ -1665,6 +1698,41 @@ println(value) // StringValue(value=W-1)
 // -> UnsupportedWhereExpressionException
 ----
 
+(Semantic core Welle B) Within the supported subset, the code generator
+turns a `DERIVE` into a computed property instead (ADR-0021). For
+
+[source]
+----
+ENTITY shape_info;
+  count : INTEGER;
+  note  : OPTIONAL STRING;
+DERIVE
+  is_big   : BOOLEAN := count > 10;
+  has_note : BOOLEAN := EXISTS(note);
+END_ENTITY;
+----
+
+the generated class is
+
+[source,kotlin]
+----
+public data class ShapeInfo(
+  public val count: Int,
+  public val note: String? = null,
+) {
+  public val isBig: Boolean
+    get() = ((count).toDouble().compareTo((10).toDouble()) > 0)
+
+  public val hasNote: Boolean
+    get() = (note != null)
+}
+----
+
+The derived values are not constructor parameters and not part of
+`equals`/`hashCode`/`copy`/`toString`. `ExpressKotlinCodeGenerator.generateFileWithReport`
+additionally returns the DERIVEs it had to skip when
+`derivedAttributeMode = GENERATE_SUPPORTED_REPORT_UNSUPPORTED` is set.
+
 `build_next_assembly_usage_occurrence` now also enforces NAUO's real
 `UNIQUE UR1` rule — a second NAUO sharing an already-used
 `(reference_designator, relating_product_definition)` pair is rejected:
@@ -1959,7 +2027,9 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   reference) is now done too — see the SUBTYPE OF
   inheritance-flattening entry in <<status,Status>> above
   (`dev.kstep.express.semantic.InheritanceResolver`). Still pending:
-  `DERIVE`/`INVERSE`/`UNIQUE` clause codegen (still not started).
+  `INVERSE`/`UNIQUE` clause codegen (still not started). `DERIVE`
+  codegen is done for the supported expression subset (Semantic core
+  Welle B, ADR-0021); the six real V1 DERIVEs stay outside it.
   Transitive `TYPE`-alias chains (cycle- and depth-guarded), explicit
   `ENUMERATION OF (...)` types (emitted as Kotlin `enum class`es;
   `EXTENSIBLE`/`BASED_ON` enumerations stay unsupported) and closed
@@ -2079,11 +2149,18 @@ see ADR-0004 and <<status,Status>> for `KSTEP-M-002`'s scope): the
 `SIZEOF`/`USEDIN`-based real WHERE rules on `product`,
 `product_definition`, `person_and_organization`, and `application_context`
 remain unsupported and unevaluated; NAUO's real `WR1`
-(`acyclic_product_definition_relationship`) likewise; `DERIVE` attributes
-(`product_definition.name`, `person_and_organization.name`/
-`description`, `application_context.id`/`description`, NAUO's derived
-`product_definition_occurrence_id`) are still not codegen'd or
-evaluated — the generated types simply don't carry them; and NAUO's
+(`acyclic_product_definition_relationship`) likewise; the six real
+`DERIVE` attributes (`product_definition.name`,
+`person_and_organization.name`/`description`,
+`application_context.id`/`description`, NAUO's derived
+`product_definition_occurrence_id`) are now *processed* — the generator
+reports each as an unsupported DERIVE with its exact reason (function
+calls over `USEDIN`, resp. a two-hop chain through the unmodelled
+`product_definition_occurrence`; ADR-0021) and guards the set against
+drift in `generateExpressKotlin` — but still have no generated property
+and are not evaluated, so the generated types don't carry them; closing
+this needs `name_attribute`/`description_attribute`/`id_attribute` plus a
+`USEDIN` back-search and `product_definition_occurrence` first; and NAUO's
 `UNIQUE UR2` remains unenforced (depends on `product_definition_occurrence`,
 an entity not modeled anywhere in `kstep-core`).
 --

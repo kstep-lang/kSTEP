@@ -75,6 +75,11 @@ object Ap242V1CodeGen {
         val skipped: Map<String, String>,
         /** Original EXPRESS names (declaration order) of the ENUMERATION/SELECT TYPEs written to the file. */
         val emittedDefinedTypeNames: List<String> = emptyList(),
+        /**
+         * DERIVE attributes outside the supported expression subset (ADR-0021), deduplicated by
+         * declaring entity and attribute: they are named limitations, not generated properties.
+         */
+        val unsupportedDerivedAttributes: List<UnsupportedDerivedAttribute> = emptyList(),
     )
 
     fun loadSchema(): ExpressSchema {
@@ -169,6 +174,10 @@ object Ap242V1CodeGen {
         options: CodeGenOptions,
         reservedClassNames: Set<String> = KSTEP_CORE_RESERVED_CLASS_NAMES,
     ): Outcome {
+        // Forced like definedTypeScope below: the real AP242 DERIVEs are all outside the supported
+        // subset, so STRICT would make every target entity throw.
+        val effectiveOptions =
+            options.copy(derivedAttributeMode = DerivedAttributeMode.GENERATE_SUPPORTED_REPORT_UNSUPPORTED)
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
         val resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema)
 
@@ -180,7 +189,12 @@ object Ap242V1CodeGen {
                     "target entity '$name' not found in the supplied schema"
                 }
             try {
-                ExpressKotlinCodeGenerator.generateEntityType(resolved, packageName, definedTypesByLowerName, options)
+                ExpressKotlinCodeGenerator.generateEntityType(
+                    resolved,
+                    packageName,
+                    definedTypesByLowerName,
+                    effectiveOptions,
+                )
                 generated += name
             } catch (e: CodeGenException) {
                 skipped[name] = e.message ?: "codegen limitation with no message"
@@ -190,14 +204,15 @@ object Ap242V1CodeGen {
         val emittedNames = (generated + supportEntityNames).toSet()
         val filteredSchema = schema.copy(entities = schema.entities.filter { it.name in emittedNames })
         // Scope is forced: only reachable TYPEs are emitted, whatever the caller's options say.
-        val scopedOptions = options.copy(definedTypeScope = DefinedTypeScope.REACHABLE_FROM_EMITTED_ENTITIES)
-        val fileSpec =
-            ExpressKotlinCodeGenerator.generateFile(
+        val scopedOptions = effectiveOptions.copy(definedTypeScope = DefinedTypeScope.REACHABLE_FROM_EMITTED_ENTITIES)
+        val fileResult =
+            ExpressKotlinCodeGenerator.generateFileWithReport(
                 filteredSchema,
                 packageName,
                 resolvedEntities,
                 scopedOptions,
             )
+        val fileSpec = fileResult.fileSpec
 
         fileSpec.typeSpecs.forEach { typeSpec ->
             val name = checkNotNull(typeSpec.name)
@@ -215,7 +230,8 @@ object Ap242V1CodeGen {
                     (dt.enumerationItems != null || dt.selectItems != null) &&
                         fileSpec.typeSpecs.any { it.name == NamingConventions.toClassName(dt.name) }
                 }.map { it.name }
-        return Outcome(fileSpec, generated, skipped, emittedDefinedTypeNames)
+        val unsupportedDerived = fileResult.unsupportedDerived.distinctBy { it.entity to it.attribute }
+        return Outcome(fileSpec, generated, skipped, emittedDefinedTypeNames, unsupportedDerived)
     }
 
     private fun kindOf(typeSpec: TypeSpec): String =
@@ -251,6 +267,19 @@ private val EXPECTED_SKIPPED = emptySet<String>()
 // The bundled extraction has no ENUMERATION/SELECT TYPE reachable from the twelve emitted entities
 // (only STRING aliases). If that changes, the generated kstep-core file changes -- fail loudly.
 private val EXPECTED_EMITTED_DEFINED_TYPES = emptySet<String>()
+
+// The six real AP242 V1 DERIVE clauses, all outside the supported expression subset (function calls
+// over USEDIN / a two-hop entity chain, see ADR-0021). Named limitations, deliberately not
+// properties: if the codegen learns to translate one, this set must shrink on purpose.
+private val EXPECTED_UNSUPPORTED_DERIVED =
+    setOf(
+        "product_definition.name",
+        "application_context.id",
+        "application_context.description",
+        "person_and_organization.name",
+        "person_and_organization.description",
+        "next_assembly_usage_occurrence.product_definition_occurrence_id",
+    )
 
 // Deliberately plain println, not kotlin-logging (kSTEP M2 Welle 2 scope decision): this main()
 // IS the generateExpressKotlin Gradle task's own console report, the same category of output as
@@ -288,6 +317,17 @@ fun main(args: Array<String>) {
         "generateExpressKotlin: expected to generate $EXPECTED_GENERATED but generated " +
             "${outcome.generatedEntityNames.toSet()} -- the real-schema codegen boundary changed, " +
             "update EXPECTED_GENERATED/EXPECTED_SKIPPED in Ap242V1CodeGen.kt deliberately if this is intended"
+    }
+    outcome.unsupportedDerivedAttributes.forEach {
+        println("  skipped-derive: ${it.entity}.${it.attribute} -- ${it.reason}")
+    }
+    check(
+        outcome.unsupportedDerivedAttributes.map { "${it.entity}.${it.attribute}" }.toSet() ==
+            EXPECTED_UNSUPPORTED_DERIVED,
+    ) {
+        "generateExpressKotlin: expected unsupported DERIVE attributes $EXPECTED_UNSUPPORTED_DERIVED but got " +
+            "${outcome.unsupportedDerivedAttributes.map { "${it.entity}.${it.attribute}" }} -- the supported DERIVE " +
+            "subset changed, update EXPECTED_UNSUPPORTED_DERIVED in Ap242V1CodeGen.kt deliberately if this is intended"
     }
     check(outcome.skipped.keys == EXPECTED_SKIPPED) {
         "generateExpressKotlin: expected to skip $EXPECTED_SKIPPED but skipped ${outcome.skipped.keys}"
