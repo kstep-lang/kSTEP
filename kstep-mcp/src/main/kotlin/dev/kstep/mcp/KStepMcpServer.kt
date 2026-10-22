@@ -35,6 +35,15 @@ import kotlinx.io.buffered
 private val logger = KotlinLogging.logger {}
 
 /**
+ * The version this server reports to MCP clients: the jar manifest's `Implementation-Version` (set from the
+ * project version in `kstep-mcp/build.gradle.kts`), or `"unknown"` when running from a class directory such as
+ * a test classpath.
+ */
+internal fun serverVersion(): String = KStepMcpServerMarker::class.java.`package`?.implementationVersion ?: "unknown"
+
+private object KStepMcpServerMarker
+
+/**
  * Assembles the kSTEP MCP server: all sixteen AP242 entity builders (kSTEP M2 Welle 10 — six V1
  * entities plus six support entities the codegen-generated shapes now require — plus, since ADR-0023,
  * `product_definition_occurrence` and the three `*_attribute` entities) as `build_*`
@@ -47,7 +56,7 @@ private val logger = KotlinLogging.logger {}
 fun buildServer(store: EntityStore = EntityStore()): Server {
     val server =
         Server(
-            serverInfo = Implementation(name = "kstep-mcp", version = "0.1.0"),
+            serverInfo = Implementation(name = "kstep-mcp", version = serverVersion()),
             options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools())),
         )
     registerBuildApplicationContextTool(server, store)

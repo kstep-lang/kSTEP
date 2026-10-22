@@ -7,6 +7,20 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+== 0.2.0 — 2026-10-22 (pre-release)
+
+Third pre-release. It turns kSTEP from a product-structure tool into one that models, exports and reads
+back geometry: `kstep export` writes product structure and placed assembly geometry, `kstep import` reads
+STEP files (kSTEP, OCCT, FreeCAD) back, the OCCT bridge gains booleans, holes, revolve and chamfer, and a
+sketch DSL with geometric edge selectors replaces opaque edge indices. As before, the GitHub release carries
+a platform-independent JVM-only `kstep-cli-0.2.0.zip` (about 86 MB because it bundles the Kotlin compiler for
+`*.kstep.kts` scripts) and a SHA-256 checksum, and nothing is published to Maven Central or Homebrew.
+
+**Geometry, sketches and `kstep import` need the native bridges.** The zip is built without them, so those
+features report a clear "unavailable" error there; build from source with a system OpenCascade (Linux
+x86-64, or macOS arm64 via Homebrew) to use them. Interoperability is verified with OpenCascade-based readers
+(OpenCascade's typed reader and FreeCAD), not yet with other CAD/PLM systems.
+
 === Added
 
 * Sketch DSL and geometric edge selection (ADR-0031, Welle L). New module `kstep-sketch`
@@ -83,8 +97,12 @@ minor versions may contain breaking changes.
 
 * `OcctGeometryException` is now `open` (parent of `OcctEmptyResultException`); `FilletFeature` implements the
   new `DerivedFeature` interface (constructor and `copy` unchanged); the native bridge links `-lTKBO`.
-* CI/release workflows: every `apt-get` step now retries three times with a per-attempt timeout and a
-  15-minute step timeout, after a hung mirror stalled the Linux OCCT job for 61 minutes (2026-10-22).
+* CI/release workflows: the `apt-get` steps first download (resumable, three attempts with per-attempt
+  timeouts) and then install offline, with a 40-minute step limit, after a slow mirror held the Linux OCCT job
+  up twice on 2026-10-22 (its dev packages pull in about 450 MB). The Linux OCCT job also caches the downloaded
+  packages with `actions/cache` (one entry per ISO week).
+* The MCP server now reports the project version to clients (read from the jar manifest); it reported a
+  hard-coded `0.1.0`, including in the 0.1.1 release.
 * Geometry exports with assembly usages now carry an identity placement for usages without
   `place(...)`; the export text line gains `and K placed usage(s)`. Render, preview and GLB still
   ignore placements.

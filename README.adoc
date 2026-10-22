@@ -2047,8 +2047,9 @@ limit is exceeded, a schema construct is unsupported) it fails closed with
 B-Rep geometry merged into the one Part 21 file, linked to the product
 definition via `PRODUCT_DEFINITION_SHAPE` and `SHAPE_DEFINITION_REPRESENTATION`.
 Several shapes are allowed (one per product definition, each reachable from the
-roots); every part stays in its own coordinate system, there are no placement
-transformations, so parts overlap at the origin. `--require-geometry` fails with
+roots); this section describes the unplaced case (ADR-0027): without `place(...)` every
+part stays in its own coordinate system and parts overlap at the origin; placed assemblies are
+covered by ADR-0028 and the `place(...)` description above. `--require-geometry` fails with
 exit 1 and writes nothing unless geometry was merged (`KSTEP-S-006`: the script
 registers no shape; `KSTEP-S-007`: OCCT unavailable). A failed merge
 (`KSTEP-S-008`: unreachable or duplicate product definition, closed shape, OCCT
@@ -2060,8 +2061,8 @@ structure-only identifier. `--output json` gains a `geometry` object
 (`merged`, `shapeCount`, `occt`) only when shapes or the flag are involved;
 otherwise the output is byte-identical to before.
 Interop (2026-10-22): FreeCAD 1.1.4 reads the exported box as one valid `Solid`;
-for an assembly it imports only the root product (the child's geometry is not
-transferred, no hierarchy), see ADR-0027.
+for an assembly without placements it imported only the root product (historical, ADR-0027);
+since ADR-0028 FreeCAD shows the whole hierarchy with correct positions for placed assemblies.
 Example for a usage cycle (A uses B, B uses A):
 
 [source,shell]
@@ -2298,7 +2299,6 @@ matched except by `Edges.seams()`. Without the PlaneGCS bridge (for example the 
 `scripts/interop/verify-sketch-selection.sh` re-checks all four example exports with OCCT and FreeCAD. See
 docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc.
 
-[#roadmap]
 [[import-usage]]
 === Reading a STEP file back (`kstep import`)
 
@@ -2322,10 +2322,12 @@ limits are in ADR-0030. Errors are `KSTEP-I-001`..`KSTEP-I-012` (`--output json`
 and `message`). It needs the OCCT bridge; without it the command reports `geometry_unavailable`.
 See docs/adr/ADR-0030-read-geometry.adoc for what is and is not covered.
 
+[#roadmap]
 == Roadmap (V1 scope)
 
 Per the project's scope-reduction decision (kSTEP-ADR-0001, analogous to
-kUML-ADR-0004), V1 deliberately excludes B-rep geometry and PMI, and
+kUML-ADR-0004), V1 deliberately excludes B-rep geometry and PMI (a geometry layer
+was added afterwards, see Welle H to L below), and
 focuses on a semantic core that a type-safe DSL benefits from most:
 
 . EXPRESS parser (done) + EXPRESS-to-Kotlin code generation (done, see
@@ -2624,8 +2626,9 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
   remaining: `L2LAngle`/`P2PAngle` (angle-between-line/point-pairs) and
   `CoordinateX`/`CoordinateY`, deferred to C-Welle 3 alongside sketch
   entities. Sketch entities, an incremental/interactive solver,
-  PlaneGCS's own diagnosis API, a `kstep-sketch` module, AP242 mapping,
-  multi-platform support, and a WASM path remain later items. Additional
+  PlaneGCS's own diagnosis API, AP242 mapping of sketches,
+  multi-platform support beyond Linux x86-64 and macOS arm64, and a WASM path remain later items
+  (the `kstep-sketch` module itself arrived with Welle L). Additional
   STEP Application Protocols beyond AP242 remain a separate, not-yet-started
   later item. **(Geometrie Welle 4, done)** A new `kstep-shape` module now
   merges a validated `kstep-core` AP242 product structure with an OCCT B-Rep
