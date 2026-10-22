@@ -9,6 +9,7 @@ import dev.kstep.express.validation.WhereRuleExpressionBuilder
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 
 private fun buildExpr(text: String): WhereRuleExpression =
     WhereRuleExpressionBuilder.build(ExpressParserFactory.parseExpression(text))
@@ -286,5 +287,39 @@ class WhereRuleExpressionBuilderTest :
             val nested = "(".repeat(nestingDepth) + "SELF.a > 0" + ")".repeat(nestingDepth)
 
             shouldThrow<UnsupportedWhereExpressionException> { buildExpr(nested) }
+        }
+
+        "SELF group-qualified reference stays unsupported with the default options (WHERE behaviour unchanged)" {
+            val message =
+                shouldThrow<UnsupportedWhereExpressionException> { buildExpr("SELF\\base.level") }.message!!
+            message shouldContain "SELF"
+        }
+
+        "SELF group-qualified reference builds a QualifiedSelfAttribute when the option is set" {
+            val options = WhereRuleExpressionBuilder.BuildOptions(allowGroupQualifiedSelf = true)
+            WhereRuleExpressionBuilder.build(ExpressParserFactory.parseExpression("SELF\\base.level"), options) shouldBe
+                WhereRuleExpression.QualifiedSelfAttribute("base", "level")
+            WhereRuleExpressionBuilder.build(ExpressParserFactory.parseExpression("SELF.level"), options) shouldBe
+                WhereRuleExpression.SelfAttribute("level")
+        }
+
+        "a multi-hop SELF chain builds pairs of (group, attribute) links, anything else names the unsupported link" {
+            val options = WhereRuleExpressionBuilder.BuildOptions(allowGroupQualifiedSelf = true)
+            WhereRuleExpressionBuilder.build(ExpressParserFactory.parseExpression("SELF\\a.b\\c.id"), options) shouldBe
+                WhereRuleExpression.QualifiedChain(
+                    listOf(
+                        WhereRuleExpression.ChainLink("a", "b"),
+                        WhereRuleExpression.ChainLink("c", "id"),
+                    ),
+                )
+            // A dangling third group qualifier is not a pair: it is named as the unsupported link.
+            val message =
+                shouldThrow<UnsupportedWhereExpressionException> {
+                    WhereRuleExpressionBuilder.build(ExpressParserFactory.parseExpression("SELF\\a.b\\c"), options)
+                }.message!!
+            message shouldContain "unsupported link '\\c' after 'SELF\\a.b'"
+            // Without the option, the very first group qualifier is already the unsupported link.
+            shouldThrow<UnsupportedWhereExpressionException> { buildExpr("SELF.a.b") }.message!! shouldContain
+                "unsupported link '.b' after 'SELF.a'"
         }
     })

@@ -10,6 +10,7 @@ import dev.kstep.express.validation.WhereRuleValue
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.types.shouldBeInstanceOf
 
 class DerivedAttributeEvaluatorTest :
@@ -34,7 +35,7 @@ class DerivedAttributeEvaluatorTest :
             }
         }
 
-        "next_assembly_usage_occurrence's real DERIVE (a two-hop SELF chain) correctly throws" {
+        "next_assembly_usage_occurrence's real DERIVE (a two-hop SELF chain) needs an instance-graph context" {
             val schema = Ap242V1CodeGen.loadSchema()
             val nauo = schema.entities.single { it.name == "next_assembly_usage_occurrence" }
             val derived = nauo.derivedAttributes.single()
@@ -43,9 +44,10 @@ class DerivedAttributeEvaluatorTest :
                 "SELF\\product_definition_relationship.related_product_definition" +
                 "\\product_definition_occurrence.id"
 
-            shouldThrow<UnsupportedWhereExpressionException> {
+            // Since ADR-0023 the chain builds (QualifiedChain) but cannot be evaluated without the instances.
+            shouldThrow<WhereRuleEvaluationException> {
                 DerivedAttributeEvaluator.evaluate(derived, emptyMap())
-            }
+            }.message!! shouldContain "instance-graph context"
         }
 
         "a synthetic DERIVE using a SELF.attribute reference (within the supported subset) evaluates correctly" {
@@ -88,6 +90,44 @@ class DerivedAttributeEvaluatorTest :
         "a DERIVE expression referencing a missing attribute throws WhereRuleEvaluationException, same as WHERE" {
             shouldThrow<WhereRuleEvaluationException> {
                 DerivedAttributeEvaluator.evaluate("SELF.missing", emptyMap())
+            }
+        }
+
+        "next_assembly_usage_occurrence's two-hop chain builds a QualifiedChain with both links" {
+            val nauo = Ap242V1CodeGen.loadSchema().entities.single { it.name == "next_assembly_usage_occurrence" }
+            val expression =
+                dev.kstep.express.validation.WhereRuleExpressionBuilder.build(
+                    dev.kstep.express.ExpressParserFactory.parseExpression(
+                        (nauo.derivedAttributes.single() as ExpressDerivedAttribute.Explicit).expressionText,
+                    ),
+                    dev.kstep.express.validation.WhereRuleExpressionBuilder
+                        .BuildOptions(allowGroupQualifiedSelf = true),
+                )
+            expression shouldBe
+                dev.kstep.express.validation.WhereRuleExpression.QualifiedChain(
+                    listOf(
+                        dev.kstep.express.validation.WhereRuleExpression
+                            .ChainLink("product_definition_relationship", "related_product_definition"),
+                        dev.kstep.express.validation.WhereRuleExpression
+                            .ChainLink("product_definition_occurrence", "id"),
+                    ),
+                )
+        }
+
+        "a SELF\\entity.attribute reference evaluates like SELF.attribute, including the Unset rule" {
+            DerivedAttributeEvaluator.evaluate(
+                "SELF\\base.level",
+                mapOf("level" to WhereRuleValue.IntegerValue(3)),
+            ) shouldBe WhereRuleValue.IntegerValue(3)
+            DerivedAttributeEvaluator.evaluate(
+                "SELF\\base.level > 2",
+                mapOf("level" to WhereRuleValue.IntegerValue(3)),
+            ) shouldBe WhereRuleValue.BooleanValue(true)
+            shouldThrow<WhereRuleEvaluationException> {
+                DerivedAttributeEvaluator.evaluate("SELF\\base.level", mapOf("level" to WhereRuleValue.Unset))
+            }
+            shouldThrow<WhereRuleEvaluationException> {
+                DerivedAttributeEvaluator.evaluate("SELF\\base.level", emptyMap())
             }
         }
     })

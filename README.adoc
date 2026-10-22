@@ -10,8 +10,10 @@ image:https://img.shields.io/github/license/kstep-lang/kSTEP[Apache 2.0,link=htt
 image:https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml/badge.svg?branch=master[CI,link=https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml]
 
 WARNING: kSTEP is in early, pre-release development (M2). The API is
-unstable and no artifacts are published yet. See <<status,Status>> below
-for what actually works today.
+unstable and no artifacts are published yet; the first tagged release,
+https://github.com/kstep-lang/kSTEP/releases/tag/v0.1.0[v0.1.0], is a
+source-only pre-release (see link:CHANGELOG.adoc[CHANGELOG]). See
+<<status,Status>> below for what actually works today.
 
 Licensed under the Apache License, Version 2.0. See link:LICENSE[LICENSE].
 
@@ -109,13 +111,113 @@ this writing:
   `LOGICAL`/`NUMBER`/`BINARY`-typed attributes, and zero-attribute
   entities — raise a structured `CodeGenException` instead of emitting
   a silently wrong or partial class. A `TYPE` reference (`DefinedTypeRef`)
-  resolves *only* the single-level simple-alias case (`TYPE x = STRING;`
-  and the other five simple EXPRESS types — `ExpressDefinedType`'s
-  `underlyingSimpleType`) to its underlying Kotlin type; anything
-  needing further indirection — an aggregation, a
-  `SELECT`/`ENUMERATION`, or a `TYPE` that itself references another
-  `TYPE` — still raises `CodeGenException`, deliberately not resolved
-  transitively (M1 Welle 4).
+  resolves transitively (cycle- and depth-guarded, depth limit 32): a
+  `TYPE` alias chain ending in a simple EXPRESS type maps to its Kotlin
+  type, an explicit `ENUMERATION OF (...)` to a Kotlin `enum class`, and
+  a closed `SELECT (...)` to a Kotlin `sealed interface` (ADR-0020:
+  member entities, including the instantiable subtypes of a member,
+  implement it directly; enum members implement it; a nested `SELECT`
+  extends it; alias members get one shared top-level wrapper
+  `data class`). Not resolved, each with a specific `CodeGenException`:
+  `EXTENSIBLE`/`BASED_ON`/`GENERIC_ENTITY` `SELECT`s,
+  `EXTENSIBLE`/`BASED_ON` enumerations, aggregation-backed `TYPE`s, and
+  aliases of entities. Note that the bundled AP242 excerpt itself
+  contains no `ENUMERATION` or `SELECT` type, so the generated
+  `kstep-core` file is unaffected by `SELECT` support (see
+  `docs/adr/ADR-0020-select-types-as-sealed-interfaces.adoc` for the
+  open follow-up work in the Part 21 writer/reader and `kstep-mcp`).
+* (Semantic core Welle B) `DERIVE` attributes inside the supported
+  expression subset (comparisons, `SELF.attr` and `SELF\entity.attr`
+  references, `AND`/`OR`/`NOT`, string/integer/real literals,
+  `EXISTS(<attribute>)`, plain aliases, chains of DERIVEs) are now
+  generated as computed Kotlin getter properties in the class body
+  (ADR-0021): no backing field, so they are not part of `equals`/
+  `hashCode`/`copy`/`toString` and are never written to Part 21. A
+  subtype's `SELF\super.attr : T := expr;` overrides an inherited DERIVE
+  in place, or turns an inherited *explicit* attribute into a derived one
+  (it leaves the constructor but keeps its Part 21 position, where a
+  generic writer would emit `*`; the hand-mapped V1 writer is not
+  affected). `CodeGenOptions.derivedAttributeMode` is `STRICT` by default
+  (an unsupported DERIVE throws `CodeGenException`);
+  `Ap242V1CodeGen` forces the report mode, which lists unsupported DERIVEs
+  in the class KDoc and in `Outcome.unsupportedDerivedAttributes`. DERIVE
+  cycles, chains longer than 32, more than 256 DERIVEs per entity and
+  initializers longer than 8 192 characters are bounded and reported.
+  **None of the six real AP242 V1 DERIVE clauses is inside the subset**
+  (`get_name_value`/`get_description_value`/`get_id_value` are functions
+  over `USEDIN`; NAUO's `product_definition_occurrence_id` is a two-hop
+  chain through the unmodelled `product_definition_occurrence`), so the
+  generated V1 classes gain no properties; the six cases are named
+  limitations with an exact reason and a drift guard in
+  `generateExpressKotlin`. The feature is exercised with a synthetic
+  fixture schema whose generated Kotlin is compiled into the test source
+  set and compared against `DerivedAttributeEvaluator`.
+* (Semantic core Welle C) Population-level validation of the constraints that
+  need the instance graph (ADR-0022). A new identity-based, immutable
+  `ReverseReferenceIndex` (`dev.kstep.express.validation`) answers "who
+  refers to this instance, in which role?"; on top of it the WHERE-rule
+  builder accepts `SIZEOF(USEDIN(SELF, '<role>'))` behind the opt-in
+  `BuildOptions(allowInstanceGraphFunctions = true)` (without the flag
+  nothing changes -- WHERE-rule validation of a single entity, the DERIVE
+  evaluator and the DERIVE code generator still reject both functions),
+  and `InverseAttributeEvaluator` evaluates `INVERSE` attributes with their
+  bounds. `kstep-core` exposes it as `Ap242ModelValidator.validate(roots)`;
+  an unsatisfied `INVERSE` bound is reported as the new code `KSTEP-I-001`.
+  Contrary to earlier notes here, the vendored schema *does* contain an
+  `INVERSE` (`application_context.context_elements : SET [1:?] OF
+  application_context_element FOR frame_of_reference`), and `product`
+  declares **no** WHERE rule at all. The five real `SIZEOF(USEDIN(...))`
+  rules (`application_context` WR1/WR2, `product_definition` WR1,
+  `person_and_organization` WR1/WR2) all query `name_attribute`,
+  `description_attribute` or `id_attribute`, which are not modelled; an
+  explicit allow-list evaluates `USEDIN` over exactly these three roles as
+  the empty set and every such evaluation is returned to the caller as an
+  `AppliedAssumption`. **Consequence, stated plainly:** those five rules
+  run but are satisfied by construction; the only graph constraint that can
+  actually fail on V1 data today is the `application_context` `INVERSE`
+  bound (an `application_context` that no `product_context` /
+  `product_definition_context` refers to). Opt-in entry points:
+  `Part21Reader.read(source, validateModel = true)` and the MCP tool
+  `validate_model`; builders, `kstep export` and `KStepScriptHost` do not
+  run it yet.
+* (Semantic core Welle D, ADR-0023) Occurrences, attribute entities, derived
+  values, UNIQUE and acyclic usages -- the last wave of the semantic core.
+  `kstep-core` now wraps **sixteen** generated entities: the twelve above
+  plus `product_definition_occurrence` and `name_attribute`,
+  `description_attribute`, `id_attribute` (each with a builder function
+  `productDefinitionOccurrence(id)`, `nameAttribute { }`,
+  `descriptionAttribute { }`, `idAttribute { }`; Part 21 kinds; MCP tools
+  `build_product_definition_occurrence`, `build_name_attribute`,
+  `build_description_attribute`, `build_id_attribute`). Against the official
+  schema the planning premise "occurrence as a supertype of NAUO" was wrong:
+  `product_definition_occurrence` is a member of the SELECT
+  `product_definition_or_reference`, which types both ends of a
+  `product_definition_relationship` -- so `NextAssemblyUsageOccurrence.
+  relating/relatedProductDefinition` are now `ProductDefinitionOrReference`
+  (a sealed interface; **breaking for readers**, not for writers), and the
+  four `SELECT` types of the excerpt are the first ones emitted for AP242.
+  *Derived values:* all six real DERIVE clauses are now generated. The five
+  `get_name_value`/`get_description_value`/`get_id_value` ones depend on the
+  population and are member functions taking a scope
+  (`productDefinition.name(population.derivedScope)` with
+  `Ap242Population.of(roots)` or `Part21ReadResult.population()`); `null` is
+  EXPRESS `?`, and an incomplete population throws
+  `IndeterminateDerivedValueException` instead of answering `null`.
+  NAUO's `product_definition_occurrence_id` is a nullable getter (an `as?`
+  chain over the SELECT). The schema functions are a fixed registry of
+  intrinsics, not a function interpreter. *Rules:* WHERE rules inherited from
+  supertypes are now evaluated (`product_definition_usage.WR1` on NAUO);
+  the five `USEDIN` rules are real now (the three attribute roles are
+  modelled); `UNIQUE` is evaluated on population level (`KSTEP-U-001`,
+  including NAUO `UR1`/`UR2`, the inherited `product_definition_usage.UR1`
+  and `product_definition_formation.UR1`); the acyclic check
+  (`acyclic_product_definition_relationship`, `KSTEP-W-002` with the cycle
+  path) is an iterative O(V+E) DFS with depth/visit limits. An unsupported
+  graph rule is never dropped silently any more -- it fails the schema
+  context with entity, label and reason. MCP's
+  `build_next_assembly_usage_occurrence` enforces UR1, UR2 and WR1 under the
+  store lock and reports all violated rules together. See ADR-0023 for the
+  derivation, the breaking changes and the named limitations.
 * (M1 Welle 4) The generator has now run against **real AP242 ground
   truth** for the first time, not just the hand-written AP242-subset
   fixture. A curated excerpt of the official
@@ -191,9 +293,10 @@ this writing:
   `Map<String, WhereRuleValue>`; `WhereRuleValidator` ties both
   together into a `(entityName, rules, attributeValues) ->
   List<WhereRuleViolation>` API. Anything outside the supported subset
-  (`EXISTS()`, `SIZEOF()`, other function calls, aggregate/set
-  operations, `QUERY`, arithmetic operators, the tri-state `LOGICAL`
-  type, ...) raises a structured `UnsupportedWhereExpressionException`
+  (other function calls, `SIZEOF()`/`USEDIN()` except in the opt-in
+  `SIZEOF(USEDIN(SELF, '<role>'))` form of Semantic core Welle C,
+  aggregate/set operations, `QUERY`, arithmetic operators, the tri-state
+  `LOGICAL` type, ...) raises a structured `UnsupportedWhereExpressionException`
   instead of silently doing the wrong thing; a genuine evaluation-time
   problem (a missing attribute, a non-boolean result, an
   incompatible-type comparison) raises `WhereRuleEvaluationException`.
@@ -245,7 +348,7 @@ this writing:
   layer with `LIST`/`EXISTS()` support, or rebuild it on top of the
   generated types) is resolved: `kstep-core` no longer hand-authors any
   AP242 entity shape at all. `Ap242V1CodeGen.CORE_MODULE_OPTIONS`
-  generates all twelve entities (the six V1 types plus the six support
+  generates all twelve entities at that time (the six V1 types plus the six support
   entities their shapes require — `application_context`,
   `product_context`, `product_definition_context`, `approval_status`,
   `person`, `organization`) directly into `kstep-core`'s own compiled
@@ -367,9 +470,10 @@ this writing:
   absent. DERIVE and UNIQUE assertions are cross-checked against the
   real `product_definition`, `product_definition_formation`,
   `next_assembly_usage_occurrence`, and `person_and_organization`
-  entities in `ap242-v1-entities.exp`; no V1 entity has an `INVERSE`
-  clause, so that capture is proven against a small, hand-written
-  synthetic fixture instead. A redeclared (`SELF\entity.attr`) DERIVE
+  entities in `ap242-v1-entities.exp`; this wave believed that no V1 entity has
+  an `INVERSE` clause, so that capture was proven against a small,
+  hand-written synthetic fixture instead (correction, Semantic core
+  Welle C: `application_context.context_elements` is a real `INVERSE`). A redeclared (`SELF\entity.attr`) DERIVE
   or INVERSE name throws a structured `SemanticModelException` rather
   than silently dropping the clause or NPE-ing, mirroring
   `mapParameterType`'s existing precedent for out-of-scope
@@ -386,7 +490,8 @@ this writing:
   `build_product`, `build_person_and_organization`,
   `build_product_definition_formation`, `build_product_definition`,
   `build_next_assembly_usage_occurrence`, `build_approval`,
-  `export_part21`, `list_entities`, `get_entity`. Because every MCP
+  `export_part21`, `list_entities`, `get_entity` (Semantic core Welle C adds
+  `validate_model`). Because every MCP
   tool call is stateless (JSON in, JSON out) but five of the six V1
   builders take entity-typed Kotlin references
   (`ProductDefinitionFormation.ofProduct: Product`, etc.), `kstep-mcp`
@@ -481,9 +586,10 @@ this writing:
   complete outcome for those three clauses, not a gap. A small synthetic
   fixture (`DERIVE canonical_id : STRING := SELF.id;` and similar) proves
   positive evaluation actually works when the expression is within the
-  supported subset. `INVERSE` evaluation remains explicitly out of scope
-  — no real V1 entity has an `INVERSE` clause, and `kstep-core` has no
-  bidirectional-relationship modeling to evaluate against.
+  supported subset. `INVERSE` evaluation was out of scope in this wave
+  (on the mistaken belief that no real V1 entity has an `INVERSE` clause);
+  it was delivered on population level in Semantic core Welle C
+  (ADR-0022).
 +
 Separately, `kstep-mcp`'s `build_next_assembly_usage_occurrence` tool now
 enforces the real AP242 `next_assembly_usage_occurrence` `UNIQUE UR1`
@@ -507,7 +613,8 @@ documented in code and here rather than faked or approximated: NAUO's
 own `UNIQUE UR2` (`product_definition_occurrence_id`,
 `relating_product_definition`), because `product_definition_occurrence_id`
 is itself a `DERIVE` value chained through `product_definition_occurrence`,
-an entity nowhere modeled among `kstep-core`'s twelve AP242 types; and
+an entity nowhere modeled among `kstep-core`'s twelve AP242 types at that
+time (**UR2 has been enforced since Semantic core Welle D, ADR-0023**); and
 `product_definition_formation`'s own `UNIQUE UR1` (`id`, `of_product`),
 because the `EntityStore` already keys every `product_definition_formation`
 by that same `id`, so the composite key can never actually collide
@@ -627,7 +734,9 @@ See <<roadmap,Roadmap>> for what's planned next.
   `productDefinitionContext`/`approvalStatus`/`person`/`organization`/
   `product`/`personAndOrganization`/`approval`/
   `productDefinitionFormation`/`productDefinition`/
-  `nextAssemblyUsageOccurrence` builder functions (twelve total), each
+  `nextAssemblyUsageOccurrence` builder functions (twelve at M2 Welle 10;
+  sixteen with `productDefinitionOccurrence`, `nameAttribute`,
+  `descriptionAttribute`, `idAttribute` since ADR-0023), each
   running WHERE-rule, mandatory-reference (`KSTEP-M-001`),
   aggregation-bound (`KSTEP-A-001`), and — (M2 Welle 7)
   `product.name`/`next_assembly_usage_occurrence.name` — mandatory-
@@ -647,20 +756,23 @@ See <<roadmap,Roadmap>> for what's planned next.
 | Working: parses EXPRESS source into an ANTLR parse tree (verified
   against a real-schema excerpt, not just the AP242-subset fixture);
   walks it into a semantic AST; generates Kotlin
-  `data class`es from that AST, including single-level simple `TYPE`-alias
-  resolution; evaluates the supported WHERE-rule expression subset
+  `data class`es from that AST, including transitive `TYPE`-alias,
+  `ENUMERATION` and closed `SELECT` resolution; evaluates the supported WHERE-rule expression subset
   against instance attribute values. (M2 Welle 4) Also evaluates `DERIVE`
   initializer expressions within that same supported subset, via
   `DerivedAttributeEvaluator` and the new `WhereRuleEvaluator.evaluateToValue`
   entry point — reusing the WHERE-rule builder/evaluator, not a second
-  parser. The `generateExpressKotlin` Gradle task regenerates the six V1
-  entities from a real-schema extraction as a build artifact (wired into
+  parser. (Semantic core Welle B) Supported `DERIVE`s are generated as
+  computed getter properties (`DerivedAttributeCodeGen`, ADR-0021); since
+  ADR-0023 the six real V1 DERIVEs are generated too (five scope-taking
+  functions, one SELECT-cast getter). The `generateExpressKotlin` Gradle task
+  regenerates the sixteen V1 entities from a real-schema extraction as a build artifact (wired into
   `check`, not into this or any other module's own compile classpath —
   see Building below).
 
 | `kstep-step21`
 | STEP Part 21 (ISO 10303-21 physical file exchange format)
-  reader/writer for the twelve AP242 entities (`dev.kstep.step21`)
+  reader/writer for the sixteen AP242 entities (`dev.kstep.step21`)
 | Working: `Part21Writer.write`/`Part21Reader.read`, a hand-rolled
   scanner and two-pass graph resolver (independent of the ANTLR
   EXPRESS grammar — Part 21 is a different sub-format). Verified via a
@@ -701,10 +813,10 @@ See <<roadmap,Roadmap>> for what's planned next.
   below. Depends on `kstep-mcp` and `kstep-script`.
 
 | `kstep-mcp`
-| MCP server exposing the twelve AP242 entity builders and Part-21
+| MCP server exposing the sixteen AP242 entity builders and Part-21
   export as LLM tool-calling tools (`dev.kstep.mcp`), built on the
   official `io.modelcontextprotocol:kotlin-sdk-server`
-| Working (M2 Welle 1, expanded M2 Welle 10): fifteen tools —
+| Working (M2 Welle 1, expanded M2 Welle 10 and Welle D): twenty tools —
   `build_application_context`, `build_product_context`,
   `build_product_definition_context`, `build_approval_status`,
   `build_person`, `build_organization`, `build_product`,
@@ -997,7 +1109,12 @@ See <<roadmap,Roadmap>> for what's planned next.
   `KStepMcpServerTest` cases for NAUO's `UNIQUE UR1` enforcement (conflict,
   non-conflict, self-overwrite, and the `product_definition_formation`
   redundancy proof) — all exercised against either the hand-written
-  AP242-subset fixture or the real-schema excerpt; (M2 Welle 6)
+  AP242-subset fixture or the real-schema excerpt; (Semantic core Welle B)
+  `DerivedAttributeCodeGenTest` (strict/report modes, cycles, limits,
+  injection) and `DerivedAttributeRuntimeParityTest` (generated DERIVE
+  properties compiled from `derive-codegen-fixture.exp` against
+  `DerivedAttributeEvaluator`, including `-0.0`, `NaN` and unset
+  optionals); (M2 Welle 6)
   `KStepScriptHostTest` (every `KStepScriptOutcome` case: a valid
   multi-part-assembly script, the aggregating `root(ValidationResult)`
   form, a structural `KSTEP-M-001` violation, a `getOrThrow()` abort, a
@@ -1468,7 +1585,8 @@ println(violations)
 ----
 
 A WHERE-rule expression using a construct outside the supported subset
-(`EXISTS()`, `QUERY`, arithmetic, ...) throws
+(`QUERY`, arithmetic, `SIZEOF()`/`USEDIN()` without the Semantic core
+Welle C opt-in, ...) throws
 `UnsupportedWhereExpressionException`; a genuine evaluation-time
 problem (a missing attribute, a non-boolean result, an
 incompatible-type comparison) throws `WhereRuleEvaluationException`.
@@ -1657,6 +1775,41 @@ println(value) // StringValue(value=W-1)
 // -> UnsupportedWhereExpressionException
 ----
 
+(Semantic core Welle B) Within the supported subset, the code generator
+turns a `DERIVE` into a computed property instead (ADR-0021). For
+
+[source]
+----
+ENTITY shape_info;
+  count : INTEGER;
+  note  : OPTIONAL STRING;
+DERIVE
+  is_big   : BOOLEAN := count > 10;
+  has_note : BOOLEAN := EXISTS(note);
+END_ENTITY;
+----
+
+the generated class is
+
+[source,kotlin]
+----
+public data class ShapeInfo(
+  public val count: Int,
+  public val note: String? = null,
+) {
+  public val isBig: Boolean
+    get() = ((count).toDouble().compareTo((10).toDouble()) > 0)
+
+  public val hasNote: Boolean
+    get() = (note != null)
+}
+----
+
+The derived values are not constructor parameters and not part of
+`equals`/`hashCode`/`copy`/`toString`. `ExpressKotlinCodeGenerator.generateFileWithReport`
+additionally returns the DERIVEs it had to skip when
+`derivedAttributeMode = GENERATE_SUPPORTED_REPORT_UNSUPPORTED` is set.
+
 `build_next_assembly_usage_occurrence` now also enforces NAUO's real
 `UNIQUE UR1` rule — a second NAUO sharing an already-used
 `(reference_designator, relating_product_definition)` pair is rejected:
@@ -1714,8 +1867,8 @@ println(rebuilt.isError) // null
 
 (M2 Welle 6) Exporting a `*.kstep.kts` script directly to a STEP Part 21
 file via `kstep export`, no hand-written Kotlin caller needed. A script
-ends with `stepFile(fileName = "...") { ... }`; the twelve `kstep-core`
-builders (M2 Welle 10), the generated `dev.kstep.generated.ap242v1.*`
+ends with `stepFile(fileName = "...") { ... }`; the sixteen `kstep-core`
+builders (twelve at M2 Welle 10, four more since ADR-0023), the generated `dev.kstep.generated.ap242v1.*`
 types, and `stepFile`/`root` are all available without any `import`
 (`KStepScriptCompilationConfiguration`'s `defaultImports`):
 
@@ -1951,23 +2104,32 @@ focuses on a semantic core that a type-safe DSL benefits from most:
   reference) is now done too — see the SUBTYPE OF
   inheritance-flattening entry in <<status,Status>> above
   (`dev.kstep.express.semantic.InheritanceResolver`). Still pending:
-  `DERIVE`/`INVERSE`/`UNIQUE` clause codegen (still not started), and
-  `SELECT`/`ENUMERATION`-type and transitive-`TYPE`-alias resolution.
+  `INVERSE`/`UNIQUE` clause codegen (still not started). `DERIVE`
+  codegen is done for the supported expression subset (Semantic core
+  Welle B, ADR-0021) and, since Welle D (ADR-0023), for the six real V1
+  DERIVEs.
+  Transitive `TYPE`-alias chains (cycle- and depth-guarded), explicit
+  `ENUMERATION OF (...)` types (emitted as Kotlin `enum class`es;
+  `EXTENSIBLE`/`BASED_ON` enumerations stay unsupported) and closed
+  `SELECT` types (emitted as Kotlin `sealed interface`s, see ADR-0020;
+  `EXTENSIBLE`/`BASED_ON`/`GENERIC_ENTITY` `SELECT`s stay unsupported)
+  are now resolved by codegen. The real AP242 excerpt still contains no
+  `SELECT`; since Semantic core Welle D (ADR-0023) it contains four.
   `DERIVE`/`UNIQUE`
   *evaluation* (as opposed to codegen) is now partially done — capture
   was M1 Welle 6, and M2 Welle 4 added evaluation for the WHERE-rule-
   supported expression subset (`DerivedAttributeEvaluator`) plus
   `next_assembly_usage_occurrence`'s `UNIQUE UR1` enforcement in
-  `kstep-mcp` — see <<status,Status>> above. Still open: `INVERSE`
-  evaluation (no real V1 entity has an `INVERSE` clause, and `kstep-core`
-  has no bidirectional-relationship modeling to evaluate against) and
-  NAUO's `UNIQUE UR2` (depends on `product_definition_occurrence`, an
-  entity not modeled in `kstep-core`) — both carried forward explicitly
-  as named limitations, not silently dropped.
+  `kstep-mcp` — see <<status,Status>> above. `INVERSE` evaluation and
+  `SIZEOF(USEDIN(...))` are done on population level (Semantic core
+  Welle C, ADR-0022; since Welle D, ADR-0023, the attribute entities are
+  modelled, so the `USEDIN` rules are real, and NAUO's `UNIQUE UR2` and
+  the acyclic usage check are evaluated).
 . A semantic AP242 core: product structure and metadata, without
   B-rep geometry and without PMI (PMI references geometry shape
   aspects and moves with the geometry milestone). The Kotlin type
-  layer for its twelve core AP242 entities (six V1 entities —
+  layer for its twelve core AP242 entities (sixteen since Welle D, ADR-0023;
+  the original six V1 entities —
   `PRODUCT`, `PRODUCT_DEFINITION` + revision,
   `PRODUCT_DEFINITION_FORMATION`, `NEXT_ASSEMBLY_USAGE_OCCURRENCE`,
   `APPROVAL`, `PERSON_AND_ORGANIZATION` — plus six support entities
@@ -2020,7 +2182,7 @@ row below is now resolved (see ADR-0004), not an open gap:
 | resolved — both now correctly entity-typed and mandatory
 
 | `person_and_organization`
-| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule was synthesized
+| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))`; `kstep-core`'s rule was synthesized
 | resolved differently — dropped entirely, not relabeled: both attributes are now mandatory entity references, so "at least one set" is no longer a meaningful approximation
 
 | `product`
@@ -2028,16 +2190,20 @@ row below is now resolved (see ADR-0004), not an open gap:
 | resolved — mandatory and non-empty, enforced via `KSTEP-M-001`/`KSTEP-A-001`
 
 | `product`
-| real `WR1` uses `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
-| unchanged — kept, relabeled `kstep_wr1`
+| the vendored schema declares **no** WHERE rule on `product` (earlier notes claiming a `SIZEOF(USEDIN(...))` `WR1` were wrong); `kstep-core`'s rule is synthesized
+| unchanged — kept, relabeled `kstep_wr1` (no real rule exists to align to)
 
 | `product_definition`
 | real entity has a mandatory `frame_of_reference : product_definition_context`; `kstep-core` omitted it
 | resolved — mandatory, enforced via `KSTEP-M-001`
 
 | `product_definition`
-| real `WR1` uses `SIZEOF(USEDIN(...))` (unsupported); `kstep-core`'s rule is synthesized
-| unchanged — kept, relabeled `kstep_wr1`
+| real `WR1` uses `SIZEOF(USEDIN(...))`; `kstep-core`'s rule is synthesized
+| `kstep_wr1` unchanged in the builder; the real `WR1` is now evaluated on model level by `Ap242ModelValidator` (ADR-0022), always satisfied under the unmodelled-entity assumption
+
+| `application_context`
+| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))`; real `INVERSE context_elements : SET [1:?]`
+| evaluated on model level by `Ap242ModelValidator` (ADR-0022): the `INVERSE` bound can fail (`KSTEP-I-001`), the two WHERE rules are satisfied by construction
 
 | `product`, `product_definition`, `product_definition_formation`
 | real `OPTIONAL text description`; `kstep-core` modeled it as non-null `String` defaulting to `""`
@@ -2060,24 +2226,44 @@ row below is now resolved (see ADR-0004), not an open gap:
 | unchanged — no synthesized rule remains for this entity (the old one was the now-removed reference_designator over-constraint above)
 |===
 
-Deliberately still open (named limitations, not silently dropped —
-see ADR-0004 and <<status,Status>> for `KSTEP-M-002`'s scope): the
-`SIZEOF`/`USEDIN`-based real WHERE rules on `product`,
-`product_definition`, `person_and_organization`, and `application_context`
-remain unsupported and unevaluated; NAUO's real `WR1`
-(`acyclic_product_definition_relationship`) likewise; `DERIVE` attributes
-(`product_definition.name`, `person_and_organization.name`/
-`description`, `application_context.id`/`description`, NAUO's derived
-`product_definition_occurrence_id`) are still not codegen'd or
-evaluated — the generated types simply don't carry them; and NAUO's
-`UNIQUE UR2` remains unenforced (depends on `product_definition_occurrence`,
-an entity not modeled anywhere in `kstep-core`).
+Deliberately still open (named limitations, not silently dropped --
+the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
+<<status,Status>> for `KSTEP-M-002`'s scope):
+
+* Model-level validation (`Ap242ModelValidator`: `USEDIN`/`INVERSE`/`UNIQUE`
+  rules and the acyclic usage check) is not yet run by `kstep export` /
+  `KStepScriptHost`; whether findings are errors or warnings is an open
+  decision. A cyclic structure built through the DSL can therefore still be
+  exported; the MCP server refuses to build it (`acyclic_relationship_violated`).
+* `product_definition_occurrence` is an excerpt: `quantity`
+  (`measure_with_unit`), the DERIVE `descendant_occurrences`, the INVERSE
+  `child_occurrences` and the WHERE rules `WR1`/`WR3` are not vendored (the
+  text of the two rules could not be verified against a local copy of the
+  schema, so none was invented); its `WR2` is kept and, because
+  `configuration_design` is not modelled, requires a `definition`. Part 21
+  keeps the real arity: `quantity` is always written as `$`, anything else is
+  rejected (STRICT) or kept opaque (TOLERANT).
+* The four vendored `SELECT` types list only the modelled members
+  (`generic_product_definition_reference` and most `*_attribute_select`
+  members are missing); `configuration_design` is not modelled (its `USEDIN`
+  is the empty set, reported as an assumption).
+* The inherited `product_definition_usage.UR1` is enforced on population level
+  only (it cannot fire in MCP, where usage ids are unique per store).
+* `QUERY` and general EXPRESS functions are unsupported -- only the four fixed
+  schema-function intrinsics exist; there is no generic Part 21 writer (the
+  hand-mapped V1 writer does not emit `*` for derived positions); `RENAMED`
+  redeclarations and EXPRESS three-valued logic are not modelled.
+* The acyclic walk is bounded (ancestor depth 256, 100 000 visited
+  definitions); a larger structure is a `limit_exceeded` in MCP and an
+  exception in the validator, never a verdict.
 --
 . Validation: EXPRESS `WHERE` rules surfaced as structured errors.
   Done for the supported expression subset (comparisons, `SELF.attribute`
   references, `AND`/`OR`/`NOT`, string/integer/real literals) — see
-  <<status,Status>> above. Constructs outside that subset (`EXISTS()`,
-  `SIZEOF()`, other function calls, aggregate/set operations, `QUERY`,
+  <<status,Status>> above. Constructs outside that subset (other function
+  calls -- the fixed AP242 schema functions are opt-in, ADR-0023 --,
+  `SIZEOF(USEDIN(...))` without the population-level opt-in,
+  aggregate/set operations, `QUERY`,
   arithmetic operators, the tri-state `LOGICAL` type) are not evaluated
   and raise a structured exception instead. Note that WHERE-rule
   evaluation is not the same thing as EXPRESS mandatory-attribute-
@@ -2133,7 +2319,7 @@ an entity not modeled anywhere in `kstep-core`).
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and
   the kSTEP DSL as generation targets. **(M2 Welle 1) Split into two
   halves, only the first of which is done**: the MCP server itself
-  (`kstep-mcp` — fifteen tools over stdio wrapping the twelve AP242
+  (`kstep-mcp` — twenty tools over stdio wrapping the sixteen AP242
   builders and Part-21 export, a bounded session-scoped `EntityStore`, structured
   tool-call errors, tested end-to-end via the SDK's in-memory
   transport — see <<status,Status>> and Usage above) is complete and

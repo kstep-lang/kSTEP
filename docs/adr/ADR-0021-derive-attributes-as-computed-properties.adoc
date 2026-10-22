@@ -1,0 +1,153 @@
+= ADR-0021: EXPRESS DERIVE attributes as computed Kotlin properties
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP semantic-core Welle B). Amends ADR-0004 (generated entities
+stay flat `data class`es but may carry computed body properties) and ADR-0020 (a SELECT,
+ENUMERATION or entity type is only admissible in a DERIVE as a plain alias).
+
+Amended by ADR-0022: `SIZEOF` and `USEDIN` need an instance graph and stay unsupported inside
+`DERIVE` initializers (the builder is called without `allowInstanceGraphFunctions`); the sealed
+`when`s in `DerivedAttributeCodeGen` reject the new AST nodes explicitly.
+
+Amended by ADR-0023: the real V1 DERIVEs are now translated (population-dependent member functions taking a scope, and a SELECT-cast chain getter). Statements below that none of the six is inside the subset describe the state before that wave.
+
+== Context
+
+The semantic model captured `DERIVE` clauses (M1 Welle 6) and `DerivedAttributeEvaluator`
+evaluated the WHERE-rule expression subset reflectively (M2 Welle 4), but the code generator
+ignored them: a generated class had no way to expose a derived value, and a subtype's
+`SELF\super.attr : T := expr;` redeclaration (EXPRESS 9.2.3, derived attribute redeclaration)
+was not resolved at all.
+
+A survey of the six real V1 DERIVE clauses in `ap242-v1-entities.exp` shows that **none** of
+them is inside the supported subset:
+
+* `get_name_value(SELF)`, `get_description_value(SELF)` and `get_id_value(SELF)` are function
+  calls built on `USEDIN` over `name_attribute` / `description_attribute` / `id_attribute`;
+  none of those entities is modelled.
+* NAUO's `SELF\product_definition_relationship.related_product_definition\product_definition_occurrence.id`
+  is a chain with two hops through an entity-typed attribute; `product_definition_occurrence`
+  is not modelled.
+
+So this wave builds and tests the complete mechanism with synthetic schemas, and turns the six
+real cases into named, guarded limitations. The generated V1 classes gain no properties.
+
+Part 21 constraint, established by reading the existing code: a DERIVE declared on an entity
+is **not** an instance parameter and is never written. A `*` appears only at the position of an
+inherited *explicit* attribute that a subtype redeclares as DERIVE. `Part21Value.Derived`
+already exists in tokenizer and renderer. `Part21Writer` maps the twelve V1 entities by hand
+(`valueArgs` / `referencesOf`), so body properties cannot change its output, and no V1 entity has
+a redeclared-explicit-as-derived position.
+
+== Decision
+
+A DERIVE inside the supported subset becomes a **getter property in the class body**:
+
+[source,kotlin]
+----
+public val isBig: Boolean
+  get() = ((count).toDouble().compareTo((10).toDouble()) > 0)
+----
+
+* No backing field. The value is a pure function of the explicit attributes, therefore always
+  consistent with `copy()`, and nothing is stored or serialised.
+* Body properties are not part of a `data class`'s `equals`, `hashCode`, `toString`,
+  `componentN` or `copy`. That is intended. `EntityDescription` in `kstep-mcp` builds its JSON
+  per field and is unaffected.
+* The property is `public` even if the constructor is `internal` (ADR-0004); it cannot be used
+  to construct anything.
+
+*Translation.* The generator re-parses the initializer with `WhereRuleExpressionBuilder` (one
+grammar and one AST for WHERE and DERIVE) and translates the AST with
+`DerivedAttributeCodeGen`. Supported: comparisons, `AND`/`OR`/`NOT`, string / integer / real
+literals, `SELF.attr`, `SELF\entity.attr`, `EXISTS(<attribute>)`, plain aliases, and references
+to other DERIVEs. `SELF\entity.attr` is parsed only with
+`BuildOptions(allowGroupQualifiedSelf = true)`, so WHERE-rule behaviour is unchanged.
+
+*Parity rule.* The generated code must agree with `WhereRuleEvaluator` for every input.
+Comparisons therefore always go through `compareTo`, with both numeric operands converted by
+`toDouble()` exactly like `compareValues`; Kotlin's IEEE `==` / `<` on `Double` is never used
+(it differs for `-0.0` and `NaN`). A runtime parity test compiles a fixture schema into the test
+source set and compares every generated property with `DerivedAttributeEvaluator` over a grid
+including `-0.0`, `NaN`, infinities, empty strings and unset optionals.
+
+*Typing.* The result type must match the declared type. `INTEGER` to `REAL` is promoted with
+`toDouble()`. An entity, aggregate, ENUMERATION or SELECT result is accepted only as a plain
+alias of an attribute with exactly the same Kotlin type. An `OPTIONAL` attribute may be used only
+inside `EXISTS()` or as the whole initializer (then the property is nullable); anything else
+would need EXPRESS's three-valued logic, which kSTEP does not model.
+
+*Modes.* `CodeGenOptions.derivedAttributeMode`:
+
+* `STRICT` (default): any DERIVE outside the subset throws `CodeGenException` with the reason.
+  Silently ignoring a DERIVE is no longer possible for generic callers.
+* `GENERATE_SUPPORTED_REPORT_UNSUPPORTED`: unsupported DERIVEs are listed in the class KDoc and
+  in `EntityCodeGenResult` / `FileCodeGenResult.unsupportedDerived`; they never become
+  properties. A DERIVE that depends on an unsupported one is unsupported as well.
+  `Ap242V1CodeGen` forces this mode (like `definedTypeScope`).
+
+Two things throw in **both** modes because they are schema errors, not limitations: a
+dependency cycle between DERIVEs (`DERIVE cycle in entity 'x': a -> b -> a`), and an unsupported
+redeclaration of an inherited *explicit* attribute (neither keeping the constructor parameter
+nor dropping it would be correct).
+
+*Redeclaration.* `ExpressDerivedAttribute.Redeclared` carries `supertypeName`, `attributeName`
+and `renamedTo`, read from the grammar context. `InheritanceResolver` resolves it against the
+SUBTYPE OF chain:
+
+* the attribute is an inherited DERIVE: the new entry replaces it at the same list position
+  (`Override.InheritedDerived`);
+* the attribute is an inherited explicit attribute: it keeps its position in
+  `flattenedAttributes` (Part 21 order is unchanged) and is marked `redeclaredAsDerived`; the
+  generated constructor omits it (`Override.InheritedExplicit`). A generic Part 21 writer would
+  have to emit `*` there; see Consequences;
+* anything else fails with the failing link: `link 'SELF\a': 'a' is not a supertype of 'x'
+  (ancestor chain: p -> q)`, `link '.b': 'b' is not an attribute of 'a'`. `RENAMED` is rejected
+  as out of scope. A plain DERIVE whose name collides with an inherited or own attribute is a
+  schema error naming both declaring entities.
+
+*Limits (DoS).* At most 256 DERIVEs per entity, initializers of at most 8 192 characters (longer
+ones are not parsed), a DERIVE dependency chain of at most 32 attributes, expression nesting
+of 128 (existing). Cycles are detected at generation time, so no generated getter can recurse
+forever.
+
+*Injection.* Literals are emitted only through KotlinPoet's `%S` / `%L`, identifiers only from
+grammar IDs through `escapeIfKotlinKeyword`; schema text appears in KDoc only after `*/` and
+`/*` are neutralised (this also closes the same gap in the existing WHERE-rule KDoc).
+
+== Consequences
+
+* *Part 21*: unchanged for all twelve V1 entities (byte-identical output, tested). A future
+  generic writer must write `*` at the position of every attribute with
+  `redeclaredAsDerived != null` and nothing for ordinary DERIVEs. Follow-up work, not done here.
+* *kstep-mcp*, *kstep-core builders*: unchanged. The generated V1 file changes only in KDoc
+  (the unsupported-DERIVE notes).
+* `InheritanceResolver.resolve(schema)` throws for the whole schema when one entity has an
+  invalid DERIVE redeclaration. The real schema has none.
+* A drift guard in `Ap242V1CodeGen.main` (`EXPECTED_UNSUPPORTED_DERIVED`) fails the build if the
+  set of unsupported real DERIVEs changes, in either direction.
+
+== Limitations (named, not hidden)
+
+* The six real V1 DERIVEs: `product_definition.name`, `person_and_organization.name` and
+  `.description`, `application_context.id` and `.description` (function calls over `USEDIN`),
+  and `next_assembly_usage_occurrence.product_definition_occurrence_id` (two-hop chain; the
+  report names the link `\product_definition_occurrence`).
+* `RENAMED` in a DERIVE redeclaration; three-valued logic for optional attributes; chains through
+  entity-typed attributes; arithmetic, aggregates, `SIZEOF`, `QUERY`, other function calls.
+* Open follow-up waves: model `name_attribute` / `description_attribute` / `id_attribute` plus a
+  `USEDIN` back-search; model `product_definition_occurrence`; generic Part 21 writer with `*`.
+* `SELF\entity.attr` is not enabled for WHERE rules.
+
+== Alternatives considered
+
+* *Hand-written extension properties in `kstep-core`.* They drift from the schema, need manual
+  work per entity and have no override concept. Rejected.
+* *Generated top-level extension properties.* Weaker override semantics and discoverability
+  than members. Rejected.
+* *A reflective `derivedValue("name")` over the evaluator.* Stringly typed, no compile-time
+  safety. Rejected.
+* *Backing field set by an initializer.* Costs memory, couples the value to construction and
+  has to be recomputed in `copy()`. Rejected.

@@ -2,7 +2,7 @@ package dev.kstep.core.ap242
 
 import dev.kstep.core.ValidationResult
 import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
-import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.generated.ap242v1.ProductDefinitionOrReference
 
 private const val ENTITY_NAME = "next_assembly_usage_occurrence"
 
@@ -11,7 +11,13 @@ private const val ENTITY_NAME = "next_assembly_usage_occurrence"
  * — see [Product]'s equivalent doc note). `id`/`name` are mandatory; `description` (inherited
  * from `product_definition_relationship`) and `reference_designator` (inherited from
  * `assembly_component_usage`) are both genuinely `OPTIONAL` in the real schema.
- * `relating_product_definition`/`related_product_definition` are mandatory references.
+ * `relating_product_definition`/`related_product_definition` are mandatory references, typed by the
+ * SELECT `product_definition_or_reference` (a `product_definition` or, since ADR-0023, a
+ * `product_definition_occurrence`; assigning a `ProductDefinition` still compiles). When the related end is a
+ * `product_definition_occurrence`, the usage's derived `product_definition_occurrence_id` is that
+ * occurrence's `id` and `UNIQUE UR2` applies; for a `product_definition` it is `?` and UR2 does not apply.
+ * `WR1` (`acyclic_product_definition_relationship`, inherited from `product_definition_usage`) and both
+ * UNIQUE rules need the population and are checked by [Ap242ModelValidator].
  *
  * Pre-Welle-10, this builder enforced a synthesized WHERE rule requiring a non-blank
  * `reference_designator` — an over-constraint on what the real schema leaves `OPTIONAL`,
@@ -29,8 +35,8 @@ class NextAssemblyUsageOccurrenceBuilder internal constructor() {
     // build() time is a structural violation (KSTEP-M-002), never a legitimate empty value.
     var name: String? = null
     var description: String? = null
-    var relatingProductDefinition: ProductDefinition? = null
-    var relatedProductDefinition: ProductDefinition? = null
+    var relatingProductDefinition: ProductDefinitionOrReference? = null
+    var relatedProductDefinition: ProductDefinitionOrReference? = null
     var referenceDesignator: String? = null
 }
 

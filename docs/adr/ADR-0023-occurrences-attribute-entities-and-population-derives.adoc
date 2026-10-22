@@ -1,0 +1,180 @@
+= ADR-0023: Occurrences, attribute entities, population-dependent DERIVE values, UNIQUE and acyclic usages
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP semantic-core Welle D, the last wave of the semantic core). Amends
+ADR-0004 (sixteen generated entities instead of twelve, `relating_`/`related_product_definition`
+become a SELECT), ADR-0020 (the first SELECTs of the V1 excerpt are emitted), ADR-0021 (the DERIVE
+subset grows: SELECT-cast chains and population-dependent functions) and ADR-0022 (the three
+`*_attribute` roles are modelled, so the `USEDIN` rules are real; inherited rules are evaluated;
+`UNIQUE` is evaluated on population level).
+
+== Context
+
+ADR-0021 and ADR-0022 left a documented rest: the six real DERIVE clauses had no Kotlin form, the five
+`SIZEOF(USEDIN(...))` rules were satisfied by construction, `next_assembly_usage_occurrence`
+(NAUO) `UR2` and `product_definition_usage` `WR1` were not evaluated. Checking the plan for this
+wave against the official schema text (`ap242ed2_dis2_mim_lf_v1.101.exp`, as bundled by stepcode)
+changed its premises:
+
+* *F1 -- `product_definition_occurrence` (PDO) is not a supertype of NAUO.* The chain stays
+  `NAUO -> assembly_component_usage -> product_definition_usage -> product_definition_relationship`.
+  PDO is a *member of the SELECT* `product_definition_or_reference` that types both ends of a
+  `product_definition_relationship`. NAUO's derived `product_definition_occurrence_id` is
+  `SELF\product_definition_relationship.related_product_definition\product_definition_occurrence.id`:
+  the id of the related end *if that end is a PDO*, otherwise `?`. So for every usage between two plain
+  product definitions the derived id is `?`, and by the unknown-is-never-equal rule of `UNIQUE` (D6)
+  `UR2` can only bite when the related end is an occurrence.
+* *F2 -- `WR1` (`acyclic_product_definition_relationship`) belongs to `product_definition_usage`*, not to
+  NAUO. NAUO inherits it, and the old code never evaluated inherited rules (G2 below).
+* *F3 -- the `get_*_value` functions* (`get_name_value`, `get_description_value`, `get_id_value`) return
+  the `attribute_value` of the single `name_attribute`/`description_attribute`/`id_attribute` that names
+  the item, else `?`.
+
+Four gaps of the existing code had to be closed as well:
+
+* *G1* `WhereRuleValidator.prepareForInstanceGraph` returned `null` for an unsupported rule and the
+  schema context filtered it out: a graph rule could vanish silently.
+* *G2* `ResolvedEntity` had no flattened rules, so a rule declared on a supertype was never checked on a
+  subtype instance.
+* *G3* ADR-0021 getters are pure functions of the explicit attributes; `get_*_value` depends on the
+  population, so a getter cannot express it.
+* *G4* `product_definition_usage` `UR1` (`id`, relating, related) was enforced nowhere.
+
+== Decision
+
+[cols="1,5"]
+|===
+| D1 | `product_definition_occurrence` is its own entity and a SELECT member. `product_definition_or_reference`
+  is vendored narrowed to the members that are modelled (`product_definition`, `product_definition_occurrence`;
+  the real one also has `generic_product_definition_reference`). `relating_`/`related_product_definition`
+  now carry the verbatim type `product_definition_or_reference`. The earlier ADAPTED typing as plain
+  `product_definition` is gone.
+| D2 | `name_attribute`, `description_attribute`, `id_attribute` are vendored verbatim; their `*_select` types
+  are narrowed to the modelled members. The three roles leave `KNOWN_UNMODELLED_ROLES`; the role
+  `CONFIGURATION_DESIGN.DESIGN` (used by PDO `WR2`) joins it.
+| D3 | A *population-dependent* DERIVE is generated as a member function `fun name(scope: DerivedValueScope): String?`,
+  not as a property. `null` is EXPRESS `?` (zero or several matches). When the population is incomplete
+  for the instance (an opaque, rejected or skipped Part 21 instance may reference it) the call throws
+  `IndeterminateDerivedValueException` -- answering `null` there would be wrong, since `?` means "0 or 2+
+  matches", not "unknown". Reading a value for an instance that is not in the population is a loud error.
+| D4 | The schema functions are a *fixed registry of intrinsics* (`SchemaFunctionIntrinsics`): `get_name_value`,
+  `get_description_value`, `get_id_value`, `acyclic_product_definition_relationship` (in exactly the form
+  `acyclic_product_definition_relationship(SELF, [SELF\product_definition_relationship.related_product_definition], '<SCHEMA.ENTITY>')`;
+  every deviation is an unsupported expression naming the expected form). There is no general EXPRESS function
+  interpreter. The intrinsics are opt-in (`CodeGenOptions.schemaFunctionIntrinsics`,
+  `BuildOptions.schemaFunctionIntrinsics`, `Ap242V1CodeGen` forces `AP242`). A schema that *declares* a FUNCTION
+  with an intrinsic's name is refused (`CodeGenException`) when intrinsics are on: kSTEP cannot verify that a
+  declared body is equivalent to the native implementation, so it will not choose silently. (The planning
+  note suggested comparing the declared text with an expected text; that text could not be verified against a
+  local copy of the schema, so the stricter refusal was chosen.) `FUNCTION` declarations are now captured
+  by the semantic model (name and verbatim text) for this purpose.
+| D5 | A multi-hop `SELF\a.x\b.y` chain (strict pairs of group and attribute qualifier) is a
+  `QualifiedChain` AST node. For a chain whose first attribute is a SELECT- or entity-typed attribute of the
+  entity and whose later groups are admitted by the previous attribute's type (member or subtype of a SELECT
+  member, transitively through nested SELECTs and aliases), codegen emits a nullable getter with an `as?`
+  chain: `(relatedProductDefinition as? ProductDefinitionOccurrence)?.id`. `null` is `?`. The evaluator
+  (`WhereRuleEvaluator.evaluateChain`) follows the references with a type test per hop and returns
+  `WhereRuleValue.Unset` for `?`; a parity test pins the two together.
+| D6 | `UNIQUE` on population level (`UniqueRuleEvaluator`): an instance whose tuple contains an unset OPTIONAL value
+  or a derived value that is `?` takes no part. Strings compare by equality, entity references by identity.
+  Grouping is hash based, O(n) per rule. Referenced attributes may be explicit, references, or derived
+  (evaluated with the DERIVE machinery); `SELF\entity.attr` is accepted. Anything else is a loud
+  `UnsupportedUniqueRuleException`.
+| D7 | `acyclic_product_definition_relationship` is evaluated as an *iterative O(V+E) DFS* (`AcyclicRelationshipEvaluator`).
+  Derivation below.
+| D8 | Bounds against denial of service: maximum ancestor depth (256) and maximum visited nodes (100 000).
+  Exceeding either throws `AcyclicEvaluationLimitExceededException` (a structured `limit_exceeded` in MCP);
+  it is never mapped to a verdict.
+| D9 | Rules declared on supertypes apply to subtype instances (`ResolvedEntity.flattenedWhereRules`,
+  `flattenedUniqueRules`, ancestors first). A graph rule outside the supported subset is *never* dropped:
+  `prepareForInstanceGraph` returns `PreparationOutcome.Unsupported(reason)` and
+  `SchemaRulePreparer.prepareAll` makes the AP242 schema context fail with entity, label and reason on first use.
+| D10 | Breaking changes, listed below.
+|===
+
+=== Acyclic semantics (D7)
+
+The schema function, with `A = relation.relating_product_definition` and `B = relation.related_product_definition`:
+it returns `FALSE` if `A` is in `relatives` (initially `{B}`), otherwise it looks at every relation `x` of the
+requested type whose *related* end is `A`, and recurses into `x` with `relatives + A`. So it returns `FALSE`
+exactly when `A = B`, or walking *upwards* from `A` (to the relating end of every such relation) reaches `B`
+or revisits a node of the current path. The recursion is path based and exponential on diamond-shaped
+assemblies; the DFS gives the same truth value in O(V+E): grey nodes are the current path (revisit = cycle),
+black nodes are completely explored without a hit and are never re-explored. A node that is explored once
+is clean for the path-independent questions (reaches `B`? reaches a cycle?), so the memo is sound.
+
+Two consequences worth stating, because they look like false alarms and are not:
+
+* A cycle anywhere *above* a usage makes that usage invalid too, even if the usage is not on the cycle: the
+  schema function walks the whole ancestor closure. The model tests pin this.
+* A diamond (a part used twice below one assembly) is a DAG and valid.
+
+Findings carry the code `KSTEP-W-002` and the path of ids (`'A' -> 'B' -> ...`). If a visited node has
+invisible referrers (Part 21 TOLERANT read with opaque instances) and no cycle is found, the verdict is
+*indeterminate* and counted in `ModelValidationResult.indeterminateCount`: neither a pass nor a violation. A
+cycle among visible instances is a fact and is reported regardless.
+
+=== Where the checks run
+
+* `Ap242ModelValidator.validate(roots, limits, incomplete)` (population): inherited WHERE rules including the
+  acyclic check, `INVERSE` bounds, `UNIQUE` (code `KSTEP-U-001`). `Part21Reader.read(validateModel = true)` passes
+  the instances referenced by non-reconstructed instances as `incomplete` instead of post-filtering; USEDIN and
+  INVERSE verdicts on those stay suppressed and counted (`suppressedFindingCount`, unchanged semantics),
+  cycle and UNIQUE findings are not suppressed.
+* `kstep-mcp` `build_next_assembly_usage_occurrence`: UR1, UR2 and WR1 against the usages in the store, inside the
+  same `capacityLock` section as the write (no check-then-write race). All violated rules are reported, in the
+  fixed order UR1, UR2, WR1. The store walks its own usages with the same `AcyclicRelationshipEvaluator.walk`.
+  A rebuild under the same id is checked without its previous version.
+
+== Breaking changes
+
+. `NextAssemblyUsageOccurrence.relating/relatedProductDefinition` change type from `ProductDefinition` to the
+  sealed `ProductDefinitionOrReference`. Assigning in builders still compiles; reading `.id` etc. does not.
+. Generated V1 types: sixteen instead of twelve; five new member functions (`name`, `description`, `id` with a
+  `DerivedValueScope`), one new property `productDefinitionOccurrenceId`, four sealed interfaces.
+. `WhereRuleValidator.prepareForInstanceGraph` returns `PreparationOutcome` instead of a nullable
+  `PreparedWhereRule`; `ResolvedEntity`, `ExpressSchema`, `InstanceEvaluationContext`, `WhereRuleEvaluationResult`,
+  `WhereRuleValidationReport`, `WhereRuleViolation`, `ModelValidationResult` gained fields (all with defaults);
+  `WhereRuleValue` and `WhereRuleExpression` gained variants (`EntityReference`, `QualifiedChain`, ...).
+. `Ap242ModelValidator`: new findings (inherited `WR1` acyclic, PDO `WR2`, `UNIQUE`, now-real `*_attribute`
+  `USEDIN` rules); the three attribute-role assumptions are gone, `CONFIGURATION_DESIGN.DESIGN` appears
+  instead. A PDO without a definition violates `WR2` because `configuration_design` is not modelled.
+. Part 21: `PRODUCT_DEFINITION_OCCURRENCE`, `NAME_ATTRIBUTE`, `DESCRIPTION_ATTRIBUTE`, `ID_ATTRIBUTE` are known
+  kinds and typed on read (a `NAME_ATTRIBUTE` was opaque before). STRICT mode accepts files containing them.
+  The PDO's fifth argument (`quantity`, not modelled) must be `$`: STRICT rejects anything else naming instance and
+  position; TOLERANT keeps such an instance opaque, and a typed reference to it is a structured error. Output
+  for populations of the original twelve types is byte-identical (the existing golden tests are unchanged).
+. MCP: usages accept occurrences; new tools `build_product_definition_occurrence`, `build_name_attribute`,
+  `build_description_attribute`, `build_id_attribute` (twenty tools); new errors `acyclic_relationship_violated`
+  and `limit_exceeded`; `unique_constraint_violated` now also covers UR2 and carries a `violations` list. A usage of a
+  definition within itself, previously accepted, is now rejected (WR1).
+
+== Limitations (named, not hidden)
+
+* `product_definition_occurrence` is an excerpt: `quantity` (`measure_with_unit`), the DERIVE
+  `descendant_occurrences`, the INVERSE `child_occurrences` and the WHERE rules `WR1` and `WR3` are not vendored. `WR1` and
+  `WR3` are omitted because their exact text could not be verified against a local copy of the schema; no
+  rule text was invented. `WR2` is kept. A `TYPEOF`-based expression node was therefore not needed and is not
+  implemented; the type test the acyclic check needs is done natively.
+* The vendored SELECTs list only modelled members; `generic_product_definition_reference` and the many other
+  members of the `*_attribute_select` types are missing.
+* `configuration_design` is not modelled; `USEDIN` over it is the empty set and reported as an assumption.
+* Model validation is still not run by `kstep export` and `KStepScriptHost` (whether findings are errors or
+  warnings is an open decision), so a cyclic structure built through the DSL can still be exported. The MCP
+  server refuses to build it.
+* The inherited `UNIQUE UR1` of `product_definition_usage` is enforced on population level only; MCP ids are
+  unique per store, so it cannot fire there.
+* `QUERY` and general EXPRESS functions remain unsupported; three-valued logic is not modelled.
+* Per-usage the acyclic walk is O(V+E); the validator therefore costs O(N*(V+E)) for N usages in the worst
+  case, bounded by the limits of D8.
+
+== Alternatives considered
+
+* *PDO as a supertype of NAUO* (the planning note). Contradicts the schema and would break the chain DERIVE.
+* *A getter with a global population.* Hidden global state; impossible to test or to run two populations.
+* *Interpreting EXPRESS functions.* A large, risky surface for four functions. A fixed registry with exact
+  argument shapes cannot silently accept a different function.
+* *Comparing a declared FUNCTION's text with an expected text.* Needs verbatim text that could not be verified
+  offline; refusing the schema is safer.

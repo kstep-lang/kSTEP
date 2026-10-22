@@ -23,6 +23,8 @@ dependencies {
     // module needed dev.kstep.render before.
     implementation(project(":kstep-render"))
     implementation(libs.antlr4.runtime)
+    // DeriveFixtureCodeGen (main source set) drives the KotlinPoet-based generator and writes its FileSpec.
+    implementation(libs.kotlinpoet)
     testImplementation(libs.kotlinpoet)
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
@@ -38,6 +40,45 @@ dependencies {
     // primary-constructor parameters (name/type/nullability) via kotlin-reflect to compare
     // their shape against the real AP242 schema -- not needed by any other test in this module.
     testImplementation(libs.kotlin.reflect)
+}
+
+// DERIVE runtime-parity fixture (ADR-0021): generates Kotlin from src/test/express/derive-codegen-fixture.exp
+// with STRICT mode (dev.kstep.tests.fixtures.DeriveFixtureCodeGenKt, this module's own main source set)
+// and compiles it into the TEST source set, so DerivedAttributeRuntimeParityTest runs against real compiled
+// generated code. Only plain Strings/Files are captured (no Gradle script object references), the
+// classpath is this project's own, same pattern as kstep-express' generateExpressKotlin.
+val deriveFixtureSchema = layout.projectDirectory.file("src/test/express/derive-codegen-fixture.exp")
+val deriveFixtureOutputDir = layout.buildDirectory.dir("generated/deriveFixture/test")
+val generateDeriveFixtureKotlin =
+    tasks.register<JavaExec>("generateDeriveFixtureKotlin") {
+        group = "code generation"
+        description = "Generates Kotlin from the DERIVE fixture schema (STRICT mode) for the runtime-parity test."
+        dependsOn(tasks.named("classes"))
+        classpath = sourceSets.main.get().runtimeClasspath
+        mainClass.set("dev.kstep.tests.fixtures.DeriveFixtureCodeGenKt")
+        inputs.file(deriveFixtureSchema)
+        outputs.dir(deriveFixtureOutputDir)
+        doFirst {
+            val dir = deriveFixtureOutputDir.get().asFile
+            dir.deleteRecursively()
+            dir.mkdirs()
+        }
+        args(
+            deriveFixtureSchema.asFile.absolutePath,
+            "dev.kstep.tests.generated.derive",
+            deriveFixtureOutputDir.get().asFile.absolutePath,
+        )
+    }
+
+kotlin.sourceSets.named("test") {
+    kotlin.srcDir(files(deriveFixtureOutputDir).builtBy(generateDeriveFixtureKotlin))
+}
+
+// ktlint only lints hand-written sources: the generated fixture lives under build/generated.
+ktlint {
+    filter {
+        exclude { entry -> entry.file.path.contains("generated") }
+    }
 }
 
 tasks.withType<Test>().configureEach {

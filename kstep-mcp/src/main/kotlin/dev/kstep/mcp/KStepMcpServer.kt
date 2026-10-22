@@ -3,6 +3,9 @@ package dev.kstep.mcp
 import dev.kstep.mcp.tools.registerApprovalTool
 import dev.kstep.mcp.tools.registerBuildApplicationContextTool
 import dev.kstep.mcp.tools.registerBuildApprovalStatusTool
+import dev.kstep.mcp.tools.registerBuildDescriptionAttributeTool
+import dev.kstep.mcp.tools.registerBuildIdAttributeTool
+import dev.kstep.mcp.tools.registerBuildNameAttributeTool
 import dev.kstep.mcp.tools.registerBuildNextAssemblyUsageOccurrenceTool
 import dev.kstep.mcp.tools.registerBuildOrganizationTool
 import dev.kstep.mcp.tools.registerBuildPersonAndOrganizationTool
@@ -10,11 +13,13 @@ import dev.kstep.mcp.tools.registerBuildPersonTool
 import dev.kstep.mcp.tools.registerBuildProductContextTool
 import dev.kstep.mcp.tools.registerBuildProductDefinitionContextTool
 import dev.kstep.mcp.tools.registerBuildProductDefinitionFormationTool
+import dev.kstep.mcp.tools.registerBuildProductDefinitionOccurrenceTool
 import dev.kstep.mcp.tools.registerBuildProductDefinitionTool
 import dev.kstep.mcp.tools.registerBuildProductTool
 import dev.kstep.mcp.tools.registerExportPart21Tool
 import dev.kstep.mcp.tools.registerGetEntityTool
 import dev.kstep.mcp.tools.registerListEntitiesTool
+import dev.kstep.mcp.tools.registerValidateModelTool
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
@@ -30,8 +35,9 @@ import kotlinx.io.buffered
 private val logger = KotlinLogging.logger {}
 
 /**
- * Assembles the kSTEP MCP server: all twelve AP242 entity builders (kSTEP M2 Welle 10 — six V1
- * entities plus six support entities the codegen-generated shapes now require) as `build_*`
+ * Assembles the kSTEP MCP server: all sixteen AP242 entity builders (kSTEP M2 Welle 10 — six V1
+ * entities plus six support entities the codegen-generated shapes now require — plus, since ADR-0023,
+ * `product_definition_occurrence` and the three `*_attribute` entities) as `build_*`
  * tools, `export_part21` (wrapping `kstep-step21`'s `Part21Writer` unmodified), and the
  * `list_entities`/`get_entity` introspection tools — all sharing one [EntityStore], scoped to
  * this [Server] instance for its process lifetime (one store per server, reset only on restart;
@@ -54,12 +60,17 @@ fun buildServer(store: EntityStore = EntityStore()): Server {
     registerBuildPersonAndOrganizationTool(server, store)
     registerBuildProductDefinitionFormationTool(server, store)
     registerBuildProductDefinitionTool(server, store)
+    registerBuildProductDefinitionOccurrenceTool(server, store)
     registerBuildNextAssemblyUsageOccurrenceTool(server, store)
+    registerBuildNameAttributeTool(server, store)
+    registerBuildDescriptionAttributeTool(server, store)
+    registerBuildIdAttributeTool(server, store)
     registerApprovalTool(server, store)
     registerExportPart21Tool(server, store)
     registerListEntitiesTool(server, store)
     registerGetEntityTool(server, store)
-    logger.info { "kSTEP MCP server assembled: 15 tools registered" }
+    registerValidateModelTool(server, store)
+    logger.info { "kSTEP MCP server assembled: 20 tools registered" }
     return server
 }
 

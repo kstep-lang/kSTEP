@@ -3,6 +3,9 @@ package dev.kstep.step21
 import dev.kstep.generated.ap242v1.ApplicationContext
 import dev.kstep.generated.ap242v1.Approval
 import dev.kstep.generated.ap242v1.ApprovalStatus
+import dev.kstep.generated.ap242v1.DescriptionAttribute
+import dev.kstep.generated.ap242v1.IdAttribute
+import dev.kstep.generated.ap242v1.NameAttribute
 import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.generated.ap242v1.Organization
 import dev.kstep.generated.ap242v1.Person
@@ -12,6 +15,7 @@ import dev.kstep.generated.ap242v1.ProductContext
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.generated.ap242v1.ProductDefinitionContext
 import dev.kstep.generated.ap242v1.ProductDefinitionFormation
+import dev.kstep.generated.ap242v1.ProductDefinitionOccurrence
 import java.util.IdentityHashMap
 
 /**
@@ -83,10 +87,11 @@ object Part21Writer {
     // equals()/hashCode() — two structurally-equal-but-distinct instances must get two
     // distinct #N, only the literal same object reused across multiple referencing sites
     // collapses to one. Depth-capped (not converted to an explicit work-stack) because the
-    // twelve V1+support types have a true max reference-chain depth of 6 (application_context
+    // sixteen V1+support types have a max reference-chain depth of 6 (application_context
     // -> product_context -> product -> product_definition_formation -> product_definition ->
-    // next_assembly_usage_occurrence) — MAX_WRITE_GRAPH_DEPTH=64 is defense-in-depth headroom,
-    // not a realistic limit, so native recursion cannot practically overflow the JVM stack here.
+    // next_assembly_usage_occurrence) plus one level per nested product_definition_occurrence
+    // (definition may be another occurrence, ADR-0023) — MAX_WRITE_GRAPH_DEPTH=64 bounds that,
+    // so native recursion cannot overflow the JVM stack; a deeper chain is a Part21LimitExceededException.
     private fun visit(
         instance: Any,
         depth: Int,
@@ -119,8 +124,12 @@ object Part21Writer {
             is Product -> instance.frameOfReference.toList()
             is ProductDefinitionFormation -> listOf(instance.ofProduct)
             is ProductDefinition -> listOf(instance.formation, instance.frameOfReference)
+            is ProductDefinitionOccurrence -> listOfNotNull(instance.definition)
             is NextAssemblyUsageOccurrence ->
                 listOf(instance.relatingProductDefinition, instance.relatedProductDefinition)
+            is NameAttribute -> listOf(instance.namedItem)
+            is DescriptionAttribute -> listOf(instance.describedItem)
+            is IdAttribute -> listOf(instance.identifiedItem)
             is Approval -> listOf(instance.status)
             is PersonAndOrganization -> listOf(instance.thePerson, instance.theOrganization)
             else -> unsupportedInstanceType(instance)
@@ -137,7 +146,11 @@ object Part21Writer {
             is Product -> Part21EntityKind.PRODUCT
             is ProductDefinitionFormation -> Part21EntityKind.PRODUCT_DEFINITION_FORMATION
             is ProductDefinition -> Part21EntityKind.PRODUCT_DEFINITION
+            is ProductDefinitionOccurrence -> Part21EntityKind.PRODUCT_DEFINITION_OCCURRENCE
             is NextAssemblyUsageOccurrence -> Part21EntityKind.NEXT_ASSEMBLY_USAGE_OCCURRENCE
+            is NameAttribute -> Part21EntityKind.NAME_ATTRIBUTE
+            is DescriptionAttribute -> Part21EntityKind.DESCRIPTION_ATTRIBUTE
+            is IdAttribute -> Part21EntityKind.ID_ATTRIBUTE
             is Approval -> Part21EntityKind.APPROVAL
             is PersonAndOrganization -> Part21EntityKind.PERSON_AND_ORGANIZATION
             else -> unsupportedInstanceType(instance)
@@ -195,6 +208,18 @@ object Part21Writer {
                     ref(instance.formation),
                     ref(instance.frameOfReference),
                 )
+            is ProductDefinitionOccurrence ->
+                listOf(
+                    str(instance.id),
+                    strOrUnset(instance.name),
+                    strOrUnset(instance.description),
+                    instance.definition?.let { ref(it) } ?: Part21Value.Unset,
+                    // quantity : measure_with_unit is not modelled; the real arity keeps it as '$' (ADR-0023).
+                    Part21Value.Unset,
+                )
+            is NameAttribute -> listOf(str(instance.attributeValue), ref(instance.namedItem))
+            is DescriptionAttribute -> listOf(str(instance.attributeValue), ref(instance.describedItem))
+            is IdAttribute -> listOf(str(instance.attributeValue), ref(instance.identifiedItem))
             is NextAssemblyUsageOccurrence ->
                 listOf(
                     str(instance.id),
@@ -213,7 +238,7 @@ object Part21Writer {
     private fun unsupportedInstanceType(instance: Any): Nothing =
         throw Part21WriteException(
             "object of type '${instance::class.qualifiedName}' reachable from the writer's roots is not " +
-                "one of the twelve supported kstep-core AP242 V1/support entity types",
+                "one of the sixteen supported kstep-core AP242 V1/support entity types",
         )
 }
 
