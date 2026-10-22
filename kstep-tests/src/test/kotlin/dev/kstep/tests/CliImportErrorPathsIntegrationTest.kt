@@ -98,7 +98,7 @@ class CliImportErrorPathsIntegrationTest :
             result.stdout shouldContain "kstep import <file.step>"
         }
 
-        "without OCCT a valid STEP file reports geometry_unavailable".config(
+        "import fails predictably when the native bridge is unavailable (geometry_unavailable)".config(
             enabled = OcctKernel.availability() !is OcctAvailability.Available,
         ) {
             fixture("import/box-20x30x40.step")
