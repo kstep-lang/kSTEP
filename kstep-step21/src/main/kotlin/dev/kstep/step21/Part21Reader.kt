@@ -1,5 +1,7 @@
 package dev.kstep.step21
 
+import dev.kstep.core.ap242.Ap242ModelValidator
+
 /**
  * Parses ISO 10303-21 physical exchange file text back into `kstep-core` AP242 V1 instances.
  *
@@ -22,13 +24,46 @@ package dev.kstep.step21
  * exception" philosophy.
  */
 object Part21Reader {
-    /** Full read + typed reconstruction. Defaults to [Part21ReadMode.STRICT] — every pre-existing caller's behavior is unchanged. */
+    /**
+     * Full read + typed reconstruction. Defaults to [Part21ReadMode.STRICT] — every pre-existing caller's behavior is unchanged.
+     *
+     * With [validateModel] set (opt-in, default off), the successfully reconstructed instances are
+     * additionally validated on population level (`USEDIN`-based WHERE rules and `INVERSE` bounds,
+     * ADR-0022) and the outcome is returned in [Part21ReadResult.modelValidation]. Opaque
+     * instances (TOLERANT mode) and instances rejected/skipped on read do not take part, so they are
+     * invisible to the reverse-reference index. To avoid false positives, findings on any instance
+     * that such a non-reconstructed instance references are withheld and counted in
+     * `ModelValidationResult.suppressedFindingCount` (a cycle found by the acyclic check and a UNIQUE violation are
+     * facts about the visible instances and are not withheld; a walk through such an instance without finding a
+     * cycle is counted as indeterminate). It never changes [Part21ReadResult.isFullySuccessful].
+     * The index limits (100 000 instances) exceed the tokenizer's own instance cap, so they cannot
+     * trip on a document this reader accepts.
+     */
     fun read(
         source: String,
         mode: Part21ReadMode = Part21ReadMode.STRICT,
+        validateModel: Boolean = false,
     ): Part21ReadResult {
         val document = Part21Tokenizer.parseDocument(source, mode)
-        return Part21GraphResolver.resolve(document)
+        val resolved = Part21GraphResolver.resolve(document)
+        val unreconstructed = resolved.opaque.keys + resolved.violations.keys + resolved.skipped.keys
+        // Instances referenced by something that could not be reconstructed have invisible referrers; the
+        // validator withholds USEDIN/INVERSE verdicts for them and treats them as incomplete in the acyclic
+        // check and in population-dependent derived values (ADR-0022, ADR-0023).
+        val shadowedIds =
+            document.instances
+                .filter { it.id in unreconstructed }
+                .flatMapTo(mutableSetOf()) { it.referencedIds() }
+        val shadowed =
+            resolved.instances
+                .filterKeys { it in shadowedIds }
+                .values
+                .toList()
+        val result = resolved.copy(incompleteInstances = shadowed)
+        if (!validateModel) return result
+        return result.copy(
+            modelValidation = Ap242ModelValidator.validate(result.instances.values, incomplete = shadowed),
+        )
     }
 
     /**

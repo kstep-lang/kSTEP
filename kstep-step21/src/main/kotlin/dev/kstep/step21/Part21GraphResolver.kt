@@ -5,6 +5,9 @@ import dev.kstep.core.ValidationResult
 import dev.kstep.core.ap242.applicationContext
 import dev.kstep.core.ap242.approval
 import dev.kstep.core.ap242.approvalStatus
+import dev.kstep.core.ap242.descriptionAttribute
+import dev.kstep.core.ap242.idAttribute
+import dev.kstep.core.ap242.nameAttribute
 import dev.kstep.core.ap242.nextAssemblyUsageOccurrence
 import dev.kstep.core.ap242.organization
 import dev.kstep.core.ap242.person
@@ -14,15 +17,19 @@ import dev.kstep.core.ap242.productContext
 import dev.kstep.core.ap242.productDefinition
 import dev.kstep.core.ap242.productDefinitionContext
 import dev.kstep.core.ap242.productDefinitionFormation
+import dev.kstep.core.ap242.productDefinitionOccurrence
 import dev.kstep.generated.ap242v1.ApplicationContext
 import dev.kstep.generated.ap242v1.ApprovalStatus
+import dev.kstep.generated.ap242v1.DescriptionAttributeSelect
+import dev.kstep.generated.ap242v1.IdAttributeSelect
+import dev.kstep.generated.ap242v1.NameAttributeSelect
 import dev.kstep.generated.ap242v1.Organization
 import dev.kstep.generated.ap242v1.Person
 import dev.kstep.generated.ap242v1.Product
 import dev.kstep.generated.ap242v1.ProductContext
-import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.generated.ap242v1.ProductDefinitionContext
 import dev.kstep.generated.ap242v1.ProductDefinitionFormation
+import dev.kstep.generated.ap242v1.ProductDefinitionOrReference
 
 /**
  * Pass 2: resolves a [Part21RawDocument] (pass-1 output) into a [Part21ReadResult].
@@ -32,10 +39,11 @@ import dev.kstep.generated.ap242v1.ProductDefinitionFormation
  * 1. Build the type-agnostic `#N` reference graph, detect dangling references (a `#N` used but
  *    never defined) and reference cycles via an iterative (non-recursive) topological sort.
  *    This step must run *before* step 2, because per-reference target-*type* verification
- *    would otherwise make [Part21CycleException] permanently unreachable dead code: the twelve
- *    real V1+support entity shapes form a strict, acyclic reference DAG, so the only way to
- *    construct a genuinely reachable cycle in a test (or a hostile file) is to cross-wire two
- *    entities whose `REFERENCE`-argument *shape* matches at the same position but whose declared
+ *    would otherwise make [Part21CycleException] reachable only by cross-wiring: the sixteen
+ *    real V1+support entity shapes form an acyclic reference DAG except for the one
+ *    self-referential position `product_definition_occurrence.definition` (ADR-0023), so the
+ *    other genuinely reachable cycles in a test (or a hostile file) cross-wire two entities
+ *    whose `REFERENCE`-argument *shape* matches at the same position but whose declared
  *    target *type* doesn't — a case step 2's type check would reject first if it ran first.
  * 2. Per-reference target-entity-type verification, now that every reference is known to
  *    resolve to a real, cycle-free instance. Applies to both single `REFERENCE` positions and
@@ -182,12 +190,12 @@ internal object Part21GraphResolver {
             val raw = rawById.getValue(id) as? Part21SimpleInstance ?: continue
             val kind = Part21EntityKind.byEntityName[raw.entityName] ?: continue
             raw.args.forEachIndexed { index, arg ->
-                val expectedTarget = kind.referenceTargets[index] ?: return@forEachIndexed
+                val expectedTargets = kind.referenceTargets[index] ?: return@forEachIndexed
                 when (arg) {
-                    is Part21Value.Ref -> checkOneReferenceTarget(kind, id, index, expectedTarget, arg.id, rawById)
+                    is Part21Value.Ref -> checkOneReferenceTarget(kind, id, index, expectedTargets, arg.id, rawById)
                     is Part21Value.ListValue ->
                         arg.items.filterIsInstance<Part21Value.Ref>().forEach { ref ->
-                            checkOneReferenceTarget(kind, id, index, expectedTarget, ref.id, rawById)
+                            checkOneReferenceTarget(kind, id, index, expectedTargets, ref.id, rawById)
                         }
                     else -> Unit
                 }
@@ -205,26 +213,41 @@ internal object Part21GraphResolver {
         kind: Part21EntityKind,
         id: Int,
         index: Int,
-        expectedTarget: Part21EntityKind,
+        expectedTargets: Set<String>,
         refId: Int,
         rawById: Map<Int, Part21EntityInstance>,
     ) {
         val actual = rawById.getValue(refId)
         val actualNames = entityNamesOf(actual)
-        if (expectedTarget.entityName !in actualNames) {
+        val expectedShown = expectedTargets.sorted().joinToString(" or ")
+        if (actualNames.none { it in expectedTargets }) {
             throw Part21SyntaxException(
                 "${kind.entityName} #$id argument ${index + 1} must reference a " +
-                    "${expectedTarget.entityName}, but #$refId is a ${actualNames.joinToString("/")}",
+                    "$expectedShown, but #$refId is a ${actualNames.joinToString("/")}",
             )
         }
         if (actual is Part21ComplexInstance) {
             throw Part21SyntaxException(
                 "${kind.entityName} #$id argument ${index + 1} references #$refId, a complex instance " +
                     "(${actualNames.joinToString("/")}) — even though one of its parts is a " +
-                    "${expectedTarget.entityName}, kSTEP cannot typed-construct a complex instance, so this " +
+                    "$expectedShown, kSTEP cannot typed-construct a complex instance, so this " +
                     "reference cannot be resolved to a typed value",
             )
         }
+        // A known kind that carries a value kSTEP cannot represent (ADR-0023) stays opaque in TOLERANT mode, so
+        // like a complex instance it cannot be the target of a typed reference.
+        if (isUnrepresentable(actual)) {
+            throw Part21SyntaxException(
+                "${kind.entityName} #$id argument ${index + 1} references #$refId, a " +
+                    "${actualNames.joinToString("/")} that uses an attribute kSTEP does not model (non-'\$' " +
+                    "value), so it was kept opaque and cannot be resolved to a typed value",
+            )
+        }
+    }
+
+    private fun isUnrepresentable(instance: Part21EntityInstance): Boolean {
+        val simple = instance as? Part21SimpleInstance ?: return false
+        return Part21EntityKind.byEntityName[simple.entityName]?.hasUnrepresentableValue(simple.args) == true
     }
 
     private fun construct(
@@ -240,7 +263,11 @@ internal object Part21GraphResolver {
 
         for (id in order) {
             val raw = rawById.getValue(id)
-            val kind = (raw as? Part21SimpleInstance)?.let { Part21EntityKind.byEntityName[it.entityName] }
+            val kind =
+                (raw as? Part21SimpleInstance)
+                    ?.let { Part21EntityKind.byEntityName[it.entityName] }
+                    // TOLERANT only (STRICT rejected it at tokenizing): a known kind with a value it cannot represent.
+                    ?.takeUnless { isUnrepresentable(raw) }
             if (kind == null) {
                 // Neither a success nor a failure: excluded from `built`/`violations`/`skipped`
                 // entirely, so a KNOWN instance depending on this opaque one is never wrongly
@@ -341,13 +368,34 @@ internal object Part21GraphResolver {
                     formation = refValue<ProductDefinitionFormation>(2)
                     frameOfReference = refValue<ProductDefinitionContext>(3)
                 }
+            Part21EntityKind.PRODUCT_DEFINITION_OCCURRENCE ->
+                productDefinitionOccurrence(str(0)) {
+                    name = strOrNull(1)
+                    description = strOrNull(2)
+                    definition = if (raw.args[3] is Part21Value.Ref) refValue<ProductDefinitionOrReference>(3) else null
+                }
             Part21EntityKind.NEXT_ASSEMBLY_USAGE_OCCURRENCE ->
                 nextAssemblyUsageOccurrence(str(0)) {
                     name = str(1)
                     description = strOrNull(2)
-                    relatingProductDefinition = refValue<ProductDefinition>(3)
-                    relatedProductDefinition = refValue<ProductDefinition>(4)
+                    relatingProductDefinition = refValue<ProductDefinitionOrReference>(3)
+                    relatedProductDefinition = refValue<ProductDefinitionOrReference>(4)
                     referenceDesignator = strOrNull(5)
+                }
+            Part21EntityKind.NAME_ATTRIBUTE ->
+                nameAttribute {
+                    attributeValue = str(0)
+                    namedItem = refValue<NameAttributeSelect>(1)
+                }
+            Part21EntityKind.DESCRIPTION_ATTRIBUTE ->
+                descriptionAttribute {
+                    attributeValue = str(0)
+                    describedItem = refValue<DescriptionAttributeSelect>(1)
+                }
+            Part21EntityKind.ID_ATTRIBUTE ->
+                idAttribute {
+                    attributeValue = str(0)
+                    identifiedItem = refValue<IdAttributeSelect>(1)
                 }
             Part21EntityKind.APPROVAL ->
                 approval {

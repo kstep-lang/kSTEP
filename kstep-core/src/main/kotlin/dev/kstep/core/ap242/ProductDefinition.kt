@@ -11,7 +11,8 @@ import dev.kstep.generated.ap242v1.ProductDefinitionFormation
 private const val ENTITY_NAME = "product_definition"
 
 // `kstep_wr1`, NOT a real AP242 WR1 — see Product.kt's equivalent doc note. The real WR1
-// (`SIZEOF(USEDIN(...)) <= 1`) stays outside the supported WHERE-expression subset.
+// (`SIZEOF(USEDIN(...)) <= 1`) is evaluated on population level by Ap242ModelValidator (ADR-0022),
+// not by this builder.
 private val WHERE_RULES = listOf(WhereRuleSpec(label = "kstep_wr1", expressionText = "SELF.id <> ''"))
 
 /**

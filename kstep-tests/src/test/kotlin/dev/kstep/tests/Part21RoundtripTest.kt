@@ -243,4 +243,62 @@ class Part21RoundtripTest :
                 .filterIsInstance<PersonAndOrganization>()
                 .single() shouldBe personAndOrg
         }
+
+        "writing, reading and writing again is byte-identical for a graph with the DERIVE-carrying entities" {
+            val appCtx = buildAppCtx()
+            val prodCtx = buildProductCtx(appCtx)
+            val defCtx = buildProductDefCtx(appCtx)
+            val product =
+                product("P-1") {
+                    name = "P"
+                    frameOfReference = setOf(prodCtx)
+                }.getOrThrow()
+            val formation = productDefinitionFormation("P-1-F") { ofProduct = product }.getOrThrow()
+            val definition =
+                productDefinition("P-1-D") {
+                    this.formation = formation
+                    frameOfReference = defCtx
+                }.getOrThrow()
+            val nauo =
+                nextAssemblyUsageOccurrence("NAUO-1") {
+                    name = "usage"
+                    relatingProductDefinition = definition
+                    relatedProductDefinition = definition
+                }.getOrThrow()
+            val personAndOrg =
+                personAndOrganization {
+                    thePerson = person("P-001") { lastName = "Doe" }.getOrThrow()
+                    theOrganization = organization { name = "Acme" }.getOrThrow()
+                }.getOrThrow()
+
+            val first = Part21Writer.write(testHeader(), listOf(nauo, personAndOrg))
+            val result = Part21Reader.read(first)
+            result.isFullySuccessful shouldBe true
+            val nauo2 =
+                result.instances.values
+                    .filterIsInstance<NextAssemblyUsageOccurrence>()
+                    .single()
+            val personAndOrg2 =
+                result.instances.values
+                    .filterIsInstance<PersonAndOrganization>()
+                    .single()
+            val second = Part21Writer.write(result.header, listOf(nauo2, personAndOrg2))
+
+            second shouldBe first
+            // Derived values never appear: no '*' anywhere in the DATA section of a writer-produced file.
+            first.substringAfter("DATA;").contains("*") shouldBe false
+        }
+
+        "a '*' (derived) value at an explicit V1 attribute position is rejected in both read modes" {
+            val exported = Part21Writer.write(testHeader(), listOf(buildAppCtx()))
+            val tampered = exported.replace("'config control'", "*")
+            (tampered != exported) shouldBe true
+
+            io.kotest.assertions.throwables.shouldThrow<dev.kstep.step21.Part21SyntaxException> {
+                Part21Reader.read(tampered)
+            }
+            io.kotest.assertions.throwables.shouldThrow<dev.kstep.step21.Part21SyntaxException> {
+                Part21Reader.read(tampered, dev.kstep.step21.Part21ReadMode.TOLERANT)
+            }
+        }
     })

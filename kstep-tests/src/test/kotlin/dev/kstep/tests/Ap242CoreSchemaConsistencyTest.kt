@@ -3,6 +3,9 @@ package dev.kstep.tests
 import dev.kstep.core.ap242.ApplicationContextBuilder
 import dev.kstep.core.ap242.ApprovalBuilder
 import dev.kstep.core.ap242.ApprovalStatusBuilder
+import dev.kstep.core.ap242.DescriptionAttributeBuilder
+import dev.kstep.core.ap242.IdAttributeBuilder
+import dev.kstep.core.ap242.NameAttributeBuilder
 import dev.kstep.core.ap242.NextAssemblyUsageOccurrenceBuilder
 import dev.kstep.core.ap242.OrganizationBuilder
 import dev.kstep.core.ap242.PersonAndOrganizationBuilder
@@ -12,9 +15,13 @@ import dev.kstep.core.ap242.ProductContextBuilder
 import dev.kstep.core.ap242.ProductDefinitionBuilder
 import dev.kstep.core.ap242.ProductDefinitionContextBuilder
 import dev.kstep.core.ap242.ProductDefinitionFormationBuilder
+import dev.kstep.core.ap242.ProductDefinitionOccurrenceBuilder
 import dev.kstep.core.ap242.applicationContext
 import dev.kstep.core.ap242.approval
 import dev.kstep.core.ap242.approvalStatus
+import dev.kstep.core.ap242.descriptionAttribute
+import dev.kstep.core.ap242.idAttribute
+import dev.kstep.core.ap242.nameAttribute
 import dev.kstep.core.ap242.nextAssemblyUsageOccurrence
 import dev.kstep.core.ap242.organization
 import dev.kstep.core.ap242.person
@@ -24,6 +31,7 @@ import dev.kstep.core.ap242.productContext
 import dev.kstep.core.ap242.productDefinition
 import dev.kstep.core.ap242.productDefinitionContext
 import dev.kstep.core.ap242.productDefinitionFormation
+import dev.kstep.core.ap242.productDefinitionOccurrence
 import dev.kstep.express.codegen.Ap242V1CodeGen
 import dev.kstep.express.codegen.NamingConventions
 import dev.kstep.express.semantic.AggregationType
@@ -60,7 +68,7 @@ import kotlin.reflect.full.memberProperties
  * settable `var` (or drops the positional identity parameter), or one that invents an extra
  * property with no counterpart in the real schema at all — both leave the entity impossible (or
  * silently wrong) to build correctly through the DSL without breaking compilation anywhere.
- * Concretely, for every one of the twelve entities:
+ * Concretely, for every one of the sixteen entities:
  *
  * > `{positional parameters of the builder function} ∪ {mutable ("var") properties of its
  * > Builder class}`, mapped through [NamingConventions.toPropertyName], must be **exactly** the
@@ -158,6 +166,11 @@ private val ENTITY_WRAPPERS: Map<String, EntityWrapper> =
             EntityWrapper(NextAssemblyUsageOccurrenceBuilder::class, ::nextAssemblyUsageOccurrence),
         "approval" to EntityWrapper(ApprovalBuilder::class, ::approval),
         "person_and_organization" to EntityWrapper(PersonAndOrganizationBuilder::class, ::personAndOrganization),
+        "product_definition_occurrence" to
+            EntityWrapper(ProductDefinitionOccurrenceBuilder::class, ::productDefinitionOccurrence),
+        "name_attribute" to EntityWrapper(NameAttributeBuilder::class, ::nameAttribute),
+        "description_attribute" to EntityWrapper(DescriptionAttributeBuilder::class, ::descriptionAttribute),
+        "id_attribute" to EntityWrapper(IdAttributeBuilder::class, ::idAttribute),
     )
 
 /** Classifies a real [ExpressType] into the coarse category this drift test compares on. */
@@ -173,6 +186,10 @@ private fun realCategoryOf(
             val definedType =
                 definedTypes[type.typeName.lowercase()]
                     ?: error("Ap242CoreSchemaConsistencyTest: unresolved TYPE reference '${type.typeName}'")
+            // A SELECT (ADR-0023) is generated as a sealed interface of entities: an entity reference.
+            if (definedType.selectItems != null) return AttrCategory.ENTITY_REF
+            // Alias of another TYPE (`TYPE a = b;`): classify the aliased TYPE.
+            definedType.aliasedTypeName?.let { return realCategoryOf(DefinedTypeRef(it), definedTypes) }
             val underlying =
                 definedType.underlyingSimpleType
                     ?: error(
@@ -186,7 +203,7 @@ private fun realCategoryOf(
                 "Ap242CoreSchemaConsistencyTest: real AP242 excerpt now uses a type category ('$type') this " +
                     "drift test does not yet classify -- extend realCategoryOf before trusting the comparison " +
                     "again (this usually means ap242-v1-entities.exp grew a non-STRING primitive attribute " +
-                    "on one of the twelve entities)",
+                    "on one of the sixteen entities)",
             )
     }
 

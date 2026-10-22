@@ -3,6 +3,9 @@ package dev.kstep.mcp
 import dev.kstep.generated.ap242v1.ApplicationContext
 import dev.kstep.generated.ap242v1.Approval
 import dev.kstep.generated.ap242v1.ApprovalStatus
+import dev.kstep.generated.ap242v1.DescriptionAttribute
+import dev.kstep.generated.ap242v1.IdAttribute
+import dev.kstep.generated.ap242v1.NameAttribute
 import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.generated.ap242v1.Organization
 import dev.kstep.generated.ap242v1.Person
@@ -12,10 +15,12 @@ import dev.kstep.generated.ap242v1.ProductContext
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.generated.ap242v1.ProductDefinitionContext
 import dev.kstep.generated.ap242v1.ProductDefinitionFormation
+import dev.kstep.generated.ap242v1.ProductDefinitionOccurrence
 
 /**
- * A tagged wrapper around one of the twelve `kstep-core` AP242 entity types (kSTEP M2 Welle 10
- * — six V1 entities plus six support entities the codegen-generated shapes now require), as
+ * A tagged wrapper around one of the sixteen `kstep-core` AP242 entity types (kSTEP M2 Welle 10
+ * — six V1 entities plus six support entities the codegen-generated shapes now require — and, since ADR-0023,
+ * `product_definition_occurrence` plus the three `*_attribute` entities), as
  * held in an [EntityStore]. Sealed rather than a bare `Map<String, Any>` so every store consumer
  * ([EntityStore.findProduct] and friends, `list_entities`, `get_entity`) gets a compile-time
  * exhaustive `when` instead of an unchecked cast that could throw `ClassCastException` on a
@@ -108,6 +113,34 @@ sealed interface EntityStoreEntry {
         override val entityType: String = "approval"
         override val rawValue: Any get() = value
     }
+
+    data class ProductDefinitionOccurrenceEntry(
+        val value: ProductDefinitionOccurrence,
+    ) : EntityStoreEntry {
+        override val entityType: String = "product_definition_occurrence"
+        override val rawValue: Any get() = value
+    }
+
+    data class NameAttributeEntry(
+        val value: NameAttribute,
+    ) : EntityStoreEntry {
+        override val entityType: String = "name_attribute"
+        override val rawValue: Any get() = value
+    }
+
+    data class DescriptionAttributeEntry(
+        val value: DescriptionAttribute,
+    ) : EntityStoreEntry {
+        override val entityType: String = "description_attribute"
+        override val rawValue: Any get() = value
+    }
+
+    data class IdAttributeEntry(
+        val value: IdAttribute,
+    ) : EntityStoreEntry {
+        override val entityType: String = "id_attribute"
+        override val rawValue: Any get() = value
+    }
 }
 
 /**
@@ -150,4 +183,9 @@ fun EntityStoreEntry.estimatedCharCount(): Long =
                 (value.description?.length ?: 0) +
                 (value.referenceDesignator?.length ?: 0)
         is EntityStoreEntry.ApprovalEntry -> value.level.length.toLong()
+        is EntityStoreEntry.ProductDefinitionOccurrenceEntry ->
+            value.id.length.toLong() + (value.name?.length ?: 0) + (value.description?.length ?: 0)
+        is EntityStoreEntry.NameAttributeEntry -> value.attributeValue.length.toLong()
+        is EntityStoreEntry.DescriptionAttributeEntry -> value.attributeValue.length.toLong()
+        is EntityStoreEntry.IdAttributeEntry -> value.attributeValue.length.toLong()
     }

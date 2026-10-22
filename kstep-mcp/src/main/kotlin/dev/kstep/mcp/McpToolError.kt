@@ -6,6 +6,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -309,6 +310,89 @@ fun uniqueConstraintViolatedError(
     )
 }
 
+private const val UNIQUE_ERROR_KIND = "unique_constraint_violated"
+private const val ACYCLIC_ERROR_KIND = "acyclic_relationship_violated"
+
+/**
+ * Every population rule a candidate entity violates against the store, in rule order (ADR-0023). The
+ * top-level `errorKind` is that of the first violation (`unique_constraint_violated` or
+ * `acyclic_relationship_violated`), with the first violation's fields (`ruleLabel`, `conflictingId`,
+ * `fields` / `path`) at the top level for callers that only read one; `violations` lists all of them.
+ */
+fun ruleViolationsError(
+    entityType: String,
+    violations: List<RuleViolation>,
+): CallToolResult {
+    require(violations.isNotEmpty()) { "ruleViolationsError needs at least one violation" }
+
+    fun describe(violation: RuleViolation): String =
+        when (violation) {
+            is RuleViolation.Unique ->
+                "UNIQUE constraint '${violation.ruleLabel}' on '$entityType' violated: (" +
+                    violation.fieldValues.joinToString(", ") { "${it.field}='${it.value}'" } +
+                    ") already used by id '${violation.conflictingId}'"
+            is RuleViolation.Cyclic ->
+                "WHERE rule '${violation.ruleLabel}' on '$entityType' violated: the usage would close a cycle " +
+                    "in the assembly structure (${violation.path.joinToString(" -> ") { "'$it'" }})"
+        }
+
+    fun detail(violation: RuleViolation) =
+        buildJsonObject {
+            put("ruleLabel", violation.ruleLabel)
+            when (violation) {
+                is RuleViolation.Unique -> {
+                    put("kind", "unique")
+                    put("conflictingId", violation.conflictingId)
+                    put(
+                        "fields",
+                        buildJsonArray {
+                            for (fieldValue in violation.fieldValues) {
+                                add(
+                                    buildJsonObject {
+                                        put("field", fieldValue.field)
+                                        put("value", fieldValue.value)
+                                    },
+                                )
+                            }
+                        },
+                    )
+                }
+                is RuleViolation.Cyclic -> {
+                    put("kind", "acyclic")
+                    put("path", buildJsonArray { violation.path.forEach { add(it) } })
+                }
+            }
+        }
+    val first = violations.first()
+    return CallToolResult(
+        content = listOf(TextContent(text = violations.joinToString("\n") { describe(it) })),
+        isError = true,
+        structuredContent =
+            buildJsonObject {
+                put("errorKind", if (first is RuleViolation.Unique) UNIQUE_ERROR_KIND else ACYCLIC_ERROR_KIND)
+                put("entityType", entityType)
+                for ((key, value) in detail(first)) {
+                    if (key != "kind") put(key, value)
+                }
+                put("violations", buildJsonArray { violations.forEach { add(detail(it)) } })
+            },
+    )
+}
+
+/** A bound (acyclic-check depth or visited nodes) was exceeded: the verdict is unknown and nothing was written. */
+fun limitExceededError(message: String?): CallToolResult {
+    val sanitized = sanitizeMessage(message)
+    return CallToolResult(
+        content = listOf(TextContent(text = "Limit exceeded: $sanitized")),
+        isError = true,
+        structuredContent =
+            buildJsonObject {
+                put("errorKind", "limit_exceeded")
+                put("message", sanitized)
+            },
+    )
+}
+
 fun exportFailedError(message: String?): CallToolResult {
     val sanitized = sanitizeMessage(message)
     return CallToolResult(
@@ -317,6 +401,19 @@ fun exportFailedError(message: String?): CallToolResult {
         structuredContent =
             buildJsonObject {
                 put("errorKind", "export_failed")
+                put("message", sanitized)
+            },
+    )
+}
+
+fun modelValidationFailedError(message: String?): CallToolResult {
+    val sanitized = sanitizeMessage(message)
+    return CallToolResult(
+        content = listOf(TextContent(text = "Model validation could not be completed: $sanitized")),
+        isError = true,
+        structuredContent =
+            buildJsonObject {
+                put("errorKind", "model_validation_failed")
                 put("message", sanitized)
             },
     )
@@ -351,22 +448,23 @@ fun storeOrCapacityError(
 ): CallToolResult = store.put(id, entry).toCallToolResult(onConflict = null, onStored = onStored)
 
 /**
- * Same as [storeOrCapacityError], but atomically runs [findConflict] (a UNIQUE-rule scan over
- * the store) inside [EntityStore.putIfNoConflict]'s own lock before writing, mapping a
- * [EntityStore.PutOutcome.Conflict] through [onConflict] instead of writing [entry] — see
- * [EntityStore.putIfNoConflict]'s KDoc for why the scan and the write must share one lock.
+ * Same as [storeOrCapacityError], but atomically runs [findConflict] (a UNIQUE-rule / acyclic-rule scan
+ * over the store) inside [EntityStore.putIfNoConflict]'s own lock before writing, mapping a
+ * [EntityStore.PutOutcome.Conflict] to [ruleViolationsError] for [entityType] instead of writing
+ * [entry] — see [EntityStore.putIfNoConflict]'s KDoc for why the scan and the write must share one lock.
  */
 fun storeIfNoConflictOrError(
     store: EntityStore,
     id: String,
     entry: EntityStoreEntry,
-    findConflict: (Map<String, EntityStoreEntry>) -> String?,
-    onConflict: (conflictingId: String) -> CallToolResult,
+    entityType: String,
+    findConflict: (Map<String, EntityStoreEntry>) -> List<RuleViolation>,
     onStored: () -> CallToolResult,
-): CallToolResult = store.putIfNoConflict(id, entry, findConflict).toCallToolResult(onConflict, onStored)
+): CallToolResult =
+    store.putIfNoConflict(id, entry, findConflict).toCallToolResult({ ruleViolationsError(entityType, it) }, onStored)
 
 private fun EntityStore.PutOutcome.toCallToolResult(
-    onConflict: ((conflictingId: String) -> CallToolResult)?,
+    onConflict: ((violations: List<RuleViolation>) -> CallToolResult)?,
     onStored: () -> CallToolResult,
 ): CallToolResult =
     when (this) {
@@ -389,6 +487,6 @@ private fun EntityStore.PutOutcome.toCallToolResult(
         is EntityStore.PutOutcome.Conflict ->
             // Only storeIfNoConflictOrError's callers ever pass a findConflict able to
             // produce this outcome, so onConflict is non-null exactly when it's needed.
-            onConflict!!(conflictingId)
+            onConflict!!(violations)
         EntityStore.PutOutcome.Ok -> onStored()
     }

@@ -35,4 +35,18 @@ object DslViolationCodes {
     // kstep-core's move onto the codegen-generated AP242 types, whose SET-typed attributes are
     // the first ones this layer enforces a lower bound on.
     const val AGGREGATION_BOUND_VIOLATED = "KSTEP-A-001"
+
+    // An INVERSE attribute whose evaluated cardinality violates its declared bounds, e.g.
+    // application_context.context_elements : SET [1:?] with no context element referencing the
+    // application_context. Only detectable on population level (ADR-0022), never in a builder.
+    const val INVERSE_BOUND_VIOLATED = "KSTEP-I-001"
+
+    // `acyclic_product_definition_relationship` failed: the usage closes a cycle in the assembly
+    // structure (ADR-0023). Distinct from WHERE_RULE_NOT_SATISFIED so consumers can tell "a rule on this
+    // one instance is false" from "the structure around it is cyclic"; the message carries the cycle path.
+    const val ACYCLIC_RELATIONSHIP_VIOLATED = "KSTEP-W-002"
+
+    // A UNIQUE rule is violated on population level: two or more instances agree on every listed value
+    // (ADR-0023). An instance with an unset/indeterminate value takes no part in the comparison.
+    const val UNIQUE_RULE_VIOLATED = "KSTEP-U-001"
 }

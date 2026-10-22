@@ -224,4 +224,121 @@ class InheritanceResolverTest :
 
             shouldThrow<IllegalArgumentException> { InheritanceResolver.resolveStandalone(derived) }
         }
+
+        "DERIVE attributes are flattened ancestors-first and an own DERIVE is appended" {
+            val schema =
+                ExpressSemanticModelBuilder
+                    .build(
+                        """
+                        SCHEMA derive_flatten;
+                        ENTITY base;
+                          a : INTEGER;
+                        DERIVE
+                          da : INTEGER := a;
+                        END_ENTITY;
+                        ENTITY leaf SUBTYPE OF (base);
+                          b : INTEGER;
+                        DERIVE
+                          db : INTEGER := b;
+                        END_ENTITY;
+                        END_SCHEMA;
+                        """.trimIndent(),
+                    ).schemas
+                    .single()
+            val leaf = InheritanceResolver.resolve(schema).getValue("leaf")
+
+            leaf.flattenedDerivedAttributes.map { it.name } shouldContainExactly listOf("da", "db")
+            leaf.flattenedDerivedAttributes.map { it.declaringEntity } shouldContainExactly listOf("base", "leaf")
+            leaf.flattenedDerivedAttributes.map { it.overrides } shouldContainExactly listOf(null, null)
+        }
+
+        "a redeclared DERIVE replaces the inherited DERIVE in place and records the original declarer" {
+            val schema =
+                ExpressSemanticModelBuilder
+                    .build(
+                        """
+                        SCHEMA derive_override;
+                        ENTITY base;
+                          a : INTEGER;
+                        DERIVE
+                          first : INTEGER := 1;
+                          second : INTEGER := 2;
+                        END_ENTITY;
+                        ENTITY mid SUBTYPE OF (base);
+                        DERIVE
+                          SELF\base.first : INTEGER := 10;
+                        END_ENTITY;
+                        ENTITY leaf SUBTYPE OF (mid);
+                        DERIVE
+                          SELF\base.first : INTEGER := 100;
+                        END_ENTITY;
+                        END_SCHEMA;
+                        """.trimIndent(),
+                    ).schemas
+                    .single()
+            val leaf = InheritanceResolver.resolve(schema).getValue("leaf")
+
+            leaf.flattenedDerivedAttributes.map { it.name } shouldContainExactly listOf("first", "second")
+            val first = leaf.flattenedDerivedAttributes.first()
+            first.expressionText shouldBe "100"
+            first.declaringEntity shouldBe "leaf"
+            first.originalDeclaringEntity shouldBe "base"
+            first.overrides shouldBe
+                dev.kstep.express.semantic.ResolvedDerivedAttribute.Override
+                    .InheritedDerived("base")
+        }
+
+        "a DERIVE redeclaring an inherited explicit attribute keeps its position and is marked" {
+            val schema =
+                ExpressSemanticModelBuilder
+                    .build(
+                        """
+                        SCHEMA derive_explicit;
+                        ENTITY base;
+                          a : INTEGER;
+                          b : INTEGER;
+                        END_ENTITY;
+                        ENTITY leaf SUBTYPE OF (base);
+                          c : INTEGER;
+                        DERIVE
+                          SELF\base.b : INTEGER := 5;
+                        END_ENTITY;
+                        END_SCHEMA;
+                        """.trimIndent(),
+                    ).schemas
+                    .single()
+            val resolved = InheritanceResolver.resolve(schema)
+            val leaf = resolved.getValue("leaf")
+
+            leaf.flattenedAttributes.map { it.attribute.name } shouldContainExactly listOf("a", "b", "c")
+            leaf.flattenedAttributes.map { it.redeclaredAsDerived?.name } shouldContainExactly listOf(null, "b", null)
+            leaf.flattenedDerivedAttributes.single().overrides shouldBe
+                dev.kstep.express.semantic.ResolvedDerivedAttribute.Override
+                    .InheritedExplicit("base")
+            // The supertype itself is untouched.
+            resolved.getValue("base").flattenedAttributes.all { it.redeclaredAsDerived == null } shouldBe true
+        }
+
+        "DERIVE redeclaration failures name the failing link" {
+            fun resolveWith(derive: String) =
+                InheritanceResolver.resolve(
+                    ExpressSemanticModelBuilder
+                        .build(
+                            "SCHEMA f;\nENTITY p;\n  x : INTEGER;\nEND_ENTITY;\n" +
+                                "ENTITY q SUBTYPE OF (p);\nEND_ENTITY;\n" +
+                                "ENTITY other;\n  o : INTEGER;\nEND_ENTITY;\n" +
+                                "ENTITY leaf SUBTYPE OF (q);\nDERIVE\n$derive\nEND_ENTITY;\nEND_SCHEMA;",
+                        ).schemas
+                        .single(),
+                )
+            shouldThrow<SemanticModelException> { resolveWith("SELF\\other.o : INTEGER := 1;") }
+                .message!! shouldContain
+                "link 'SELF\\other': 'other' is not a supertype of 'leaf' (ancestor chain: p -> q)"
+            shouldThrow<SemanticModelException> { resolveWith("SELF\\p.missing : INTEGER := 1;") }
+                .message!! shouldContain "link '.missing': 'missing' is not an attribute of 'p'"
+            shouldThrow<SemanticModelException> { resolveWith("SELF\\p.x RENAMED y : INTEGER := 1;") }
+                .message!! shouldContain "RENAMED in DERIVE redeclaration is out of scope"
+            shouldThrow<SemanticModelException> { resolveWith("x : INTEGER := 1;") }
+                .message!! shouldContain "declared by 'p'"
+        }
     })
