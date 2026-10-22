@@ -125,21 +125,28 @@ jobs:
           cache-read-only: true
 
       - name: Install Skiko runtime libraries
-        timeout-minutes: 15
+        timeout-minutes: 40
         run: |
-          # A hung mirror once stalled this step for 61 minutes (2026-10-22): bound each
-          # attempt and retry instead of waiting for the job timeout.
+          # A slow or stalled mirror once held this step for 61 minutes (2026-10-22) and a retry
+          # loop around the whole install timed out again. Download first (apt resumes partial
+          # files, so every retry makes progress), then install offline from the local cache.
+          PKGS=(libgl1 libfontconfig1 libfreetype6 libx11-6)
+          downloaded=0
           for attempt in 1 2 3; do
-            if sudo timeout 240 apt-get -o Acquire::Retries=3 update \
-              && sudo timeout 480 apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-                libgl1 libfontconfig1 libfreetype6 libx11-6; then
-              exit 0
+            if sudo timeout 120 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+                install -y --no-install-recommends --download-only "${PKGS[@]}"; then
+              downloaded=1
+              break
             fi
-            echo "::warning::apt attempt $attempt failed or timed out"
+            echo "::warning::apt download attempt $attempt failed or timed out"
             sleep 15
           done
-          echo "::error::apt-get failed after 3 attempts"
-          exit 1
+          if [ "$downloaded" != 1 ]; then
+            echo "::error::apt-get could not download the packages after 3 attempts"
+            exit 1
+          fi
+          sudo timeout 300 apt-get install -y --no-install-recommends "${PKGS[@]}"
         # Needed by kstep-viewer's tests under check. Explicitly NO Eigen, Boost or OCCT:
         # the release zip must not contain native bridges.
 
