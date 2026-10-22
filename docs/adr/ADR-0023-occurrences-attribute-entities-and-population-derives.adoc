@@ -10,6 +10,8 @@ subset grows: SELECT-cast chains and population-dependent functions) and ADR-002
 `*_attribute` roles are modelled, so the `USEDIN` rules are real; inherited rules are evaluated;
 `UNIQUE` is evaluated on population level).
 
+Amended by ADR-0024: `kstep export --validate` runs the model validation opt-in.
+
 == Context
 
 ADR-0021 and ADR-0022 left a documented rest: the six real DERIVE clauses had no Kotlin form, the five

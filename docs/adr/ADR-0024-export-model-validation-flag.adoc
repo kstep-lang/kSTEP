@@ -1,0 +1,73 @@
+= ADR-0024: Opt-in model validation on export (`kstep export --validate`)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle E). Amends ADR-0022 and ADR-0023: both left the population-level
+checks (`Ap242ModelValidator`) without a CLI entry point on the export path. This ADR adds one, opt-in.
+
+== Context
+
+`Ap242ModelValidator` (ADR-0022, ADR-0023) checks what a single entity cannot know: `USEDIN`-based
+WHERE rules, `INVERSE` bounds, `UNIQUE` rules and the acyclic usage rule. It was reachable only through
+`Part21Reader.read(..., validateModel = true)` and the MCP tool `validate_model`. `kstep export`
+therefore exported a cyclic assembly built through the DSL with exit code 0 (documented as a known
+limitation). Builders cannot close this gap: a builder does not know who will reference its entity
+later.
+
+== Decision
+
+* *Opt-in flag `--validate`*, default off. A boolean without a value, matching the existing opt-in
+  vocabulary (`validateModel = true`, `--require-geometry`). Making the check the default was rejected:
+  it would turn previously successful exports into failures, and findings versus warnings is still an
+  open policy question.
+* *The function lives in `kstep-script`*: `KStepModel.validateModel(limits)` in
+  `KStepModelValidation.kt`, returning `ModelValidationOutcome.Checked` or `Unavailable`. It is a
+  standalone extension and deliberately not a new case of the sealed `KStepScriptOutcome`, which would
+  have forced changes in every exhaustive `when` (CLI error rendering, `render`, the asciidoc module).
+  `render` and `asciidoc` can reuse it later.
+* *Fail closed.* With `--validate` the check runs after the script succeeded and before
+  `Part21Writer.write` and any file access. Findings give exit code 1 and no file is written.
+  `Unavailable` (limit exceeded, unsupported construct, evaluation failure, unknown instance type,
+  schema model error) also gives exit code 1 and no file: no verdict is never read as "valid". The new
+  code is `KSTEP-S-005` (`MODEL_VALIDATION_UNAVAILABLE`); findings keep their own codes (`KSTEP-W-001`,
+  `KSTEP-W-002`, `KSTEP-I-001`, `KSTEP-U-001`). An already existing output file is not deleted.
+* *Exception mapping* follows the MCP `validate_model` tool. `InstanceGraphException` (including the
+  index and acyclic limit exceptions) maps to `LIMIT_EXCEEDED`, `UnknownInstanceTypeException` to
+  `UNKNOWN_INSTANCE_TYPE`, the three `Unsupported*Exception` types to `UNSUPPORTED_CONSTRUCT`,
+  `WhereRuleEvaluationException` and `IndeterminateDerivedValueException` to `EVALUATION_FAILED`,
+  `SemanticModelException` to `SCHEMA_MODEL`. There is no blanket `catch (Exception)`; an unforeseen
+  exception surfaces.
+* *Output.* Text and `--output json` are described in the README. Without the flag the output is
+  byte-identical to before; with the flag a success adds a `Model validation passed (...)` line and a
+  `validation` object in the JSON.
+* *Indeterminate and suppressed counts* (ADR-0023: "neither findings nor passes") are reported
+  prominently in both formats but do not fail the export. Through the script host the population is
+  always complete, so both are 0 in practice. Failing on them would be a hidden strict mode.
+* *Limits are unchanged* (100k instances, 1M references, depth 64, acyclic depth 256). The CLI exposes
+  no knob to raise them; exceeding them is `Unavailable`.
+
+== Consequences
+
+* A cyclic or UNIQUE-violating assembly can be rejected at export time, on request.
+* Without the flag nothing changes: the cycle is still exported with exit code 0. This remains a
+  documented limitation.
+* One more scripted compile-and-validate path exists, so large scripts pay the validation cost only
+  when asked.
+
+== Limitations (named, not hidden)
+
+* Only `root(...)` entities are validated. Registered `shape(...)` assignments are no AP242 entity type
+  and are not covered.
+* `kstep render` and `kstep asciidoc` have no `--validate` yet.
+* `KStepScriptHost` itself still does not validate.
+* ADR-0001 acceptance criterion #2 (interoperability with an external tool) is unaffected by this ADR.
+
+== Alternatives considered
+
+* *Validate by default.* Rejected, see Decision.
+* *Extend `KStepScriptOutcome` with a validation case.* Rejected, see Decision.
+* *Warn but exit 0 on findings.* Rejected: an export that is known to violate the schema should not
+  look successful to a script or CI job that asked for validation.
+
+See also ADR-0022 and ADR-0023.

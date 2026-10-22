@@ -178,8 +178,8 @@ this writing:
   bound (an `application_context` that no `product_context` /
   `product_definition_context` refers to). Opt-in entry points:
   `Part21Reader.read(source, validateModel = true)` and the MCP tool
-  `validate_model`; builders, `kstep export` and `KStepScriptHost` do not
-  run it yet.
+  `validate_model`, and since Welle E `kstep export --validate` (ADR-0024;
+  off by default). Builders and `KStepScriptHost` itself still do not run it.
 * (Semantic core Welle D, ADR-0023) Occurrences, attribute entities, derived
   values, UNIQUE and acyclic usages -- the last wave of the semantic core.
   `kstep-core` now wraps **sixteen** generated entities: the twelve above
@@ -439,9 +439,12 @@ this writing:
   **Acceptance-criterion honesty**:
   kSTEP-ADR-0001 names a lossless roundtrip through an external
   CAD/PLM tool (e.g. FreeCAD) as the real-world bar for Part 21
-  export/import. No such tool is available in this development
-  environment, so that external validation has **not** been done —
-  this wave's acceptance test is a self-roundtrip only
+  export/import. A first check on 2026-10-22: FreeCAD 1.x (OCCT 7.8)
+  reads a kSTEP product-structure file without error or warning, but
+  yields 0 objects because no geometry is written. Only syntactic
+  acceptance by the OCCT STEP parser is proven; product-structure
+  interop and geometry interop remain unverified, and geometry can
+  only be produced under Linux/OCCT. This wave's acceptance test is a self-roundtrip only
   (`Part21Reader.read(Part21Writer.write(header, model)) == model`,
   verified in `Part21RoundtripTest`). This closes the kSTEP-own-format
   half of the ADR-0001 bar, not the external-interop half; see
@@ -777,7 +780,8 @@ See <<roadmap,Roadmap>> for what's planned next.
   scanner and two-pass graph resolver (independent of the ANTLR
   EXPRESS grammar — Part 21 is a different sub-format). Verified via a
   self-roundtrip test suite in `kstep-tests`; no external CAD/PLM
-  tool (e.g. FreeCAD) validation yet — see Status above. (M2 Welle 6)
+  tool interop beyond syntactic acceptance by FreeCAD 1.x (2026-10-22, 0 objects imported, no
+  geometry written) — see Status above. (M2 Welle 6)
   Now wired into the CLI via `kstep-script`/`kstep export` — see the
   `kstep-script`/`kstep-cli` rows below. (Geometrie Welle 4) The value
   grammar and instance model now also cover real, foreign-produced AP242
@@ -1901,6 +1905,30 @@ kstep export bracket.kstep.kts
 # Exported 1 root(s) to bracket.step
 ----
 
+`--validate` additionally runs the population-level model validation
+(`USEDIN`/`INVERSE`/`UNIQUE` rules and the acyclic usage check, ADR-0024)
+before anything is written. It is off by default. On findings the command
+exits with status 1 and writes no file; if no verdict can be reached (a
+limit is exceeded, a schema construct is unsupported) it fails closed with
+`KSTEP-S-005`. Only `root(...)` entities are validated, not `shape(...)`.
+Example for a usage cycle (A uses B, B uses A):
+
+[source,shell]
+----
+kstep export cycle.kstep.kts --validate
+# Model validation failed: 2 instance(s) violate population-level constraints:
+#   [KSTEP-W-002] next_assembly_usage_occurrence (WR1): ... cycle path ...
+# Checked 9 instance(s); indeterminate: 0; suppressed: 0; assumptions applied: 0
+# Nothing was written.
+----
+
+With `--output json` the failure is `{"status":"error","errorKind":"model_validation_failed",
+"command":"export","instanceCount":...,"findings":[{"entityType":...,"violations":[{"code":...,
+"ruleLabel":...,"expressionText":...,"message":...}]}],...}`; an unavailable verdict is
+`"errorKind":"model_validation_unavailable"` with `"code":"KSTEP-S-005"` and a `reason`. A passing
+run adds a `validation` object (`performed`, `valid`, counts) to the success document. Without
+the flag the output is unchanged.
+
 `--out` overrides the derived output path; `--output json` renders the
 same information as a JSON document instead of human-readable text —
 useful for tool/LLM consumption (kSTEP-ADR-0001 acceptance criterion
@@ -2231,10 +2259,11 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
 <<status,Status>> for `KSTEP-M-002`'s scope):
 
 * Model-level validation (`Ap242ModelValidator`: `USEDIN`/`INVERSE`/`UNIQUE`
-  rules and the acyclic usage check) is not yet run by `kstep export` /
-  `KStepScriptHost`; whether findings are errors or warnings is an open
-  decision. A cyclic structure built through the DSL can therefore still be
-  exported; the MCP server refuses to build it (`acyclic_relationship_violated`).
+  rules and the acyclic usage check) is opt-in via `kstep export --validate`
+  (ADR-0024); by default, and in `KStepScriptHost` itself, it is not run, and
+  `kstep render` / `kstep asciidoc` have no such flag yet. A cyclic structure
+  built through the DSL can therefore still be exported without the flag; the
+  MCP server refuses to build it (`acyclic_relationship_violated`).
 * `product_definition_occurrence` is an excerpt: `quantity`
   (`measure_with_unit`), the DERIVE `descendant_occurrences`, the INVERSE
   `child_occurrences` and the WHERE rules `WR1`/`WR3` are not vendored (the
@@ -2313,9 +2342,11 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
   `kstep-script` module's `*.kstep.kts` scripting DSL and
   `KStepScriptHost`) compiles and runs a script and writes its
   `Part21Writer` output to disk — see <<status,Status>> and Usage
-  above. The external-CAD/PLM-tool roundtrip gap above is unchanged by
-  this — `kstep export`'s output still needs the same manual FreeCAD
-  import to close acceptance criterion #2.
+  above. The external-CAD/PLM-tool roundtrip gap above is only narrowed by
+  this: on 2026-10-22 FreeCAD 1.x (OCCT 7.8) read `kstep export`'s product-structure
+  output without error or warning but yielded 0 objects (no geometry is
+  written), so only syntactic acceptance is proven and acceptance criterion
+  #2 stays open.
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and
   the kSTEP DSL as generation targets. **(M2 Welle 1) Split into two
   halves, only the first of which is done**: the MCP server itself

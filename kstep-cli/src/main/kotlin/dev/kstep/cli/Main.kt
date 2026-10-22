@@ -34,6 +34,8 @@ Usage:
   kstep export <script.kstep.kts> [opts]   Export a *.kstep.kts script to a STEP Part 21 file
       --out <file.step>                    Output path (default: derived from the script name)
       --output json                        Emit the result as a JSON document instead of text
+      --validate                           Run model-level validation (USEDIN/INVERSE/UNIQUE, acyclic
+                                            assemblies); exit 1 on violations, nothing is written
   kstep render <script.kstep.kts> [opts]   Render a headless SVG/PNG/text/glTF preview of a script
       -f, --format <auto|svg|png|text|glb> Preview container (default: auto); "gltf" is an alias
                                             for "glb" -- both write binary glTF 2.0 (.glb)
@@ -65,6 +67,7 @@ sealed interface CliCommand {
         val scriptPath: String,
         val outPath: String?,
         val jsonOutput: Boolean,
+        val validate: Boolean = false,
     ) : CliCommand
 
     data class Render(
@@ -130,6 +133,7 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
     var scriptPath: String? = null
     var outPath: String? = null
     var jsonOutput = false
+    var validate = false
     var i = 0
     while (i < rest.size) {
         when (rest[i]) {
@@ -143,6 +147,10 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
                 jsonOutput = true
                 i += 2
             }
+            "--validate" -> {
+                validate = true
+                i += 1
+            }
             else -> {
                 val arg = rest[i]
                 if (arg.startsWith("--") || scriptPath != null) return CliCommand.ShowUsage(1)
@@ -152,7 +160,12 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
         }
     }
     val resolvedScriptPath = scriptPath ?: return CliCommand.ShowUsage(1)
-    return CliCommand.Export(scriptPath = resolvedScriptPath, outPath = outPath, jsonOutput = jsonOutput)
+    return CliCommand.Export(
+        scriptPath = resolvedScriptPath,
+        outPath = outPath,
+        jsonOutput = jsonOutput,
+        validate = validate,
+    )
 }
 
 private const val DEFAULT_RENDER_WIDTH = 1024
@@ -392,6 +405,10 @@ private fun writeExport(
     command: CliCommand.Export,
     outcome: KStepScriptOutcome.Success,
 ) {
+    // Opt-in population-level validation (ADR-0024): runs BEFORE the writer and before any file
+    // access, and exits 1 (never returning) on findings or when no verdict is available, so no
+    // output file is written and a stale one is never mistaken for fresh output.
+    val validation = if (command.validate) validateForExport(outcome.model, command.jsonOutput) else null
     val text =
         try {
             Part21Writer.write(outcome.model.header, outcome.model.roots)
@@ -422,10 +439,12 @@ private fun writeExport(
                 put("outPath", outPath)
                 put("rootCount", outcome.model.roots.size)
                 put("shapeCount", shapeCount)
+                if (validation != null) put("validation", validationSummaryJson(validation))
             }.toString(),
         )
     } else {
         println("Exported ${outcome.model.roots.size} root(s) to $outPath")
+        if (validation != null) println(validationSummaryText(validation))
     }
 }
 

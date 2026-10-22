@@ -9,6 +9,8 @@ validator in `kstep-core`; builders and constructors are unchanged) and ADR-0021
 
 Amended by ADR-0023: `name_attribute`, `description_attribute` and `id_attribute` are now modelled, so the five `USEDIN` rules are real, not satisfied by construction; inherited rules, `UNIQUE` and the acyclic check are evaluated. The "Limitations" below describe the state before that wave.
 
+Amended by ADR-0024: `kstep export --validate` runs the model validation opt-in.
+
 == Context
 
 Seven of the V1 schema's constraints could not be evaluated because they ask "who refers to

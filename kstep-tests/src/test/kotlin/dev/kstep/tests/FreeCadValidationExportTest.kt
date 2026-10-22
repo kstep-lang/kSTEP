@@ -21,6 +21,10 @@ import java.io.File
  * acceptance criterion #2 ("validiert erfolgreich in einem gängigen STEP-Viewer"). The roundtrip
  * assertion below is the automated half of that criterion; the FreeCAD import is the manual half,
  * done separately against the file this test produces at `build/freecad-validation/`.
+ *
+ * Finding of 2026-10-22: FreeCAD 1.x (OCCT 7.8) reads the product-structure file without error or
+ * warning but yields 0 objects, because no geometry is written. Only syntactic acceptance is
+ * proven; criterion #2 stays open.
  */
 class FreeCadValidationExportTest :
     StringSpec({

@@ -85,6 +85,30 @@ class CliMainTest :
                 CliCommand.Export(scriptPath = "a.kstep.kts", outPath = "b.step", jsonOutput = true)
         }
 
+        "\"export <path> --validate\" resolves to Export with validate true" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--validate")) shouldBe
+                CliCommand.Export(scriptPath = "a.kstep.kts", outPath = null, jsonOutput = false, validate = true)
+        }
+
+        "\"export\" parses --validate together with --out and --output json, in any order" {
+            resolveCommand(
+                arrayOf("export", "--validate", "--output", "json", "a.kstep.kts", "--out", "b.step"),
+            ) shouldBe
+                CliCommand.Export(scriptPath = "a.kstep.kts", outPath = "b.step", jsonOutput = true, validate = true)
+        }
+
+        "\"export --validate\" without a script path resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "--validate")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "\"export --validate=true\" resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--validate=true")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "USAGE_TEXT documents --validate" {
+            USAGE_TEXT shouldContain "--validate"
+        }
+
         "\"export\" with no script path resolves to ShowUsage with exit code 1" {
             resolveCommand(arrayOf("export")) shouldBe CliCommand.ShowUsage(1)
         }

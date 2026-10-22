@@ -21,6 +21,11 @@ object KStepScriptOutcomeCodes {
      * the preferred `root(ValidationResult)` aggregating form.
      */
     const val GET_OR_THROW_ABORT = "KSTEP-S-004"
+
+    /** Opt-in population-level model validation (`kstep export --validate`, ADR-0024) could not
+     * reach a verdict (limit exceeded, unsupported construct, ...). Fail closed: nothing may be
+     * assumed valid. */
+    const val MODEL_VALIDATION_UNAVAILABLE = "KSTEP-S-005"
 }
 
 /** One compiler diagnostic, stripped down to what a CLI/JSON consumer needs: no internal
