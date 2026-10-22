@@ -7,6 +7,12 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+== 0.1.1 — 2026-10-22 (pre-release)
+
+Second pre-release. The GitHub release carries a platform-independent `kstep-cli-0.1.1.zip` (JVM only, without native bridges; about 86 MB because
+it bundles the Kotlin compiler for `*.kstep.kts` scripts) and a SHA-256 checksum. Nothing is published to Maven Central or Homebrew. Geometry still needs a system OCCT
+build (Linux x86-64 or, new, macOS arm64 via Homebrew).
+
 === Added
 
 * macOS arm64 support for the OCCT and PlaneGCS native bridges (ADR-0026): platform-aware Gradle
@@ -27,6 +33,11 @@ minor versions may contain breaking changes.
 * `KStepModel.validateModel()` in `kstep-script` (`ModelValidationOutcome.Checked` /
   `Unavailable`).
 
+=== Changed
+
+* CI action updates (pinned by commit SHA, tags verified): `actions/setup-java` 6.0.1,
+  `gradle/actions/setup-gradle` 6.4.0, `actions/upload-artifact` 7.0.2.
+
 === Documented
 
 * Interop finding of 2026-10-22: kSTEP Part 21 files (product structure) are read by FreeCAD 1.x
@@ -35,7 +46,7 @@ minor versions may contain breaking changes.
   (`scripts/interop/read_step_structure.cpp`) additionally resolves the product structure:
   products, product definitions, formations and both ends of every assembly usage are found, no
   entity is undefined and the OCCT model check reports 0 fails and 0 warnings. This proves
-  product-structure *read* interop with one external implementation (OCCT). Geometry interop,
+  product-structure read interop with one external implementation (OCCT). Geometry interop,
   other CAD/PLM readers, full AP242 schema conformance and a lossless write-back round trip remain
   unverified, so ADR-0001 acceptance criterion #2 is only partly met.
 
@@ -90,11 +101,11 @@ see the README.
 * No published artifacts; build from source (JDK 21).
 * Part 21 output is verified by self-round-trip only. Interoperability with external CAD/PLM tools
   (for example FreeCAD) has not been validated; a fixture for the manual check lives in
-  `kstep-tests`. Update (Unreleased): FreeCAD 1.x reads the files without error (0 objects, no
+  `kstep-tests`. Update (0.1.1): FreeCAD 1.x reads the files without error (0 objects, no
   geometry is written) and an OpenCascade typed reader resolves the product structure; geometry
   and other tools remain unverified.
 * `kstep export` and the script host do not run model-level validation yet; an assembly cycle
-  is not detected on export (exit code 0). Update (Unreleased): `kstep export --validate` now
+  is not detected on export (exit code 0). Update (0.1.1): `kstep export --validate` now
   does this opt-in; without the flag a cycle is still exported.
 * `QUERY` and general EXPRESS functions are not evaluated; `INVERSE`/`USEDIN` roles over entities
   that are not modelled follow the assumptions documented in ADR-0022/0023.
