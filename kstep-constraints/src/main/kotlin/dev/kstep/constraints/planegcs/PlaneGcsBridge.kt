@@ -80,4 +80,42 @@ object PlaneGcsBridge {
         convergence: Double,
         outCoords: DoubleArray,
     ): Int
+
+    /**
+     * Like [nativeSolveConstraints], additionally with scalar unknowns (circle/arc radii) -- see
+     * `docs/adr/ADR-0032-sketch-extensions.adoc`. Kinds 0-6 keep their layout and must carry `-1`
+     * in both `constraintScalars` slots.
+     *
+     * | kind | meaning                         | points                    | scalars  | param |
+     * |------|---------------------------------|---------------------------|----------|-------|
+     * | 7    | radius = value                  | -                         | `[r]`    | radius, `> 0`, `<= 1e9` |
+     * | 8    | two scalars equal               | -                         | `[a, b]` | `0.0` |
+     * | 9    | point on circle                 | `[p, centre]`             | `[r]`    | `0.0` |
+     * | 10   | line tangent to circle          | `[l1, l2, centre]`        | `[r]`    | `0.0` |
+     * | 11   | circle tangent to circle        | `[c1, c2]`                | `[r1, r2]` | `0.0` external, `1.0` internal |
+     * | 12   | angle between two lines (rad)   | `[a1, a2, b1, b2]`        | -        | angle in `[-pi, pi]` |
+     *
+     * Every scalar start value must be finite, `> 0` and `<= 1e9`; unused scalar slots must be exactly `-1`.
+     *
+     * @param scalars initial values of the scalar unknowns (length `scalarCount`).
+     * @param scalarFixedFlags `1` if a scalar is fixed, `0` if free (length `scalarCount`).
+     * @param constraintScalars scalar indices, length `2 * constraintCount`.
+     * @param outScalars output buffer for the solved scalars (length `scalarCount`).
+     * @return the native status as for [nativeSolveConstraints].
+     */
+    @Suppress("LongParameterList")
+    external fun nativeSolveSystem(
+        coords: DoubleArray,
+        fixedFlags: IntArray,
+        scalars: DoubleArray,
+        scalarFixedFlags: IntArray,
+        constraintKinds: IntArray,
+        constraintPoints: IntArray,
+        constraintScalars: IntArray,
+        constraintParams: DoubleArray,
+        maxIterations: Int,
+        convergence: Double,
+        outCoords: DoubleArray,
+        outScalars: DoubleArray,
+    ): Int
 }

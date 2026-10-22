@@ -35,6 +35,14 @@ class ImportedPart(
     val volume: Double?,
     val topology: ShapeTopology?,
     val boundingBox: BoundingBox?,
+    /** Per-solid volume and face count when the part has more than one solid, else `null` (ADR-0032). */
+    val bodies: List<ImportedBody>? = null,
+)
+
+/** One body (solid) of a multi-body [ImportedPart]. */
+class ImportedBody(
+    val volume: Double,
+    val faces: Int,
 )
 
 /**

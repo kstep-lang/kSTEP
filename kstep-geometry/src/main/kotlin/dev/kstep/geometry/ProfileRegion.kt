@@ -5,6 +5,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.sin
 
 /** One boundary element of a [ProfileLoop], in the XY plane. */
@@ -54,6 +55,24 @@ data class ProfileRegion(
 fun ProfileRegion.requireValid() = RegionValidation.validate(this)
 
 /**
+ * Checks that [this] list of regions forms valid, pairwise DISJOINT separate bodies: every region on its
+ * own is valid, at most [RegionValidation.MAX_REGIONS] regions, and no two regions cross, touch or nest
+ * (an island inside a HOLE of another region is allowed). See ADR-0032 for the conservative clearance rule.
+ *
+ * @throws IllegalArgumentException naming the offending regions.
+ */
+fun List<ProfileRegion>.requireValidDisjoint() = RegionValidation.validateDisjoint(this)
+
+/**
+ * Groups closed [loops] into regions by nesting depth: a loop at even depth (not inside any other, or
+ * inside a hole) is an outer contour, a loop at odd depth is a hole of its direct parent. Loops must not
+ * cross each other. The regions come in the order of their outer loops.
+ *
+ * @throws IllegalArgumentException if two loops cross.
+ */
+fun groupLoopsIntoRegions(loops: List<ProfileLoop>): List<ProfileRegion> = RegionValidation.group(loops)
+
+/**
  * Signed area of this loop's polygon approximation (arcs and circles are sampled): positive when the
  * loop runs counter-clockwise. Accurate to a fraction of a percent, intended for ordering loops by
  * size and for orientation, not for measurement.
@@ -78,6 +97,11 @@ internal fun ProfileSegment.endPoint(): ProfilePoint =
 internal object RegionValidation {
     const val MAX_REGION_LOOPS: Int = 64
     const val MAX_REGION_SEGMENTS: Int = 512
+    const val MAX_REGIONS: Int = 32
+    private const val CLEARANCE_SAMPLES = 128
+    private const val SAGITTA_FACTOR = 0.0003
+    private const val CLEARANCE_RELATIVE = 1e-6
+    private const val MAX_CLEARANCE_PAIRS = 40_000_000L
     private const val ARC_SAMPLES = 16
     private const val CIRCLE_SAMPLES = 32
     private const val COLLINEAR_SINE = 1e-9
@@ -108,6 +132,171 @@ internal object RegionValidation {
                     "holes ${k - 1} and ${h - 1} overlap or are nested"
                 }
             }
+        }
+    }
+
+    /** Validates several regions as pairwise disjoint bodies; see [requireValidDisjoint]. */
+    fun validateDisjoint(regions: List<ProfileRegion>) {
+        require(regions.isNotEmpty()) { "at least one region is required" }
+        require(regions.size <= MAX_REGIONS) { "at most $MAX_REGIONS regions are allowed, got ${regions.size}" }
+        val loopCount = regions.sumOf { 1 + it.holes.size }
+        require(
+            loopCount <= MAX_REGION_LOOPS,
+        ) { "regions together may have at most $MAX_REGION_LOOPS loops, got $loopCount" }
+        val segCount = regions.sumOf { r -> (listOf(r.outer) + r.holes).sumOf { it.segments.size } }
+        require(segCount <= MAX_REGION_SEGMENTS) {
+            "regions together may have at most $MAX_REGION_SEGMENTS segments, got $segCount"
+        }
+        regions.forEachIndexed { i, r ->
+            try {
+                validate(r)
+            } catch (e: IllegalArgumentException) {
+                throw IllegalArgumentException("region $i: ${e.message}", e)
+            }
+        }
+        if (regions.size == 1) return
+        val outers = regions.map { polygon(it.outer) }
+        val holes = regions.map { r -> r.holes.map { polygon(it) } }
+        for (i in regions.indices) {
+            for (j in i + 1 until regions.size) {
+                require(!crosses(outers[i], outers[j])) { "regions $i and $j cross each other" }
+                val iInJ = allInside(outers[i], outers[j])
+                val jInI = allInside(outers[j], outers[i])
+                if (iInJ) {
+                    require(holes[j].any { allInside(outers[i], it) }) {
+                        "region $i lies inside region $j (not in one of its holes)"
+                    }
+                }
+                if (jInI) {
+                    require(holes[i].any { allInside(outers[j], it) }) {
+                        "region $j lies inside region $i (not in one of its holes)"
+                    }
+                }
+            }
+        }
+        requireClearance(regions)
+    }
+
+    private fun loopsOf(region: ProfileRegion) = listOf(region.outer) + region.holes
+
+    private fun sagitta(loop: ProfileLoop): Double {
+        if (loop.segments.all { it is ProfileSegment.Line }) return 0.0
+        val pts = polygon(loop)
+        val extent = max(pts.maxOf { it.x } - pts.minOf { it.x }, pts.maxOf { it.y } - pts.minOf { it.y })
+        return SAGITTA_FACTOR * extent
+    }
+
+    /** Conservative minimum distance between the boundaries of two different regions. */
+    private fun requireClearance(regions: List<ProfileRegion>) {
+        class Dense(
+            val poly: List<ProfilePoint>,
+            val sag: Double,
+        )
+
+        val dense =
+            regions.map { r -> loopsOf(r).map { Dense(polygon(it, dense = true), sagitta(it)) } }
+        val scale = max(1.0, dense.flatten().maxOf { d -> d.poly.maxOf { max(abs(it.x), abs(it.y)) } })
+        var work = 0L
+        for (i in regions.indices) {
+            for (j in i + 1 until regions.size) {
+                for (a in dense[i]) {
+                    for (b in dense[j]) {
+                        val margin = a.sag + b.sag + CLEARANCE_RELATIVE * scale
+                        if (boxGap(a.poly, b.poly) > margin) continue
+                        work += a.poly.size.toLong() * b.poly.size
+                        require(work <= MAX_CLEARANCE_PAIRS) {
+                            "regions are too complex to check their clearance (limit reached); simplify the profile"
+                        }
+                        val d = polylineDistance(a.poly, b.poly)
+                        require(d > margin) {
+                            "regions $i and $j touch or are closer than ${"%.3g".format(margin)}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun boxGap(
+        a: List<ProfilePoint>,
+        b: List<ProfilePoint>,
+    ): Double {
+        val gx = max(0.0, max(a.minOf { it.x } - b.maxOf { it.x }, b.minOf { it.x } - a.maxOf { it.x }))
+        val gy = max(0.0, max(a.minOf { it.y } - b.maxOf { it.y }, b.minOf { it.y } - a.maxOf { it.y }))
+        return hypot(gx, gy)
+    }
+
+    private fun polylineDistance(
+        a: List<ProfilePoint>,
+        b: List<ProfilePoint>,
+    ): Double {
+        var best = Double.MAX_VALUE
+        for (i in a.indices) {
+            val p1 = a[i]
+            val p2 = a[(i + 1) % a.size]
+            for (j in b.indices) {
+                val q1 = b[j]
+                val q2 = b[(j + 1) % b.size]
+                if (segmentsIntersect(p1, p2, q1, q2)) return 0.0
+                best =
+                    minOf(
+                        best,
+                        pointSegment(p1, q1, q2),
+                        pointSegment(p2, q1, q2),
+                        pointSegment(q1, p1, p2),
+                        pointSegment(q2, p1, p2),
+                    )
+            }
+        }
+        return best
+    }
+
+    private fun pointSegment(
+        p: ProfilePoint,
+        a: ProfilePoint,
+        b: ProfilePoint,
+    ): Double {
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        val len2 = dx * dx + dy * dy
+        val t = if (len2 == 0.0) 0.0 else (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).coerceIn(0.0, 1.0)
+        return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+    }
+
+    /** See [groupLoopsIntoRegions]. */
+    fun group(loops: List<ProfileLoop>): List<ProfileRegion> {
+        val polys = loops.map { polygon(it) }
+        val areas = polys.map { abs(signedArea(it)) }
+        for (i in loops.indices) {
+            for (j in i + 1 until loops.size) {
+                require(!crosses(polys[i], polys[j])) { "profile loops $i and $j cross each other" }
+            }
+        }
+        val parent = IntArray(loops.size) { -1 }
+        for (i in loops.indices) {
+            var best = -1
+            for (j in loops.indices) {
+                if (i == j || areas[j] <= areas[i]) continue
+                if (allInside(polys[i], polys[j]) && (best < 0 || areas[j] < areas[best])) best = j
+            }
+            parent[i] = best
+        }
+
+        fun depth(i: Int): Int {
+            var d = 0
+            var k = parent[i]
+            while (k >= 0) {
+                d++
+                k = parent[k]
+            }
+            return d
+        }
+        val depths = loops.indices.map { depth(it) }
+        return loops.indices.filter { depths[it] % 2 == 0 }.map { outer ->
+            ProfileRegion(
+                loops[outer],
+                loops.indices.filter { parent[it] == outer && depths[it] % 2 == 1 }.map { loops[it] },
+            )
         }
     }
 
@@ -188,15 +377,20 @@ internal object RegionValidation {
     ) = hypot(a.x - b.x, a.y - b.y)
 
     /** Polygon approximation of a loop (arcs and circles sampled). */
-    fun polygon(loop: ProfileLoop): List<ProfilePoint> {
+    fun polygon(
+        loop: ProfileLoop,
+        dense: Boolean = false,
+    ): List<ProfilePoint> {
+        val arcSamples = if (dense) CLEARANCE_SAMPLES else ARC_SAMPLES
+        val circleSamples = if (dense) CLEARANCE_SAMPLES else CIRCLE_SAMPLES
         val out = ArrayList<ProfilePoint>()
         for (seg in loop.segments) {
             when (seg) {
                 is ProfileSegment.Line -> out.add(seg.start)
-                is ProfileSegment.Arc -> out.addAll(sampleArc(seg))
+                is ProfileSegment.Arc -> out.addAll(sampleArc(seg, arcSamples))
                 is ProfileSegment.Circle ->
-                    for (i in 0 until CIRCLE_SAMPLES) {
-                        val a = 2.0 * PI * i / CIRCLE_SAMPLES
+                    for (i in 0 until circleSamples) {
+                        val a = 2.0 * PI * i / circleSamples
                         out.add(ProfilePoint(seg.center.x + seg.radius * cos(a), seg.center.y + seg.radius * sin(a)))
                     }
             }
@@ -204,7 +398,10 @@ internal object RegionValidation {
         return out
     }
 
-    private fun sampleArc(arc: ProfileSegment.Arc): List<ProfilePoint> {
+    private fun sampleArc(
+        arc: ProfileSegment.Arc,
+        samples: Int = ARC_SAMPLES,
+    ): List<ProfilePoint> {
         val (s, m, e) = Triple(arc.start, arc.mid, arc.end)
         val d = 2.0 * (s.x * (m.y - e.y) + m.x * (e.y - s.y) + e.x * (s.y - m.y))
         val ux =
@@ -229,8 +426,8 @@ internal object RegionValidation {
         // The midpoint must lie on the swept side; guards numerical edge cases.
         val midSweep = if (ccw) normalizePositive(am - a0) else -normalizePositive(a0 - am)
         if (abs(midSweep) > abs(sweep)) sweep = if (ccw) sweep + 2.0 * PI else sweep - 2.0 * PI
-        return List(ARC_SAMPLES) { i ->
-            val a = a0 + sweep * i / ARC_SAMPLES
+        return List(samples) { i ->
+            val a = a0 + sweep * i / samples
             ProfilePoint(ux + r * cos(a), uy + r * sin(a))
         }
     }

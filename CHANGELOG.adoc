@@ -7,6 +7,43 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Added
+
+* Sketch extensions (ADR-0032, Welle M). Circle and arc radii can be solver unknowns (`fixedRadius = false`);
+  new sketch constraints `radius`, `diameter`, `equalRadius`, `tangent(line, circle)`, `tangent(circle, circle,
+  internal)` and `angle(l1, l2, degrees)`; `SolvedSketch.radius(ref)`. New PlaneGCS constraint kinds 7-12 and
+  scalar unknowns (`SketchScalar`, `RadiusConstraint`, `EqualScalarConstraint`, `PointOnCircleConstraint`,
+  `TangentLineCircleConstraint`, `TangentCircleCircleConstraint`, `AngleConstraint`) behind the new native entry
+  point `nativeSolveSystem` (at most 128 scalars).
+* `SketchFeature` / `sketchFeature(...)`: a parametric sketch as a step of a feature history that re-solves on
+  `FeatureRebuilder.rebuild`, through the new open interface `ExternalRootFeature` (and `ExternalFeatureException`).
+* Several separate outer contours in one sketch become several bodies in one shape: `SolvedSketch.toRegions()`,
+  `OcctKernel.extrudeRegions/revolveRegions`, `ExtrudeRegionsFeature`/`RevolveRegionsFeature`, native
+  `nativeMakeCompound` (at most 32 bodies); STEP export writes them as one representation with several
+  `MANIFOLD_SOLID_BREP`; `kstep import` reports them per body (`ImportedPart.bodies`, JSON field `bodies`).
+* `OcctKernel.solidSummaries`, `groupLoopsIntoRegions`, `requireValidDisjoint`.
+* Example scripts and `scripts/interop/verify-sketch-extensions.sh`.
+
+=== Changed
+
+* `SolveResult` gained a `scalars` field (default empty): source compatible, not binary compatible.
+* Arcs now bind their end points with a point-on-circle constraint on the radius unknown instead of two distance
+  constraints; labels and degrees of freedom are unchanged for fixed radii.
+* BREAKING (source): `SolvedSketch.extrudeFeature/revolveFeature` now return `Feature` instead of
+  `ExtrudeRegionFeature`/`RevolveRegionFeature`, callers using the concrete type must adapt; `toRegion()` fails with `INVALID_PROFILE` when the
+  sketch has several separate outer contours (use `toRegions()`).
+* `fillet`/`chamfer` (index, selector and history variants) refuse a shape with more than one solid with a clear
+  message instead of failing inside OCCT.
+* `FeatureRebuilder` closes all built shapes when an external feature fails with any runtime exception.
+
+* `kstep import` no longer fails for a part with more than 1024 solids: the per-body summary is omitted with a
+  warning. Computing it for up to 1024 solids adds noticeable import time.
+
+=== Notes
+
+* Not covered: undo/redo and persistent naming of generated edges (next wave), booleans with several bodies,
+  tangency at arc ends, contours touching each other. The multi-body STEP layout is verified on OCCT 7.9.3.
+
 == 0.2.0 — 2026-10-22 (pre-release)
 
 Third pre-release. It turns kSTEP from a product-structure tool into one that models, exports and reads

@@ -966,8 +966,10 @@ See <<roadmap,Roadmap>> for what's planned next.
   constraint and reports the remaining freedom; `SolvedSketch.toRegion()/extrude(h)/revolve(angle, axis)/
   extrudeFeature(h)` turn the profile (outer loop plus holes) into geometry. Failures are `SketchException`s with a
   `SketchErrorKind` (`KSTEP-S-010` in scripts); a missing PlaneGCS bridge is `SketchSolverUnavailableException`
-  (`KSTEP-S-009`). Circle and arc radii are fixed measures (not solver unknowns); tangency, equal-radius and angle
-  constraints are not available yet. Needs the PlaneGCS bridge to solve and the OCCT bridge to extrude; contains no
+  (`KSTEP-S-009`). Since ADR-0032 a circle or arc can be created with `fixedRadius = false`, which makes its radius a solver
+  unknown set by `radius`/`diameter`/`equalRadius`/`tangent`; `angle(l1, l2, degrees)` fixes the angle between two
+  lines; `sketchFeature(parameters, SketchOperation.Extrude(h)) { p -> ... }` makes the sketch a re-solving step of a
+  feature history; several separate outer contours extrude to several bodies in one shape. Needs the PlaneGCS bridge to solve and the OCCT bridge to extrude; contains no
   native code itself, so the release zip carries it without native resources. See
   docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc.
 

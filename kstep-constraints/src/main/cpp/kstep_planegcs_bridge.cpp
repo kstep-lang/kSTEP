@@ -177,6 +177,19 @@ constexpr jint kKindVertical = 3;
 constexpr jint kKindPointOnLine = 4;
 constexpr jint kKindParallel = 5;
 constexpr jint kKindPerpendicular = 6;
+constexpr jint kKindRadius = 7;
+constexpr jint kKindEqualScalar = 8;
+constexpr jint kKindPointOnCircle = 9;
+constexpr jint kKindTangentLineCircle = 10;
+constexpr jint kKindTangentCircleCircle = 11;
+constexpr jint kKindL2LAngle = 12;
+
+// Scalar (non-coordinate) unknowns, e.g. circle/arc radii -- see docs/adr/ADR-0032. Two scalar-index
+// slots are reserved per constraint, the unused ones must be exactly -1.
+constexpr jsize kScalarSlotsPerConstraint = 2;
+constexpr jsize kMaxScalars = 128;
+constexpr jdouble kMaxScalarValue = 1e9;
+constexpr double kPi = 3.14159265358979323846;
 
 // Fixed number of point-index slots reserved per constraint in constraintPoints, regardless of a
 // given kind's actual arity -- see PlaneGcsBridge.nativeSolveConstraints's KDoc and
@@ -185,22 +198,35 @@ constexpr jsize kPointSlotsPerConstraint = 4;
 constexpr jint kUnusedPointSlot = -1;
 constexpr jdouble kUnusedParam = 0.0;
 
-JNIEXPORT jint JNICALL
-Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
+/**
+ * Shared implementation of nativeSolveConstraints (legacy = true: no scalar unknowns, scalar arrays
+ * are null and every scalar slot is implicitly -1) and nativeSolveSystem (legacy = false).
+ */
+static jint solveCore(
     JNIEnv* env,
-    jobject /*self*/,
     jdoubleArray coords,
     jintArray fixedFlags,
+    jdoubleArray scalars,
+    jintArray scalarFixedFlags,
     jintArray constraintKinds,
     jintArray constraintPoints,
+    jintArray constraintScalars,
     jdoubleArray constraintParams,
     jint maxIterations,
     jdouble convergence,
-    jdoubleArray outCoords) {
+    jdoubleArray outCoords,
+    jdoubleArray outScalars,
+    bool legacy) {
     // --- 1. Null checks, before ANY array access (see invariant 2 in the file header comment). ---
     if (coords == nullptr || fixedFlags == nullptr || constraintKinds == nullptr ||
         constraintPoints == nullptr || constraintParams == nullptr || outCoords == nullptr) {
         throwJava(env, "java/lang/NullPointerException", "nativeSolveConstraints: no array argument may be null");
+        return -1;
+    }
+    if (!legacy &&
+        (scalars == nullptr || scalarFixedFlags == nullptr || constraintScalars == nullptr ||
+         outScalars == nullptr)) {
+        throwJava(env, "java/lang/NullPointerException", "nativeSolveSystem: no array argument may be null");
         return -1;
     }
 
@@ -213,6 +239,10 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
     jsize cpLen = env->GetArrayLength(constraintPoints);
     jsize paramsLen = env->GetArrayLength(constraintParams);
     jsize outLen = env->GetArrayLength(outCoords);
+    jsize scalarCount = legacy ? 0 : env->GetArrayLength(scalars);
+    jsize scalarFixedLen = legacy ? 0 : env->GetArrayLength(scalarFixedFlags);
+    jsize csLen = legacy ? 0 : env->GetArrayLength(constraintScalars);
+    jsize outScalarsLen = legacy ? 0 : env->GetArrayLength(outScalars);
 
     if (coordsLen < 0 || (coordsLen % 2) != 0) {
         throwJava(
@@ -245,6 +275,32 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
         return -1;
     }
     jsize constraintCount = kindsLen;
+    if (!legacy) {
+        if (scalarCount < 0 || scalarCount > kMaxScalars) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "scalars length must be in 0.." + std::to_string(kMaxScalars));
+            return -1;
+        }
+        if (scalarFixedLen != scalarCount) {
+            throwJava(env, "java/lang/IllegalArgumentException", "scalarFixedFlags length must equal scalars length");
+            return -1;
+        }
+        if (outScalarsLen != scalarCount) {
+            throwJava(env, "java/lang/IllegalArgumentException", "outScalars length must equal scalars length");
+            return -1;
+        }
+        if (csLen < 0 || (csLen % kScalarSlotsPerConstraint) != 0 ||
+            (csLen / kScalarSlotsPerConstraint) != kindsLen) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "constraintScalars length must equal " + std::to_string(kScalarSlotsPerConstraint) +
+                    " * constraintKinds length");
+            return -1;
+        }
+    }
     if (maxIterations <= 0) {
         throwJava(env, "java/lang/IllegalArgumentException", "maxIterations must be positive");
         return -1;
@@ -261,7 +317,15 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
         IntArrayGuard kindsGuard(env, constraintKinds);
         IntArrayGuard pointsGuard(env, constraintPoints);
         DoubleArrayGuard paramsGuard(env, constraintParams);
+        DoubleArrayGuard scalarsGuard(env, legacy ? nullptr : scalars);
+        IntArrayGuard scalarFixedGuard(env, legacy ? nullptr : scalarFixedFlags);
+        IntArrayGuard csGuard(env, legacy ? nullptr : constraintScalars);
 
+        if (!legacy && ((scalarCount > 0 && scalarsGuard.elements() == nullptr) ||
+                        (scalarCount > 0 && scalarFixedGuard.elements() == nullptr) ||
+                        (csLen > 0 && csGuard.elements() == nullptr))) {
+            return -1;  // OutOfMemoryError pending
+        }
         if (coordsGuard.elements() == nullptr || fixedGuard.elements() == nullptr ||
             kindsGuard.elements() == nullptr || pointsGuard.elements() == nullptr ||
             paramsGuard.elements() == nullptr) {
@@ -295,6 +359,26 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
             }
         }
 
+        for (jsize i = 0; i < scalarCount; ++i) {
+            double v = scalarsGuard.elements()[i];
+            if (!std::isfinite(v) || !(v > 0.0) || v > kMaxScalarValue) {
+                throwJava(
+                    env,
+                    "java/lang/IllegalArgumentException",
+                    "scalars[" + std::to_string(i) + "] must be finite, positive and <= 1e9, got " +
+                        std::to_string(v));
+                return -1;
+            }
+            jint flag = scalarFixedGuard.elements()[i];
+            if (flag != 0 && flag != 1) {
+                throwJava(
+                    env,
+                    "java/lang/IllegalArgumentException",
+                    "scalarFixedFlags[" + std::to_string(i) + "] must be 0 or 1, got " + std::to_string(flag));
+                return -1;
+            }
+        }
+
         // --- 5. Per-constraint kind/slot/param/index validation, BEFORE any value is used to build
         // the solver's own storage below. Every kind's exact slot count (arity) and unused-slot/
         // unused-param sentinels are enforced here -- see PlaneGcsBridge.nativeSolveConstraints's
@@ -302,6 +386,7 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
         for (jsize i = 0; i < constraintCount; ++i) {
             jint kind = kindsGuard.elements()[i];
             int arity;
+            int scalarArity = 0;
             switch (kind) {
                 case kKindP2PDistance:
                 case kKindP2PCoincident:
@@ -314,7 +399,28 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                     break;
                 case kKindParallel:
                 case kKindPerpendicular:
+                case kKindL2LAngle:
                     arity = 4;
+                    break;
+                case kKindRadius:
+                    arity = 0;
+                    scalarArity = 1;
+                    break;
+                case kKindEqualScalar:
+                    arity = 0;
+                    scalarArity = 2;
+                    break;
+                case kKindPointOnCircle:
+                    arity = 2;
+                    scalarArity = 1;
+                    break;
+                case kKindTangentLineCircle:
+                    arity = 3;
+                    scalarArity = 1;
+                    break;
+                case kKindTangentCircleCircle:
+                    arity = 2;
+                    scalarArity = 2;
                     break;
                 default:
                     throwJava(
@@ -323,6 +429,46 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                         "constraintKinds[" + std::to_string(i) + "] is not a recognized kind: " +
                             std::to_string(kind));
                     return -1;
+            }
+            if (legacy && kind > kKindPerpendicular) {
+                throwJava(
+                    env,
+                    "java/lang/IllegalArgumentException",
+                    "constraintKinds[" + std::to_string(i) + "] needs nativeSolveSystem: " + std::to_string(kind));
+                return -1;
+            }
+
+            jint scalarSlotValues[kScalarSlotsPerConstraint];
+            for (jsize slot = 0; slot < kScalarSlotsPerConstraint; ++slot) {
+                jint value = legacy ? -1 : csGuard.elements()[i * kScalarSlotsPerConstraint + slot];
+                scalarSlotValues[slot] = value;
+                if (slot < scalarArity) {
+                    if (value < 0 || value >= scalarCount) {
+                        throwJava(
+                            env,
+                            "java/lang/IllegalArgumentException",
+                            "constraintScalars[" + std::to_string(i * kScalarSlotsPerConstraint + slot) +
+                                "] is out of range for scalarCount=" + std::to_string(scalarCount) + ": " +
+                                std::to_string(value));
+                        return -1;
+                    }
+                } else if (value != -1) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraintScalars[" + std::to_string(i * kScalarSlotsPerConstraint + slot) +
+                            "] must be -1 for an unused slot on constraint kind " + std::to_string(kind) +
+                            ", got " + std::to_string(value));
+                    return -1;
+                }
+            }
+            if (scalarArity == 2 && scalarSlotValues[0] == scalarSlotValues[1]) {
+                throwJava(
+                    env,
+                    "java/lang/IllegalArgumentException",
+                    "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                        ") references the same scalar twice (index " + std::to_string(scalarSlotValues[0]) + ")");
+                return -1;
             }
 
             jsize base = i * kPointSlotsPerConstraint;
@@ -442,6 +588,35 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                 }
             }
 
+            if (kind == kKindPointOnCircle || kind == kKindTangentCircleCircle) {
+                // Both divide by the distance between slots 0 and 1 in their gradient; identical start
+                // coordinates would make that NaN for the whole solve.
+                if (coordsGuard.elements()[2 * slotValues[0]] == coordsGuard.elements()[2 * slotValues[1]] &&
+                    coordsGuard.elements()[2 * slotValues[0] + 1] == coordsGuard.elements()[2 * slotValues[1] + 1]) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraint " + std::to_string(i) + " (kind " + std::to_string(kind) +
+                            ") has its two points at identical coordinates (indices " +
+                            std::to_string(slotValues[0]) + "/" + std::to_string(slotValues[1]) + ")");
+                    return -1;
+                }
+            }
+            if (kind == kKindTangentLineCircle) {
+                // The line is slotValues[0]..[1]; the circle centre is slotValues[2]. P2LDistance divides
+                // by the line length, so a line starting at identical coordinates is degenerate.
+                if (coordsGuard.elements()[2 * slotValues[0]] == coordsGuard.elements()[2 * slotValues[1]] &&
+                    coordsGuard.elements()[2 * slotValues[0] + 1] == coordsGuard.elements()[2 * slotValues[1] + 1]) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraint " + std::to_string(i) + " (kind 10) has a tangent line starting at identical " +
+                            "coordinates (indices " + std::to_string(slotValues[0]) + "/" +
+                            std::to_string(slotValues[1]) + ")");
+                    return -1;
+                }
+            }
+
             double param = paramsGuard.elements()[i];
             if (kind == kKindP2PDistance) {
                 if (!std::isfinite(param) || !(param > 0.0)) {
@@ -450,6 +625,33 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                         "java/lang/IllegalArgumentException",
                         "constraintParams[" + std::to_string(i) + "] must be finite and positive for a distance " +
                             "constraint, got " + std::to_string(param));
+                    return -1;
+                }
+            } else if (kind == kKindRadius) {
+                if (!std::isfinite(param) || !(param > 0.0) || param > kMaxScalarValue) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraintParams[" + std::to_string(i) + "] must be finite, positive and <= 1e9 for a " +
+                            "radius constraint, got " + std::to_string(param));
+                    return -1;
+                }
+            } else if (kind == kKindTangentCircleCircle) {
+                if (param != 0.0 && param != 1.0) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraintParams[" + std::to_string(i) + "] must be 0.0 (external) or 1.0 (internal) " +
+                            "for a circle-circle tangent, got " + std::to_string(param));
+                    return -1;
+                }
+            } else if (kind == kKindL2LAngle) {
+                if (!std::isfinite(param) || param < -kPi || param > kPi) {
+                    throwJava(
+                        env,
+                        "java/lang/IllegalArgumentException",
+                        "constraintParams[" + std::to_string(i) + "] must be a finite angle in [-pi, pi], got " +
+                            std::to_string(param));
                     return -1;
                 }
             } else if (param != kUnusedParam) {
@@ -487,6 +689,12 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
         std::vector<double> distances(constraintCount);
         for (jsize i = 0; i < constraintCount; ++i) {
             distances[i] = paramsGuard.elements()[i];
+        }
+
+        // Scalar unknowns: constructed once at final size, never resized (same pointer-stability rule).
+        std::vector<double> sv(static_cast<size_t>(scalarCount));
+        for (jsize i = 0; i < scalarCount; ++i) {
+            sv[i] = scalarsGuard.elements()[i];
         }
 
         std::vector<GCS::Point> points;
@@ -530,11 +738,16 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                 unknowns.push_back(&params[2 * i + 1]);
             }
         }
+        for (jsize i = 0; i < scalarCount; ++i) {
+            if (scalarFixedGuard.elements()[i] == 0) {
+                unknowns.push_back(&sv[i]);
+            }
+        }
         if (unknowns.empty()) {
             throwJava(
                 env,
                 "java/lang/IllegalArgumentException",
-                "at least one point must be non-fixed (an all-fixed system has no unknowns)");
+                "at least one point or scalar must be non-fixed (an all-fixed system has no unknowns)");
             return -1;
         }
 
@@ -615,6 +828,58 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
                     system.addConstraintPerpendicular(points[a1], points[a2], points[b1], points[b2], tagId);
                     break;
                 }
+                case kKindL2LAngle: {
+                    jint a1 = pointsGuard.elements()[base];
+                    jint a2 = pointsGuard.elements()[base + 1];
+                    jint b1 = pointsGuard.elements()[base + 2];
+                    jint b2 = pointsGuard.elements()[base + 3];
+                    // Four-Point overload; the angle pointer targets the stable `distances` vector.
+                    system.addConstraintL2LAngle(
+                        points[a1], points[a2], points[b1], points[b2], &distances[i], tagId);
+                    break;
+                }
+                case kKindRadius: {
+                    jint r = csGuard.elements()[i * kScalarSlotsPerConstraint];
+                    system.addConstraintEqual(&sv[r], &distances[i], tagId);
+                    break;
+                }
+                case kKindEqualScalar: {
+                    jint a = csGuard.elements()[i * kScalarSlotsPerConstraint];
+                    jint b = csGuard.elements()[i * kScalarSlotsPerConstraint + 1];
+                    system.addConstraintEqual(&sv[a], &sv[b], tagId);
+                    break;
+                }
+                case kKindPointOnCircle: {
+                    jint p = pointsGuard.elements()[base];
+                    jint c = pointsGuard.elements()[base + 1];
+                    jint r = csGuard.elements()[i * kScalarSlotsPerConstraint];
+                    // P2PDistance(point, centre) == radius.
+                    system.addConstraintP2PDistance(points[p], points[c], &sv[r], tagId);
+                    break;
+                }
+                case kKindTangentLineCircle: {
+                    jint l1 = pointsGuard.elements()[base];
+                    jint l2 = pointsGuard.elements()[base + 1];
+                    jint c = pointsGuard.elements()[base + 2];
+                    jint r = csGuard.elements()[i * kScalarSlotsPerConstraint];
+                    // Stack-local GCS::Line adapter: ConstraintP2LDistance copies only the raw double*
+                    // (Constraints.cpp), same safety argument as kKindParallel above. Distance uses abs(),
+                    // so the side of the line is decided by the start values.
+                    GCS::Line line;
+                    line.p1 = points[l1];
+                    line.p2 = points[l2];
+                    system.addConstraintP2LDistance(points[c], line, &sv[r], tagId);
+                    break;
+                }
+                case kKindTangentCircleCircle: {
+                    jint c1 = pointsGuard.elements()[base];
+                    jint c2 = pointsGuard.elements()[base + 1];
+                    jint r1 = csGuard.elements()[i * kScalarSlotsPerConstraint];
+                    jint r2 = csGuard.elements()[i * kScalarSlotsPerConstraint + 1];
+                    bool internal = distances[i] == 1.0;
+                    system.addConstraintTangentCircumf(points[c1], points[c2], &sv[r1], &sv[r2], internal, tagId);
+                    break;
+                }
                 default:
                     // Unreachable: already rejected in the validation pass above. Kept as a defensive
                     // guard rather than assumed unreachable, mirroring this file's own stated
@@ -658,6 +923,16 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
             }
         }
 
+        for (jsize i = 0; i < scalarCount; ++i) {
+            if (!std::isfinite(sv[i])) {
+                throwJava(
+                    env,
+                    "java/lang/RuntimeException",
+                    "PlaneGCS produced a non-finite result at scalars[" + std::to_string(i) + "]");
+                return -1;
+            }
+        }
+
         // --- 9. Write the result back via SetDoubleArrayRegion -- never via Get/ReleaseArrayElements
         // for outCoords, so there is no write-back array to release on any path above. ---
         env->SetDoubleArrayRegion(outCoords, 0, coordsLen, params.data());
@@ -666,6 +941,13 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
             // mismatch -- already excluded above by the outLen check, but defensive regardless of
             // that earlier check ever becoming stale.
             return -1;
+        }
+
+        if (!legacy && scalarCount > 0) {
+            env->SetDoubleArrayRegion(outScalars, 0, scalarCount, sv.data());
+            if (env->ExceptionCheck()) {
+                return -1;
+            }
         }
 
         return static_cast<jint>(status);
@@ -677,6 +959,44 @@ Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
         throwJava(env, "java/lang/RuntimeException", "Unknown native error in nativeSolveConstraints");
     }
     return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveConstraints(
+    JNIEnv* env,
+    jobject /*self*/,
+    jdoubleArray coords,
+    jintArray fixedFlags,
+    jintArray constraintKinds,
+    jintArray constraintPoints,
+    jdoubleArray constraintParams,
+    jint maxIterations,
+    jdouble convergence,
+    jdoubleArray outCoords) {
+    return solveCore(
+        env, coords, fixedFlags, nullptr, nullptr, constraintKinds, constraintPoints, nullptr, constraintParams,
+        maxIterations, convergence, outCoords, nullptr, true);
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_kstep_constraints_planegcs_PlaneGcsBridge_nativeSolveSystem(
+    JNIEnv* env,
+    jobject /*self*/,
+    jdoubleArray coords,
+    jintArray fixedFlags,
+    jdoubleArray scalars,
+    jintArray scalarFixedFlags,
+    jintArray constraintKinds,
+    jintArray constraintPoints,
+    jintArray constraintScalars,
+    jdoubleArray constraintParams,
+    jint maxIterations,
+    jdouble convergence,
+    jdoubleArray outCoords,
+    jdoubleArray outScalars) {
+    return solveCore(
+        env, coords, fixedFlags, scalars, scalarFixedFlags, constraintKinds, constraintPoints, constraintScalars,
+        constraintParams, maxIterations, convergence, outCoords, outScalars, false);
 }
 
 }  // extern "C"

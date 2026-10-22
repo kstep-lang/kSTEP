@@ -42,7 +42,11 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -1368,6 +1372,11 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStep(
                 // can observe the detached state.
                 PrinterSilencer silencer;
                 schemaAccepted = Interface_Static::SetCVal("write.step.schema", schemaValue.c_str());
+                // A multi-body result (a compound of several solids, ADR-0032) is written as ONE shape
+                // representation with one MANIFOLD_SOLID_BREP per body (assembly mode off) -- OCCT's default
+                // (mode 2 = auto) would otherwise turn the compound into an assembly with one product per body.
+                // The static parameter is process-global, so it is always set explicitly (never left sticky).
+                Interface_Static::SetIVal("write.step.assembly", countSolids(*shape) > 1 ? 0 : 2);
                 if (schemaAccepted) {
                     transferStatus = writer.Transfer(*shape, STEPControl_AsIs);
                     if (transferStatus != IFSelect_RetDone) {
@@ -3273,6 +3282,162 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveRegion(
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error revolving region");
     }
     return 0;
+}
+
+// ------------------------------------------------------------------------------------------
+// Welle M (multi-body results). See docs/adr/ADR-0032-sketch-extensions.adoc.
+// ------------------------------------------------------------------------------------------
+constexpr jsize kMaxCompoundParts = 32;
+constexpr jsize kMaxSolidSummaries = 1024;
+
+/**
+ * Combines 1..32 registered single-solid shapes into ONE compound of independent copies. The parts must
+ * be pairwise separated by more than Precision::Confusion() -- touching or overlapping solids are
+ * rejected (IllegalArgumentException), so the compound is a set of disjoint bodies.
+ */
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeMakeCompound(JNIEnv* env, jobject /*self*/, jlongArray handles) {
+    if (handles == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", "nativeMakeCompound: handles must not be null");
+        return 0;
+    }
+    jsize n = env->GetArrayLength(handles);
+    if (n < 1 || n > kMaxCompoundParts) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeMakeCompound: between 1 and " + std::to_string(kMaxCompoundParts) + " parts are required, got " +
+                std::to_string(n));
+        return 0;
+    }
+    std::vector<jlong> ids(static_cast<size_t>(n));
+    env->GetLongArrayRegion(handles, 0, n, ids.data());
+    if (env->ExceptionCheck()) {
+        return 0;
+    }
+    try {
+        std::vector<TopoDS_Shape> copies;
+        copies.reserve(static_cast<size_t>(n));
+        bool allFound = true;
+        jlong missing = 0;
+        bool notSingle = false;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            for (jlong id : ids) {
+                TopoDS_Shape* shape = findShapeLocked(id);
+                if (shape == nullptr) {
+                    allFound = false;
+                    missing = id;
+                    break;
+                }
+                if (countSolids(*shape) != 1) {
+                    notSingle = true;
+                    break;
+                }
+                // Independent copy: the compound must share no TShape with a registered shape (mesh
+                // generation mutates TShapes under g_mutex).
+                BRepBuilderAPI_Copy copier(unwrapSingleSolid(*shape), Standard_True, Standard_False);
+                copies.push_back(copier.Shape());
+            }
+        }
+        if (!allFound) {
+            throwUnknownHandle(env, missing);
+            return 0;
+        }
+        if (notSingle) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeMakeCompound: every part must be exactly one solid");
+            return 0;
+        }
+        // Pairwise separation: bounding boxes first, exact distance only for boxes that overlap.
+        std::vector<Bnd_Box> boxes(copies.size());
+        for (size_t i = 0; i < copies.size(); ++i) {
+            BRepBndLib::Add(copies[i], boxes[i]);
+            boxes[i].SetGap(Precision::Confusion());
+        }
+        for (size_t i = 0; i < copies.size(); ++i) {
+            for (size_t j = i + 1; j < copies.size(); ++j) {
+                if (boxes[i].IsOut(boxes[j])) {
+                    continue;
+                }
+                BRepExtrema_DistShapeShape dist(copies[i], copies[j]);
+                if (!dist.IsDone() || dist.Value() <= Precision::Confusion()) {
+                    throwJava(
+                        env, "java/lang/IllegalArgumentException",
+                        "nativeMakeCompound: solids " + std::to_string(i) + " and " + std::to_string(j) +
+                            " touch or overlap");
+                    return 0;
+                }
+            }
+        }
+        BRep_Builder builder;
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Shape& part : copies) {
+            builder.Add(compound, part);
+        }
+        TopoDS_Shape result(compound);
+        if (countSolids(result) != static_cast<int>(n)) {
+            throwJava(env, "java/lang/IllegalStateException", "nativeMakeCompound: unexpected solid count");
+            return 0;
+        }
+        if (!postCheckSolid(env, result, "nativeMakeCompound", "java/lang/IllegalArgumentException")) {
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error building compound: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error building compound: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error building compound");
+    }
+    return 0;
+}
+
+/** Per-solid summary of a shape: [volume, faceCount] for each solid, at most 1024 solids. */
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeSolidSummaries(JNIEnv* env, jobject /*self*/, jlong handle) {
+    std::vector<jdouble> out;
+    bool found = true;
+    bool tooMany = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape == nullptr) {
+            found = false;
+        } else if (countSolids(*shape) > kMaxSolidSummaries) {
+            tooMany = true;
+        } else {
+            for (TopExp_Explorer ex(*shape, TopAbs_SOLID); ex.More(); ex.Next()) {
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(ex.Current(), props);
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(ex.Current(), TopAbs_FACE, faces);
+                out.push_back(props.Mass());
+                out.push_back(static_cast<jdouble>(faces.Extent()));
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error summarising solids: ") + e.GetMessageString());
+        return nullptr;
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error summarising solids: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error summarising solids");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    if (tooMany) {
+        throwJava(env, "java/lang/IllegalArgumentException", "nativeSolidSummaries: more than 1024 solids");
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
 }
 
 }  // extern "C"

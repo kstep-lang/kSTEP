@@ -127,6 +127,9 @@ object PlaneGcsSolver {
      */
     const val MAX_ITERATIONS: Int = 1_000
 
+    /** Upper bound on the number of [SketchScalar]s (radii) a single [solve] call may pass. */
+    const val MAX_SCALARS: Int = 128
+
     /** `GCS::System()`'s own default `maxIter` (verified against `third_party/planegcs/GCS.cpp:475`). */
     const val DEFAULT_MAX_ITERATIONS: Int = 100
 
@@ -193,8 +196,24 @@ object PlaneGcsSolver {
         constraints: List<SketchConstraint>,
         maxIterations: Int = DEFAULT_MAX_ITERATIONS,
         convergence: Double = DEFAULT_CONVERGENCE,
+    ): SolveResult = solve(points, constraints, emptyList(), maxIterations, convergence)
+
+    /**
+     * Like the overload without scalars, additionally solving for [scalars] (circle/arc radii, see
+     * [SketchScalar]); constraints address them by index into this list. At least one point or one
+     * scalar must be free. The solved values are returned in [SolveResult.scalars].
+     *
+     * @throws IllegalArgumentException additionally for out-of-range/duplicate scalar indices, more than
+     *   [MAX_SCALARS] scalars, or a non-finite, non-positive or too large scalar value.
+     */
+    fun solve(
+        points: List<SketchPoint>,
+        constraints: List<SketchConstraint>,
+        scalars: List<SketchScalar>,
+        maxIterations: Int = DEFAULT_MAX_ITERATIONS,
+        convergence: Double = DEFAULT_CONVERGENCE,
     ): SolveResult {
-        validate(points, constraints, maxIterations, convergence)
+        validate(points, constraints, scalars, maxIterations, convergence)
 
         val a = availability()
         if (a !is PlaneGcsAvailability.Available) {
@@ -211,18 +230,31 @@ object PlaneGcsSolver {
         }
         val encoded = encodeConstraints(constraints)
         val outCoords = DoubleArray(points.size * 2)
+        val scalarValues = DoubleArray(scalars.size) { scalars[it].value }
+        val scalarFixed = IntArray(scalars.size) { if (scalars[it].fixed) 1 else 0 }
+        val outScalars = DoubleArray(scalars.size)
 
         val nativeStatus =
             try {
-                PlaneGcsBridge.nativeSolveConstraints(
+                PlaneGcsBridge.nativeSolveSystem(
                     coords,
                     fixedFlags,
+                    scalarValues,
+                    scalarFixed,
                     encoded.kinds,
                     encoded.points,
+                    encoded.scalars,
                     encoded.params,
                     maxIterations,
                     convergence,
                     outCoords,
+                    outScalars,
+                )
+            } catch (e: UnsatisfiedLinkError) {
+                // A bridge library from before nativeSolveSystem (e.g. via the override path).
+                throw PlaneGcsUnavailableException(
+                    "the loaded PlaneGCS bridge predates nativeSolveSystem; rebuild it",
+                    e,
                 )
             } catch (e: RuntimeException) {
                 throw ConstraintSolverException("PlaneGCS failed to solve the constraint system", e)
@@ -241,6 +273,14 @@ object PlaneGcsSolver {
         if (status == SolveStatus.SUCCESS || status == SolveStatus.CONVERGED) {
             // See this function's own KDoc and PointOnLineConstraint's KDoc: a non-finite coordinate
             // must never reach a caller labeled as a "successful" solve.
+            for (i in outScalars.indices) {
+                if (!outScalars[i].isFinite()) {
+                    throw ConstraintSolverException(
+                        "PlaneGCS reported status $status but produced a non-finite scalar " +
+                            "at outScalars[$i] (${outScalars[i]}) -- refusing to return a NaN-polluted result",
+                    )
+                }
+            }
             for (i in outCoords.indices) {
                 if (!outCoords[i].isFinite()) {
                     throw ConstraintSolverException(
@@ -255,7 +295,8 @@ object PlaneGcsSolver {
             points.indices.map { i ->
                 SketchPoint(x = outCoords[2 * i], y = outCoords[2 * i + 1], fixed = points[i].fixed)
             }
-        return SolveResult(status = status, points = resultPoints)
+        val resultScalars = scalars.indices.map { SketchScalar(outScalars[it], scalars[it].fixed) }
+        return SolveResult(status = status, points = resultPoints, scalars = resultScalars)
     }
 
     /**
@@ -275,6 +316,7 @@ object PlaneGcsSolver {
     private fun validate(
         points: List<SketchPoint>,
         constraints: List<SketchConstraint>,
+        scalars: List<SketchScalar>,
         maxIterations: Int,
         convergence: Double,
     ) {
@@ -293,10 +335,16 @@ object PlaneGcsSolver {
                 "points[$i].y (${p.y}) exceeds MAX_ABS_COORDINATE ($MAX_ABS_COORDINATE)"
             }
         }
-        require(points.any { !it.fixed }) {
-            "points must contain at least one non-fixed point (an all-fixed system has no unknowns)"
+        require(scalars.size <= MAX_SCALARS) { "scalars.size (${scalars.size}) exceeds MAX_SCALARS ($MAX_SCALARS)" }
+        scalars.forEachIndexed { i, sc ->
+            require(sc.value.isFinite() && sc.value > 0.0 && sc.value <= MAX_DISTANCE) {
+                "scalars[$i].value must be finite, positive and <= MAX_DISTANCE ($MAX_DISTANCE), got ${sc.value}"
+            }
         }
-        constraints.forEachIndexed { i, c -> validateConstraint(i, c, points) }
+        require(points.any { !it.fixed } || scalars.any { !it.fixed }) {
+            "points must contain at least one non-fixed point or scalar (an all-fixed system has no unknowns)"
+        }
+        constraints.forEachIndexed { i, c -> validateConstraint(i, c, points, scalars) }
         require(maxIterations in 1..MAX_ITERATIONS) {
             "maxIterations ($maxIterations) must be in 1..$MAX_ITERATIONS"
         }
@@ -320,6 +368,7 @@ object PlaneGcsSolver {
         index: Int,
         constraint: SketchConstraint,
         points: List<SketchPoint>,
+        scalars: List<SketchScalar>,
     ) {
         when (constraint) {
             is DistanceConstraint -> {
@@ -397,6 +446,109 @@ object PlaneGcsSolver {
                     points = points,
                 )
             }
+            is RadiusConstraint -> {
+                requireScalar(index, constraint.radiusScalar, "radiusScalar", scalars)
+                require(constraint.radius.isFinite() && constraint.radius > 0.0 && constraint.radius <= MAX_DISTANCE) {
+                    "constraints[$index].radius must be finite, positive and <= MAX_DISTANCE, got ${constraint.radius}"
+                }
+            }
+            is EqualScalarConstraint -> {
+                requireScalar(index, constraint.a, "a", scalars)
+                requireScalar(index, constraint.b, "b", scalars)
+                require(constraint.a != constraint.b) {
+                    "constraints[$index] references the same scalar twice (index ${constraint.a})"
+                }
+            }
+            is PointOnCircleConstraint -> {
+                requireInRange(index, constraint.point, "point", points)
+                requireInRange(index, constraint.center, "center", points)
+                requireScalar(index, constraint.radiusScalar, "radiusScalar", scalars)
+                require(constraint.point != constraint.center) {
+                    "constraints[$index].point must differ from center (index ${constraint.point})"
+                }
+                requireDistinctCoordinates(
+                    index,
+                    "PointOnCircleConstraint",
+                    constraint.point,
+                    constraint.center,
+                    points,
+                )
+            }
+            is TangentLineCircleConstraint -> {
+                requireInRange(index, constraint.lineFrom, "lineFrom", points)
+                requireInRange(index, constraint.lineTo, "lineTo", points)
+                requireInRange(index, constraint.center, "center", points)
+                requireScalar(index, constraint.radiusScalar, "radiusScalar", scalars)
+                require(
+                    constraint.lineFrom != constraint.lineTo &&
+                        constraint.lineFrom != constraint.center &&
+                        constraint.lineTo != constraint.center,
+                ) { "constraints[$index] (TangentLineCircleConstraint) needs three distinct points" }
+                requireDistinctCoordinates(
+                    index,
+                    "TangentLineCircleConstraint",
+                    constraint.lineFrom,
+                    constraint.lineTo,
+                    points,
+                )
+            }
+            is TangentCircleCircleConstraint -> {
+                requireInRange(index, constraint.centerA, "centerA", points)
+                requireInRange(index, constraint.centerB, "centerB", points)
+                requireScalar(index, constraint.radiusA, "radiusA", scalars)
+                requireScalar(index, constraint.radiusB, "radiusB", scalars)
+                require(constraint.centerA != constraint.centerB) {
+                    "constraints[$index] references the same centre twice (index ${constraint.centerA})"
+                }
+                require(constraint.radiusA != constraint.radiusB) {
+                    "constraints[$index] references the same radius twice (index ${constraint.radiusA})"
+                }
+                requireDistinctCoordinates(
+                    index,
+                    "TangentCircleCircleConstraint",
+                    constraint.centerA,
+                    constraint.centerB,
+                    points,
+                )
+            }
+            is AngleConstraint -> {
+                validateFourPointLegs(
+                    index = index,
+                    kindName = "AngleConstraint",
+                    aFrom = constraint.lineAFrom,
+                    aTo = constraint.lineATo,
+                    bFrom = constraint.lineBFrom,
+                    bTo = constraint.lineBTo,
+                    points = points,
+                )
+                require(constraint.radians.isFinite() && constraint.radians in -Math.PI..Math.PI) {
+                    "constraints[$index].radians must be a finite angle in [-pi, pi], got ${constraint.radians}"
+                }
+            }
+        }
+    }
+
+    private fun requireScalar(
+        index: Int,
+        scalarIndex: Int,
+        fieldName: String,
+        scalars: List<SketchScalar>,
+    ) {
+        require(scalarIndex in scalars.indices) {
+            "constraints[$index].$fieldName ($scalarIndex) is out of range for ${scalars.size} scalars"
+        }
+    }
+
+    private fun requireDistinctCoordinates(
+        index: Int,
+        kindName: String,
+        a: Int,
+        b: Int,
+        points: List<SketchPoint>,
+    ) {
+        require(points[a].x != points[b].x || points[a].y != points[b].y) {
+            "constraints[$index] ($kindName) points $a/$b start at identical coordinates -- the gradient " +
+                "divides by their distance"
         }
     }
 
@@ -477,6 +629,7 @@ object PlaneGcsSolver {
     private data class EncodedConstraints(
         val kinds: IntArray,
         val points: IntArray,
+        val scalars: IntArray,
         val params: DoubleArray,
     )
 
@@ -489,6 +642,12 @@ object PlaneGcsSolver {
             is PointOnLineConstraint -> NativeConstraintKind.POINT_ON_LINE
             is ParallelConstraint -> NativeConstraintKind.PARALLEL
             is PerpendicularConstraint -> NativeConstraintKind.PERPENDICULAR
+            is RadiusConstraint -> NativeConstraintKind.RADIUS
+            is EqualScalarConstraint -> NativeConstraintKind.EQUAL_SCALAR
+            is PointOnCircleConstraint -> NativeConstraintKind.POINT_ON_CIRCLE
+            is TangentLineCircleConstraint -> NativeConstraintKind.TANGENT_LINE_CIRCLE
+            is TangentCircleCircleConstraint -> NativeConstraintKind.TANGENT_CIRCLE_CIRCLE
+            is AngleConstraint -> NativeConstraintKind.L2L_ANGLE
         }
 
     private fun SketchConstraint.pointIndices(): IntArray =
@@ -500,6 +659,22 @@ object PlaneGcsSolver {
             is PointOnLineConstraint -> intArrayOf(point, lineFrom, lineTo)
             is ParallelConstraint -> intArrayOf(lineAFrom, lineATo, lineBFrom, lineBTo)
             is PerpendicularConstraint -> intArrayOf(lineAFrom, lineATo, lineBFrom, lineBTo)
+            is RadiusConstraint -> intArrayOf()
+            is EqualScalarConstraint -> intArrayOf()
+            is PointOnCircleConstraint -> intArrayOf(point, center)
+            is TangentLineCircleConstraint -> intArrayOf(lineFrom, lineTo, center)
+            is TangentCircleCircleConstraint -> intArrayOf(centerA, centerB)
+            is AngleConstraint -> intArrayOf(lineAFrom, lineATo, lineBFrom, lineBTo)
+        }
+
+    private fun SketchConstraint.scalarIndices(): IntArray =
+        when (this) {
+            is RadiusConstraint -> intArrayOf(radiusScalar)
+            is EqualScalarConstraint -> intArrayOf(a, b)
+            is PointOnCircleConstraint -> intArrayOf(radiusScalar)
+            is TangentLineCircleConstraint -> intArrayOf(radiusScalar)
+            is TangentCircleCircleConstraint -> intArrayOf(radiusA, radiusB)
+            else -> intArrayOf()
         }
 
     private fun SketchConstraint.parameter(): Double =
@@ -511,11 +686,18 @@ object PlaneGcsSolver {
             is PointOnLineConstraint -> NativeConstraintKind.UNUSED_PARAM
             is ParallelConstraint -> NativeConstraintKind.UNUSED_PARAM
             is PerpendicularConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is RadiusConstraint -> radius
+            is EqualScalarConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is PointOnCircleConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is TangentLineCircleConstraint -> NativeConstraintKind.UNUSED_PARAM
+            is TangentCircleCircleConstraint -> if (internal) 1.0 else 0.0
+            is AngleConstraint -> radians
         }
 
     private fun encodeConstraints(constraints: List<SketchConstraint>): EncodedConstraints {
         val kinds = IntArray(constraints.size)
         val pointSlots = IntArray(constraints.size * NativeConstraintKind.POINT_SLOTS)
+        val scalarSlots = IntArray(constraints.size * NativeConstraintKind.SCALAR_SLOTS)
         val params = DoubleArray(constraints.size)
         constraints.forEachIndexed { i, c ->
             val kind = c.kind()
@@ -530,8 +712,17 @@ object PlaneGcsSolver {
                 pointSlots[base + slot] =
                     if (slot < kind.arity) indices[slot] else NativeConstraintKind.UNUSED_POINT_SLOT
             }
+            val scalarIdx = c.scalarIndices()
+            require(scalarIdx.size == kind.scalarArity) {
+                "${kind.name} constraint at index $i encoded ${scalarIdx.size} scalar indices, " +
+                    "but its scalar arity is ${kind.scalarArity}"
+            }
+            val sBase = i * NativeConstraintKind.SCALAR_SLOTS
+            for (slot in 0 until NativeConstraintKind.SCALAR_SLOTS) {
+                scalarSlots[sBase + slot] = if (slot < kind.scalarArity) scalarIdx[slot] else -1
+            }
             params[i] = c.parameter()
         }
-        return EncodedConstraints(kinds = kinds, points = pointSlots, params = params)
+        return EncodedConstraints(kinds = kinds, points = pointSlots, scalars = scalarSlots, params = params)
     }
 }

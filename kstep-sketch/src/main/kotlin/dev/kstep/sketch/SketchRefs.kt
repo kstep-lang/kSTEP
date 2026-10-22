@@ -14,17 +14,30 @@ class SketchLineRef internal constructor(
     internal val to: SketchPointRef,
 )
 
+/** A circle or circular arc of a sketch under construction: it has a centre and a radius. */
+sealed class SketchRoundRef {
+    internal abstract val owner: Any
+    internal abstract val center: SketchPointRef
+
+    /** Index of the radius scalar in the owning sketch. */
+    internal abstract val scalar: Int
+}
+
 /** A circular arc of a sketch under construction. */
 class SketchArcRef internal constructor(
-    internal val owner: Any,
+    override val owner: Any,
     internal val index: Int,
-)
+    override val center: SketchPointRef,
+    override val scalar: Int,
+) : SketchRoundRef()
 
 /** A full circle of a sketch under construction. */
 class SketchCircleRef internal constructor(
-    internal val owner: Any,
+    override val owner: Any,
     internal val index: Int,
-)
+    override val center: SketchPointRef,
+    override val scalar: Int,
+) : SketchRoundRef()
 
 /** The four corners and edges of a rectangle made by [SketchBuilder.rectangle], counter-clockwise from the origin corner. */
 class SketchRectangle internal constructor(

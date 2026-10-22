@@ -1,0 +1,149 @@
+= ADR-0032: Sketch extensions -- radius unknowns, sketches in the history, separate contours (Welle M)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle M). Extends ADR-0031 (sketch DSL), ADR-0029 (booleans) and ADR-0030 (import).
+
+== Context
+
+ADR-0031 left four things open: circle/arc radii were fixed measures, a sketch could not be a step of a feature
+history (so a parameter change did not flow through), only one outer contour per sketch was possible, and there
+were no tangent, equal-radius or angle constraints.
+
+Measured on macOS arm64 with OCCT 7.9.3 and the vendored PlaneGCS. The Linux CI uses OCCT 7.8; the multi-body STEP
+layout below was verified on 7.9.3 only (see "Not covered").
+
+=== Spike result: how OCCT writes a compound of several solids
+
+With the default `write.step.assembly` mode (2, auto) OCCT writes a compound as an *assembly*: one
+`SHAPE_DEFINITION_REPRESENTATION` for the compound plus one per solid, joined by `NEXT_ASSEMBLY_USAGE_OCCURRENCE`
+and `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`. `Ap242GeometryExtraction` rightly rejects that (it expects exactly one
+representation and would otherwise create a second product structure). With assembly mode 0 OCCT writes *one*
+`SHAPE_REPRESENTATION` whose items are the `MANIFOLD_SOLID_BREP`s -- exactly what the exporter accepts, so no change
+to the extraction was needed.
+
+== Decision
+
+=== Radii as solver unknowns (native bridge)
+
+PlaneGCS already contains every constraint needed; no vendored source changed. The bridge got a second entry point,
+`nativeSolveSystem`, with scalar unknowns; `nativeSolveConstraints` stays as a wrapper (no scalars), so the hostile-input
+tests of ADR-0006/-0007/-0014 remain valid. A veraltete library without the new symbol is reported as
+`PlaneGcsUnavailableException`. The kind table now has three hand-synchronised copies (C++ constants,
+`NativeConstraintKind`, the KDoc on `PlaneGcsBridge`); `NativeConstraintKindSyncTest` parses the C++ source and fails
+on drift.
+
+[cols="1,3,2,2,2"]
+|===
+| Kind | Meaning | Points | Scalars | Parameter
+| 7 | radius = value | -- | `[r]` | radius, `> 0`, `<= 1e9`
+| 8 | two scalars equal | -- | `[a, b]`, `a != b` | `0.0`
+| 9 | point on circle (`P2PDistance`) | `[p, centre]`, different start coordinates | `[r]` | `0.0`
+| 10 | line tangent to circle (`P2LDistance`; stack-local `GCS::Line` adapter, same argument as ADR-0014) | `[l1, l2, centre]`, `l1`/`l2` different start coordinates | `[r]` | `0.0`
+| 11 | circle tangent to circle (`TangentCircumf`) | `[c1, c2]`, different start coordinates | `[r1, r2]`, `r1 != r2` | `0.0` external, `1.0` internal
+| 12 | angle between two lines (`L2LAngle`, four-point overload) | as parallel | -- | radians in `[-pi, pi]`
+|===
+
+Every scalar start value is finite, `> 0` and `<= 1e9`; at most 128 scalars; unused scalar slots must be exactly `-1`
+(also for kinds 0-6). Results are swept for NaN. After solving, the sketch layer requires every radius to lie within
+`OcctKernel.MIN_DIMENSION..MAX_DIMENSION`, because PlaneGCS may return a negative radius.
+
+Known solver behaviour that the *start values* decide: `P2LDistance` uses an absolute distance (which side of the line
+the circle lies on), and circle-circle tangency is chosen external/internal by an explicit flag, but which of the two
+solutions is reached depends on the start positions. KDoc and examples say so.
+
+=== Sketch layer
+
+* `SketchBuilder`: `circle(centre, radius, fixedRadius = true, name)` / `arc(..., fixedRadius = true)`; `radius`,
+  `diameter`, `equalRadius`, `tangent(line, round)` (the infinite line, not the segment), `tangent(round, round,
+  internal)` and `angle(l1, l2, degrees)`. Fixed radii keep the previous behaviour (same degrees of freedom, same
+  labels such as `arc radius c-s=5.0`).
+* `DofAnalysis` works on `[x, y per point | scalars]`; analytic Jacobian rows for every new constraint are checked
+  against finite differences (`DofAnalysisScalarTest`). A `radius` constraint on a fixed radius is reported as
+  redundant with the hint `radius is fixed; use fixedRadius = false`.
+* The solved radius (not the start value) drives `toRegion` and arc midpoints; `SolvedSketch.radius(ref)` reads it.
+
+=== `SketchFeature`: sketches in the feature history
+
+`kstep-geometry` cannot depend on `kstep-constraints` (ADR-0031). Kotlin requires direct subtypes of the sealed
+`Feature` to live in the same module, but not their implementations. A non-sealed interface
+`ExternalRootFeature : Feature` (`label`, `buildShape()`) in `kstep-geometry` is therefore the extension point;
+`dev.kstep.sketch.SketchFeature` implements it. `FeatureRebuilder` treats it as a root feature; failures that are
+neither `IllegalArgumentException` nor `OcctGeometryException` nor `OcctUnavailableException` are wrapped in
+`ExternalFeatureException`, and *every* failure closes all shapes built so far (before this, a runtime exception
+from an external step would have leaked them). Scripts see S-009 / S-010 through the existing cause chain.
+
+Rejected alternatives: `kstep-geometry` depending on `kstep-constraints` (cycle with ADR-0031's layering); a new
+module for one class; a global callback registry (mutable global state, hard to test).
+
+`SketchFeature(parameters, operation, requireFullyConstrained, label, definition)`: `withParameter`/`withOperation`
+copy; the `definition` lambda must be pure and is compared by identity in `equals`. At most 64 parameters, names of
+up to 64 printable ASCII characters, finite values.
+
+=== Several outer contours become several bodies
+
+* `groupLoopsIntoRegions` assigns loops by nesting depth (even depth: outer contour, odd: hole of its parent);
+  `requireValidDisjoint` allows at most 32 regions and rejects crossing, nesting outside a hole, and contours that
+  touch or are closer than a conservative clearance: boundaries sampled with 128 points per arc/circle, minus the
+  chord error bound of both loops, `<= 1e-6 * scale`.
+* `OcctKernel.extrudeRegions/revolveRegions` build one solid per region and combine them with the new native
+  `nativeMakeCompound` (independent copies, at most 32 parts, each exactly one solid, pairwise separation checked
+  with a bounding-box pre-filter and `BRepExtrema_DistShapeShape`, then `BRepCheck_Analyzer`). All intermediate shapes
+  are closed in a `finally`.
+* Export: `write.step.assembly` is set to 0 for a shape with more than one solid (and explicitly back to 2
+  otherwise, the parameter is process-global). Import: `ImportedPart.bodies` (volume and faces per solid, from
+  `nativeSolidSummaries`, at most 1024) is filled for multi-solid parts and added to the JSON output of
+  `kstep import`. A part with more than 1024 solids gets no summary and a warning (the import itself still succeeds).
+  Regions disjoint in 2D can still overlap after a revolve (for example two regions mirrored about the axis) and are
+  then refused by `nativeMakeCompound`.
+* `toRegion()` still returns exactly one region; with several contours it fails with `INVALID_PROFILE` and points to
+  `toRegions()`/`extrude()`. `extrudeFeature`/`revolveFeature` now return `Feature` (`ExtrudeRegionFeature` for one
+  contour, `ExtrudeRegionsFeature` for several).
+* Booleans are unchanged (ADR-0029): operands may contain several solids, a result with several bodies is still
+  rejected. `fillet`/`chamfer` (index, selector and `WithHistory` variants) now refuse a shape with more than one solid
+  with a clear `IllegalArgumentException` instead of failing inside OCCT.
+
+== Security
+
+[cols="1,3"]
+|===
+| Aspect | Measure
+| DoS | New limits: 128 scalars, 32 regions, 32 compound parts, 1024 solid summaries, 64 sketch parameters. The clearance
+check is bounded by 512 segments x 128 samples and a hard work cap of 4e7 point pairs after a bounding-box pre-filter.
+`BRepExtrema` runs only for parts with overlapping boxes, under the OCCT bridge's usual single-threaded use.
+| JNI | `nativeSolveSystem` re-validates every length, index, sentinel, flag and value natively and checks results for
+NaN/Inf; the hostile-input suite `PlaneGcsSystemHostileInputTest` calls it directly.
+| Resource leaks | `ExternalFeatureException` path closes built shapes; `extrudeRegions` closes intermediates in `finally`.
+| Logging | No script contents or lambdas are logged; sketch parameters appear in messages only as names and values.
+| Licence | PlaneGCS unchanged; new OCCT classes (`BRep_Builder`, `BRepBuilderAPI_Copy`, `BRepExtrema`) are in the already
+linked TKBRep/TKTopAlgo.
+|===
+
+== Not covered / follow-up waves
+
+* Undo/redo and persistent naming of edges *generated* by an operation (Welle N).
+* Booleans producing several bodies, and fillet/chamfer on multi-body shapes.
+* Tangency at an arc end ("smooth join"), tangent to a *segment* instead of the infinite line, ellipses.
+* A contour touching another contour of the same region, `nearest(point)`, selecting vertices and faces.
+* The multi-body STEP layout (one representation with several `MANIFOLD_SOLID_BREP`) is verified for OCCT 7.9.3 only;
+  OCCT 7.8 (Linux CI) is covered by the same CLI round-trip test when the CI runs it.
+* `SolveResult` gained a field (default value), which is source compatible but changes the data class signature.
+
+== Verification
+
+Hand-computed first, then measured (`OcctSketchExtensionsTest`, `CliExportSketchExtensionsIntegrationTest`,
+`scripts/interop/verify-sketch-extensions.sh` with OCCT's typed reader and FreeCAD 1.x):
+
+[cols="3,2,1,1"]
+|===
+| Case | Volume (mm3) | Faces | Solids
+| plate 40x20x10, two holes, diameter 6 + equalRadius (8000 - 2 * 90 pi) | 7434.513 | 8 | 1
+| same, hole 1 set by `radius(3)` | 7434.513 | 8 | 1
+| hole tangent to the line y = 4, centre (20, 10), so r = 6 (8000 - 360 pi) | 6869.027 | 7 | 1
+| two 10x10 squares, 10 apart, height 10 | 2000 | 12 | 2
+| sketch feature, width 40 then 60 (60 * 20 * 10 - 90 pi) | 7717.257, then 11717.257 | 7 | 1
+|===
+
+Touching squares fail with `KSTEP-S-010` (`INVALID_PROFILE`); in the release zip (no PlaneGCS) the rectangles cannot
+be solved at all, so the same script fails with `KSTEP-S-009` there.

@@ -308,14 +308,14 @@ object OcctKernel {
         radius: Double,
     ): OcctShape {
         requireFilletArguments(edgeIndices, radius)
+        requireSingleSolidOperand(shape, "fillet")
 
-        // checkOpen() (via withHandle, below) covers "already closed"; this call intentionally
-        // does not read shape.topology first to check MAX_FILLET_INPUT_FACES here in Kotlin --
-        // that would mean two round-trips through the JNI boundary (one to count faces, one to
-        // fillet) with a check-then-act gap in between where nothing prevents the shape from being
-        // closed concurrently. The native side re-derives the face count from the same locked
-        // lookup it uses to fillet, so the check and the operation are atomic -- see
-        // kstep_occt_bridge.cpp's nativeFilletEdges.
+        // checkOpen() (via withHandle, below) covers "already closed". requireSingleSolidOperand above
+        // reads the lazily cached shape.topology (a concurrent close surfaces as the documented
+        // IllegalStateException via withHandle). The MAX_FILLET_INPUT_FACES check is deliberately NOT
+        // done here in Kotlin: the native side re-derives the face count from the same locked lookup it
+        // uses to fillet, so that check and the operation are atomic -- see kstep_occt_bridge.cpp's
+        // nativeFilletEdges.
         val a = availability()
         if (a !is OcctAvailability.Available) {
             val unavailable = a as OcctAvailability.Unavailable
@@ -661,6 +661,7 @@ object OcctKernel {
         distance: Double,
     ): OcctShape {
         requireChamferArguments(edgeIndices, distance)
+        requireSingleSolidOperand(shape, "chamfer")
         requireAvailable()
         val edgeIndicesArray = edgeIndices.toIntArray()
         val resultHandle =
@@ -732,6 +733,7 @@ object OcctKernel {
         radius: Double,
     ): TrackedShape {
         requireFilletArguments(edgeIndices, radius)
+        requireSingleSolidOperand(shape, "fillet")
         requireAvailable()
         val indices = edgeIndices.toIntArray()
         val holder = arrayOfNulls<IntArray>(1)
@@ -758,6 +760,7 @@ object OcctKernel {
         distance: Double,
     ): TrackedShape {
         requireChamferArguments(edgeIndices, distance)
+        requireSingleSolidOperand(shape, "chamfer")
         requireAvailable()
         val indices = edgeIndices.toIntArray()
         val holder = arrayOfNulls<IntArray>(1)
@@ -942,6 +945,92 @@ object OcctKernel {
                 throw OcctGeometryException("OCCT failed to revolve a region by $angleDegrees degrees", e)
             }
         return OcctShape(handle)
+    }
+
+    /**
+     * Fillet and chamfer are only supported on a single solid: an operand with several bodies (a multi-body
+     * extrusion, or an import) is rejected clearly instead of failing somewhere inside OCCT. See ADR-0032.
+     */
+    private fun requireSingleSolidOperand(
+        shape: OcctShape,
+        operation: String,
+    ) {
+        val solids = shape.topology.solids
+        require(solids <= 1) {
+            "operand has $solids solids; $operation on a multi-body shape is not supported yet (ADR-0032)"
+        }
+    }
+
+    /**
+     * Extrudes SEVERAL disjoint planar regions by [height] along +Z into ONE shape (a compound of one solid
+     * per region). The regions must be pairwise disjoint, see [requireValidDisjoint]; at most
+     * [RegionValidation.MAX_REGIONS]. A single region is exactly [extrudeRegion]. Every intermediate shape is
+     * closed again, whatever happens.
+     *
+     * @throws IllegalArgumentException for an invalid region list, height, or regions that touch.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT itself fails.
+     */
+    fun extrudeRegions(
+        regions: List<ProfileRegion>,
+        height: Double,
+    ): OcctShape {
+        RegionValidation.validateDisjoint(regions)
+        return combineRegions(regions) { extrudeRegion(it, height) }
+    }
+
+    /**
+     * Revolves several disjoint regions, see [extrudeRegions] and [revolveRegion].
+     *
+     * Regions that are disjoint in 2D can still produce solids that touch or overlap once revolved: two
+     * regions mirrored about the revolve axis (for example x in [1, 2] and x in [-2, -1] about Y) make
+     * identical rings, and the combination fails with an [IllegalArgumentException] ("touch or overlap").
+     */
+    fun revolveRegions(
+        regions: List<ProfileRegion>,
+        angleDegrees: Double = 360.0,
+        axis: RevolveAxis = RevolveAxis.Y,
+    ): OcctShape {
+        RegionValidation.validateDisjoint(regions)
+        return combineRegions(regions) { revolveRegion(it, angleDegrees, axis) }
+    }
+
+    private fun combineRegions(
+        regions: List<ProfileRegion>,
+        build: (ProfileRegion) -> OcctShape,
+    ): OcctShape {
+        if (regions.size == 1) return build(regions[0])
+        val parts = ArrayList<OcctShape>(regions.size)
+        try {
+            regions.forEach { parts.add(build(it)) }
+            requireAvailable()
+            val handles = LongArray(parts.size)
+            // Handles are read through withHandle one by one; the native call re-validates every one.
+            parts.forEachIndexed { i, part -> part.withHandle { handles[i] = it } }
+            val handle =
+                try {
+                    OcctBridge.nativeMakeCompound(handles)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to combine ${parts.size} bodies", e)
+                }
+            return OcctShape(handle)
+        } finally {
+            parts.forEach { it.close() }
+        }
+    }
+
+    /**
+     * Volume and face count of every solid of [shape] (at most 1024 solids), in the order OCCT enumerates
+     * them -- the per-body view of a multi-body shape (ADR-0032).
+     *
+     * @throws OcctUnavailableException if the native bridge is not available.
+     */
+    fun solidSummaries(shape: OcctShape): List<SolidSummary> {
+        requireAvailable()
+        val raw = shape.withHandle { OcctBridge.nativeSolidSummaries(it) }
+        return List(raw.size / 2) { SolidSummary(raw[2 * it], raw[2 * it + 1].toInt()) }
     }
 
     private fun requireFilletArguments(

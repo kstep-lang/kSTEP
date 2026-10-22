@@ -511,6 +511,21 @@ internal fun importJson(
                                 } ?: JsonNull,
                             )
                             put("boundingBox", jsonBox(p.boundingBox))
+                            p.bodies?.let { bodies ->
+                                put(
+                                    "bodies",
+                                    buildJsonArray {
+                                        bodies.forEach { b ->
+                                            add(
+                                                buildJsonObject {
+                                                    put("volume", jsonNum(b.volume))
+                                                    put("faces", b.faces)
+                                                },
+                                            )
+                                        }
+                                    },
+                                )
+                            }
                         },
                     )
                 }

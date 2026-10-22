@@ -435,3 +435,9 @@ symmetry constraints and a proper request/response data model -- but is no
 longer motivated by any remaining gap in `Parallel`/`Perpendicular`
 support, both of which ADR-0014 already fully serves via the index-pair
 encoding every other constraint in this module uses.
+
+== Update (ADR-0032)
+
+The wire-format kind table has grown: kinds 7-12 (radius, equal scalar, point on circle, line/circle and circle/circle
+tangent, angle) and scalar unknowns arrive with the second native entry point `nativeSolveSystem`; see ADR-0032.
+`nativeSolveConstraints` is unchanged and remains a wrapper for kinds 0-6.

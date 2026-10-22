@@ -14,12 +14,15 @@ package dev.kstep.constraints.planegcs
  * public [dev.kstep.constraints.PlaneGcsSolver] API surface.
  *
  * @property nativeValue the raw `int` sent to native code as one entry of `constraintKinds`.
+ * @property scalarArity how many of the two `constraintScalars` slots this kind uses (scalar
+ *   unknowns such as radii, see `docs/adr/ADR-0032`); the rest must be exactly `-1`.
  * @property arity how many of the four `constraintPoints` slots this kind actually uses; the
  *   remaining `4 - arity` slots must be encoded as exactly `-1` (see [POINT_SLOTS]).
  */
 internal enum class NativeConstraintKind(
     val nativeValue: Int,
     val arity: Int,
+    val scalarArity: Int = 0,
 ) {
     P2P_DISTANCE(nativeValue = 0, arity = 2),
     P2P_COINCIDENT(nativeValue = 1, arity = 2),
@@ -28,6 +31,12 @@ internal enum class NativeConstraintKind(
     POINT_ON_LINE(nativeValue = 4, arity = 3),
     PARALLEL(nativeValue = 5, arity = 4),
     PERPENDICULAR(nativeValue = 6, arity = 4),
+    RADIUS(nativeValue = 7, arity = 0, scalarArity = 1),
+    EQUAL_SCALAR(nativeValue = 8, arity = 0, scalarArity = 2),
+    POINT_ON_CIRCLE(nativeValue = 9, arity = 2, scalarArity = 1),
+    TANGENT_LINE_CIRCLE(nativeValue = 10, arity = 3, scalarArity = 1),
+    TANGENT_CIRCLE_CIRCLE(nativeValue = 11, arity = 2, scalarArity = 2),
+    L2L_ANGLE(nativeValue = 12, arity = 4),
     ;
 
     internal companion object {
@@ -44,6 +53,9 @@ internal enum class NativeConstraintKind(
 
         /** Sentinel written into an unused `constraintPoints` slot; see [POINT_SLOTS]. */
         const val UNUSED_POINT_SLOT: Int = -1
+
+        /** Number of scalar-index slots per constraint in `constraintScalars`. */
+        const val SCALAR_SLOTS: Int = 2
 
         /** Sentinel written into `constraintParams` for a kind that takes no scalar parameter. */
         const val UNUSED_PARAM: Double = 0.0

@@ -34,6 +34,30 @@ object StepImporter {
     internal const val NON_RIGID_WARNING =
         "some placements carry scaling, a reflection or numeric noise; those occurrences are not placed"
 
+    /** Upper bound of solids per part for which a per-body summary is computed (mirrors the native limit). */
+    internal const val MAX_BODY_SUMMARIES = 1024
+
+    /**
+     * Per-solid summary of a multi-solid part, or `null` for a single-solid part. A part with more than
+     * [limit] solids gets no summary and a warning instead of failing the whole import. Computing the
+     * summary takes the native lock and one VolumeProperties pass per solid, so up to [limit] solids add
+     * noticeable import time; this is accepted.
+     */
+    internal fun bodiesOf(
+        shape: OcctShape,
+        partName: String,
+        warnings: MutableList<String>,
+        limit: Int = MAX_BODY_SUMMARIES,
+    ): List<ImportedBody>? {
+        val solids = shape.topology.solids
+        if (solids <= 1) return null
+        if (solids > limit) {
+            warnings.add("bodies omitted for part '$partName': $solids solids exceed $limit")
+            return null
+        }
+        return OcctKernel.solidSummaries(shape).map { ImportedBody(it.volume, it.faces) }
+    }
+
     /** A Kotlin-side structural limit (assembly depth, expanded occurrence count) was exceeded. */
     internal class LimitExceeded(
         message: String,
@@ -147,6 +171,7 @@ object StepImporter {
                     volume = shape?.volume,
                     topology = shape?.topology,
                     boundingBox = shape?.boundingBox,
+                    bodies = shape?.let { bodiesOf(it, node.name, warnings) },
                 ),
             )
         }

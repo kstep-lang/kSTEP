@@ -318,4 +318,13 @@ object OcctBridge {
         angleDegrees: Double,
         axis: Int,
     ): Long
+
+    /**
+     * Combines 1..32 registered single-solid shapes into one compound of independent copies; touching or
+     * overlapping parts are rejected with `IllegalArgumentException` (ADR-0032).
+     */
+    external fun nativeMakeCompound(handles: LongArray): Long
+
+    /** `[volume, faceCount]` for every solid of the shape (at most 1024 solids), ADR-0032. */
+    external fun nativeSolidSummaries(handle: Long): DoubleArray
 }

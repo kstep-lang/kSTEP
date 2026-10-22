@@ -22,8 +22,11 @@ import kotlin.math.hypot
  * those coordinates, not from the constraint: `distance` and `length` are unsigned magnitudes.
  * Every constraint must reference points created by THIS builder.
  *
- * Circle and arc radii are fixed measures in this version, not solver unknowns; tangency, equal
- * radius and angle constraints are not available yet.
+ * **Radii** are fixed measures by default (`fixedRadius = true`). With `fixedRadius = false` a
+ * radius becomes a solver unknown that [radius], [diameter], [equalRadius] and the tangent
+ * constraints can determine; the start value then only seeds the solver. Tangency decided by the
+ * solver depends on the start values (which side of a line, inside or outside of a circle), see
+ * [tangent].
  */
 class SketchBuilder internal constructor() {
     private val token = Any()
@@ -31,6 +34,7 @@ class SketchBuilder internal constructor() {
     private val lines = ArrayList<SketchLineData>()
     private val arcs = ArrayList<SketchArcData>()
     private val circles = ArrayList<SketchCircleData>()
+    private val scalars = ArrayList<SketchScalarData>()
     private val constraints = ArrayList<SketchConstraintData>()
 
     /**
@@ -60,8 +64,9 @@ class SketchBuilder internal constructor() {
 
     /**
      * Adds a circular arc around [center] from [start] to [end], going counter-clockwise when [ccw]
-     * (else clockwise). Implies the two fixed-radius constraints `|center start| = radius` and
-     * `|center end| = radius`.
+     * (else clockwise). Implies the two constraints `|center start| = radius` and
+     * `|center end| = radius`. With `fixedRadius = false` the radius is a solver unknown that [radius],
+     * [equalRadius] or [tangent] constraints determine; [radius] is then only its start value.
      */
     fun arc(
         center: SketchPointRef,
@@ -69,6 +74,7 @@ class SketchBuilder internal constructor() {
         end: SketchPointRef,
         radius: Double,
         ccw: Boolean = true,
+        fixedRadius: Boolean = true,
     ): SketchArcRef {
         own(center)
         own(start)
@@ -78,36 +84,165 @@ class SketchBuilder internal constructor() {
         }
         requireRadius(radius)
         limitSegments()
-        arcs.add(SketchArcData(center.index, start.index, end.index, radius, ccw))
+        val scalar = addScalar(radius, fixedRadius, "radius of arc ${nameOf(start.index)}-${nameOf(end.index)}")
+        arcs.add(SketchArcData(center.index, start.index, end.index, scalar, ccw))
+        val suffix = if (fixedRadius) "=$radius" else ""
         addConstraint(
-            DistanceData(
-                center.index,
+            PointOnCircleData(
                 start.index,
-                radius,
-                "arc radius ${nameOf(center.index)}-${nameOf(start.index)}=$radius",
+                center.index,
+                scalar,
+                "arc radius ${nameOf(center.index)}-${nameOf(start.index)}$suffix",
             ),
         )
         addConstraint(
-            DistanceData(
-                center.index,
+            PointOnCircleData(
                 end.index,
-                radius,
-                "arc radius ${nameOf(center.index)}-${nameOf(end.index)}=$radius",
+                center.index,
+                scalar,
+                "arc radius ${nameOf(center.index)}-${nameOf(end.index)}$suffix",
             ),
         )
-        return SketchArcRef(token, arcs.size - 1)
+        return SketchArcRef(token, arcs.size - 1, center, scalar)
     }
 
-    /** Adds a full circle around [center]; the radius is a fixed measure. */
+    /**
+     * Adds a full circle around [center]. The radius is a fixed measure unless `fixedRadius = false`,
+     * in which case [radius] only seeds the solver and a [radius]/[diameter]/[equalRadius]/[tangent]
+     * constraint must determine it. [name] only appears in diagnostics.
+     */
     fun circle(
         center: SketchPointRef,
         radius: Double,
+        fixedRadius: Boolean = true,
+        name: String? = null,
     ): SketchCircleRef {
         own(center)
         requireRadius(radius)
         limitSegments()
-        circles.add(SketchCircleData(center.index, radius))
-        return SketchCircleRef(token, circles.size - 1)
+        val label = name ?: "circle@${nameOf(center.index)}"
+        require(label.length <= MAX_NAME_LENGTH && label.all { it.code in 0x20..0x7E }) {
+            fail(
+                SketchErrorKind.INVALID_INPUT,
+                "a circle name must be at most $MAX_NAME_LENGTH printable ASCII characters",
+            )
+        }
+        val scalar = addScalar(radius, fixedRadius, "radius of $label")
+        circles.add(SketchCircleData(center.index, scalar, label))
+        return SketchCircleRef(token, circles.size - 1, center, scalar)
+    }
+
+    /** Fixes the radius of a circle or arc to [value]; the shape must have been created with `fixedRadius = false`. */
+    fun radius(
+        shape: SketchRoundRef,
+        value: Double,
+    ) {
+        ownRound(shape)
+        requireRadius(value)
+        addConstraint(RadiusData(shape.scalar, value, "radius(${roundName(shape)})=$value"))
+    }
+
+    /** Fixes the diameter of a circle or arc to [value] (stored as radius `value / 2`). */
+    fun diameter(
+        shape: SketchRoundRef,
+        value: Double,
+    ) {
+        ownRound(shape)
+        requireRadius(value / 2.0)
+        addConstraint(RadiusData(shape.scalar, value / 2.0, "diameter(${roundName(shape)})=$value"))
+    }
+
+    /** Makes two circles/arcs equal in radius. */
+    fun equalRadius(
+        a: SketchRoundRef,
+        b: SketchRoundRef,
+    ) {
+        ownRound(a)
+        ownRound(b)
+        require(a.scalar != b.scalar) { fail(SketchErrorKind.INVALID_INPUT, "equalRadius needs two different shapes") }
+        addConstraint(EqualRadiusData(a.scalar, b.scalar, "equalRadius(${roundName(a)}, ${roundName(b)})"))
+    }
+
+    /**
+     * Makes the INFINITE line through [line] tangent to a circle or arc (not just the segment). Which
+     * side of the line the circle lies on, comes from the start values; the centre must not be an end
+     * point of the line.
+     */
+    fun tangent(
+        line: SketchLineRef,
+        shape: SketchRoundRef,
+    ) {
+        own(line)
+        ownRound(shape)
+        own(line.from)
+        own(line.to)
+        require(shape.center.index != line.from.index && shape.center.index != line.to.index) {
+            fail(SketchErrorKind.INVALID_INPUT, "tangent: the centre must not be an end point of the line")
+        }
+        addConstraint(
+            TangentLineData(
+                line.from.index,
+                line.to.index,
+                shape.center.index,
+                shape.scalar,
+                "tangent(${lineName(line)}, ${roundName(shape)})",
+            ),
+        )
+    }
+
+    /**
+     * Makes two circles/arcs tangent: externally touching, or with [internal] one inside the other.
+     * Both centres must start at different coordinates.
+     *
+     * With [internal] = true and two EQUAL radii (for example via [equalRadius] or two [radius] constraints)
+     * the circles would have to be concentric, which makes the tangency gradient degenerate (0/0): the
+     * solver then fails with a generic `SOLVER_FAILED`. Do not combine the two.
+     */
+    fun tangent(
+        a: SketchRoundRef,
+        b: SketchRoundRef,
+        internal: Boolean = false,
+    ) {
+        ownRound(a)
+        ownRound(b)
+        require(a.scalar != b.scalar && a.center.index != b.center.index) {
+            fail(SketchErrorKind.INVALID_INPUT, "tangent needs two different circles/arcs with different centres")
+        }
+        addConstraint(
+            TangentCirclesData(
+                a.center.index,
+                a.scalar,
+                b.center.index,
+                b.scalar,
+                internal,
+                "tangent(${roundName(a)}, ${roundName(b)}${if (internal) ", internal" else ""})",
+            ),
+        )
+    }
+
+    /**
+     * Fixes the angle from the direction of [l1] to the direction of [l2] to [degrees], counter-clockwise
+     * positive, within (-180, 180]. The lines may share an end point.
+     */
+    fun angle(
+        l1: SketchLineRef,
+        l2: SketchLineRef,
+        degrees: Double,
+    ) {
+        distinctLines(l1, l2)
+        require(degrees.isFinite() && degrees > -180.0 && degrees <= 180.0) {
+            fail(SketchErrorKind.INVALID_INPUT, "angle must be finite and within (-180, 180] degrees, got $degrees")
+        }
+        addConstraint(
+            AngleData(
+                l1.from.index,
+                l1.to.index,
+                l2.from.index,
+                l2.to.index,
+                Math.toRadians(degrees),
+                "angle(${lineName(l1)}, ${lineName(l2)})=$degrees",
+            ),
+        )
     }
 
     /**
@@ -299,6 +434,7 @@ class SketchBuilder internal constructor() {
             lines.toList(),
             arcs.toList(),
             circles.toList(),
+            scalars.toList(),
             constraints.toList(),
             token,
         )
@@ -342,6 +478,29 @@ class SketchBuilder internal constructor() {
         }
         constraints.add(c)
     }
+
+    private fun addScalar(
+        initial: Double,
+        fixed: Boolean,
+        label: String,
+    ): Int {
+        if (scalars.size >= PlaneGcsSolver.MAX_SCALARS) {
+            throw SketchException(
+                SketchErrorKind.LIMIT_EXCEEDED,
+                "a sketch may have at most ${PlaneGcsSolver.MAX_SCALARS} circles and arcs",
+            )
+        }
+        scalars.add(SketchScalarData(initial, fixed, label))
+        return scalars.size - 1
+    }
+
+    private fun ownRound(r: SketchRoundRef) {
+        require(r.owner === token && r.scalar in scalars.indices) {
+            fail(SketchErrorKind.INVALID_INPUT, "a circle or arc reference belongs to a different sketch")
+        }
+    }
+
+    private fun roundName(r: SketchRoundRef) = scalars[r.scalar].label.removePrefix("radius of ")
 
     private fun limitSegments() {
         if (lines.size + arcs.size + circles.size >= MAX_SEGMENTS) {

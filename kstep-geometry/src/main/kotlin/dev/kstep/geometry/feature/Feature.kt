@@ -142,6 +142,19 @@ data class RevolveRegionFeature(
     val axis: RevolveAxis = RevolveAxis.Y,
 ) : Feature
 
+/** Replays [dev.kstep.geometry.OcctKernel.extrudeRegions] (Welle M, ADR-0032): several disjoint regions as separate bodies. */
+data class ExtrudeRegionsFeature(
+    val regions: List<ProfileRegion>,
+    val height: Double,
+) : Feature
+
+/** Replays [dev.kstep.geometry.OcctKernel.revolveRegions] (Welle M, ADR-0032). */
+data class RevolveRegionsFeature(
+    val regions: List<ProfileRegion>,
+    val angleDegrees: Double = 360.0,
+    val axis: RevolveAxis = RevolveAxis.Y,
+) : Feature
+
 /**
  * Which edges a [SelectedFilletFeature] / [SelectedChamferFeature] acts on, described
  * geometrically instead of by opaque index (Welle L, ADR-0031).

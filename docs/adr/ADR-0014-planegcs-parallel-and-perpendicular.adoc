@@ -395,3 +395,9 @@ equal-length, and equal-radius constraints and a proper request/response
 data model -- not motivated by any remaining gap in `Parallel`/
 `Perpendicular` support, both of which are now fully served by the
 index-pair encoding this ADR ships.
+
+== Update (ADR-0032)
+
+The wire-format kind table has grown: kinds 7-12 (radius, equal scalar, point on circle, line/circle and circle/circle
+tangent, angle) and scalar unknowns arrive with the second native entry point `nativeSolveSystem`; see ADR-0032.
+`nativeSolveConstraints` is unchanged and remains a wrapper for kinds 0-6.

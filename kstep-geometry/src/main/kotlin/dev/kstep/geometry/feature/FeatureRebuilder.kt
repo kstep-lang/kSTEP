@@ -107,6 +107,9 @@ object FeatureRebuilder {
                 } catch (e: OcctGeometryException) {
                     built.forEach { it.close() }
                     throw wrapFailure(index, feature, built, e)
+                } catch (e: ExternalFeatureException) {
+                    built.forEach { it.close() }
+                    throw wrapFailure(index, feature, built, e)
                 } catch (e: IllegalStateException) {
                     // Defensive, not reachable through this function's own current usage pattern
                     // (every shape built so far is held strongly in `built`, and nothing else
@@ -173,6 +176,10 @@ object FeatureRebuilder {
             is ChamferFeature -> OcctKernel.chamfer(built[feature.baseIndex], feature.edgeIndices, feature.distance)
             is ExtrudeRegionFeature -> OcctKernel.extrudeRegion(feature.region, feature.height)
             is RevolveRegionFeature -> OcctKernel.revolveRegion(feature.region, feature.angleDegrees, feature.axis)
+            is ExtrudeRegionsFeature -> OcctKernel.extrudeRegions(feature.regions, feature.height)
+            is RevolveRegionsFeature ->
+                OcctKernel.revolveRegions(feature.regions, feature.angleDegrees, feature.axis)
+            is ExternalRootFeature -> buildExternal(feature)
             is SelectedFilletFeature ->
                 OcctKernel.fillet(
                     built[feature.baseIndex],
@@ -185,6 +192,26 @@ object FeatureRebuilder {
                     resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
                     feature.distance,
                 )
+        }
+
+    /**
+     * Runs an [ExternalRootFeature]. Argument and geometry failures pass through unchanged (they are
+     * wrapped by [rebuild] like those of any other feature); any other runtime failure is labelled and
+     * wrapped in an [ExternalFeatureException] so that [rebuild] still closes every shape built so far.
+     */
+    private fun buildExternal(feature: ExternalRootFeature): OcctShape =
+        try {
+            feature.buildShape()
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (e: OcctGeometryException) {
+            throw e
+        } catch (e: IllegalStateException) {
+            throw e
+        } catch (e: dev.kstep.geometry.OcctUnavailableException) {
+            throw e
+        } catch (e: RuntimeException) {
+            throw ExternalFeatureException("feature '${feature.label}' failed: ${e.message}", e)
         }
 
     /** Builds a feature that lies on a tracked-edge path, keeping the edge history OCCT recorded for it. */
@@ -248,6 +275,9 @@ object FeatureRebuilder {
             is RevolveFeature,
             is ExtrudeRegionFeature,
             is RevolveRegionFeature,
+            is ExtrudeRegionsFeature,
+            is RevolveRegionsFeature,
+            is ExternalRootFeature,
             ->
                 error("feature[$index] (${feature::class.simpleName}) cannot be built with edge history")
         }

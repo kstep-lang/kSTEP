@@ -27,6 +27,9 @@ dependencies {
     // kstep-constraints/build.gradle.kts (PlaneGcsNativeLibrary.resolveLibraryPath).
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
+    // kstep-geometry's OcctNativeLibrary logs through kotlin-logging -> SLF4J; without a provider on the
+    // test runtime class path, loading it fails with NoClassDefFoundError (see kstep-geometry/build.gradle.kts).
+    testRuntimeOnly(libs.slf4j.simple)
 }
 
 tasks.withType<Test>().configureEach {

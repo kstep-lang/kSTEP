@@ -686,3 +686,9 @@ from the separate planning-phase run described above.
   browser-facing kSTEP frontend -- symmetric to the JNI-first,
   WASM/Panama-later sequencing ADR-0005 already chose for OCCT.
 |===
+
+== Update (ADR-0032)
+
+The wire-format kind table has grown: kinds 7-12 (radius, equal scalar, point on circle, line/circle and circle/circle
+tangent, angle) and scalar unknowns arrive with the second native entry point `nativeSolveSystem`; see ADR-0032.
+`nativeSolveConstraints` is unchanged and remains a wrapper for kinds 0-6.

@@ -13,7 +13,11 @@ import kotlin.math.hypot
 data class SolveResult(
     val status: SolveStatus,
     val points: List<SketchPoint>,
+    val scalars: List<SketchScalar> = emptyList(),
 ) {
+    /** The solved value of scalar [i] (see [PlaneGcsSolver.solve] with `scalars`). */
+    fun scalar(i: Int): Double = scalars[i].value
+
     /** `true` when [status] is [SolveStatus.SUCCESS] or [SolveStatus.CONVERGED]. */
     val solved: Boolean
         get() = status == SolveStatus.SUCCESS || status == SolveStatus.CONVERGED

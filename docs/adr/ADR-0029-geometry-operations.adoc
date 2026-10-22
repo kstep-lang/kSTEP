@@ -23,6 +23,8 @@ and no boss or pocket at a given place; without booleans there is no hole.
 * *Single-solid rule.* A result with several disjoint solids (union of separated boxes, a cut that
   severs a part) is rejected with `OcctGeometryException` ("multi-body"): the exporter (ADR-0027) and
   `ShapeTopology` assume exactly one `MANIFOLD_SOLID_BREP`. Multi-body compounds are a follow-up.
+  (Multi-body *extrude/revolve* results from separate sketch contours are covered by ADR-0032; the boolean rule
+  above is unchanged.)
 * *Empty results.* No solid volume at all (common of disjoint solids, `cut(a, a)`) throws the new
   `OcctEmptyResultException`, a subclass of `OcctGeometryException` (which is therefore now `open`; this
   is source- and binary-compatible). The native side throws that class directly via
