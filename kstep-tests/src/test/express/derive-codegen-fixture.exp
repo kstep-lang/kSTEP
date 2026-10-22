@@ -1,0 +1,48 @@
+(*
+ * Fixture for DerivedAttributeRuntimeParityTest (ADR-0021): every DERIVE below is inside the
+ * supported subset, so STRICT codegen accepts the whole schema. The generated Kotlin is compiled
+ * into the test source set (Gradle task generateDeriveFixtureKotlin) and each generated property
+ * is compared with dev.kstep.express.validation.DerivedAttributeEvaluator.
+ *)
+SCHEMA derive_codegen_fixture;
+
+ENTITY shape_info;
+  title  : STRING;
+  count  : INTEGER;
+  weight : REAL;
+  flag   : BOOLEAN;
+  note   : OPTIONAL STRING;
+  pinned : INTEGER;
+DERIVE
+  title_alias    : STRING  := title;
+  note_alias     : STRING  := note;
+  has_note       : BOOLEAN := EXISTS(note);
+  has_title      : BOOLEAN := EXISTS(SELF.title);
+  is_big         : BOOLEAN := count > 10;
+  is_heavy       : BOOLEAN := weight >= count;
+  is_x           : BOOLEAN := title = 'x';
+  title_order    : BOOLEAN := title < 'm';
+  flag_alias     : BOOLEAN := flag;
+  flag_equal     : BOOLEAN := flag = (count > 1);
+  combo          : BOOLEAN := (count > 1) AND ((weight < 2.5) OR NOT (flag));
+  count_as_real  : REAL    := count;
+  weight_literal : REAL    := 2;
+  neg_check      : BOOLEAN := weight > -1.5;
+  escaped_text   : STRING  := 'cost $5 "q" \ ${System.exit(1)} """';
+  chain_a        : BOOLEAN := is_big;
+  chain_b        : BOOLEAN := NOT (chain_a);
+  qualified      : INTEGER := SELF\shape_info.count;
+  pinned_big     : BOOLEAN := pinned > 5;
+END_ENTITY;
+
+ENTITY special_info
+  SUBTYPE OF (shape_info);
+  extra : INTEGER;
+DERIVE
+  SELF\shape_info.title_alias : STRING := 'overridden';
+  SELF\shape_info.pinned      : INTEGER := 7;
+  extra_big                   : BOOLEAN := extra > pinned;
+  base_qualified              : INTEGER := SELF\shape_info.count;
+END_ENTITY;
+
+END_SCHEMA;

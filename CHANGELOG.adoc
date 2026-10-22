@@ -1,0 +1,65 @@
+= Changelog
+:toc:
+
+All notable changes to kSTEP are documented here. The project follows
+https://semver.org[Semantic Versioning]; while the major version is `0`, the API is unstable and
+minor versions may contain breaking changes.
+
+== 0.1.0 — 2026-10-19 (pre-release)
+
+First tagged release. It is a *pre-release*: no artifacts are published (Maven Central, etc.), and
+the native geometry bridges need system libraries (OpenCascade for the OCCT modules, Eigen headers
+for PlaneGCS) and are only verified on Linux x86-64. CI runs on Linux only; the semantic core was
+additionally built and tested locally on macOS (geometry tests skipped there). Build from source,
+see the README.
+
+=== Semantic core (ISO 10303 AP242)
+
+* EXPRESS parser (ANTLR4, `Express.g4`) and a semantic model with Kotlin code generation, verified
+  against an excerpt of the real AP242 schema, now sixteen entities
+  (`product_definition_occurrence` and the `name`/`description`/`id` attribute entities included).
+* Code generation resolves transitive `TYPE` alias chains (cycle- and depth-guarded),
+  `ENUMERATION OF (...)` as Kotlin enum classes and closed `SELECT` types as sealed interfaces
+  (ADR-0020). `EXTENSIBLE` and `BASED_ON` types are rejected loudly. Only types reachable from the
+  emitted entities are generated.
+* `SUBTYPE OF` inheritance flattening; `kstep-core` is an ergonomic validating layer over the
+  generated types (ADR-0004).
+* `DERIVE` attributes as computed properties on generated types (ADR-0021); `get_name_value`,
+  `get_description_value` and `get_id_value` intrinsics and the population derives (ADR-0023).
+* `WHERE`-rule evaluation including `USEDIN`/`SIZEOF`, `INVERSE` evaluation over a
+  reverse-reference index, `UNIQUE` rules `UR1`/`UR2` and the acyclic `WR1` check for assemblies,
+  all with size and depth limits (ADR-0022, ADR-0023). Structured violations with stable
+  `KSTEP-*` codes; `Ap242ModelValidator` for whole-model checks (opt-in, not yet part of
+  `kstep export`).
+* Mandatory-attribute presence enforcement (`KSTEP-M-001`, `KSTEP-M-002`).
+
+=== STEP Part 21 and tooling
+
+* STEP Part 21 writer and reader (`kstep-step21`), including tolerant reading and value grammar.
+* `*.kstep.kts` scripting host and the `kstep export` CLI command.
+* `kstep render` headless preview (SVG, PNG, text and self-contained glTF/GLB).
+* `kstep asciidoc`: pre-processing of `kstep` blocks in AsciiDoc documents (ADR-0019).
+* MCP server (`kstep mcp`) exposing the entity builders, Part 21 export and `validate_model` as
+  LLM tools with structured validation feedback.
+
+=== Geometry and viewer (native bridges; Linux x86-64 verified)
+
+* OpenCascade JNI bridge: boxes, extrusion and fillet, AP242 shape assignment, parametric feature
+  history (foundation), triangulation.
+* PlaneGCS 2D constraint solver bridge: coincidence, distance, horizontal/vertical, point-on-line,
+  parallel and perpendicular.
+* Interactive Compose Desktop viewer: orbit, zoom, pan, multi-shape scenes, per-part colors and
+  smooth per-vertex normals (ADR-0018).
+
+=== Known limitations
+
+* No published artifacts; build from source (JDK 21).
+* Part 21 output is verified by self-round-trip only. Interoperability with external CAD/PLM tools
+  (for example FreeCAD) has not been validated; a fixture for the manual check lives in
+  `kstep-tests`.
+* `kstep export` and the script host do not run model-level validation yet; an assembly cycle
+  is not detected on export (exit code 0).
+* `QUERY` and general EXPRESS functions are not evaluated; `INVERSE`/`USEDIN` roles over entities
+  that are not modelled follow the assumptions documented in ADR-0022/0023.
+* The AP242 schema is a vendored excerpt, not the full standard.
+* The LLM benchmark is deferred to a later version.

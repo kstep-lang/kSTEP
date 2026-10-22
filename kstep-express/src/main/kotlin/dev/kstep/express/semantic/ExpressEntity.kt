@@ -2,8 +2,9 @@ package dev.kstep.express.semantic
 
 /**
  * An EXPRESS `entityDecl`, losslessly captured (including constructs V1 codegen refuses to
- * emit -- `DERIVE`, `INVERSE`, `UNIQUE`, and redeclared attributes are all captured here even
- * though `dev.kstep.express.codegen.ExpressKotlinCodeGenerator` never reads them).
+ * emit -- `DERIVE`, `INVERSE`, `UNIQUE`, and redeclared attributes are all captured here;
+ * `dev.kstep.express.codegen.ExpressKotlinCodeGenerator` translates the supported subset of
+ * `DERIVE` to computed properties (ADR-0021) and does not read the other clauses).
  */
 data class ExpressEntity(
     val name: String,

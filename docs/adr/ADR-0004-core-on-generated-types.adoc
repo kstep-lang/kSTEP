@@ -5,6 +5,20 @@
 
 Accepted, implemented (kSTEP M2 Welle 10).
 
+Amended by ADR-0020 (entities may implement member-less marker sealed
+interfaces for SELECT membership; they remain flat `data class`es).
+
+Amended by ADR-0021 (generated entities may carry computed getter properties for
+supported `DERIVE` attributes in the class body; they are not constructor parameters and
+not part of `equals`/`hashCode`/`copy`/`toString`; an inherited explicit attribute that a
+subtype redeclares as DERIVE leaves the constructor).
+
+Amended by ADR-0022 (a population-level `Ap242ModelValidator` checks the constraints that need
+the instance graph -- `SIZEOF(USEDIN(...))` WHERE rules and `INVERSE` bounds; builders and
+constructors are unchanged).
+
+Amended by ADR-0023: `kstep-core` now wraps sixteen generated entities (the twelve described here plus `product_definition_occurrence`, `name_attribute`, `description_attribute`, `id_attribute`); every "twelve" below is the count before that wave.
+
 == Context
 
 M2 Welle 8 closed the *known* gap between `kstep-core`'s six
@@ -127,8 +141,8 @@ codegen level instead of losing it by switching to generated types.
 * *Breaking changes, no migration path needed.* The Part-21 wire format
   (`kstep-step21`) and the `kstep-mcp` tool contract both change
   incompatibly (new/changed argument arity and shapes throughout). No
-  migration path is provided or needed: the project is pre-1.0
-  (`0.1.0-SNAPSHOT`), unreleased, with no persisted `.step` files or
+  migration path is provided or needed: at the time of this
+  decision the project was pre-1.0 (`0.1.0-SNAPSHOT`) and unreleased, with no persisted `.step` files or
   deployed MCP clients to preserve compatibility for.
 * *No schema or license-boundary change.* All twelve entities' EXPRESS
   declarations were already vendored in `ap242-v1-entities.exp` and

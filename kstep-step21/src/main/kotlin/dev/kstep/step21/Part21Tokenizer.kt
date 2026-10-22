@@ -178,7 +178,7 @@ internal object Part21Tokenizer {
                     "entity '${kind.entityName}' (#$id) expects ${kind.args.size} argument(s) but found ${args.size}",
                 )
             }
-            args.forEachIndexed { index, value -> checkArgShape(kind, id, index, value) }
+            args.forEachIndexed { index, value -> checkArgShape(kind, id, index, value, mode) }
         } else if (mode == Part21ReadMode.STRICT) {
             throw Part21SyntaxException(
                 "unknown entity name '${truncateForMessage(rawName)}' for instance #$id at line $sourceLine " +
@@ -234,8 +234,21 @@ internal object Part21Tokenizer {
         id: Int,
         index: Int,
         value: Part21Value,
+        mode: Part21ReadMode,
     ) {
         val spec = kind.args[index]
+        if (spec.kind == Part21ArgKind.UNSET_ONLY) {
+            // A real-schema attribute kSTEP does not model (ADR-0023): '$' is the only representable value.
+            // STRICT rejects anything else, naming instance and position; TOLERANT accepts the token here and
+            // Part21GraphResolver keeps the whole instance opaque (Part21EntityKind.hasUnrepresentableValue).
+            if (value !is Part21Value.Unset && mode == Part21ReadMode.STRICT) {
+                throw Part21SyntaxException(
+                    "entity '${kind.entityName}' (#$id) argument ${index + 1} is an attribute kSTEP does not " +
+                        "model and must be '\$' but was ${describeShape(value)}",
+                )
+            }
+            return
+        }
         if (value is Part21Value.Unset) {
             if (!spec.optional) {
                 throw Part21SyntaxException(
@@ -252,6 +265,7 @@ internal object Part21Tokenizer {
                     value is Part21Value.ListValue && value.items.all { it is Part21Value.Str }
                 Part21ArgKind.REFERENCE_LIST ->
                     value is Part21Value.ListValue && value.items.all { it is Part21Value.Ref }
+                Part21ArgKind.UNSET_ONLY -> false // handled (and returned) above
             }
         if (!matches) {
             throw Part21SyntaxException(

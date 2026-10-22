@@ -2,24 +2,39 @@ package dev.kstep.express.codegen
 
 import com.squareup.kotlinpoet.FileSpec
 import com.squareup.kotlinpoet.KModifier
+import com.squareup.kotlinpoet.TypeSpec
 import dev.kstep.express.semantic.ExpressSchema
 import dev.kstep.express.semantic.ExpressSemanticModelBuilder
 import dev.kstep.express.semantic.InheritanceResolver
 import dev.kstep.express.semantic.ResolvedEntity
+import dev.kstep.express.validation.SchemaFunctionIntrinsicSet
 import java.io.File
 
 /**
- * Regenerates the six V1 AP242 entities from the real-schema extraction bundled at
+ * Regenerates the sixteen V1 AP242 entities (ADR-0023) from the real-schema extraction bundled at
  * [SCHEMA_RESOURCE_PATH] (see that file's header comment for provenance). Backs both the
  * `generateExpressKotlin` Gradle task (see kstep-express/build.gradle.kts, via [main] below)
  * and `kstep-tests`' `Ap242V1CodeGenTest`, which drives [generate] directly for per-entity
  * assertions the Gradle task's own success/failure counts can't express.
+ *
+ * Only ENUMERATION/SELECT TYPEs *reachable* from the emitted entities are written out
+ * ([DefinedTypeScope.REACHABLE_FROM_EMITTED_ENTITIES], enforced here regardless of what the caller
+ * passes); the full TYPE list still serves as the resolution map. The four SELECTs of the bundled
+ * extraction are all reachable (see `EXPECTED_EMITTED_DEFINED_TYPES`). Every generated top-level type name is
+ * also checked against [KSTEP_CORE_RESERVED_CLASS_NAMES], the hand-written types of `dev.kstep.core`
+ * and `dev.kstep.core.ap242`, which import the generated package explicitly and would otherwise
+ * be silently shadowed or become ambiguous.
  */
 object Ap242V1CodeGen {
     const val SCHEMA_RESOURCE_PATH = "/dev/kstep/express/codegen/ap242-v1-entities.exp"
     const val DEFAULT_PACKAGE_NAME = "dev.kstep.generated.ap242v1"
 
-    /** The six V1 entities this wave's real-schema regeneration targets and reports on. */
+    /**
+     * The sixteen V1 entities this wave's real-schema regeneration targets and reports on: the original six
+     * plus `product_definition_occurrence` and the three `*_attribute` entities (ADR-0023). Eleven entities were
+     * already generated before as targets/supports; the six former support entities are listed in
+     * [SUPPORT_ENTITY_NAMES].
+     */
     val TARGET_ENTITY_NAMES =
         listOf(
             "product",
@@ -28,6 +43,10 @@ object Ap242V1CodeGen {
             "next_assembly_usage_occurrence",
             "approval",
             "person_and_organization",
+            "product_definition_occurrence",
+            "name_attribute",
+            "description_attribute",
+            "id_attribute",
         )
 
     // Not part of TARGET_ENTITY_NAMES (which tracks the six V1 entities this wave reports on)
@@ -50,7 +69,7 @@ object Ap242V1CodeGen {
     // product_definition_usage, assembly_component_usage) are deliberately NOT listed here: nothing
     // in the emitted file references them as an attribute type, so emitting them would add classes
     // with no incoming reference -- they stay resolver-only ancestors, not emitted Kotlin.
-    private val SUPPORT_ENTITY_NAMES =
+    val SUPPORT_ENTITY_NAMES =
         listOf(
             "approval_status",
             "person",
@@ -64,6 +83,17 @@ object Ap242V1CodeGen {
         val fileSpec: FileSpec,
         val generatedEntityNames: List<String>,
         val skipped: Map<String, String>,
+        /** Original EXPRESS names (declaration order) of the ENUMERATION/SELECT TYPEs written to the file. */
+        val emittedDefinedTypeNames: List<String> = emptyList(),
+        /**
+         * DERIVE attributes outside the supported expression subset (ADR-0021), deduplicated by
+         * declaring entity and attribute: they are named limitations, not generated properties.
+         */
+        val unsupportedDerivedAttributes: List<UnsupportedDerivedAttribute> = emptyList(),
+        /** DERIVEs generated as `fun name(scope: DerivedValueScope): String?` (ADR-0023), deduplicated. */
+        val populationDerivedAttributes: List<GeneratedDerivedAttribute> = emptyList(),
+        /** DERIVEs generated as nullable `as?` SELECT-cast chain getters (ADR-0023), deduplicated. */
+        val chainDerivedAttributes: List<GeneratedDerivedAttribute> = emptyList(),
     )
 
     fun loadSchema(): ExpressSchema {
@@ -104,34 +134,157 @@ object Ap242V1CodeGen {
     val CORE_MODULE_OPTIONS =
         CodeGenOptions(constructorVisibility = KModifier.INTERNAL, consistentCopyVisibility = true)
 
+    /**
+     * Top-level type names hand-written in kstep-core's `dev.kstep.core` and `dev.kstep.core.ap242`
+     * packages (plus their `*Kt` file facades), which import `dev.kstep.generated.ap242v1.*`
+     * explicitly; a generated type with one of these names would shadow/ambiguate silently there.
+     * Kept in sync by Ap242V1CodeGenTest's classpath scan.
+     */
+    val KSTEP_CORE_RESERVED_CLASS_NAMES: Set<String> =
+        setOf(
+            "ValidationResult",
+            "DslViolation",
+            "DslViolationCodes",
+            "ProductBuilder",
+            "ProductDefinitionBuilder",
+            "ProductDefinitionFormationBuilder",
+            "NextAssemblyUsageOccurrenceBuilder",
+            "ApprovalBuilder",
+            "ApprovalStatusBuilder",
+            "PersonBuilder",
+            "OrganizationBuilder",
+            "PersonAndOrganizationBuilder",
+            "ProductContextBuilder",
+            "ProductDefinitionContextBuilder",
+            "ApplicationContextBuilder",
+            // Occurrences and attribute entities (ADR-0023).
+            "ProductDefinitionOccurrenceBuilder",
+            "NameAttributeBuilder",
+            "DescriptionAttributeBuilder",
+            "IdAttributeBuilder",
+            "Ap242Population",
+            // Population-level validation (ADR-0022).
+            "Ap242ModelValidator",
+            "Ap242InstanceDescriber",
+            "Ap242V1SchemaContext",
+            "InstanceFinding",
+            "ModelValidationResult",
+            // File facades of the hand-written Kotlin files.
+            "ValidationResultKt",
+            "DslViolationKt",
+            "ApplicationContextKt",
+            "ApprovalKt",
+            "ApprovalStatusKt",
+            "NextAssemblyUsageOccurrenceKt",
+            "OrganizationKt",
+            "PersonKt",
+            "PersonAndOrganizationKt",
+            "ProductKt",
+            "ProductContextKt",
+            "ProductDefinitionKt",
+            "ProductDefinitionContextKt",
+            "ProductDefinitionFormationKt",
+            "ProductDefinitionOccurrenceKt",
+            "NameAttributeKt",
+            "DescriptionAttributeKt",
+            "IdAttributeKt",
+            "Ap242PopulationKt",
+            "WhereRuleViolationMappingKt",
+        )
+
     fun generate(
         packageName: String = DEFAULT_PACKAGE_NAME,
         options: CodeGenOptions = CodeGenOptions(),
+    ): Outcome = generate(loadSchema(), TARGET_ENTITY_NAMES, SUPPORT_ENTITY_NAMES, packageName, options)
+
+    fun generate(
+        schema: ExpressSchema,
+        targetEntityNames: List<String>,
+        supportEntityNames: List<String>,
+        packageName: String,
+        options: CodeGenOptions,
+        reservedClassNames: Set<String> = KSTEP_CORE_RESERVED_CLASS_NAMES,
     ): Outcome {
-        val schema = loadSchema()
+        // Forced like definedTypeScope below: STRICT would make a future unsupported DERIVE throw for the
+        // whole entity instead of being reported (and caught by the drift guard). The AP242 schema-function
+        // intrinsics are forced on: the real AP242 DERIVEs use get_*_value(SELF) (ADR-0023).
+        val effectiveOptions =
+            options.copy(
+                derivedAttributeMode = DerivedAttributeMode.GENERATE_SUPPORTED_REPORT_UNSUPPORTED,
+                schemaFunctionIntrinsics = SchemaFunctionIntrinsicSet.AP242,
+            )
+        ExpressKotlinCodeGenerator.requireNoShadowedIntrinsics(schema, effectiveOptions)
         val definedTypesByLowerName = schema.definedTypes.associateBy { it.name.lowercase() }
         val resolvedEntities: Map<String, ResolvedEntity> = InheritanceResolver.resolve(schema)
 
         val skipped = mutableMapOf<String, String>()
         val generated = mutableListOf<String>()
-        TARGET_ENTITY_NAMES.forEach { name ->
+        targetEntityNames.forEach { name ->
             val resolved =
                 requireNotNull(resolvedEntities[name]) {
-                    "target entity '$name' not found in $SCHEMA_RESOURCE_PATH"
+                    "target entity '$name' not found in the supplied schema"
                 }
             try {
-                ExpressKotlinCodeGenerator.generateEntityType(resolved, packageName, definedTypesByLowerName, options)
+                ExpressKotlinCodeGenerator.generateEntityType(
+                    resolved,
+                    packageName,
+                    definedTypesByLowerName,
+                    effectiveOptions,
+                    resolvedEntities = resolvedEntities,
+                )
                 generated += name
             } catch (e: CodeGenException) {
                 skipped[name] = e.message ?: "codegen limitation with no message"
             }
         }
 
-        val emittedNames = (generated + SUPPORT_ENTITY_NAMES).toSet()
+        val emittedNames = (generated + supportEntityNames).toSet()
         val filteredSchema = schema.copy(entities = schema.entities.filter { it.name in emittedNames })
-        val fileSpec = ExpressKotlinCodeGenerator.generateFile(filteredSchema, packageName, resolvedEntities, options)
-        return Outcome(fileSpec, generated, skipped)
+        // Scope is forced: only reachable TYPEs are emitted, whatever the caller's options say.
+        val scopedOptions = effectiveOptions.copy(definedTypeScope = DefinedTypeScope.REACHABLE_FROM_EMITTED_ENTITIES)
+        val fileResult =
+            ExpressKotlinCodeGenerator.generateFileWithReport(
+                filteredSchema,
+                packageName,
+                resolvedEntities,
+                scopedOptions,
+            )
+        val fileSpec = fileResult.fileSpec
+
+        fileSpec.typeSpecs.forEach { typeSpec ->
+            val name = checkNotNull(typeSpec.name)
+            if (name in reservedClassNames) {
+                throw CodeGenException(
+                    "AP242 codegen: generated ${kindOf(typeSpec)} '$name' collides with a hand-written kstep-core " +
+                        "type of the same name (dev.kstep.core / dev.kstep.core.ap242), which imports the " +
+                        "generated package explicitly; rename/adjust before emitting",
+                )
+            }
+        }
+        val emittedDefinedTypeNames =
+            schema.definedTypes
+                .filter { dt ->
+                    (dt.enumerationItems != null || dt.selectItems != null) &&
+                        fileSpec.typeSpecs.any { it.name == NamingConventions.toClassName(dt.name) }
+                }.map { it.name }
+        val unsupportedDerived = fileResult.unsupportedDerived.distinctBy { it.entity to it.attribute }
+        return Outcome(
+            fileSpec,
+            generated,
+            skipped,
+            emittedDefinedTypeNames,
+            unsupportedDerived,
+            fileResult.populationDerived.distinct(),
+            fileResult.chainDerived.distinct(),
+        )
     }
+
+    private fun kindOf(typeSpec: TypeSpec): String =
+        when {
+            typeSpec.kind == TypeSpec.Kind.INTERFACE -> "SELECT type (sealed interface)"
+            typeSpec.isEnum -> "ENUMERATION type"
+            else -> "entity or wrapper class"
+        }
 
     fun generateAndWrite(
         outputDir: File,
@@ -153,8 +306,79 @@ private val EXPECTED_GENERATED =
         "next_assembly_usage_occurrence",
         "approval",
         "person_and_organization",
+        "product_definition_occurrence",
+        "name_attribute",
+        "description_attribute",
+        "id_attribute",
     )
 private val EXPECTED_SKIPPED = emptySet<String>()
+
+// The four closed SELECT TYPEs of the bundled extraction, all reachable from the emitted entities
+// (ADR-0023). If that changes, the generated kstep-core file changes -- fail loudly.
+val EXPECTED_EMITTED_DEFINED_TYPES =
+    setOf(
+        "name_attribute_select",
+        "description_attribute_select",
+        "id_attribute_select",
+        "product_definition_or_reference",
+    )
+
+// Every real AP242 V1 DERIVE clause is now translated (ADR-0023); a clause that stops being supported
+// must make the generator fail on purpose, never silently disappear from the generated types.
+val EXPECTED_UNSUPPORTED_DERIVED = emptySet<String>()
+
+// The five get_*_value(SELF) DERIVEs, generated as `fun name(scope: DerivedValueScope): String?`.
+val EXPECTED_POPULATION_DERIVED =
+    setOf(
+        "product_definition.name",
+        "application_context.id",
+        "application_context.description",
+        "person_and_organization.name",
+        "person_and_organization.description",
+    )
+
+// The SELECT-cast chain DERIVE, generated as a nullable getter.
+val EXPECTED_CHAIN_DERIVED = setOf("next_assembly_usage_occurrence.product_definition_occurrence_id")
+
+/**
+ * The drift guard of [main] as a function (both directions): returns the list of mismatches, empty when the
+ * [outcome] is exactly what this wave documents. Internal so the test suite can pin the guard itself.
+ */
+fun ap242DriftProblems(
+    outcome: Ap242V1CodeGen.Outcome,
+    expectedUnsupported: Set<String> = EXPECTED_UNSUPPORTED_DERIVED,
+    expectedPopulation: Set<String> = EXPECTED_POPULATION_DERIVED,
+    expectedChain: Set<String> = EXPECTED_CHAIN_DERIVED,
+): List<String> {
+    val problems = mutableListOf<String>()
+
+    fun compare(
+        label: String,
+        actual: Set<String>,
+        expected: Set<String>,
+    ) {
+        if (actual != expected) {
+            problems += "$label: expected $expected but got $actual " +
+                "(missing ${expected - actual}, unexpected ${actual - expected})"
+        }
+    }
+    compare(
+        "unsupported DERIVE attributes",
+        outcome.unsupportedDerivedAttributes.map { "${it.entity}.${it.attribute}" }.toSet(),
+        expectedUnsupported,
+    )
+    compare(
+        "population-dependent DERIVE attributes",
+        outcome.populationDerivedAttributes.map { "${it.entity}.${it.attribute}" }.toSet(),
+        expectedPopulation,
+    )
+    compare(
+        "SELECT-chain DERIVE attributes",
+        outcome.chainDerivedAttributes.map { "${it.entity}.${it.attribute}" }.toSet(),
+        expectedChain,
+    )
+    return problems
+}
 
 // Deliberately plain println, not kotlin-logging (kSTEP M2 Welle 2 scope decision): this main()
 // IS the generateExpressKotlin Gradle task's own console report, the same category of output as
@@ -193,7 +417,22 @@ fun main(args: Array<String>) {
             "${outcome.generatedEntityNames.toSet()} -- the real-schema codegen boundary changed, " +
             "update EXPECTED_GENERATED/EXPECTED_SKIPPED in Ap242V1CodeGen.kt deliberately if this is intended"
     }
+    outcome.unsupportedDerivedAttributes.forEach {
+        println("  skipped-derive: ${it.entity}.${it.attribute} -- ${it.reason}")
+    }
+    outcome.populationDerivedAttributes.forEach { println("  population-derive: ${it.entity}.${it.attribute}") }
+    outcome.chainDerivedAttributes.forEach { println("  chain-derive: ${it.entity}.${it.attribute}") }
+    val driftProblems = ap242DriftProblems(outcome)
+    check(driftProblems.isEmpty()) {
+        "generateExpressKotlin: the supported DERIVE subset drifted: ${driftProblems.joinToString("; ")} -- " +
+            "update the EXPECTED_*_DERIVED sets in Ap242V1CodeGen.kt deliberately if this is intended"
+    }
     check(outcome.skipped.keys == EXPECTED_SKIPPED) {
         "generateExpressKotlin: expected to skip $EXPECTED_SKIPPED but skipped ${outcome.skipped.keys}"
+    }
+    check(outcome.emittedDefinedTypeNames.toSet() == EXPECTED_EMITTED_DEFINED_TYPES) {
+        "generateExpressKotlin: expected to emit defined types $EXPECTED_EMITTED_DEFINED_TYPES but emitted " +
+            "${outcome.emittedDefinedTypeNames} -- the generated kstep-core file changed, update " +
+            "EXPECTED_EMITTED_DEFINED_TYPES in Ap242V1CodeGen.kt deliberately if this is intended"
     }
 }

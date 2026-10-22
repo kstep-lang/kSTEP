@@ -2,6 +2,7 @@ package dev.kstep.tests
 
 import dev.kstep.core.DslViolationCodes
 import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
+import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.mcp.EntityStore
 import dev.kstep.mcp.EntityStoreEntry
 import dev.kstep.mcp.buildServer
@@ -167,8 +168,8 @@ class KStepMcpServerTest :
                     .filterIsInstance<NextAssemblyUsageOccurrence>()
                     .single()
             nauo.id shouldBe "NAUO-001"
-            nauo.relatingProductDefinition.id shouldBe "HSG-001-D"
-            nauo.relatedProductDefinition.id shouldBe "BRK-001-D"
+            (nauo.relatingProductDefinition as ProductDefinition).id shouldBe "HSG-001-D"
+            (nauo.relatedProductDefinition as ProductDefinition).id shouldBe "BRK-001-D"
             nauo.referenceDesignator shouldBe "RD-1"
         }
 
@@ -295,6 +296,12 @@ class KStepMcpServerTest :
                     mapOf("id" to "BRK-001-D", "formation_id" to "BRK-001-F", "frame_of_reference_handle" to pdc),
                 ).isError shouldBe null
 
+            // A usage of a definition within itself would close a cycle (WR1, ADR-0023): use a second definition.
+            client
+                .callTool(
+                    "build_product_definition",
+                    mapOf("id" to "BRK-002-D", "formation_id" to "BRK-001-F", "frame_of_reference_handle" to pdc),
+                ).isError shouldBe null
             val result =
                 client.callTool(
                     "build_next_assembly_usage_occurrence",
@@ -302,7 +309,7 @@ class KStepMcpServerTest :
                         "id" to "NAUO-1",
                         "name" to "bracket usage",
                         "relating_product_definition_id" to "BRK-001-D",
-                        "related_product_definition_id" to "BRK-001-D",
+                        "related_product_definition_id" to "BRK-002-D",
                     ),
                 )
             result.isError shouldBe null
@@ -508,6 +515,116 @@ class KStepMcpServerTest :
                     "ORG-1" to "organization",
                     "PO-1" to "person_and_organization",
                 )
+        }
+
+        "validate_model reports an empty, a valid and an invalid model" {
+            val server = buildServer()
+            val client = connectedClient(server)
+
+            val empty = client.callTool("validate_model", emptyMap())
+            empty.isError shouldBe null
+            empty.structuredContent!!["valid"]!!.jsonPrimitive.content shouldBe "true"
+            empty.structuredContent!!["instanceCount"]!!.jsonPrimitive.int shouldBe 0
+
+            client
+                .callTool(
+                    "build_application_context",
+                    mapOf("handle" to "AC", "application" to "cc"),
+                ).isError shouldBe
+                null
+            val orphan = client.callTool("validate_model", emptyMap())
+            orphan.isError shouldBe null
+            orphan.structuredContent!!["valid"]!!.jsonPrimitive.content shouldBe "false"
+            val finding =
+                orphan.structuredContent!!["findings"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject
+            finding["id"]!!.jsonPrimitive.content shouldBe "AC"
+            finding["entityType"]!!.jsonPrimitive.content shouldBe "application_context"
+            finding["violations"]!!
+                .jsonArray
+                .single()
+                .jsonObject["code"]!!
+                .jsonPrimitive.content shouldBe
+                DslViolationCodes.INVERSE_BOUND_VIOLATED
+            // name/description/id_attribute are modelled since ADR-0023: no unmodelled USEDIN, no assumption.
+            orphan.structuredContent!!["assumptions"]!!.jsonArray shouldHaveSize 0
+
+            client
+                .callTool(
+                    "build_product_context",
+                    mapOf(
+                        "handle" to "PC",
+                        "name" to "e",
+                        "frame_of_reference_handle" to "AC",
+                        "discipline_type" to "m",
+                    ),
+                ).isError shouldBe null
+            val valid = client.callTool("validate_model", emptyMap())
+            valid.structuredContent!!["valid"]!!.jsonPrimitive.content shouldBe "true"
+            valid.structuredContent!!["findings"]!!.jsonArray shouldHaveSize 0
+            valid.text() shouldContain "consistent"
+        }
+
+        "validate_model counts an overwritten but still referenced application_context as a real referrer" {
+            val server = buildServer()
+            val client = connectedClient(server)
+            client
+                .callTool(
+                    "build_application_context",
+                    mapOf("handle" to "AC", "application" to "cc"),
+                ).isError shouldBe
+                null
+            client
+                .callTool(
+                    "build_product_context",
+                    mapOf(
+                        "handle" to "PC",
+                        "name" to "e",
+                        "frame_of_reference_handle" to "AC",
+                        "discipline_type" to "m",
+                    ),
+                ).isError shouldBe null
+            // Overwrite AC with a different application; the old instance stays referenced by PC.
+            client
+                .callTool(
+                    "build_application_context",
+                    mapOf("handle" to "AC", "application" to "other"),
+                ).isError shouldBe
+                null
+            val result = client.callTool("validate_model", emptyMap())
+            // The new AC is unreferenced (violation); the old one is referenced through PC (no violation).
+            result.structuredContent!!["findings"]!!.jsonArray shouldHaveSize 1
+            result.structuredContent!!["instanceCount"]!!.jsonPrimitive.int shouldBe 3
+        }
+
+        "EntityStore.consistentSnapshot stays consistent under parallel puts" {
+            val store = EntityStore()
+            val entries =
+                (0 until 200).map { i ->
+                    val ac =
+                        dev.kstep.core.ap242
+                            .applicationContext { application = "a$i" }
+                    EntityStoreEntry.ApplicationContextEntry((ac as dev.kstep.core.ValidationResult.Valid).value)
+                }
+            coroutineScope {
+                val writers =
+                    entries.mapIndexed {
+                        i,
+                        entry,
+                        ->
+                        async(kotlinx.coroutines.Dispatchers.Default) { store.put("id$i", entry) }
+                    }
+                val readers =
+                    (1..4).map {
+                        async(kotlinx.coroutines.Dispatchers.Default) {
+                            repeat(200) { store.consistentSnapshot().size }
+                        }
+                    }
+                (writers + readers).awaitAll()
+            }
+            store.consistentSnapshot().size shouldBe 200
         }
 
         "get_entity returns a full field dump for a known id and a structured error for an unknown id" {

@@ -12,7 +12,30 @@ import dev.kstep.generated.ap242v1.ProductContext
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.generated.ap242v1.ProductDefinitionContext
 import dev.kstep.generated.ap242v1.ProductDefinitionFormation
+import dev.kstep.generated.ap242v1.ProductDefinitionOccurrence
+import dev.kstep.generated.ap242v1.ProductDefinitionOrReference
 import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * One population rule violated by a candidate entry (ADR-0023). Reported by the scan that runs inside
+ * [EntityStore.putIfNoConflict]'s lock.
+ */
+sealed interface RuleViolation {
+    val ruleLabel: String
+
+    /** A `UNIQUE` rule: [fieldValues] duplicate a combination that [conflictingId] already holds. */
+    data class Unique(
+        override val ruleLabel: String,
+        val conflictingId: String,
+        val fieldValues: List<UniqueConstraintFieldValue>,
+    ) : RuleViolation
+
+    /** The acyclic WHERE rule: storing the entity would close the cycle [path] (product definition ids). */
+    data class Cyclic(
+        override val ruleLabel: String,
+        val path: List<String>,
+    ) : RuleViolation
+}
 
 /**
  * Session-scoped, in-memory store for the entities an LLM agent builds across a sequence of
@@ -89,27 +112,29 @@ class EntityStore(
             val newEntityType: String,
         ) : PutOutcome
 
+        /** At least one population rule (UNIQUE or the acyclic WHERE rule) is violated; nothing was written. */
         data class Conflict(
-            val conflictingId: String,
+            val violations: List<RuleViolation>,
         ) : PutOutcome
     }
 
     fun put(
         id: String,
         entry: EntityStoreEntry,
-    ): PutOutcome = putIfNoConflict(id, entry) { null }
+    ): PutOutcome = putIfNoConflict(id, entry) { emptyList() }
 
     /**
      * Same as [put], but runs [findConflict] — a scan over the current entries, excluding
      * [id]'s own prior slot is [findConflict]'s own responsibility — inside the same lock as
      * the type/capacity checks and the insert itself, so the whole check-then-write sequence
-     * is atomic. Returns [PutOutcome.Conflict] if [findConflict] returns a non-null id instead
-     * of writing [entry].
+     * is atomic. Returns [PutOutcome.Conflict] if [findConflict] returns any violation, instead
+     * of writing [entry]. [findConflict] reports **all** violated rules, in a deterministic order
+     * (UR1, UR2, WR1 for `next_assembly_usage_occurrence`). It must not call back into the store.
      */
     fun putIfNoConflict(
         id: String,
         entry: EntityStoreEntry,
-        findConflict: (Map<String, EntityStoreEntry>) -> String?,
+        findConflict: (Map<String, EntityStoreEntry>) -> List<RuleViolation>,
     ): PutOutcome =
         synchronized(capacityLock) {
             val existing = entries[id]
@@ -117,8 +142,10 @@ class EntityStore(
                 existing != null && existing.entityType != entry.entityType ->
                     PutOutcome.TypeMismatch(id, existing.entityType, entry.entityType)
                 else ->
-                    when (val conflictingId = findConflict(entries)) {
-                        null -> {
+                    findConflict(entries).let { violations ->
+                        if (violations.isNotEmpty()) {
+                            PutOutcome.Conflict(violations)
+                        } else {
                             // An overwrite (existing != null, same type) can still grow the
                             // character budget — e.g. a short person re-built under the same id
                             // with three full 64x4096-character lists — so the budget check
@@ -139,7 +166,6 @@ class EntityStore(
                                 }
                             }
                         }
-                        else -> PutOutcome.Conflict(conflictingId)
                     }
             }
         }
@@ -147,6 +173,13 @@ class EntityStore(
     fun get(id: String): EntityStoreEntry? = entries[id]
 
     fun snapshot(): Map<String, EntityStoreEntry> = entries.toMap()
+
+    /**
+     * A point-in-time copy taken under [capacityLock], so no writer is half-way through a
+     * [putIfNoConflict] while it is read. [snapshot] copies a [ConcurrentHashMap] and is only
+     * weakly consistent; a population-wide validation must not run over a torn view.
+     */
+    fun consistentSnapshot(): Map<String, EntityStoreEntry> = synchronized(capacityLock) { entries.toMap() }
 
     /**
      * Finds the store key currently holding [value] by object identity, not structural
@@ -179,6 +212,13 @@ fun EntityStore.findProductDefinitionFormation(id: String): ProductDefinitionFor
 
 fun EntityStore.findProductDefinition(id: String): ProductDefinition? =
     (get(id) as? EntityStoreEntry.ProductDefinitionEntry)?.value
+
+fun EntityStore.findProductDefinitionOccurrence(id: String): ProductDefinitionOccurrence? =
+    (get(id) as? EntityStoreEntry.ProductDefinitionOccurrenceEntry)?.value
+
+/** A `product_definition` or `product_definition_occurrence` by id: the SELECT `product_definition_or_reference` (ADR-0023). */
+fun EntityStore.findProductDefinitionOrReference(id: String): ProductDefinitionOrReference? =
+    findProductDefinition(id) ?: findProductDefinitionOccurrence(id)
 
 fun EntityStore.findNextAssemblyUsageOccurrence(id: String): NextAssemblyUsageOccurrence? =
     (get(id) as? EntityStoreEntry.NextAssemblyUsageOccurrenceEntry)?.value

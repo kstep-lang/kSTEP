@@ -90,6 +90,35 @@ data class BuildNextAssemblyUsageOccurrenceArgs(
 )
 
 @Serializable
+data class BuildProductDefinitionOccurrenceArgs(
+    val id: String,
+    val name: String? = null,
+    val description: String? = null,
+    @SerialName("definition_id") val definitionId: String? = null,
+)
+
+@Serializable
+data class BuildNameAttributeArgs(
+    val handle: String,
+    @SerialName("attribute_value") val attributeValue: String? = null,
+    @SerialName("named_item_id") val namedItemId: String,
+)
+
+@Serializable
+data class BuildDescriptionAttributeArgs(
+    val handle: String,
+    @SerialName("attribute_value") val attributeValue: String? = null,
+    @SerialName("described_item_id") val describedItemId: String,
+)
+
+@Serializable
+data class BuildIdAttributeArgs(
+    val handle: String,
+    @SerialName("attribute_value") val attributeValue: String? = null,
+    @SerialName("identified_item_id") val identifiedItemId: String,
+)
+
+@Serializable
 data class BuildApprovalArgs(
     val handle: String,
     @SerialName("status_handle") val statusHandle: String,

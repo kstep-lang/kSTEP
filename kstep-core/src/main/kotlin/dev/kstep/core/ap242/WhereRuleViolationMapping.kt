@@ -2,15 +2,23 @@ package dev.kstep.core.ap242
 
 import dev.kstep.core.DslViolation
 import dev.kstep.core.DslViolationCodes
+import dev.kstep.express.validation.InverseEvaluation
 import dev.kstep.express.validation.WhereRuleViolation
 
 internal fun WhereRuleViolation.toDslViolation(): DslViolation =
     DslViolation(
-        code = DslViolationCodes.WHERE_RULE_NOT_SATISFIED,
+        code =
+            if (cycle) {
+                DslViolationCodes.ACYCLIC_RELATIONSHIP_VIOLATED
+            } else {
+                DslViolationCodes.WHERE_RULE_NOT_SATISFIED
+            },
         entityName = entityName,
         ruleLabel = ruleLabel,
         expressionText = expressionText,
-        message = "WHERE rule ${ruleLabel ?: "(unlabeled)"} not satisfied: $expressionText",
+        message =
+            "WHERE rule ${ruleLabel ?: "(unlabeled)"} not satisfied: $expressionText" +
+                (detail?.let { " ($it)" } ?: ""),
     )
 
 internal fun missingMandatoryReferenceViolation(
@@ -63,4 +71,18 @@ internal fun aggregationBoundViolation(
         message =
             "attribute '$attributeName' of entity '$entityName' declares bound $declaredBounds but was given " +
                 "$actualSize element(s)",
+    )
+
+internal fun inverseBoundViolation(
+    entityName: String,
+    evaluation: InverseEvaluation,
+): DslViolation =
+    DslViolation(
+        code = DslViolationCodes.INVERSE_BOUND_VIOLATED,
+        entityName = entityName,
+        ruleLabel = null,
+        expressionText = null,
+        message =
+            "INVERSE attribute '${evaluation.attributeName}' of entity '$entityName' violates its bounds: " +
+                evaluation.failedLink,
     )

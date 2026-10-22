@@ -143,7 +143,7 @@ object PreviewSummary {
 
     // Mirrors part21TextLines' own try/catch below (same RuntimeException catch, same
     // "unavailable: <message>" wording) -- Part21Writer.emit throws Part21WriteException the
-    // moment ANY object reachable from model.roots is not one of the twelve supported
+    // moment ANY object reachable from model.roots is not one of the sixteen supported
     // kstep-core AP242 V1/support entity types (see Part21Writer.unsupportedInstanceType). This
     // function is called from BOTH modelLines (the "everything is fine" content path) and
     // noticeLines (the Pflicht-Fallback path ADR-0011 promises never crashes) -- an unguarded

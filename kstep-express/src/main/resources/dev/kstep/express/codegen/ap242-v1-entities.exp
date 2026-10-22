@@ -1,74 +1,70 @@
 (*
   Real AP242 V1-entity extraction.
 
-  The six entities below (product, product_definition,
-  product_definition_formation, next_assembly_usage_occurrence, approval,
-  person_and_organization) are copied verbatim from the official
-  ap242ed2_dis2_mim_lf_v1.101.exp (ISO TS 10303-442 AP242 "managed model
-  based 3d engineering", EXPRESS MIM Long Form, v1.101, 2019) — see /NOTICE
-  for full provenance and licensing rationale. The complete, unmodified
-  2,122-entity schema (49,942 lines) is not vendored in this repository,
-  only this excerpt.
+  The six entities product, product_definition, product_definition_formation,
+  next_assembly_usage_occurrence, approval and person_and_organization (the "V1" set) and the
+  four entities product_definition_occurrence, name_attribute, description_attribute and
+  id_attribute (ADR-0023) are taken from the official ap242ed2_dis2_mim_lf_v1.101.exp (ISO TS
+  10303-442 AP242 "managed model based 3d engineering", EXPRESS MIM Long Form, v1.101, 2019) --
+  see /NOTICE for full provenance and licensing rationale. The complete, unmodified 2,122-entity
+  schema (49,942 lines) is not vendored in this repository, only this excerpt.
 
-  Also copied verbatim: the three TYPE declarations (identifier, label,
-  text) and ten ENTITYs (product_context, product_definition_context,
-  approval_status, person, organization, application_context_element,
-  application_context, product_definition_relationship,
-  product_definition_usage, assembly_component_usage) the six entities'
-  attribute types reference, directly or (for the last three, and for
-  application_context_element) via SUBTYPE OF. In the official schema (a
-  single SCHEMA block with no USE/REFERENCE FROM) every name resolves
-  within it; this extraction preserves that property standalone by
-  including exactly the supporting declarations needed for
-  dev.kstep.express.semantic.ExpressSemanticModelBuilder's named-type
-  symbol resolution, and dev.kstep.express.semantic.InheritanceResolver's
-  SUBTYPE OF attribute flattening, to succeed.
+  Also copied verbatim: the three TYPE declarations (identifier, label, text), the alias TYPE
+  product_definition_or_reference_or_occurrence, and ten supporting ENTITYs (product_context,
+  product_definition_context, approval_status, person, organization, application_context_element,
+  application_context, product_definition_relationship, product_definition_usage,
+  assembly_component_usage) that the target entities' attribute types reference, directly or (for
+  the last three, and for application_context_element) via SUBTYPE OF. In the official schema (a
+  single SCHEMA block with no USE/REFERENCE FROM) every name resolves within it; this extraction
+  preserves that property standalone by including exactly the supporting declarations needed for
+  dev.kstep.express.semantic.ExpressSemanticModelBuilder's named-type symbol resolution, and
+  dev.kstep.express.semantic.InheritanceResolver's SUBTYPE OF attribute flattening, to succeed.
 
-  ADAPTED, not verbatim (two spots, both deliberate truncations of the
-  real schema text — see kSTEP's M2 SUBTYPE-OF-codegen wave plan for the
-  stop-and-flag rationale):
+  Verification note: product_definition_occurrence, name_attribute, description_attribute,
+  id_attribute and the alias product_definition_or_reference_or_occurrence were transcribed from
+  the official schema as quoted in the semantic-core Welle D plan; no local copy of the MBx-IF
+  file was available to diff them mechanically (the role names used in the USEDIN strings of the
+  WHERE rules below agree with them). Diff them when a copy is at hand.
 
-  - product_definition_relationship.relating_product_definition and
-    .related_product_definition are typed `product_definition` here.
-    The real schema types them `product_definition_or_reference`, a
-    SELECT type (introduced in the move from AP203/214 to AP242) that
-    is not itself vendored — resolving a SELECT type has no Kotlin
-    mapping in dev.kstep.express.codegen.TypeMapping (V1 scope, see
-    README), and vendoring the SELECT plus its full list of selectable
-    entity types would balloon this excerpt well past the "minimal,
-    gap-driven" precedent NOTICE documents. `product_definition` is the
-    common/expected case for AP242's own product-structure entities, so
-    this narrows the SELECT to its most useful member rather than
-    resolving it in full.
-  - assembly_component_usage's real SUPERTYPE OF lists further sibling
-    entities (multi_level_reference_designator,
-    promissory_usage_occurrence, specified_higher_usage_occurrence,
-    quantified_assembly_component_usage) that are not vendored here;
-    product_definition_usage's real SUPERTYPE OF likewise lists
-    make_from_usage_option; application_context_element's real
-    SUPERTYPE OF likewise lists product_concept_context. All three
-    SUPERTYPE OF clauses are kept verbatim in full below (the
-    `supertypeConstraintRawText` capture never resolves these names
-    against the symbol table — same pre-existing treatment as
-    product_definition's own SUPERTYPE OF ONEOF list a few lines down,
-    which already names types this excerpt never vendored either), so
-    this is not actually a truncation of parseable structure, only of
-    which of the *named* ONEOF branches happen to have their own
-    ENTITY declaration in this file.
+  ADAPTED, not verbatim -- every deliberate deviation from the real schema text is listed here
+  and marked at the spot with a "-- ADAPTED" comment:
 
-  Three of the ten supporting entities (product_definition_relationship,
-  product_definition_usage, assembly_component_usage) exist ONLY to make
-  next_assembly_usage_occurrence's SUBTYPE OF chain resolve and flatten;
-  dev.kstep.express.codegen.Ap242V1CodeGen deliberately does not emit
-  Kotlin classes for them (nothing in the six target entities'
-  generated Kotlin references them as an attribute type) — see that
-  file's SUPPORT_ENTITY_NAMES comment.
+  - The four SELECT types product_definition_or_reference, name_attribute_select,
+    description_attribute_select and id_attribute_select list ONLY the members that are modelled
+    in this excerpt. The real product_definition_or_reference is
+    SELECT (generic_product_definition_reference, product_definition, product_definition_occurrence);
+    the real *_attribute_select types have many more members. Membership of entities that are not
+    emitted would make the generated sealed interfaces uninhabitable.
+  - product_definition_occurrence omits quantity (measure_with_unit is not modelled), the DERIVE
+    descendant_occurrences (get_descendant_occurrences is not implemented), the INVERSE
+    child_occurrences (product_definition_specified_occurrence is not modelled) and the WHERE rules
+    WR1 and WR3, whose exact text could not be verified against a local copy of the schema; no rule
+    text is invented. Its WR2 is kept. Part 21 still carries the real arity: quantity is the fifth
+    argument and must be '$' (see kstep-step21's Part21EntityKind).
+  - The functions get_name_value, get_description_value, get_id_value and
+    acyclic_product_definition_relationship, which DERIVE and WHERE clauses below call, are NOT
+    vendored. kSTEP implements them as fixed intrinsics (dev.kstep.express.validation.
+    SchemaFunctionIntrinsics, ADR-0023); a schema declaring one of them itself is refused.
+  - assembly_component_usage's real SUPERTYPE OF lists further sibling entities
+    (multi_level_reference_designator, promissory_usage_occurrence, specified_higher_usage_occurrence,
+    quantified_assembly_component_usage) that are not vendored here; product_definition_usage's real
+    SUPERTYPE OF likewise lists make_from_usage_option; application_context_element's real SUPERTYPE
+    OF likewise lists product_concept_context; product_definition_occurrence's lists
+    product_definition_specified_occurrence and
+    product_definition_occurrence_reference_with_local_representation. All SUPERTYPE OF clauses are
+    kept verbatim in full below (the `supertypeConstraintRawText` capture never resolves these names
+    against the symbol table), so this is not a truncation of parseable structure, only of which of
+    the *named* branches happen to have their own ENTITY declaration in this file.
 
-  This file is used by the generateExpressKotlin Gradle task (see
-  kstep-express/build.gradle.kts) and by kstep-tests'
-  Ap242V1CodeGenTest/ExpressCodeGenTest, which regenerate/verify the six V1
-  entities against this real-schema ground truth (M1 Welle 4; SUBTYPE OF
-  attribute flattening added in the M2 SUBTYPE-OF-codegen wave).
+  Three of the supporting entities (product_definition_relationship, product_definition_usage,
+  assembly_component_usage) exist ONLY to make next_assembly_usage_occurrence's SUBTYPE OF chain
+  resolve and flatten; dev.kstep.express.codegen.Ap242V1CodeGen deliberately does not emit Kotlin
+  classes for them (nothing in the target entities' generated Kotlin references them as an
+  attribute type) -- see that file's SUPPORT_ENTITY_NAMES comment.
+
+  This file is used by the generateExpressKotlin Gradle task (see kstep-express/build.gradle.kts)
+  and by kstep-tests' Ap242V1CodeGenTest/ExpressCodeGenTest, which regenerate/verify the V1
+  entities against this real-schema ground truth.
 *)
 
 SCHEMA ap242_v1_entities;
@@ -80,6 +76,26 @@ TYPE label = STRING;
 END_TYPE;
 
 TYPE text = STRING;
+END_TYPE;
+
+-- ADAPTED: only the modelled members (real: generic_product_definition_reference, product_definition,
+-- product_definition_occurrence).
+TYPE product_definition_or_reference = SELECT (product_definition, product_definition_occurrence);
+END_TYPE;
+
+TYPE product_definition_or_reference_or_occurrence = product_definition_or_reference;
+END_TYPE;
+
+-- ADAPTED: only the modelled members of the real SELECT.
+TYPE name_attribute_select = SELECT (product_definition, person_and_organization);
+END_TYPE;
+
+-- ADAPTED: only the modelled members of the real SELECT.
+TYPE description_attribute_select = SELECT (application_context, person_and_organization);
+END_TYPE;
+
+-- ADAPTED: only the modelled member of the real SELECT.
+TYPE id_attribute_select = SELECT (application_context);
 END_TYPE;
 
 ENTITY application_context;
@@ -159,15 +175,12 @@ UNIQUE
   UR1: id, of_product;
 END_ENTITY;
 
--- ADAPTED, not verbatim: relating_product_definition/related_product_definition are typed
--- `product_definition` here, not the real schema's `product_definition_or_reference` SELECT
--- type -- see this file's header comment for the full rationale.
 ENTITY product_definition_relationship;
   id                          : identifier;
   name                        : label;
   description                 : OPTIONAL text;
-  relating_product_definition : product_definition;
-  related_product_definition  : product_definition;
+  relating_product_definition : product_definition_or_reference;
+  related_product_definition  : product_definition_or_reference;
 END_ENTITY;
 
 ENTITY product_definition_usage
@@ -197,6 +210,37 @@ UNIQUE
   UR1: SELF\assembly_component_usage.reference_designator,
        SELF\product_definition_relationship.relating_product_definition;
   UR2: product_definition_occurrence_id, SELF\product_definition_relationship.relating_product_definition;
+END_ENTITY;
+
+-- ADAPTED: quantity, DERIVE descendant_occurrences, INVERSE child_occurrences, WR1 and WR3 are omitted;
+-- see this file's header comment.
+ENTITY product_definition_occurrence
+  SUPERTYPE OF (product_definition_specified_occurrence ANDOR
+                product_definition_occurrence_reference_with_local_representation);
+  id          : identifier;
+  name        : OPTIONAL label;
+  description : OPTIONAL text;
+  definition  : OPTIONAL product_definition_or_reference_or_occurrence;
+INVERSE
+  assembly_usages : SET [0:?] OF assembly_component_usage FOR related_product_definition;
+WHERE
+  WR2: EXISTS(definition) OR
+       (SIZEOF(USEDIN(SELF, 'AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF.CONFIGURATION_DESIGN.DESIGN')) > 0);
+END_ENTITY;
+
+ENTITY name_attribute;
+  attribute_value : label;
+  named_item      : name_attribute_select;
+END_ENTITY;
+
+ENTITY description_attribute;
+  attribute_value : text;
+  described_item  : description_attribute_select;
+END_ENTITY;
+
+ENTITY id_attribute;
+  attribute_value : identifier;
+  identified_item : id_attribute_select;
 END_ENTITY;
 
 ENTITY approval;
