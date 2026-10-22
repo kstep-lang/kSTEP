@@ -90,7 +90,9 @@ No `RootFeature`/`DerivedFeature` marker interface was introduced: with only
 check in `FeatureRebuilder` is simpler and equally clear. That split becomes
 worth its own abstraction once a second `baseIndex`-carrying feature exists
 (chamfer -- see ADR-0008's "Geometrie Welle 5a-Nachzügler" row) -- left as a
-named follow-up, not built preemptively.
+named follow-up, not built preemptively. *Update (Welle J, ADR-0029):* the split is now introduced as
+`sealed interface DerivedFeature : Feature { val baseIndices: List<Int> }`, implemented by `FilletFeature` and the
+new chamfer, translate, boolean and hole features.
 
 === Exception mapping: deliberately uniform, unlike `OcctKernel`'s own split
 

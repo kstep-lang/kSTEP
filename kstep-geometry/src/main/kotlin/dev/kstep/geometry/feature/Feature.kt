@@ -1,22 +1,25 @@
 package dev.kstep.geometry.feature
 
+import dev.kstep.geometry.BooleanOperation
 import dev.kstep.geometry.ProfilePoint
+import dev.kstep.geometry.RevolveAxis
 
 /**
  * One step of a [FeatureSequence]: a value-only description of a single OCCT operation, replayed
  * by [FeatureRebuilder.rebuild] against the existing, unchanged `OcctKernel` API.
  *
- * Deliberately just three concrete cases, one per `OcctKernel` operation this wave replays
- * ([dev.kstep.geometry.OcctKernel.makeBox], [dev.kstep.geometry.OcctKernel.extrudeProfile],
- * [dev.kstep.geometry.OcctKernel.fillet]) -- no `RootFeature`/`DerivedFeature` marker interface.
- * That split would earn its keep once a second `baseIndex`-carrying feature exists (e.g. chamfer,
- * see ADR-0008's "Geometrie Welle 5a-Nachzügler" row); with only [FilletFeature] doing so today, a
- * direct `is FilletFeature` check in [FeatureRebuilder] is the simpler, honest option.
+ * Two kinds of case: root features that build a shape from scalars ([BoxFeature],
+ * [ExtrudeFeature], [CylinderFeature], [RevolveFeature]) and [DerivedFeature]s that consume one or
+ * more EARLIER shapes of the same sequence, referenced by index ([FilletFeature],
+ * [ChamferFeature], [TranslateFeature], [BooleanFeature], [HoleFeature]). The split exists so
+ * [FeatureRebuilder] can validate every referenced index generically (ADR-0015 anticipated it once
+ * a second `baseIndex`-carrying feature existed; ADR-0029 introduced it).
  *
- * Every case is a plain data class of `Double`/`Int`/`List` values -- no `OcctShape`, no native
+ * Every case is a plain data class of `Double`/`Int`/`List`/enum values -- no `OcctShape`, no native
  * handle, nothing that outlives a single JVM process. That is what makes a [FeatureSequence] safe
  * to hold, copy (e.g. `.copy(radius = 8.0)` to change one parameter), and rebuild repeatedly
- * without touching OCCT until [FeatureRebuilder.rebuild] actually runs.
+ * without touching OCCT until [FeatureRebuilder.rebuild] actually runs. (There is deliberately no
+ * feature wrapping a `Placement`: that type has no value-`equals`.)
  */
 sealed interface Feature
 
@@ -50,4 +53,75 @@ data class FilletFeature(
     val baseIndex: Int,
     val edgeIndices: List<Int>,
     val radius: Double,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/** A [Feature] that consumes earlier shapes of the same [FeatureSequence], referenced by index. */
+sealed interface DerivedFeature : Feature {
+    /** Positions (0-based) of the EARLIER features this one reads; each must be strictly less than
+     *  this feature's own position -- enforced centrally in [FeatureRebuilder.rebuild]. */
+    val baseIndices: List<Int>
+}
+
+/** Replays [dev.kstep.geometry.OcctKernel.makeCylinder]. */
+data class CylinderFeature(
+    val radius: Double,
+    val height: Double,
+    val x: Double = 0.0,
+    val y: Double = 0.0,
+    val z: Double = 0.0,
+    val dirX: Double = 0.0,
+    val dirY: Double = 0.0,
+    val dirZ: Double = 1.0,
 ) : Feature
+
+/** Replays [dev.kstep.geometry.OcctKernel.revolveProfile]. */
+data class RevolveFeature(
+    val profile: List<ProfilePoint>,
+    val angleDegrees: Double = 360.0,
+    val axis: RevolveAxis = RevolveAxis.Y,
+) : Feature
+
+/** Replays [dev.kstep.geometry.OcctKernel.translate] on the shape of feature [baseIndex]. */
+data class TranslateFeature(
+    val baseIndex: Int,
+    val dx: Double,
+    val dy: Double,
+    val dz: Double,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/** Replays [dev.kstep.geometry.OcctKernel.boolean] on the shapes of features [leftIndex] and [rightIndex]. */
+data class BooleanFeature(
+    val operation: BooleanOperation,
+    val leftIndex: Int,
+    val rightIndex: Int,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(leftIndex, rightIndex)
+}
+
+/** Replays [dev.kstep.geometry.OcctKernel.hole] on the shape of feature [baseIndex]. */
+data class HoleFeature(
+    val baseIndex: Int,
+    val diameter: Double,
+    val depth: Double,
+    val x: Double,
+    val y: Double,
+    val z: Double,
+    val dirX: Double = 0.0,
+    val dirY: Double = 0.0,
+    val dirZ: Double = -1.0,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/** Replays [dev.kstep.geometry.OcctKernel.chamfer]; [edgeIndices] share [FilletFeature]'s opaque addressing. */
+data class ChamferFeature(
+    val baseIndex: Int,
+    val edgeIndices: List<Int>,
+    val distance: Double,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}

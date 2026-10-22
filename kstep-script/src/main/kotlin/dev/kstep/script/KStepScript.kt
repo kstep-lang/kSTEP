@@ -86,7 +86,9 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
         // exception types -- added in kSTEP's headless-preview-rendering wave (see
         // docs/adr/ADR-0011-headless-preview-rendering.adoc) so a script can build geometry
         // (`OcctKernel.makeBox(...)`) and register it via `shape(...)` without an explicit
-        // import.
+        // import. Welle J (ADR-0029) adds BooleanOperation, RevolveAxis, Placement and
+        // OcctEmptyResultException to that set; none collides with another default import
+        // (checked by grep, and no new vector type is introduced -- dev.kstep.shape owns Vec3).
         "dev.kstep.geometry.*",
         // ShapeAssignment -- the type `shape(...)` registers on KStepModel.shapes.
         "dev.kstep.shape.*",

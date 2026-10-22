@@ -438,7 +438,7 @@ exercised either way).
 |===
 | Wave | Content
 
-| Geometrie Welle 2
+| Geometrie Welle 2 (partially done in Welle J, ADR-0029: cylinder, booleans; cone, sphere and STEP import still open)
 | Cylinder, cone, sphere primitives; boolean ops
   (`BRepAlgoAPI_Fuse`/`Cut`/`Common`); `STEPControl_Reader` for STEP
   *import*, turning this wave's write-only smoke test into a real

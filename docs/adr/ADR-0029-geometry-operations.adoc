@@ -1,0 +1,168 @@
+= ADR-0029: Geometry operations (booleans, cylinder, hole, revolve, chamfer, transform)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle J). Delivers the "5a-Nachzuegler" row of ADR-0008 (chamfer, holes via
+boolean subtraction), the cylinder/boolean part of "Geometrie Welle 2" of ADR-0005, and the second
+`baseIndex`-carrying feature that ADR-0015 named as the trigger for a `DerivedFeature` split.
+
+== Context
+
+After Welle I the geometry kernel could build a box and extrude a profile, and could fillet edges, but
+nothing could be positioned, combined or cut. Without moving a shape there is no "two overlapping boxes"
+and no boss or pocket at a given place; without booleans there is no hole.
+
+== Decision
+
+* *Booleans* `OcctKernel.union/cut/common/boolean(op, a, b)` run `BRepAlgoAPI_Fuse/Cut/Common` with
+  `SetRunParallel(false)` (deterministic, no OCCT thread pool inside the JVM), then `SimplifyResult()`.
+  Without `SimplifyResult` a union of two overlapping boxes keeps split coplanar cap faces (wrong face
+  counts). `BRepAlgoAPI_*` always returns a compound, so a compound holding exactly one solid is unwrapped
+  before the mandatory `BRepCheck_Analyzer` + volume post-check.
+* *Single-solid rule.* A result with several disjoint solids (union of separated boxes, a cut that
+  severs a part) is rejected with `OcctGeometryException` ("multi-body"): the exporter (ADR-0027) and
+  `ShapeTopology` assume exactly one `MANIFOLD_SOLID_BREP`. Multi-body compounds are a follow-up.
+* *Empty results.* No solid volume at all (common of disjoint solids, `cut(a, a)`) throws the new
+  `OcctEmptyResultException`, a subclass of `OcctGeometryException` (which is therefore now `open`; this
+  is source- and binary-compatible). The native side throws that class directly via
+  `FindClass("dev/kstep/geometry/OcctEmptyResultException")` and needs its `(String)` constructor.
+* *Cylinder* `makeCylinder(radius, height, x, y, z, dirX, dirY, dirZ)`, default axis +Z at the origin.
+  The direction is validated (finite, length >= 1e-9) before `gp_Dir` is built, because `gp_Dir` throws
+  `Standard_ConstructionError` on a null vector.
+* *Hole* is a Kotlin composition, `makeCylinder(...).use { cut(shape, it) }`, default direction -Z (drilling
+  down from a top face). A hole that misses the body returns an unchanged copy; that is documented, not an
+  error.
+* *Positioning* `translate` and `transformed(shape, Placement)` use `BRepBuilderAPI_Transform` with
+  copy = true and a row-major 3x4 matrix (`Placement.toMatrix12()`, `internal`). Native side re-validates:
+  12 finite entries, translation within +-1e7, rotation block orthonormal (tolerance 1e-9) with positive
+  determinant (no scaling, shear or reflection).
+* *Revolve* `revolveProfile(profile, angleDegrees = 360, axis = Y)` with `RevolveAxis { X, Y }` through the
+  origin in the profile plane (lathe convention: x is the radius for Y). All points must lie on one side of
+  the axis (points on the axis are fine; crossing it would produce a self-penetrating solid). A full
+  revolution uses the angle-less `BRepPrimAPI_MakeRevol` overload; 2 pi can leave seam artefacts.
+  Arbitrary axes are out of scope.
+* *Chamfer* `chamfer(shape, edgeIndices, distance)` (`BRepFilletAPI_MakeChamfer`, symmetric distance) with
+  the same opaque 0-based `TopExp::MapShapes(EDGE)` addressing as `fillet`; no stable edge identity.
+* *Vectors.* `kstep-geometry` cannot use `dev.kstep.shape.Vec3` (module direction is shape to geometry), and
+  a new vector type would collide with the script default imports `dev.kstep.shape.*`. All new functions
+  take named `Double` parameters, consistent with `makeBox(dx, dy, dz)`.
+* *No operator sugar* (`a.cut(b)`, infix): chained expressions would leave intermediate shapes open until the
+  Cleaner runs. Scripts call `OcctKernel.cut(a, b)`.
+* *Features.* `sealed interface DerivedFeature : Feature { val baseIndices: List<Int> }` is introduced;
+  `FilletFeature` implements it (constructor, `equals`, `copy` unchanged; `baseIndices` is a computed
+  property). New cases: `CylinderFeature`, `RevolveFeature` (roots), `TranslateFeature`, `BooleanFeature`,
+  `HoleFeature`, `ChamferFeature` (derived). `FeatureRebuilder` validates every referenced index generically
+  (message text for fillet unchanged). There is no `TransformFeature`: `Placement` has no value `equals`.
+
+=== Native bridge
+
+Five new JNI functions (`nativeTransformShape`, `nativeMakeCylinder`, `nativeBooleanOp`,
+`nativeRevolveProfile`, `nativeChamferEdges`), 14 in total (the "roughly 50 shim functions" binding-strategy
+re-evaluation trigger of ADR-0005/0008 is unchanged). Shared helpers `readProfileXy`, `buildProfileFace`,
+`countSolids`, `unwrapSingleSolid`, `postCheckSolid` were factored out; the extrude error texts are
+word-for-word unchanged (tests assert on substrings). New link dependency: `-lTKBO` (verified with
+`nm -gU libTKBO.dylib | grep BRepAlgoAPI_Fuse`; `-Wl,--no-undefined` on Linux re-verifies on every build).
+`MakeChamfer` is in TKFillet, `MakeCylinder`/`MakeRevol` in TKPrim and `BRepBuilderAPI_Transform` in
+TKTopAlgo, all already linked. TKBO ships in the same package as TKFillet, so CI needs no change.
+
+=== Lock and serialization
+
+Every function that dereferences a registry shape does the lookup and all OCCT calls inside one `g_mutex`
+critical section; `throwJava` and `registerShape` run only outside it. `nativeBooleanOp` looks up both
+operands in a single critical section (`left == right` is therefore harmless). The work is deliberately
+not moved out of the lock onto copied `TopoDS_Shape` handles: TShapes are shared and `nativeShapeTriangles`
+mutates them (triangulate, then `BRepTools::Clean`), which would be a data race. Consequence, accepted as
+for fillet: a long boolean blocks every other OCCT call and `nativeReleaseShape` from the Cleaner.
+
+=== Exception mapping
+
+[cols="2,3"]
+|===
+| Situation | Exception
+| Invalid argument, operand above the face limit, operand without a solid, profile crossing the axis,
+  degenerate revolve result, out-of-range edge index | `IllegalArgumentException` (passed through unchanged)
+| Empty boolean result | `OcctEmptyResultException` (passed through unchanged; its catch precedes the
+  general `RuntimeException` catch, otherwise it would be relabelled)
+| Unknown or closed handle, OCCT error, multi-body result, chamfer too large | `OcctGeometryException`
+  (Kotlin) / `IllegalStateException` (native), already-closed shape `IllegalStateException`
+|===
+
+== Security
+
+Measured with OCCT 7.9.3 on macOS arm64 (Linux values not measured). Raw timings:
+union/cut/common of a 198-gon prism (200 faces) with a shifted prism, a rotated prism and a cylinder.
+
+[cols="1,1,1,1"]
+|===
+| Operand faces | union (shifted prism) | cut (shifted prism) | worst of the nine combinations
+| 52 | 33 ms | 23 ms | 33 ms
+| 102 | 60 ms | 46 ms | 60 ms
+| 152 | 94 ms | 75 ms | 94 ms
+| 200 | 132 ms | 104 ms | 132 ms
+|===
+
+Booleans scale roughly linearly in this range, so `MAX_BOOLEAN_INPUT_FACES = 200` leaves at least 7x
+headroom under one second. Larger operands were not measured (the guard itself prevents it); raise the
+limit only together with a new measurement. The deadline-based abort (`Message_ProgressIndicator::UserBreak`)
+was considered and not built: the face limit bounds the cost, and the measurements show no pathological
+case. Revisit if one appears (many curved intersections).
+
+[cols="1,1,1,1"]
+|===
+| Revolve points (360 deg) | build + BRepCheck | faces / triangles | triangulate
+| 64 | 5.9 ms | 64 / 3 346 | 10.9 ms
+| 128 | 11.1 ms | 128 / 6 694 | 19.4 ms
+| 256 | 22.4 ms | 256 / 13 386 | 40.5 ms
+| 512 | 44.2 ms | 512 / 26 774 | 85.1 ms
+|===
+
+`MAX_REVOLVE_PROFILE_POINTS = 512` (same as extrude). Chamfer (64 edges): 113 ms at 102 faces and 317 ms
+at 200 faces (roughly n^1.5); `MAX_CHAMFER_INPUT_FACES` is therefore 150 (about 5x headroom), tighter than
+the fillet limit. Triangle cap: the old "6 332 triangles is the worst reachable shape" statement of
+ADR-0010 is outdated; a 512-point revolve reaches 26 774, still about 5x below `kMaxTriangles = 130 000`,
+so the `tooManyTriangles` branch remains unreachable through the public API (defence in depth, untested).
+
+Feature sequences: 64 chained holes in one plate took 0.8 s end to end. The boolean face limit caps a chain
+of holes in a single plate at about 98 holes (each hole adds two faces), so `MAX_SEQUENCE_LENGTH = 256` is
+not reachable with holes alone; a worst case of 256 mixed operations was not measured and is bounded only by
+256 times the per-operation costs above.
+
+Other points: every new native function re-validates all parameters independently of Kotlin (proved by
+`OcctGeometryOperationsNativeHostileInputTest`); no handle is registered on any failure path; the hole tool
+is closed via `use`; `reachabilityFence` covers both boolean operands; no OCCT header is used outside the
+OCCT build path; no network, no cryptography. Licence: OCCT only (LGPL-2.1 with exception), no new third-party
+dependency, no JSDAI.
+
+== Consequences
+
+* Plates with holes, unions, intersections, sleeves and chamfered parts are expressible and exportable
+  (verified through `kstep export`, OCCT typed reader and FreeCAD, see below).
+* Multi-body results, stable edge identity, arbitrary revolve axes, sweep/loft, a deadline abort for
+  booleans and a unified vector type remain follow-ups.
+
+== Verification
+
+Gate, 2026-10-22, macOS arm64, OCCT 7.9.3:
+`./gradlew clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true --no-build-cache --rerun-tasks`
+ran 1333 tests with 0 failures, 0 errors and 6 skipped (the six known ones). With
+`-Pkstep.occt.includeDir=/nonexistent` (OCCT absent) the new OCCT cases skip and the ungated validation cases
+pass.
+
+External check of the six `kstep export` fixtures: `scripts/interop/read_step_structure.cpp` reports read
+status `RetDone`, 0 undefined entities, model check 0 fails and 0 warnings for all; FreeCAD (`freecadcmd`)
+(`Part.read`) reports `Solid`, valid, with:
+
+[cols="2,1,1"]
+|===
+| File | Volume | Faces
+| plate with hole | 15497.345 | 7
+| union | 7000.0 | 10
+| common | 1000.0 | 6
+| cut | 3000.0 | 8
+| revolved sleeve | 4712.389 | 4
+| chamfered prism | 23920.0 | 7
+|===
+
+These equal the closed-form values and the OCCT face counts; no seam-splitting difference between OCCT and
+FreeCAD was observed.

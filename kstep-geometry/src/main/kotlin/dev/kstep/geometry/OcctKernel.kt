@@ -91,6 +91,44 @@ object OcctKernel {
     /** See [MIN_FILLET_RADIUS]. */
     const val MAX_FILLET_RADIUS: Double = 1e7
 
+    /** Minimum / maximum chamfer distance, same role as [MIN_FILLET_RADIUS]/[MAX_FILLET_RADIUS]. */
+    const val MIN_CHAMFER_DISTANCE: Double = 1e-7
+
+    /** See [MIN_CHAMFER_DISTANCE]. */
+    const val MAX_CHAMFER_DISTANCE: Double = 1e7
+
+    /** Maximum edges chamfered in one operation. */
+    const val MAX_CHAMFER_EDGES: Int = 64
+
+    /** Maximum faces the INPUT shape of a chamfer may have. Measured (OCCT 7.9.3, macOS arm64): a
+     *  64-edge chamfer costs 113 ms at 102 faces and 317 ms at 200 faces (roughly n^1.5), so 150
+     *  keeps about 5x headroom under one second -- deliberately tighter than
+     *  [MAX_FILLET_INPUT_FACES]. See docs/adr/ADR-0029-geometry-operations.adoc. */
+    const val MAX_CHAMFER_INPUT_FACES: Int = 150
+
+    /** Maximum faces EACH operand of a boolean operation may have. Measured (OCCT 7.9.3, macOS arm
+     *  64): union/cut/common of a 198-gon prism (200 faces) with a shifted prism, a rotated prism
+     *  or a cylinder costs 12-132 ms (roughly linear), i.e. at least 7x headroom under one second.
+     *  A boolean holds the process-wide native lock and therefore blocks every other OCCT call --
+     *  this limit is the DoS guard. Larger operands were not measured (the guard itself prevents
+     *  it); raise it only together with a new measurement. See
+     *  docs/adr/ADR-0029-geometry-operations.adoc. */
+    const val MAX_BOOLEAN_INPUT_FACES: Int = 200
+
+    /** Revolve angle bounds in degrees; 360 is a true full revolution. */
+    const val MIN_REVOLVE_ANGLE_DEGREES: Double = 1e-4
+
+    /** See [MIN_REVOLVE_ANGLE_DEGREES]. */
+    const val MAX_REVOLVE_ANGLE_DEGREES: Double = 360.0
+
+    /** Maximum vertices in a revolve profile. Measured (OCCT 7.9.3): a 512-point profile revolved
+     *  360 degrees builds in 44 ms (BRepCheck included) and triangulates to 26 774 triangles in
+     *  85 ms. See docs/adr/ADR-0029-geometry-operations.adoc. */
+    const val MAX_REVOLVE_PROFILE_POINTS: Int = 512
+
+    /** Minimum length of a direction vector (cylinder / hole axis). */
+    const val MIN_DIRECTION_LENGTH: Double = 1e-9
+
     /** Maximum triangle count [OcctShape.triangulate] returns. Mirrors `kMaxTriangles` in
      *  kstep_occt_bridge.cpp (hand-synchronized pair, the same pattern ADR-0007's
      *  `NativeConstraintKind` already uses -- see that ADR's Decision section). Measured (OCCT
@@ -110,14 +148,13 @@ object OcctKernel {
      *  is still reachable, so a single concurrent `triangulate()` call can peak around ~37 MB of
      *  JVM heap, not the ~18.7 MB the native-side array alone would suggest.
      *
-     *  Untested by construction, not by oversight: the "6 332 is the most expensive shape
-     *  reachable through this module's own public API" measurement above means this guard's
-     *  `tooManyTriangles` branch (`kstep_occt_bridge.cpp`'s `nativeShapeTriangles`) cannot
-     *  actually be exercised by any [makeBox]/[extrudeProfile]/[fillet] call this module exposes
-     *  -- reaching it would require either a native-only test harness this repo does not have, or
-     *  lowering this constant to an artificially small value just to trip it, which would test the
-     *  wrong number. Left as pure defense-in-depth, mirroring the equally-untested
-     *  `mesher.IsDone()`/unmeshed-face guard right next to it in the same native function. */
+     *  Welle J update (ADR-0029): the "6 332 is the most expensive reachable shape" statement above
+     *  is OUTDATED. Revolve, cylinders and booleans reach more triangles: a 512-point profile
+     *  revolved 360 degrees triangulates to 26 774 triangles (measured, OCCT 7.9.3) -- still about
+     *  5x below this cap. The cap's `tooManyTriangles` branch (`kstep_occt_bridge.cpp`'s
+     *  `nativeShapeTriangles`) therefore remains unreachable through this module's public API, and
+     *  stays untested as defence-in-depth, mirroring the equally-untested `mesher.IsDone()` guard
+     *  right next to it. */
     const val MAX_TRIANGLES: Int = 130_000
 
     /**
@@ -193,38 +230,7 @@ object OcctKernel {
         profile: List<ProfilePoint>,
         height: Double,
     ): OcctShape {
-        require(profile.size >= MIN_PROFILE_POINTS) {
-            "profile must have at least $MIN_PROFILE_POINTS points, got ${profile.size}"
-        }
-        require(profile.size <= MAX_PROFILE_POINTS) {
-            "profile must have at most $MAX_PROFILE_POINTS points, got ${profile.size}"
-        }
-        profile.forEachIndexed { index, point ->
-            require(point.x.isFinite() && point.y.isFinite()) {
-                "profile[$index] must be finite, got (${point.x}, ${point.y})"
-            }
-            require(abs(point.x) <= MAX_ABS_COORDINATE && abs(point.y) <= MAX_ABS_COORDINATE) {
-                "profile[$index] coordinates must be within +/-$MAX_ABS_COORDINATE, got (${point.x}, ${point.y})"
-            }
-        }
-        for (index in profile.indices) {
-            val current = profile[index]
-            val next = profile[(index + 1) % profile.size]
-            // Distance-based, not `current != next` (ProfilePoint's data-class `equals()`) nor a
-            // primitive `==`: either of those bit-exact comparisons only catches a strict subset
-            // of what `BRepBuilderAPI_MakePolygon` itself silently collapses -- see
-            // PROFILE_POINT_COINCIDENCE_TOLERANCE's KDoc. Ordinary subtraction already treats
-            // -0.0 and 0.0 as equal (dx/dy come out exactly 0.0 either way), so the -0.0 case this
-            // check used to call out by name is still caught -- just as one instance of the wider
-            // distance check rather than a special case. The native side (kstep_occt_bridge.cpp)
-            // makes the identical choice for the same reason.
-            val dx = current.x - next.x
-            val dy = current.y - next.y
-            require(dx * dx + dy * dy > PROFILE_POINT_COINCIDENCE_TOLERANCE * PROFILE_POINT_COINCIDENCE_TOLERANCE) {
-                "profile has coincident (or near-coincident, within $PROFILE_POINT_COINCIDENCE_TOLERANCE) " +
-                    "consecutive points at index $index: $current"
-            }
-        }
+        validateProfile(profile, MAX_PROFILE_POINTS)
         require(height.isFinite()) { "height must be finite, got $height" }
         require(abs(height) > MIN_DIMENSION) {
             "height magnitude must be greater than $MIN_DIMENSION, got $height"
@@ -232,19 +238,10 @@ object OcctKernel {
         require(abs(height) <= MAX_DIMENSION) {
             "height magnitude must be at most $MAX_DIMENSION, got $height"
         }
-        val a = availability()
-        if (a !is OcctAvailability.Available) {
-            val unavailable = a as OcctAvailability.Unavailable
-            throw OcctUnavailableException(unavailable.reason, unavailable.cause)
-        }
-        val profileXy = DoubleArray(profile.size * 2)
-        profile.forEachIndexed { index, point ->
-            profileXy[index * 2] = point.x
-            profileXy[index * 2 + 1] = point.y
-        }
+        requireAvailable()
         val handle =
             try {
-                OcctBridge.nativeExtrudeProfile(profileXy, height)
+                OcctBridge.nativeExtrudeProfile(toXyArray(profile), height)
             } catch (e: IllegalArgumentException) {
                 // The native side's own degenerate-profile validation (collinear points, a
                 // self-crossing "bowtie" polygon, a face OCCT could not build) throws
@@ -345,6 +342,373 @@ object OcctKernel {
                 }
             }
         return OcctShape(resultHandle)
+    }
+
+    /**
+     * Builds a cylinder (OCCT `BRepPrimAPI_MakeCylinder`): the base circle of radius [radius] is
+     * centred at `(x, y, z)` and the cylinder extends [height] along `(dirX, dirY, dirZ)`
+     * (default +Z; the direction need not be normalized).
+     *
+     * @throws IllegalArgumentException if radius/height are not finite or outside
+     *   `[MIN_DIMENSION, MAX_DIMENSION]`, the position is not finite or beyond
+     *   [MAX_ABS_COORDINATE], or the direction is not finite or shorter than [MIN_DIRECTION_LENGTH].
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT itself rejects the request.
+     */
+    fun makeCylinder(
+        radius: Double,
+        height: Double,
+        x: Double = 0.0,
+        y: Double = 0.0,
+        z: Double = 0.0,
+        dirX: Double = 0.0,
+        dirY: Double = 0.0,
+        dirZ: Double = 1.0,
+    ): OcctShape {
+        validateDimension("radius", radius)
+        validateDimension("height", height)
+        requireCoordinate("x", x)
+        requireCoordinate("y", y)
+        requireCoordinate("z", z)
+        requireDirection(dirX, dirY, dirZ)
+        requireAvailable()
+        val handle =
+            try {
+                OcctBridge.nativeMakeCylinder(radius, height, x, y, z, dirX, dirY, dirZ)
+            } catch (e: IllegalArgumentException) {
+                throw e
+            } catch (e: RuntimeException) {
+                throw OcctGeometryException("OCCT failed to construct cylinder (r=$radius, h=$height)", e)
+            }
+        return OcctShape(handle)
+    }
+
+    /**
+     * Returns a translated COPY of [shape]; [shape] is neither modified nor consumed.
+     *
+     * @throws IllegalArgumentException if any component is not finite or beyond [MAX_ABS_COORDINATE].
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT fails.
+     */
+    fun translate(
+        shape: OcctShape,
+        dx: Double,
+        dy: Double,
+        dz: Double,
+    ): OcctShape {
+        requireCoordinate("dx", dx)
+        requireCoordinate("dy", dy)
+        requireCoordinate("dz", dz)
+        return transformed(shape, Placement.translation(dx, dy, dz))
+    }
+
+    /**
+     * Returns a COPY of [shape] moved by the rigid transform [placement] (rotation + translation,
+     * no scaling or reflection by construction of [Placement]). [shape] is neither modified nor
+     * consumed.
+     *
+     * @throws IllegalArgumentException if the translation is not finite or beyond
+     *   [MAX_ABS_COORDINATE].
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT fails.
+     */
+    fun transformed(
+        shape: OcctShape,
+        placement: Placement,
+    ): OcctShape {
+        val matrix = placement.toMatrix12()
+        require(matrix.all { it.isFinite() }) { "placement must be finite" }
+        for (row in 0 until 3) {
+            require(abs(matrix[row * 4 + 3]) <= MAX_ABS_COORDINATE) {
+                "placement translation must be within +/-$MAX_ABS_COORDINATE"
+            }
+        }
+        requireAvailable()
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeTransformShape(h, matrix)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to transform shape", e)
+                }
+            }
+        return OcctShape(handle)
+    }
+
+    /** Union (`a + b`). See [boolean]. */
+    fun union(
+        a: OcctShape,
+        b: OcctShape,
+    ): OcctShape = boolean(BooleanOperation.UNION, a, b)
+
+    /** Difference (`a - b`). See [boolean]. */
+    fun cut(
+        a: OcctShape,
+        b: OcctShape,
+    ): OcctShape = boolean(BooleanOperation.CUT, a, b)
+
+    /** Intersection (`a & b`). See [boolean]. */
+    fun common(
+        a: OcctShape,
+        b: OcctShape,
+    ): OcctShape = boolean(BooleanOperation.COMMON, a, b)
+
+    /**
+     * Boolean operation on two solids (OCCT `BRepAlgoAPI_Fuse`/`Cut`/`Common`, run single-threaded
+     * and followed by `SimplifyResult` so coplanar split faces are merged), returning a NEW shape.
+     * Neither operand is modified or consumed.
+     *
+     * The result must be exactly one solid: a result with several disjoint solids (a union of two
+     * separated boxes, a cut that severs the part) is rejected, because the STEP export path
+     * (ADR-0027) assumes one `MANIFOLD_SOLID_BREP` per shape. Multi-body results are a follow-up.
+     * Likewise a result whose single solid has an internal void (more than one shell, e.g. a cut
+     * whose tool lies strictly inside the body) is rejected, because it would be exported as
+     * `BREP_WITH_VOIDS`, which the geometry extraction does not support yet.
+     *
+     * A boolean holds the process-wide native lock for its whole duration and therefore blocks every
+     * other OCCT call (and the Cleaner's release of shapes) until it finishes; the DoS guard is
+     * [MAX_BOOLEAN_INPUT_FACES] per operand.
+     *
+     * @throws IllegalArgumentException if an operand has more than [MAX_BOOLEAN_INPUT_FACES] faces
+     *   or contains no solid.
+     * @throws IllegalStateException if an operand is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctEmptyResultException if the result contains no volume (e.g. the common of two
+     *   disjoint solids, or `cut(a, a)`).
+     * @throws OcctGeometryException if OCCT fails, the result has several disjoint solids, or the
+     *   result has an internal void.
+     */
+    fun boolean(
+        op: BooleanOperation,
+        a: OcctShape,
+        b: OcctShape,
+    ): OcctShape {
+        requireAvailable()
+        val handle =
+            a.withHandle { ha ->
+                b.withHandle { hb ->
+                    try {
+                        OcctBridge.nativeBooleanOp(op.nativeCode, ha, hb)
+                    } catch (e: IllegalArgumentException) {
+                        throw e
+                    } catch (e: OcctEmptyResultException) {
+                        // A RuntimeException subtype: MUST precede the general catch below, or it
+                        // would be re-labelled as a plain OcctGeometryException.
+                        throw e
+                    } catch (e: RuntimeException) {
+                        throw OcctGeometryException("OCCT failed to compute boolean $op: ${e.message}", e)
+                    }
+                }
+            }
+        return OcctShape(handle)
+    }
+
+    /**
+     * Drills a cylindrical hole into [shape]: a cylinder of [diameter] starting at `(x, y, z)` and
+     * running [depth] along `(dirX, dirY, dirZ)` (default -Z, i.e. drilling downwards from a top
+     * face) is cut from [shape]. Implemented as [makeCylinder] + [cut]; the temporary tool is closed
+     * on every path.
+     *
+     * A hole that does not touch the body returns an unchanged copy of the shape (same volume) --
+     * not an error. For a clean through-hole let the cylinder start slightly outside the body.
+     *
+     * @throws IllegalArgumentException for invalid dimensions/position/direction (as [makeCylinder])
+     *   or when [shape] has more than [MAX_BOOLEAN_INPUT_FACES] faces.
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctEmptyResultException if the hole would remove the whole body.
+     * @throws OcctGeometryException if OCCT fails, or the hole lies completely inside the body and
+     *   would leave an internal void (not supported yet).
+     */
+    fun hole(
+        shape: OcctShape,
+        diameter: Double,
+        depth: Double,
+        x: Double,
+        y: Double,
+        z: Double,
+        dirX: Double = 0.0,
+        dirY: Double = 0.0,
+        dirZ: Double = -1.0,
+    ): OcctShape {
+        validateDimension("diameter", diameter)
+        validateDimension("depth", depth)
+        return makeCylinder(diameter / 2.0, depth, x, y, z, dirX, dirY, dirZ).use { tool -> cut(shape, tool) }
+    }
+
+    /**
+     * Revolves a closed, planar profile in the XY plane about [axis] (OCCT `BRepPrimAPI_MakeRevol`).
+     * The profile is closed automatically. All points must lie on one side of the axis (points ON
+     * the axis are fine -- a rectangle with an edge on the axis gives a solid cylinder).
+     * [angleDegrees] = 360 is a true full revolution.
+     *
+     * @throws IllegalArgumentException for an invalid profile (as [extrudeProfile], with
+     *   [MAX_REVOLVE_PROFILE_POINTS]), an angle outside
+     *   `([MIN_REVOLVE_ANGLE_DEGREES]..[MAX_REVOLVE_ANGLE_DEGREES]]`, a profile crossing the axis,
+     *   or a degenerate result.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT itself fails.
+     */
+    fun revolveProfile(
+        profile: List<ProfilePoint>,
+        angleDegrees: Double = 360.0,
+        axis: RevolveAxis = RevolveAxis.Y,
+    ): OcctShape {
+        validateProfile(profile, MAX_REVOLVE_PROFILE_POINTS)
+        require(angleDegrees.isFinite()) { "angleDegrees must be finite, got $angleDegrees" }
+        require(angleDegrees >= MIN_REVOLVE_ANGLE_DEGREES) {
+            "angleDegrees must be at least $MIN_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
+        }
+        require(angleDegrees <= MAX_REVOLVE_ANGLE_DEGREES) {
+            "angleDegrees must be at most $MAX_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
+        }
+        val radial: (ProfilePoint) -> Double = if (axis == RevolveAxis.Y) { p -> p.x } else { p -> p.y }
+        require(profile.none { radial(it) > 0.0 } || profile.none { radial(it) < 0.0 }) {
+            "profile crosses the rotation axis ${axis.name}: all " +
+                "${if (axis == RevolveAxis.Y) "x" else "y"} coordinates must have the same sign"
+        }
+        requireAvailable()
+        val handle =
+            try {
+                OcctBridge.nativeRevolveProfile(toXyArray(profile), angleDegrees, axis.nativeCode)
+            } catch (e: IllegalArgumentException) {
+                throw e
+            } catch (e: RuntimeException) {
+                throw OcctGeometryException(
+                    "OCCT failed to revolve profile of ${profile.size} points by $angleDegrees degrees",
+                    e,
+                )
+            }
+        return OcctShape(handle)
+    }
+
+    /** Convenience overload for the single-edge case. */
+    fun chamfer(
+        shape: OcctShape,
+        edgeIndex: Int,
+        distance: Double,
+    ): OcctShape = chamfer(shape, listOf(edgeIndex), distance)
+
+    /**
+     * Bevels one or more edges of [shape] with a symmetric [distance] (OCCT
+     * `BRepFilletAPI_MakeChamfer`), returning a NEW shape; [shape] is neither modified nor consumed.
+     * Edge addressing is identical to [fillet] (0-based, opaque, construction-order dependent).
+     *
+     * @throws IllegalArgumentException if [edgeIndices] is empty, larger than [MAX_CHAMFER_EDGES],
+     *   contains an out-of-range index, [shape] has more than [MAX_CHAMFER_INPUT_FACES] faces, or
+     *   [distance] is not finite or outside `[[MIN_CHAMFER_DISTANCE], [MAX_CHAMFER_DISTANCE]]`.
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT cannot build the chamfer (typically a distance too large
+     *   for the local geometry).
+     */
+    fun chamfer(
+        shape: OcctShape,
+        edgeIndices: Collection<Int>,
+        distance: Double,
+    ): OcctShape {
+        require(edgeIndices.isNotEmpty()) { "edgeIndices must not be empty" }
+        require(edgeIndices.size <= MAX_CHAMFER_EDGES) {
+            "edgeIndices must have at most $MAX_CHAMFER_EDGES entries, got ${edgeIndices.size}"
+        }
+        edgeIndices.forEach { index ->
+            require(index >= 0) { "edge index must not be negative, got $index" }
+        }
+        require(distance.isFinite()) { "distance must be finite, got $distance" }
+        require(distance >= MIN_CHAMFER_DISTANCE) { "distance must be at least $MIN_CHAMFER_DISTANCE, got $distance" }
+        require(distance <= MAX_CHAMFER_DISTANCE) { "distance must be at most $MAX_CHAMFER_DISTANCE, got $distance" }
+        requireAvailable()
+        val edgeIndicesArray = edgeIndices.toIntArray()
+        val resultHandle =
+            shape.withHandle { handle ->
+                try {
+                    OcctBridge.nativeChamferEdges(handle, edgeIndicesArray, distance)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException(
+                        "OCCT failed to chamfer ${edgeIndices.size} edge(s) at distance $distance",
+                        e,
+                    )
+                }
+            }
+        return OcctShape(resultHandle)
+    }
+
+    /** Shared Kotlin-side profile validation of [extrudeProfile] and [revolveProfile]; the native
+     *  side re-validates independently. Messages are unchanged from the original extrude checks. */
+    private fun validateProfile(
+        profile: List<ProfilePoint>,
+        maxPoints: Int,
+    ) {
+        require(profile.size >= MIN_PROFILE_POINTS) {
+            "profile must have at least $MIN_PROFILE_POINTS points, got ${profile.size}"
+        }
+        require(profile.size <= maxPoints) {
+            "profile must have at most $maxPoints points, got ${profile.size}"
+        }
+        profile.forEachIndexed { index, point ->
+            require(point.x.isFinite() && point.y.isFinite()) {
+                "profile[$index] must be finite, got (${point.x}, ${point.y})"
+            }
+            require(abs(point.x) <= MAX_ABS_COORDINATE && abs(point.y) <= MAX_ABS_COORDINATE) {
+                "profile[$index] coordinates must be within +/-$MAX_ABS_COORDINATE, got (${point.x}, ${point.y})"
+            }
+        }
+        for (index in profile.indices) {
+            val current = profile[index]
+            val next = profile[(index + 1) % profile.size]
+            // Distance-based (OCCT's own Precision::Confusion()), not bit-exact -- see
+            // PROFILE_POINT_COINCIDENCE_TOLERANCE.
+            val dx = current.x - next.x
+            val dy = current.y - next.y
+            require(dx * dx + dy * dy > PROFILE_POINT_COINCIDENCE_TOLERANCE * PROFILE_POINT_COINCIDENCE_TOLERANCE) {
+                "profile has coincident (or near-coincident, within $PROFILE_POINT_COINCIDENCE_TOLERANCE) " +
+                    "consecutive points at index $index: $current"
+            }
+        }
+    }
+
+    private fun toXyArray(profile: List<ProfilePoint>): DoubleArray {
+        val profileXy = DoubleArray(profile.size * 2)
+        profile.forEachIndexed { index, point ->
+            profileXy[index * 2] = point.x
+            profileXy[index * 2 + 1] = point.y
+        }
+        return profileXy
+    }
+
+    private fun requireAvailable() {
+        val a = availability()
+        if (a !is OcctAvailability.Available) {
+            val unavailable = a as OcctAvailability.Unavailable
+            throw OcctUnavailableException(unavailable.reason, unavailable.cause)
+        }
+    }
+
+    private fun requireCoordinate(
+        name: String,
+        value: Double,
+    ) {
+        require(value.isFinite()) { "$name must be finite, got $value" }
+        require(abs(value) <= MAX_ABS_COORDINATE) { "$name must be within +/-$MAX_ABS_COORDINATE, got $value" }
+    }
+
+    private fun requireDirection(
+        dirX: Double,
+        dirY: Double,
+        dirZ: Double,
+    ) {
+        require(dirX.isFinite() && dirY.isFinite() && dirZ.isFinite()) {
+            "direction must be finite, got ($dirX, $dirY, $dirZ)"
+        }
+        require(kotlin.math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ) >= MIN_DIRECTION_LENGTH) {
+            "direction length must be at least $MIN_DIRECTION_LENGTH, got ($dirX, $dirY, $dirZ)"
+        }
     }
 
     private fun validateDimension(

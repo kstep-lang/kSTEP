@@ -115,3 +115,12 @@ Fixture `export-placed-assembly.kstep.kts` (OpenCascade 7.9.3, FreeCAD 1.1.4, ma
 Not covered: other CAD/PLM readers, FreeCAD's own OCCT version differs from Homebrew's, assemblies
 nested more than one level in a real reader (covered by unit tests only), scaling/mirroring (not
 representable).
+
+== Geometry operations (Welle J, ADR-0029)
+
+`verify-geometry-operations.sh` exports the six Welle-J example scripts (plate with hole, union, common,
+cut, revolved sleeve, chamfered prism), reads each file with `read_step_structure` and, when FreeCAD is
+installed, prints shape type, validity, volume and face count. Manual, not part of CI. Result of
+2026-10-22 (OCCT 7.9.3, macOS arm64): all six files read with status `RetDone`, 0 undefined entities,
+model check 0 fails and 0 warnings; FreeCAD reports valid solids whose volumes and face counts equal the
+closed-form values (see ADR-0029's Verification table).

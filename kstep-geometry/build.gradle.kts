@@ -201,6 +201,15 @@ val compileOcctBridge =
                     // so TKFillet is the ONLY new toolkit Geometrie Welle 5a needs (see
                     // docs/adr/ADR-0008-occt-feature-operations.adoc).
                     "-lTKFillet",
+                    // Welle J: BRepAlgoAPI_Fuse/Cut/Common/BooleanOperation (incl. SimplifyResult) live
+                    // in TKBO -- verified with `nm -gU libTKBO.dylib | grep BRepAlgoAPI_Fuse` (macOS;
+                    // `nm -D --defined-only libTKBO.so` on Linux). BRepFilletAPI_MakeChamfer is in
+                    // TKFillet, BRepPrimAPI_MakeCylinder/MakeRevol in TKPrim and
+                    // BRepBuilderAPI_Transform in TKTopAlgo -- all already linked. TKBO is the ONLY
+                    // new toolkit (docs/adr/ADR-0029-geometry-operations.adoc); it ships in the same
+                    // package as TKFillet (libocct-modeling-algorithms-dev on Ubuntu).
+                    // `-Wl,--no-undefined` re-verifies at every build that no further toolkit is needed.
+                    "-lTKBO",
                     // BRepMesh_IncrementalMesh lives in TKMesh -- verified with
                     // `nm -D --defined-only /usr/lib/x86_64-linux-gnu/libTKMesh.so | grep BRepMesh_IncrementalMesh`
                     // (19 symbols; zero in TKBRep/TKTopAlgo/TKPrim/TKMath/TKG3d). BRepTools::Clean and

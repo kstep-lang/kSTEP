@@ -31,21 +31,32 @@
 #include <jni.h>
 
 #include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 
 #include <BRepBndLib.hxx>
+#include <BRepAlgoAPI_BooleanOperation.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
@@ -65,18 +76,25 @@
 #include <Standard_Version.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <gp_Vec3f.hxx>
 
+#include <memory>
 #include <vector>
 
 namespace {
@@ -179,6 +197,22 @@ constexpr double kMinFilletRadius = 1e-7;
 constexpr double kMaxFilletRadius = 1e7;
 
 // ------------------------------------------------------------------------------------------
+// Welle J (geometry operations: booleans, cylinder, revolve, chamfer, transform). See
+// docs/adr/ADR-0029-geometry-operations.adoc for the measurements behind every limit below.
+// Hand-synchronized with the constants of the same name in dev.kstep.geometry.OcctKernel.
+// ------------------------------------------------------------------------------------------
+constexpr double kMinChamferDistance = 1e-7;
+constexpr double kMaxChamferDistance = 1e7;
+constexpr int kMaxChamferEdges = 64;
+constexpr int kMaxChamferInputFaces = 150;  // 64-edge chamfer: 113 ms @102 faces, 317 ms @200 faces (OCCT 7.9.3)
+constexpr int kMaxBooleanInputFaces = 200;  // worst boolean at 200 faces: 132 ms (OCCT 7.9.3)
+constexpr double kMinRevolveAngleDeg = 1e-4;
+constexpr double kMaxRevolveAngleDeg = 360.0;
+constexpr int kMaxRevolveProfilePoints = 512;  // 360 deg revolve of 512 points: 44 ms, 26 774 triangles
+constexpr double kMinDirectionLength = 1e-9;
+constexpr double kOrthonormalTolerance = 1e-9;
+
+// ------------------------------------------------------------------------------------------
 // Viewer-Welle 1 (triangulation) additions below. See
 // docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc.
 // ------------------------------------------------------------------------------------------
@@ -191,6 +225,8 @@ constexpr double kMaxFilletRadius = 1e7;
 // nicht dieser Wert, sondern transitiv kMaxFilletInputFaces/kMaxProfilePoints -- mirrors
 // dev.kstep.geometry.OcctKernel.MAX_TRIANGLES (hand-synchronized pair, same pattern
 // ADR-0007's NativeConstraintKind already uses).
+// Welle J (ADR-0029): the 6 332 figure above is outdated -- a 512-point revolve reaches 26 774
+// triangles (measured, OCCT 7.9.3), still ~5x below this cap.
 constexpr jint kMaxTriangles = 130000;
 
 // ------------------------------------------------------------------------------------------
@@ -304,6 +340,172 @@ public:
 private:
     const TopoDS_Shape* shape_;
 };
+
+// ------------------------------------------------------------------------------------------
+// Welle J shared helpers. Every function below that reports an error does so through throwJava()
+// and returns false; the caller must then return immediately. None of them ever touches g_mutex.
+// ------------------------------------------------------------------------------------------
+
+/**
+ * Reads, validates and copies an x,y-pair profile array into `out`. Error texts are prefixed with
+ * `fnName` and are word-for-word the ones nativeExtrudeProfile always produced (tests assert on
+ * substrings of them).
+ */
+bool readProfileXy(JNIEnv* env, jdoubleArray profileXy, int maxPoints, const char* fnName, std::vector<double>& out) {
+    const std::string fn(fnName);
+    if (profileXy == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", fn + ": profileXy must not be null");
+        return false;
+    }
+    jsize length = env->GetArrayLength(profileXy);
+    if (length % 2 != 0) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            fn + ": profileXy length must be even (x,y pairs), got " + std::to_string(length));
+        return false;
+    }
+    jsize pointCount = length / 2;
+    if (pointCount < kMinProfilePoints || pointCount > maxPoints) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            fn + ": profile must have between " + std::to_string(kMinProfilePoints) + " and " +
+                std::to_string(maxPoints) + " points, got " + std::to_string(pointCount));
+        return false;
+    }
+    DoubleArrayGuard guard(env, profileXy);
+    const jdouble* xy = guard.elements();
+    if (xy == nullptr) {
+        return false;  // OutOfMemoryError already pending
+    }
+    for (jsize i = 0; i < pointCount; ++i) {
+        double x = xy[i * 2];
+        double y = xy[i * 2 + 1];
+        if (!std::isfinite(x) || !std::isfinite(y) || std::abs(x) > kMaxAbsCoordinate ||
+            std::abs(y) > kMaxAbsCoordinate) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                fn + ": profile[" + std::to_string(i) + "] must be finite and within +/-" +
+                    std::to_string(kMaxAbsCoordinate) + ", got (" + std::to_string(x) + ", " + std::to_string(y) + ")");
+            return false;
+        }
+    }
+    // See the long comment in the original nativeExtrudeProfile history (ADR-0008): MakePolygon
+    // silently drops points within Precision::Confusion() of their predecessor, so reject them
+    // up front with the same tolerance.
+    const double confusionSquared = Precision::SquareConfusion();
+    for (jsize i = 0; i < pointCount; ++i) {
+        jsize next = (i + 1) % pointCount;
+        double dx = xy[i * 2] - xy[next * 2];
+        double dy = xy[i * 2 + 1] - xy[next * 2 + 1];
+        if (dx * dx + dy * dy <= confusionSquared) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                fn + ": profile has coincident (or near-coincident, within " + std::to_string(Precision::Confusion()) +
+                    ") consecutive points at index " + std::to_string(i));
+            return false;
+        }
+    }
+    out.assign(xy, xy + length);
+    return true;
+}
+
+/** Builds the planar face (XY plane) of a validated profile. Throws IllegalArgumentException on failure. */
+bool buildProfileFace(JNIEnv* env, const std::vector<double>& xy, const char* fnName, TopoDS_Face& out) {
+    const std::string fn(fnName);
+    BRepBuilderAPI_MakePolygon polygonMaker;
+    for (size_t i = 0; i + 1 < xy.size(); i += 2) {
+        polygonMaker.Add(gp_Pnt(xy[i], xy[i + 1], 0.0));
+    }
+    polygonMaker.Close();
+    if (!polygonMaker.IsDone()) {
+        throwJava(env, "java/lang/IllegalArgumentException", fn + ": failed to close polygon");
+        return false;
+    }
+    TopoDS_Wire wire = polygonMaker.Wire();
+    BRepBuilderAPI_MakeFace faceMaker(wire, Standard_True);
+    if (!faceMaker.IsDone()) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            fn + ": failed to build a planar face from the profile (BRepBuilderAPI_FaceError=" +
+                std::to_string(static_cast<int>(faceMaker.Error())) + ") -- profile may be non-planar or self-intersecting");
+        return false;
+    }
+    out = faceMaker.Face();
+    return true;
+}
+
+/** Number of TopAbs_SOLID sub-shapes (pure read; callers hold g_mutex if `shape` is registry-owned). */
+int countSolids(const TopoDS_Shape& shape) {
+    int n = 0;
+    for (TopExp_Explorer ex(shape, TopAbs_SOLID); ex.More(); ex.Next()) {
+        ++n;
+    }
+    return n;
+}
+
+/** Returns the first solid contained in `shape` (callers have checked countSolids() == 1). */
+TopoDS_Shape unwrapSingleSolid(const TopoDS_Shape& shape) {
+    TopExp_Explorer ex(shape, TopAbs_SOLID);
+    return ex.More() ? TopoDS_Shape(ex.Current()) : shape;
+}
+
+/** Number of TopAbs_SHELL sub-shapes (pure read; callers hold g_mutex if `shape` is registry-owned). */
+int countShells(const TopoDS_Shape& shape) {
+    int n = 0;
+    for (TopExp_Explorer ex(shape, TopAbs_SHELL); ex.More(); ex.Next()) {
+        ++n;
+    }
+    return n;
+}
+
+/** Outcome of runSolidChecks(): pure data, so the check can run under g_mutex and be reported after. */
+struct SolidCheckResult {
+    bool valid = true;
+    bool positiveVolume = true;
+};
+
+/**
+ * BRepCheck validity + positive volume, WITHOUT throwing. Results of booleans/chamfers/fillets
+ * share untouched sub-shapes (TShapes) with registered operands, and nativeShapeTriangles mutates
+ * those (triangulate, then Clean) under g_mutex -- so for such results this MUST run while
+ * g_mutex is held. Never calls throwJava.
+ */
+SolidCheckResult runSolidChecks(const TopoDS_Shape& shape) {
+    SolidCheckResult r;
+    BRepCheck_Analyzer analyzer(shape);
+    if (!analyzer.IsValid()) {
+        r.valid = false;
+        return r;
+    }
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    r.positiveVolume = props.Mass() > 0.0;
+    return r;
+}
+
+/**
+ * Mandatory post-check on a not-yet-registered result that shares NO sub-shapes with any
+ * registered shape (e.g. a freshly built revolve). Throws a Java exception of `exClass` and
+ * returns false when it fails. Must be called without g_mutex held (throwJava).
+ */
+bool postCheckSolid(JNIEnv* env, const TopoDS_Shape& shape, const char* fnName, const char* exClass) {
+    const std::string fn(fnName);
+    const SolidCheckResult r = runSolidChecks(shape);
+    if (!r.valid) {
+        throwJava(env, exClass, fn + ": resulting solid failed OCCT's own validity check");
+        return false;
+    }
+    if (!r.positiveVolume) {
+        throwJava(env, exClass, fn + ": resulting solid has zero volume");
+        return false;
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -635,54 +837,11 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeReleaseShape(JNIEnv* env, jobject 
 JNIEXPORT jlong JNICALL
 Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
     JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble height) {
-    // GetArrayLength(env, nullptr) is undefined behavior -- OcctBridge is public precisely so
-    // out-of-module callers (including test code, via reflection) can reach this method directly
-    // with hostile input that OcctKernel.extrudeProfile's own Kotlin-side validation would never
-    // let through -- see this method's KDoc in OcctBridge.kt and nativeWriteStep's identical null
-    // check above for the same rationale.
-    if (profileXy == nullptr) {
-        throwJava(env, "java/lang/NullPointerException", "nativeExtrudeProfile: profileXy must not be null");
+    // Null/length/range/coincidence validation lives in readProfileXy (shared with
+    // nativeRevolveProfile); its messages are word-for-word the ones this function always had.
+    std::vector<double> xy;
+    if (!readProfileXy(env, profileXy, kMaxProfilePoints, "nativeExtrudeProfile", xy)) {
         return 0;
-    }
-
-    // Length checked BEFORE any GetDoubleArrayElements call, per this file's own convention.
-    jsize length = env->GetArrayLength(profileXy);
-    if (length % 2 != 0) {
-        throwJava(
-            env,
-            "java/lang/IllegalArgumentException",
-            "nativeExtrudeProfile: profileXy length must be even (x,y pairs), got " + std::to_string(length));
-        return 0;
-    }
-    jsize pointCount = length / 2;
-    if (pointCount < kMinProfilePoints || pointCount > kMaxProfilePoints) {
-        throwJava(
-            env,
-            "java/lang/IllegalArgumentException",
-            "nativeExtrudeProfile: profile must have between " + std::to_string(kMinProfilePoints) + " and " +
-                std::to_string(kMaxProfilePoints) + " points, got " + std::to_string(pointCount));
-        return 0;
-    }
-
-    DoubleArrayGuard guard(env, profileXy);
-    const jdouble* xy = guard.elements();
-    if (xy == nullptr) {
-        return 0;  // OutOfMemoryError already pending
-    }
-
-    for (jsize i = 0; i < pointCount; ++i) {
-        double x = xy[i * 2];
-        double y = xy[i * 2 + 1];
-        if (!std::isfinite(x) || !std::isfinite(y) || std::abs(x) > kMaxAbsCoordinate ||
-            std::abs(y) > kMaxAbsCoordinate) {
-            throwJava(
-                env,
-                "java/lang/IllegalArgumentException",
-                "nativeExtrudeProfile: profile[" + std::to_string(i) + "] must be finite and within +/-" +
-                    std::to_string(kMaxAbsCoordinate) + ", got (" + std::to_string(x) + ", " + std::to_string(y) +
-                    ")");
-            return 0;
-        }
     }
     if (!std::isfinite(height) || std::abs(height) <= kMinDimension || std::abs(height) > kMaxDimension) {
         throwJava(
@@ -692,52 +851,12 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
                 ", " + std::to_string(kMaxDimension) + "], got " + std::to_string(height));
         return 0;
     }
-    // MakePolygon silently drops a consecutive point within Precision::Confusion() (1e-7) of its
-    // predecessor -- not just an exact bit-for-bit duplicate (measured against OCCT 7.9.2: a
-    // 4-point profile with one duplicate quietly became a triangle, with no error at all; the same
-    // is true for a "duplicate" that is merely 1e-8 apart, well inside OCCT's own confusion
-    // tolerance) -- reject that up front, using the SAME tolerance OCCT itself applies internally,
-    // rather than let a caller's profile be silently reinterpreted into a different polygon.
-    // Ordinary subtraction already treats -0.0 and 0.0 as equal (their difference is exactly 0.0),
-    // so that case is still caught here as one instance of the general distance check, with no
-    // special-casing needed.
-    const double confusionSquared = Precision::SquareConfusion();
-    for (jsize i = 0; i < pointCount; ++i) {
-        jsize next = (i + 1) % pointCount;
-        double dx = xy[i * 2] - xy[next * 2];
-        double dy = xy[i * 2 + 1] - xy[next * 2 + 1];
-        if (dx * dx + dy * dy <= confusionSquared) {
-            throwJava(
-                env,
-                "java/lang/IllegalArgumentException",
-                "nativeExtrudeProfile: profile has coincident (or near-coincident, within " +
-                    std::to_string(Precision::Confusion()) + ") consecutive points at index " + std::to_string(i));
-            return 0;
-        }
-    }
 
     try {
-        BRepBuilderAPI_MakePolygon polygonMaker;
-        for (jsize i = 0; i < pointCount; ++i) {
-            polygonMaker.Add(gp_Pnt(xy[i * 2], xy[i * 2 + 1], 0.0));
-        }
-        polygonMaker.Close();
-        if (!polygonMaker.IsDone()) {
-            throwJava(env, "java/lang/IllegalArgumentException", "nativeExtrudeProfile: failed to close polygon");
+        TopoDS_Face face;
+        if (!buildProfileFace(env, xy, "nativeExtrudeProfile", face)) {
             return 0;
         }
-        TopoDS_Wire wire = polygonMaker.Wire();
-
-        BRepBuilderAPI_MakeFace faceMaker(wire, Standard_True);
-        if (!faceMaker.IsDone()) {
-            throwJava(
-                env,
-                "java/lang/IllegalArgumentException",
-                "nativeExtrudeProfile: failed to build a planar face from the profile (BRepBuilderAPI_FaceError=" +
-                    std::to_string(static_cast<int>(faceMaker.Error())) + ") -- profile may be non-planar or self-intersecting");
-            return 0;
-        }
-        TopoDS_Face face = faceMaker.Face();
 
         BRepPrimAPI_MakePrism prismMaker(face, gp_Vec(0.0, 0.0, height));
         prismMaker.Build();
@@ -827,6 +946,7 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
         jint offendingIndex = 0;
         int edgeCount = 0;
         bool built = false;
+        SolidCheckResult check;
         // Result lives here, on the stack, as a plain local -- deliberately NOT registered while
         // g_mutex is held. registerShape() itself takes g_mutex (see its definition above), and
         // g_mutex is a plain, non-recursive std::mutex: calling registerShape() from inside the
@@ -873,6 +993,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
                         if (filletMaker.IsDone()) {
                             result = TopoDS_Shape(filletMaker.Shape());
                             built = true;
+                            // Shares TShapes with the registered operand: check under g_mutex.
+                            check = runSolidChecks(result);
                         }
                     }
                 }
@@ -915,15 +1037,12 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
         // Same mandatory post-check as nativeExtrudeProfile, run on the local (not-yet-registered)
         // result -- cost measured well within the DoS budget at kMaxFilletInputFaces (see
         // docs/adr/ADR-0008-occt-feature-operations.adoc).
-        BRepCheck_Analyzer analyzer(result);
-        if (!analyzer.IsValid()) {
+        if (!check.valid) {
             throwJava(
                 env, "java/lang/IllegalStateException", "nativeFilletEdges: resulting solid failed OCCT's own validity check");
             return 0;
         }
-        GProp_GProps props;
-        BRepGProp::VolumeProperties(result, props);
-        if (!(props.Mass() > 0.0)) {
+        if (!check.positiveVolume) {
             throwJava(env, "java/lang/IllegalStateException", "nativeFilletEdges: resulting solid has zero volume");
             return 0;
         }
@@ -936,6 +1055,515 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
         throwJava(env, "java/lang/IllegalStateException", std::string("Native error building fillet: ") + e.what());
     } catch (...) {
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error building fillet");
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------------------------------
+// Welle J: transform, cylinder, booleans, revolve, chamfer. See
+// docs/adr/ADR-0029-geometry-operations.adoc. Every function follows the invariants documented
+// at the top of this file: lookup + every OCCT call on a registry shape inside ONE g_mutex
+// critical section; throwJava()/registerShape() only OUTSIDE it; full catch cascade; nothing is
+// registered on any failure path.
+// ------------------------------------------------------------------------------------------
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeTransformShape(
+    JNIEnv* env, jobject /*self*/, jlong handle, jdoubleArray matrix12) {
+    if (matrix12 == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", "nativeTransformShape: matrix must not be null");
+        return 0;
+    }
+    if (env->GetArrayLength(matrix12) != 12) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            "nativeTransformShape: matrix must have exactly 12 entries (row-major 3x4), got " +
+                std::to_string(env->GetArrayLength(matrix12)));
+        return 0;
+    }
+    double m[12];
+    {
+        DoubleArrayGuard guard(env, matrix12);
+        const jdouble* src = guard.elements();
+        if (src == nullptr) {
+            return 0;  // OutOfMemoryError already pending
+        }
+        for (int i = 0; i < 12; ++i) {
+            m[i] = src[i];
+        }
+    }
+    for (int i = 0; i < 12; ++i) {
+        if (!std::isfinite(m[i])) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeTransformShape: matrix[" + std::to_string(i) + "] must be finite");
+            return 0;
+        }
+    }
+    for (int row = 0; row < 3; ++row) {
+        if (std::abs(m[row * 4 + 3]) > kMaxAbsCoordinate) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeTransformShape: translation must be within +/-" + std::to_string(kMaxAbsCoordinate));
+            return 0;
+        }
+    }
+    // Rotation block R(i,j) = m[4*i + j]. Must be orthonormal (R^T R = I) with det > 0: a scaling
+    // or reflection would silently corrupt the solid (and a reflection flips its orientation).
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            double dot = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                dot += m[4 * k + i] * m[4 * k + j];
+            }
+            double expected = (i == j) ? 1.0 : 0.0;
+            if (std::abs(dot - expected) > kOrthonormalTolerance) {
+                throwJava(
+                    env, "java/lang/IllegalArgumentException",
+                    "nativeTransformShape: rotation block must be orthonormal (no scaling or shear)");
+                return 0;
+            }
+        }
+    }
+    double det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) +
+                 m[2] * (m[4] * m[9] - m[5] * m[8]);
+    if (!(det > 0.0)) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeTransformShape: rotation block must have a positive determinant (no reflection)");
+        return 0;
+    }
+
+    try {
+        bool found = false;
+        TopoDS_Shape result;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape != nullptr) {
+                found = true;
+                gp_Trsf trsf;
+                trsf.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+                BRepBuilderAPI_Transform transformer(*shape, trsf, Standard_True);
+                result = TopoDS_Shape(transformer.Shape());
+            }
+        }  // g_mutex released here
+        if (!found) {
+            throwUnknownHandle(env, handle);
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("OCCT error transforming shape: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error transforming shape: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error transforming shape");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeMakeCylinder(
+    JNIEnv* env, jobject /*self*/, jdouble radius, jdouble height, jdouble ox, jdouble oy, jdouble oz, jdouble dx,
+    jdouble dy, jdouble dz) {
+    auto badDimension = [](double v) { return !std::isfinite(v) || v < kMinDimension || v > kMaxDimension; };
+    if (badDimension(radius) || badDimension(height)) {
+        throwJava(
+            env,
+            "java/lang/IllegalArgumentException",
+            "nativeMakeCylinder: radius and height must be finite and within [" + std::to_string(kMinDimension) + ", " +
+                std::to_string(kMaxDimension) + "], got radius=" + std::to_string(radius) +
+                ", height=" + std::to_string(height));
+        return 0;
+    }
+    for (double c : {ox, oy, oz}) {
+        if (!std::isfinite(c) || std::abs(c) > kMaxAbsCoordinate) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeMakeCylinder: origin must be finite and within +/-" + std::to_string(kMaxAbsCoordinate));
+            return 0;
+        }
+    }
+    // Must be checked BEFORE gp_Dir, which throws Standard_ConstructionError on a null vector.
+    if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz) ||
+        std::sqrt(dx * dx + dy * dy + dz * dz) < kMinDirectionLength) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeMakeCylinder: direction must be finite with length >= " + std::to_string(kMinDirectionLength));
+        return 0;
+    }
+    try {
+        gp_Ax2 axis(gp_Pnt(ox, oy, oz), gp_Dir(dx, dy, dz));
+        BRepPrimAPI_MakeCylinder maker(axis, radius, height);
+        maker.Build();
+        if (!maker.IsDone()) {
+            throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeCylinder did not complete");
+            return 0;
+        }
+        TopoDS_Shape result(maker.Shape());
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("OCCT error building cylinder: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error building cylinder: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error building cylinder");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOp(JNIEnv* env, jobject /*self*/, jint op, jlong left, jlong right) {
+    if (op < 0 || op > 2) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeBooleanOp: op must be 0 (fuse), 1 (cut) or 2 (common), got " + std::to_string(op));
+        return 0;
+    }
+    const char* opName = op == 0 ? "BRepAlgoAPI_Fuse" : (op == 1 ? "BRepAlgoAPI_Cut" : "BRepAlgoAPI_Common");
+    try {
+        bool foundLeft = false;
+        bool foundRight = false;
+        bool tooManyFaces = false;
+        int offendingFaces = 0;
+        bool noSolid = false;
+        bool opFailed = false;
+        int solids = 0;
+        int shells = 0;
+        double volume = 0.0;
+        SolidCheckResult check;
+        TopoDS_Shape result;
+        {
+            // BOTH lookups and the whole boolean run in ONE critical section (left == right is
+            // therefore harmless: there is exactly one lock acquisition). The work is deliberately
+            // NOT moved out of the lock onto copied TopoDS_Shape handles: TShapes are shared and
+            // nativeShapeTriangles mutates them (triangulate, then Clean) -- a data race.
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* a = findShapeLocked(left);
+            TopoDS_Shape* b = findShapeLocked(right);
+            foundLeft = a != nullptr;
+            foundRight = b != nullptr;
+            if (foundLeft && foundRight) {
+                for (const TopoDS_Shape* operand : {a, b}) {
+                    TopTools_IndexedMapOfShape faces;
+                    TopExp::MapShapes(*operand, TopAbs_FACE, faces);
+                    if (faces.Extent() > kMaxBooleanInputFaces) {
+                        tooManyFaces = true;
+                        offendingFaces = faces.Extent();
+                    }
+                    if (countSolids(*operand) < 1) {
+                        noSolid = true;
+                    }
+                }
+                if (!tooManyFaces && !noSolid) {
+                    std::unique_ptr<BRepAlgoAPI_BooleanOperation> algo;
+                    if (op == 0) {
+                        algo.reset(new BRepAlgoAPI_Fuse());
+                    } else if (op == 1) {
+                        algo.reset(new BRepAlgoAPI_Cut());
+                    } else {
+                        algo.reset(new BRepAlgoAPI_Common());
+                    }
+                    TopTools_ListOfShape args;
+                    TopTools_ListOfShape tools;
+                    args.Append(*a);
+                    tools.Append(*b);
+                    algo->SetArguments(args);
+                    algo->SetTools(tools);
+                    algo->SetRunParallel(Standard_False);  // deterministic, no OCCT thread pool inside the JVM
+                    algo->Build();
+                    if (algo->HasErrors() || !algo->IsDone()) {
+                        opFailed = true;
+                    } else {
+                        // Merge coplanar/co-cylindrical split faces (otherwise a union of two
+                        // overlapping boxes keeps split cap faces and wrong face counts).
+                        algo->SimplifyResult();
+                        result = TopoDS_Shape(algo->Shape());
+                        // The result shares untouched TShapes with the registered operands, so
+                        // every read of it (counting, volume, BRepCheck) stays inside g_mutex;
+                        // only plain values leave the critical section.
+                        solids = countSolids(result);
+                        if (solids > 0) {
+                            GProp_GProps props;
+                            BRepGProp::VolumeProperties(result, props);
+                            volume = props.Mass();
+                        }
+                        if (solids == 1) {
+                            result = unwrapSingleSolid(result);
+                            shells = countShells(result);
+                            if (shells == 1 && volume > Precision::Confusion()) {
+                                check = runSolidChecks(result);
+                            }
+                        }
+                    }
+                }
+            }
+        }  // g_mutex released here
+
+        if (!foundLeft || !foundRight) {
+            throwUnknownHandle(env, foundLeft ? right : left);
+            return 0;
+        }
+        if (tooManyFaces) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeBooleanOp: operand has " + std::to_string(offendingFaces) + " faces, exceeding the limit of " +
+                    std::to_string(kMaxBooleanInputFaces));
+            return 0;
+        }
+        if (noSolid) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeBooleanOp: every operand must contain a solid");
+            return 0;
+        }
+        if (opFailed) {
+            throwJava(env, "java/lang/IllegalStateException", std::string(opName) + " failed");
+            return 0;
+        }
+        if (solids == 0 || !(volume > Precision::Confusion())) {
+            throwJava(
+                env, "dev/kstep/geometry/OcctEmptyResultException",
+                std::string(opName) + " produced an empty result (no solid volume remains)");
+            return 0;
+        }
+        if (solids > 1) {
+            throwJava(
+                env, "java/lang/IllegalStateException",
+                std::string(opName) + ": result has " + std::to_string(solids) +
+                    " disjoint solids; multi-body results are not supported yet");
+            return 0;
+        }
+        if (shells > 1) {
+            throwJava(
+                env, "java/lang/IllegalStateException",
+                std::string(opName) + ": result has an internal void (" + std::to_string(shells) +
+                    " shells in one solid); internal voids are not supported yet");
+            return 0;
+        }
+        if (!check.valid) {
+            throwJava(
+                env, "java/lang/IllegalStateException",
+                "nativeBooleanOp: resulting solid failed OCCT's own validity check");
+            return 0;
+        }
+        if (!check.positiveVolume) {
+            throwJava(env, "java/lang/IllegalStateException", "nativeBooleanOp: resulting solid has zero volume");
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("OCCT error in boolean operation: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error in boolean operation: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error in boolean operation");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveProfile(
+    JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble angleDeg, jint axis) {
+    std::vector<double> xy;
+    if (!readProfileXy(env, profileXy, kMaxRevolveProfilePoints, "nativeRevolveProfile", xy)) {
+        return 0;
+    }
+    if (!std::isfinite(angleDeg) || angleDeg < kMinRevolveAngleDeg || angleDeg > kMaxRevolveAngleDeg) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeRevolveProfile: angle must be finite and within [" + std::to_string(kMinRevolveAngleDeg) + ", " +
+                std::to_string(kMaxRevolveAngleDeg) + "] degrees, got " + std::to_string(angleDeg));
+        return 0;
+    }
+    if (axis != 0 && axis != 1) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeRevolveProfile: axis must be 0 (X) or 1 (Y), got " + std::to_string(axis));
+        return 0;
+    }
+    // The whole profile must lie on ONE side of the rotation axis (points on the axis are fine):
+    // crossing it would sweep the profile through itself and produce a self-penetrating solid.
+    // Y axis -> the discriminating coordinate is x; X axis -> y.
+    const size_t offset = axis == 1 ? 0 : 1;
+    bool anyPositive = false;
+    bool anyNegative = false;
+    for (size_t i = 0; i + 1 < xy.size(); i += 2) {
+        double c = xy[i + offset];
+        if (c > 0.0) anyPositive = true;
+        if (c < 0.0) anyNegative = true;
+    }
+    if (anyPositive && anyNegative) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            std::string("nativeRevolveProfile: profile crosses the rotation axis (all ") + (axis == 1 ? "x" : "y") +
+                " coordinates must have the same sign)");
+        return 0;
+    }
+
+    try {
+        TopoDS_Face face;
+        if (!buildProfileFace(env, xy, "nativeRevolveProfile", face)) {
+            return 0;
+        }
+        gp_Ax1 rotationAxis(gp::Origin(), axis == 1 ? gp::DY() : gp::DX());
+        // Full revolution uses the angle-less overload (a closed solid); passing 2*pi can leave
+        // seam artefacts.
+        bool full = std::abs(angleDeg - 360.0) <= 1e-9;
+        TopoDS_Shape result;
+        if (full) {
+            BRepPrimAPI_MakeRevol maker(face, rotationAxis);
+            maker.Build();
+            if (!maker.IsDone()) {
+                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
+                return 0;
+            }
+            result = TopoDS_Shape(maker.Shape());
+        } else {
+            BRepPrimAPI_MakeRevol maker(face, rotationAxis, angleDeg * M_PI / 180.0);
+            maker.Build();
+            if (!maker.IsDone()) {
+                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
+                return 0;
+            }
+            result = TopoDS_Shape(maker.Shape());
+        }
+        // A degenerate profile is an input error (like extrude), hence IllegalArgumentException.
+        if (!postCheckSolid(env, result, "nativeRevolveProfile", "java/lang/IllegalArgumentException")) {
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("OCCT error revolving profile: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error revolving profile: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error revolving profile");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdges(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble distance) {
+    if (edgeIndices == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", "nativeChamferEdges: edgeIndices must not be null");
+        return 0;
+    }
+    jsize indexCount = env->GetArrayLength(edgeIndices);
+    if (indexCount < 1 || indexCount > kMaxChamferEdges) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeChamferEdges: edgeIndices must have between 1 and " + std::to_string(kMaxChamferEdges) +
+                " entries, got " + std::to_string(indexCount));
+        return 0;
+    }
+    if (!std::isfinite(distance) || distance < kMinChamferDistance || distance > kMaxChamferDistance) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeChamferEdges: distance must be finite and within [" + std::to_string(kMinChamferDistance) + ", " +
+                std::to_string(kMaxChamferDistance) + "], got " + std::to_string(distance));
+        return 0;
+    }
+    IntArrayGuard guard(env, edgeIndices);
+    const jint* indices = guard.elements();
+    if (indices == nullptr) {
+        return 0;  // OutOfMemoryError already pending
+    }
+
+    try {
+        bool found = false;
+        bool tooManyFaces = false;
+        int faceCount = 0;
+        bool badIndex = false;
+        jint offendingIndex = 0;
+        int edgeCount = 0;
+        bool built = false;
+        SolidCheckResult check;
+        TopoDS_Shape result;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape != nullptr) {
+                found = true;
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+                faceCount = faces.Extent();
+                if (faceCount > kMaxChamferInputFaces) {
+                    tooManyFaces = true;
+                } else {
+                    TopTools_IndexedMapOfShape edges;
+                    TopExp::MapShapes(*shape, TopAbs_EDGE, edges);
+                    edgeCount = edges.Extent();
+                    for (jsize i = 0; i < indexCount && !badIndex; ++i) {
+                        if (indices[i] < 0 || indices[i] >= edgeCount) {
+                            badIndex = true;
+                            offendingIndex = indices[i];
+                        }
+                    }
+                    if (!badIndex) {
+                        BRepFilletAPI_MakeChamfer chamferMaker(*shape);
+                        for (jsize i = 0; i < indexCount; ++i) {
+                            chamferMaker.Add(distance, TopoDS::Edge(edges(indices[i] + 1)));
+                        }
+                        chamferMaker.Build();
+                        if (chamferMaker.IsDone()) {
+                            result = TopoDS_Shape(chamferMaker.Shape());
+                            built = true;
+                            // Shares TShapes with the registered operand: check under g_mutex.
+                            check = runSolidChecks(result);
+                        }
+                    }
+                }
+            }
+        }  // g_mutex released here
+
+        if (!found) {
+            throwUnknownHandle(env, handle);
+            return 0;
+        }
+        if (tooManyFaces) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeChamferEdges: input shape has " + std::to_string(faceCount) + " faces, exceeding the limit of " +
+                    std::to_string(kMaxChamferInputFaces));
+            return 0;
+        }
+        if (badIndex) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeChamferEdges: edge index " + std::to_string(offendingIndex) + " is out of range for a shape with " +
+                    std::to_string(edgeCount) + " edges");
+            return 0;
+        }
+        if (!built) {
+            throwJava(
+                env, "java/lang/IllegalStateException",
+                "BRepFilletAPI_MakeChamfer did not complete (distance too large for the local geometry?)");
+            return 0;
+        }
+        if (!check.valid) {
+            throwJava(
+                env, "java/lang/IllegalStateException",
+                "nativeChamferEdges: resulting solid failed OCCT's own validity check");
+            return 0;
+        }
+        if (!check.positiveVolume) {
+            throwJava(env, "java/lang/IllegalStateException", "nativeChamferEdges: resulting solid has zero volume");
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("OCCT error building chamfer: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error building chamfer: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error building chamfer");
     }
     return 0;
 }

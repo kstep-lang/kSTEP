@@ -907,6 +907,14 @@ See <<roadmap,Roadmap>> for what's planned next.
   feature-tree UI, or serialization -- see
   docs/adr/ADR-0015-parametric-feature-history-foundation.adoc for the full
   scope boundary and what remains for Geometrie Welle 5b's continuation.
+  (Welle J) `OcctKernel` also offers `makeCylinder`, `translate`/`transformed`
+  (rigid placement of a copy), `union`/`cut`/`common`/`boolean` (single-solid
+  results, `OcctEmptyResultException` for empty ones), `hole` (cylinder cut),
+  `revolveProfile` (about X or Y) and `chamfer`; the feature history gained
+  `CylinderFeature`, `RevolveFeature`, `TranslateFeature`, `BooleanFeature`,
+  `HoleFeature`, `ChamferFeature` and the `DerivedFeature` interface. See
+  docs/adr/ADR-0029-geometry-operations.adoc for the measured limits, the
+  single-solid rule and the exception mapping.
 
 | `kstep-constraints`
 | PlaneGCS 2D geometric constraint-solver bridge -- Geometrie Welle 6,
@@ -1173,6 +1181,14 @@ See <<roadmap,Roadmap>> for what's planned next.
   determinism across rebuilds) and `OcctFeatureValidationExportTest`
   (analogous to `OcctBoxValidationExportTest`, writing a real
   extruded-then-filleted STEP file for manual STEP-viewer import);
+  (Welle J) `OcctGeometryOperationsValidationTest` (ungated Kotlin-side
+  validation), `OcctBooleanOperationsTest` (closed-form volumes and face counts
+  for cylinder, hole, union/cut/common, empty and multi-body results, a race
+  case), `OcctRevolveChamferTest`, `OcctGeometryOperationsNativeHostileInputTest`
+  (reflection against every new native function) and
+  `CliExportGeometryOperationsIntegrationTest` (`kstep export`/`render` of the
+  new example scripts, a GLB structure check, no stray artefacts in
+  `src/test/resources`), plus new cases in `FeatureRebuildTest`;
   (Geometrie Welle 5b, Teil 1) `FeatureRebuildTest` (a `FeatureSequence`
   replayed through `FeatureRebuilder.rebuild(...)`, regression-pinned
   against `OcctFeatureOperationsTest`'s own already-measured single- and
@@ -1350,7 +1366,10 @@ above — no additional `apt-get` package is required beyond the four already
 listed. `BRepMesh_IncrementalMesh` (Viewer-Welle 1, `kstep-viewer`'s
 triangulation) lives in `TKMesh`, from the same
 `libocct-modeling-algorithms-dev` package too — still no additional
-`apt-get` package required.
+`apt-get` package required. The boolean operations (Welle J,
+`BRepAlgoAPI_Fuse`/`Cut`/`Common`) live in `TKBO`, again from
+`libocct-modeling-algorithms-dev` (Homebrew's `opencascade` contains it too),
+and are an additional runtime dependency of the native bridge.
 
 === Building (macOS arm64, Homebrew)
 
@@ -2499,6 +2518,9 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
   `docs/adr/ADR-0015-parametric-feature-history-foundation.adoc` for the
   scope boundary (still no stable geometric edge identity, undo/redo,
   feature-tree UI, or serialization — all remain open follow-ups).
+  **(Welle J, done)** Booleans, cylinder, hole, revolve, chamfer and rigid
+  transforms on the OCCT bridge — see ADR-0029; open: multi-body results,
+  cone/sphere, arbitrary revolve axes, sweep/loft.
   **(Geometrie Welle 6, pulled forward, done)**
   `kstep-constraints` now exists: a PlaneGCS 2D geometric constraint-solver
   bridge, initially solving point systems under distance constraints — see

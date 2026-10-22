@@ -34,7 +34,7 @@ object FeatureRebuilder {
      * Replays every [Feature] in [sequence], in order, against [OcctKernel], and returns all
      * resulting shapes as a [FeatureRebuildResult].
      *
-     * Structural validation (empty sequence, [MAX_SEQUENCE_LENGTH], a [FilletFeature.baseIndex]
+     * Structural validation (empty sequence, [MAX_SEQUENCE_LENGTH], a [DerivedFeature] index
      * that does not refer to a strictly earlier position) runs first, entirely in Kotlin, before
      * any native call -- exactly the "validate before touching native code" discipline
      * [OcctKernel]'s own functions already apply, so a malformed sequence never reaches OCCT at
@@ -45,8 +45,8 @@ object FeatureRebuilder {
      * via [FeatureRebuildException.closedShapes].
      *
      * @throws IllegalArgumentException if [sequence] is empty, has more than
-     *   [MAX_SEQUENCE_LENGTH] features, or contains a [FilletFeature] whose [FilletFeature.baseIndex]
-     *   does not refer to a strictly earlier position in [sequence] -- surfaces unwrapped, exactly
+     *   [MAX_SEQUENCE_LENGTH] features, or contains a [DerivedFeature] whose [DerivedFeature.baseIndices]
+     *   do not refer to a strictly earlier position in [sequence] -- surfaces unwrapped, exactly
      *   like [OcctKernel]'s own pre-native validation.
      * @throws FeatureRebuildException if replaying a [Feature] fails against [OcctKernel] -- an
      *   `IllegalArgumentException` (e.g. a [FilletFeature.radius] now outside
@@ -72,10 +72,12 @@ object FeatureRebuilder {
             "sequence must have at most $MAX_SEQUENCE_LENGTH features, got ${sequence.features.size}"
         }
         sequence.features.forEachIndexed { index, feature ->
-            if (feature is FilletFeature) {
-                require(feature.baseIndex in 0 until index) {
-                    "feature[$index] baseIndex ${feature.baseIndex} must refer to an earlier " +
-                        "position in the sequence (0..${index - 1})"
+            if (feature is DerivedFeature) {
+                feature.baseIndices.forEach { base ->
+                    require(base in 0 until index) {
+                        "feature[$index] baseIndex $base must refer to an earlier " +
+                            "position in the sequence (0..${index - 1})"
+                    }
                 }
             }
         }
@@ -89,6 +91,37 @@ object FeatureRebuilder {
                         is ExtrudeFeature -> OcctKernel.extrudeProfile(feature.profile, feature.height)
                         is FilletFeature ->
                             OcctKernel.fillet(built[feature.baseIndex], feature.edgeIndices, feature.radius)
+                        is CylinderFeature ->
+                            OcctKernel.makeCylinder(
+                                feature.radius,
+                                feature.height,
+                                feature.x,
+                                feature.y,
+                                feature.z,
+                                feature.dirX,
+                                feature.dirY,
+                                feature.dirZ,
+                            )
+                        is RevolveFeature ->
+                            OcctKernel.revolveProfile(feature.profile, feature.angleDegrees, feature.axis)
+                        is TranslateFeature ->
+                            OcctKernel.translate(built[feature.baseIndex], feature.dx, feature.dy, feature.dz)
+                        is BooleanFeature ->
+                            OcctKernel.boolean(feature.operation, built[feature.leftIndex], built[feature.rightIndex])
+                        is HoleFeature ->
+                            OcctKernel.hole(
+                                built[feature.baseIndex],
+                                feature.diameter,
+                                feature.depth,
+                                feature.x,
+                                feature.y,
+                                feature.z,
+                                feature.dirX,
+                                feature.dirY,
+                                feature.dirZ,
+                            )
+                        is ChamferFeature ->
+                            OcctKernel.chamfer(built[feature.baseIndex], feature.edgeIndices, feature.distance)
                     }
                 } catch (e: IllegalArgumentException) {
                     built.forEach { it.close() }

@@ -71,6 +71,81 @@ object OcctBridge {
     ): Long
 
     /**
+     * Returns a rigidly transformed COPY of the shape (`BRepBuilderAPI_Transform`, copy=true).
+     *
+     * @param matrix row-major 3x4 `[r00 r01 r02 tx, r10 r11 r12 ty, r20 r21 r22 tz]`; the rotation
+     *   block must be orthonormal with determinant > 0 (no scaling, shear or reflection).
+     * @throws NullPointerException if `matrix` is null.
+     * @throws IllegalArgumentException if `matrix` does not have 12 finite entries, the translation
+     *   exceeds [dev.kstep.geometry.OcctKernel.MAX_ABS_COORDINATE], or the rotation block is not a
+     *   proper rotation.
+     * @throws IllegalStateException if `handle` is unknown.
+     */
+    external fun nativeTransformShape(
+        handle: Long,
+        matrix: DoubleArray,
+    ): Long
+
+    /**
+     * Builds a cylinder (`BRepPrimAPI_MakeCylinder`) whose base circle is centred at `(ox, oy, oz)`
+     * with axis direction `(dx, dy, dz)` (need not be normalized, must not be null).
+     *
+     * @throws IllegalArgumentException if radius/height are not finite and within
+     *   `[MIN_DIMENSION, MAX_DIMENSION]`, the origin is not finite/within range, or the direction
+     *   is not finite or shorter than [dev.kstep.geometry.OcctKernel.MIN_DIRECTION_LENGTH].
+     */
+    external fun nativeMakeCylinder(
+        radius: Double,
+        height: Double,
+        ox: Double,
+        oy: Double,
+        oz: Double,
+        dx: Double,
+        dy: Double,
+        dz: Double,
+    ): Long
+
+    /**
+     * Boolean operation `left <op> right` (`op`: 0 = fuse, 1 = cut, 2 = common) producing a single
+     * solid.
+     *
+     * @throws IllegalArgumentException if `op` is unknown, an operand exceeds
+     *   [dev.kstep.geometry.OcctKernel.MAX_BOOLEAN_INPUT_FACES] faces or contains no solid.
+     * @throws IllegalStateException if a handle is unknown, OCCT reports an error, or the result has
+     *   more than one disjoint solid.
+     * @throws dev.kstep.geometry.OcctEmptyResultException if the result contains no volume.
+     */
+    external fun nativeBooleanOp(
+        op: Int,
+        left: Long,
+        right: Long,
+    ): Long
+
+    /**
+     * Revolves a closed planar XY profile about a coordinate axis through the origin
+     * (`BRepPrimAPI_MakeRevol`; `axis`: 0 = X, 1 = Y).
+     *
+     * @throws IllegalArgumentException for an invalid profile, angle outside
+     *   `[MIN_REVOLVE_ANGLE_DEGREES, 360]`, unknown axis, a profile crossing the axis, or a
+     *   degenerate result.
+     */
+    external fun nativeRevolveProfile(
+        profileXy: DoubleArray,
+        angleDegrees: Double,
+        axis: Int,
+    ): Long
+
+    /**
+     * Chamfers (symmetric distance) the given edges, 0-based into the same
+     * `TopExp::MapShapes(TopAbs_EDGE)` ordering [nativeFilletEdges] uses.
+     */
+    external fun nativeChamferEdges(
+        handle: Long,
+        edgeIndices: IntArray,
+        distance: Double,
+    ): Long
+
+    /**
      * Triangulates the surface of the shape (`BRepMesh_IncrementalMesh`) and returns a
      * header-prefixed, index-free triangle soup with an OPTIONAL per-vertex-normal block: winding
      * normalized to point outward, vertices in world coordinates.

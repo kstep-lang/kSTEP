@@ -27,8 +27,22 @@ minor versions may contain breaking changes.
   `clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true --no-build-cache`, 1277 tests,
   0 failures, 0 errors, 6 skipped (the six known ones).
 
+* Geometry operations on the OCCT bridge (ADR-0029, Welle J): `OcctKernel.makeCylinder`,
+  `translate`/`transformed`, `union`/`cut`/`common`/`boolean` (single-solid results, face-limited operands),
+  `hole`, `revolveProfile` (about X or Y, `RevolveAxis`) and `chamfer`; `OcctEmptyResultException` for empty
+  boolean results; feature-history cases `CylinderFeature`, `RevolveFeature`, `TranslateFeature`,
+  `BooleanFeature`, `HoleFeature`, `ChamferFeature`; example scripts `hello-plate-with-hole`,
+  `export-plate-with-hole`, `export-boolean-{union,common,cut}`, `export-revolved-sleeve`,
+  `export-chamfered-prism`, `hello-revolve`; `scripts/interop/verify-geometry-operations.sh`. Gate
+  (2026-10-22, macOS arm64, OCCT 7.9.3): `clean check -Pkstep.occt.require=true
+  -Pkstep.planegcs.require=true --no-build-cache --rerun-tasks`, 1333 tests, 0 failures, 0 errors, 6 skipped
+  (the six known ones). The six exported STEP files read back as valid solids in OCCT's typed reader and
+  FreeCAD with the closed-form volumes.
+
 === Changed
 
+* `OcctGeometryException` is now `open` (parent of `OcctEmptyResultException`); `FilletFeature` implements the
+  new `DerivedFeature` interface (constructor and `copy` unchanged); the native bridge links `-lTKBO`.
 * CI/release workflows: every `apt-get` step now retries three times with a per-attempt timeout and a
   15-minute step timeout, after a hung mirror stalled the Linux OCCT job for 61 minutes (2026-10-22).
 * Geometry exports with assembly usages now carry an identity placement for usages without

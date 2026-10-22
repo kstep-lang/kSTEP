@@ -376,7 +376,7 @@ non-history extrude/fillet foundation. The remaining scope continues as:
   undo/redo; a feature-tree UI; serialization (JSON/Part-21) of a
   `FeatureSequence`.
 
-| Geometrie Welle 5a-Nachzügler
+| Geometrie Welle 5a-Nachzügler (chamfer and holes done in Welle J, ADR-0029; variable-radius fillet and arbitrary extrusion direction still open)
 | Chamfer (`BRepFilletAPI_MakeChamfer`, structurally identical to fillet),
   variable-radius fillet, extrusion along an arbitrary direction (not just
   +Z), holes/pockets via boolean subtraction (depends on Geometrie Welle 2's
@@ -392,5 +392,5 @@ Geometrie Welle 2 (additional primitives, boolean operations, STEP import),
 Geometrie Welle 3 (`.kstep.kts` DSL surface, `kstep-cli`/`kstep-mcp`
 wiring), Geometrie Welle 4 (merging OCCT geometry with kSTEP's own AP242
 product structure), and Geometrie Welle 9 (binding-strategy re-evaluation at
-roughly 50 shim functions -- still 8 after this wave) remain unchanged from
+roughly 50 shim functions -- still 8 after this wave, 14 after Welle J / ADR-0029) remain unchanged from
 ADR-0005 and are not repeated here.

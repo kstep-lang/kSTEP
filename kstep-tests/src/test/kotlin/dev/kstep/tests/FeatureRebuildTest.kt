@@ -1,15 +1,23 @@
 package dev.kstep.tests
 
+import dev.kstep.geometry.BooleanOperation
 import dev.kstep.geometry.OcctAvailability
+import dev.kstep.geometry.OcctEmptyResultException
 import dev.kstep.geometry.OcctGeometryException
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.ProfilePoint
+import dev.kstep.geometry.feature.BooleanFeature
 import dev.kstep.geometry.feature.BoxFeature
+import dev.kstep.geometry.feature.ChamferFeature
+import dev.kstep.geometry.feature.CylinderFeature
 import dev.kstep.geometry.feature.ExtrudeFeature
 import dev.kstep.geometry.feature.FeatureRebuildException
 import dev.kstep.geometry.feature.FeatureRebuilder
 import dev.kstep.geometry.feature.FeatureSequence
 import dev.kstep.geometry.feature.FilletFeature
+import dev.kstep.geometry.feature.HoleFeature
+import dev.kstep.geometry.feature.RevolveFeature
+import dev.kstep.geometry.feature.TranslateFeature
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.doubles.plusOrMinus
@@ -185,5 +193,78 @@ class FeatureRebuildTest :
             val result = FeatureRebuilder.rebuild(extrudeThenFillet(radius = 5.0))
             result.close()
             shouldThrow<IllegalStateException> { result.shapes[0].volume }
+        }
+
+        // Welle J (ADR-0029): the new feature cases and the generic DerivedFeature index check.
+        "a box, cylinder, cut and chamfer sequence yields the closed-form volumes".config(enabled = available) {
+            val sequence =
+                FeatureSequence(
+                    listOf(
+                        BoxFeature(40.0, 40.0, 10.0),
+                        CylinderFeature(4.0, 10.0, x = 20.0, y = 20.0, z = 0.0),
+                        BooleanFeature(BooleanOperation.CUT, 0, 1),
+                        ChamferFeature(baseIndex = 2, edgeIndices = listOf(0), distance = 1.0),
+                    ),
+                )
+            FeatureRebuilder.rebuild(sequence).use { r ->
+                r.shapes[2].volume shouldBe (16000.0 - 160.0 * Math.PI plusOrMinus 1e-5)
+                (r.final.volume < r.shapes[2].volume) shouldBe true
+            }
+        }
+
+        "changing a HoleFeature diameter and rebuilding gives the new closed-form volume".config(enabled = available) {
+            val hole = HoleFeature(0, diameter = 8.0, depth = 10.0, x = 20.0, y = 20.0, z = 10.0)
+            val base = FeatureSequence(listOf(BoxFeature(40.0, 40.0, 10.0), hole))
+            FeatureRebuilder.rebuild(base).use { it.final.volume shouldBe (16000.0 - 160.0 * Math.PI plusOrMinus 1e-5) }
+            val wider = FeatureSequence(listOf(BoxFeature(40.0, 40.0, 10.0), hole.copy(diameter = 10.0)))
+            FeatureRebuilder
+                .rebuild(
+                    wider,
+                ).use { it.final.volume shouldBe (16000.0 - 250.0 * Math.PI plusOrMinus 1e-5) }
+        }
+
+        "translate and revolve features rebuild".config(enabled = available) {
+            val sequence =
+                FeatureSequence(
+                    listOf(
+                        RevolveFeature(
+                            listOf(
+                                dev.kstep.geometry.ProfilePoint(5.0, 0.0),
+                                dev.kstep.geometry.ProfilePoint(10.0, 0.0),
+                                dev.kstep.geometry.ProfilePoint(10.0, 20.0),
+                                dev.kstep.geometry.ProfilePoint(5.0, 20.0),
+                            ),
+                        ),
+                        TranslateFeature(0, 5.0, 5.0, 5.0),
+                    ),
+                )
+            FeatureRebuilder.rebuild(sequence).use { it.final.volume shouldBe (1500.0 * Math.PI plusOrMinus 1e-5) }
+        }
+
+        "a BooleanFeature whose rightIndex is not an earlier position is rejected before native code" {
+            val sequence =
+                FeatureSequence(
+                    listOf(
+                        BoxFeature(1.0, 1.0, 1.0),
+                        BooleanFeature(BooleanOperation.UNION, leftIndex = 0, rightIndex = 1),
+                    ),
+                )
+            shouldThrow<IllegalArgumentException> { FeatureRebuilder.rebuild(sequence) }
+        }
+
+        "an empty boolean result mid-sequence fails the rebuild and closes every shape".config(enabled = available) {
+            val sequence =
+                FeatureSequence(
+                    listOf(
+                        BoxFeature(10.0, 10.0, 10.0),
+                        TranslateFeature(0, 50.0, 0.0, 0.0),
+                        BooleanFeature(BooleanOperation.COMMON, 0, 1),
+                    ),
+                )
+            val failure = shouldThrow<FeatureRebuildException> { FeatureRebuilder.rebuild(sequence) }
+            failure.featureIndex shouldBe 2
+            (failure.cause is OcctEmptyResultException) shouldBe true
+            failure.closedShapes.size shouldBe 2
+            failure.closedShapes.forEach { shape -> shouldThrow<IllegalStateException> { shape.volume } }
         }
     })

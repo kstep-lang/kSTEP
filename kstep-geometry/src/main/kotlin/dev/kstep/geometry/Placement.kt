@@ -80,6 +80,27 @@ class Placement private constructor(
         z: Double,
     ): DoubleArray = applyRotation(m, x, y, z)
 
+    /**
+     * The transform as a row-major 3x4 matrix `[r00 r01 r02 tx, r10 r11 r12 ty, r20 r21 r22 tz]` --
+     * the layout `nativeTransformShape` expects (`gp_Trsf::SetValues`). `internal`: only
+     * [OcctKernel.transformed] needs it; the private storage layout stays private.
+     */
+    internal fun toMatrix12(): DoubleArray =
+        doubleArrayOf(
+            m[0],
+            m[1],
+            m[2],
+            m[9],
+            m[3],
+            m[4],
+            m[5],
+            m[10],
+            m[6],
+            m[7],
+            m[8],
+            m[11],
+        )
+
     companion object {
         /** The no-op transform: rotation = identity, translation = zero. */
         val IDENTITY: Placement = Placement(identityMatrix() + doubleArrayOf(0.0, 0.0, 0.0))
