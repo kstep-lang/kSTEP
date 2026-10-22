@@ -1,0 +1,35 @@
+= Interop check: read kSTEP Part 21 with OpenCascade
+
+`read_step_structure.cpp` reads a STEP file with OpenCascade's *typed* STEP model (no geometry
+transfer) and prints the product structure it found: `PRODUCT`, `PRODUCT_DEFINITION`,
+`NEXT_ASSEMBLY_USAGE_OCCURRENCE` (with relating/related ends), `APPROVAL`, the entity-type
+histogram, the number of undefined entities and the OCCT model check (fails/warnings). It is an
+independent reader for the product-structure half of the external-interop bar described in the
+README; it does not prove geometry interop.
+
+== Build and run
+
+macOS (Homebrew):
+
+[source,bash]
+----
+brew install opencascade
+P="$(brew --prefix opencascade)"
+c++ -std=c++17 -I"$P/include/opencascade" -L"$P/lib" -Wl,-rpath,"$P/lib" \
+  scripts/interop/read_step_structure.cpp -o read_step_structure \
+  -lTKDESTEP -lTKXSBase -lTKernel -lTKMath
+./read_step_structure out.step
+----
+
+Linux (Debian/Ubuntu, see the README 'Building' section for the OCCT packages): same command with
+`-I/usr/include/opencascade` and `-L/usr/lib/x86_64-linux-gnu`.
+
+Produce a file with `kstep export script.kstep.kts --out out.step`.
+
+== Result of 2026-10-22 (OpenCascade 7.9.3, macOS arm64)
+
+`hello-assembly.step`: read status `RetDone`, 14 entities, none undefined, model check 0 fails and
+0 warnings; products Housing (`HSG-001`), Bracket (`BRK-001`) and Screw (`SCR-001`) with their
+definitions and both assembly usages resolved to the correct ends. A deliberately broken file is
+rejected with a line-accurate error. Not covered: geometry, other CAD/PLM readers, full AP242
+schema conformance, a lossless write-back round trip.

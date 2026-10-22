@@ -439,12 +439,15 @@ this writing:
   **Acceptance-criterion honesty**:
   kSTEP-ADR-0001 names a lossless roundtrip through an external
   CAD/PLM tool (e.g. FreeCAD) as the real-world bar for Part 21
-  export/import. A first check on 2026-10-22: FreeCAD 1.x (OCCT 7.8)
+  export/import. Checks on 2026-10-22: FreeCAD 1.x (OCCT 7.8)
   reads a kSTEP product-structure file without error or warning, but
-  yields 0 objects because no geometry is written. Only syntactic
-  acceptance by the OCCT STEP parser is proven; product-structure
-  interop and geometry interop remain unverified, and geometry can
-  only be produced under Linux/OCCT. This wave's acceptance test is a self-roundtrip only
+  yields 0 objects because no geometry is written. A typed
+  OpenCascade 7.9.3 reader (`scripts/interop/`) additionally resolves
+  the products, definitions and both ends of every assembly usage with
+  a clean model check. This proves product-structure read interop with
+  one external implementation; geometry interop, other CAD/PLM readers,
+  full schema conformance and a lossless write-back round trip remain
+  unverified, and geometry can only be produced under Linux/OCCT. This wave's acceptance test is a self-roundtrip only
   (`Part21Reader.read(Part21Writer.write(header, model)) == model`,
   verified in `Part21RoundtripTest`). This closes the kSTEP-own-format
   half of the ADR-0001 bar, not the external-interop half; see
@@ -779,9 +782,9 @@ See <<roadmap,Roadmap>> for what's planned next.
 | Working: `Part21Writer.write`/`Part21Reader.read`, a hand-rolled
   scanner and two-pass graph resolver (independent of the ANTLR
   EXPRESS grammar — Part 21 is a different sub-format). Verified via a
-  self-roundtrip test suite in `kstep-tests`; no external CAD/PLM
-  tool interop beyond syntactic acceptance by FreeCAD 1.x (2026-10-22, 0 objects imported, no
-  geometry written) — see Status above. (M2 Welle 6)
+  self-roundtrip test suite in `kstep-tests`; external interop is
+  limited to syntactic acceptance by FreeCAD 1.x (0 objects, no geometry written) and a typed
+  OpenCascade read of the product structure (`scripts/interop/`, 2026-10-22) — see Status above. (M2 Welle 6)
   Now wired into the CLI via `kstep-script`/`kstep export` — see the
   `kstep-script`/`kstep-cli` rows below. (Geometrie Welle 4) The value
   grammar and instance model now also cover real, foreign-produced AP242
@@ -2345,8 +2348,11 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
   above. The external-CAD/PLM-tool roundtrip gap above is only narrowed by
   this: on 2026-10-22 FreeCAD 1.x (OCCT 7.8) read `kstep export`'s product-structure
   output without error or warning but yielded 0 objects (no geometry is
-  written), so only syntactic acceptance is proven and acceptance criterion
-  #2 stays open.
+  written), and a typed OpenCascade 7.9.3 reader (`scripts/interop/`)
+  resolved the product structure with a clean model check. That is
+  product-structure read interop with one external implementation;
+  geometry interop and a lossless write-back round trip are unproven, so
+  acceptance criterion #2 is only partly met.
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and
   the kSTEP DSL as generation targets. **(M2 Welle 1) Split into two
   halves, only the first of which is done**: the MCP server itself

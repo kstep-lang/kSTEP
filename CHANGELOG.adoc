@@ -20,10 +20,14 @@ minor versions may contain breaking changes.
 === Documented
 
 * Interop finding of 2026-10-22: kSTEP Part 21 files (product structure) are read by FreeCAD 1.x
-  (OCCT 7.8) without error or warning, and yield 0 objects because no geometry is written. Only
-  syntactic acceptance by the OCCT STEP parser is proven. Product-structure interop and geometry
-  interop remain unverified, and geometry can only be produced under Linux/OCCT. ADR-0001
-  acceptance criterion #2 is therefore still open.
+  (OCCT 7.8) without error or warning and yield 0 objects because no geometry is written. An
+  independent reader built on OpenCascade 7.9.3's typed STEP model
+  (`scripts/interop/read_step_structure.cpp`) additionally resolves the product structure:
+  products, product definitions, formations and both ends of every assembly usage are found, no
+  entity is undefined and the OCCT model check reports 0 fails and 0 warnings. This proves
+  product-structure *read* interop with one external implementation (OCCT). Geometry interop,
+  other CAD/PLM readers, full AP242 schema conformance and a lossless write-back round trip remain
+  unverified, so ADR-0001 acceptance criterion #2 is only partly met.
 
 == 0.1.0 — 2026-10-19 (pre-release)
 
@@ -76,8 +80,9 @@ see the README.
 * No published artifacts; build from source (JDK 21).
 * Part 21 output is verified by self-round-trip only. Interoperability with external CAD/PLM tools
   (for example FreeCAD) has not been validated; a fixture for the manual check lives in
-  `kstep-tests`. Update (Unreleased): FreeCAD 1.x reads the files without error but yields 0
-  objects (no geometry is written); only syntactic acceptance is proven.
+  `kstep-tests`. Update (Unreleased): FreeCAD 1.x reads the files without error (0 objects, no
+  geometry is written) and an OpenCascade typed reader resolves the product structure; geometry
+  and other tools remain unverified.
 * `kstep export` and the script host do not run model-level validation yet; an assembly cycle
   is not detected on export (exit code 0). Update (Unreleased): `kstep export --validate` now
   does this opt-in; without the flag a cycle is still exported.
