@@ -445,7 +445,8 @@ private fun exportModel(
     // Only probe the native bridge when geometry is actually in play.
     val occt =
         if (shapeCount > 0) OcctKernel.availability() else OcctAvailability.Unavailable("not queried")
-    val plan = planExportGeometry(shapeCount, command.requireGeometry, occt)
+    val placementCount = model.placements.size
+    val plan = planExportGeometry(shapeCount, command.requireGeometry, occt, placementCount)
     val text: String
     var geometry: GeometryReport? = null
     when (plan) {
@@ -464,7 +465,14 @@ private fun exportModel(
                         )
                     }
                 }
-            geometry = GeometryReport(merged = true, shapeCount = shapeCount, occt = occt)
+            geometry =
+                GeometryReport(
+                    merged = true,
+                    shapeCount = shapeCount,
+                    occt = occt,
+                    placementCount = placementCount,
+                    usageCount = countPlacedUsages(text),
+                )
         }
         is ExportGeometryPlan.StructureOnly -> {
             text =
@@ -477,12 +485,13 @@ private fun exportModel(
                 } catch (e: Part21LimitExceededException) {
                     fail { printError(command.jsonOutput, e.toRuntimeError()) }
                 }
+            plan.ignoredPlacementsNote?.let { System.err.println("kstep export: $it.") }
             if (plan.unmergedReason != null) {
                 System.err.println(
                     "kstep export: geometry NOT written: OCCT unavailable (${plan.unmergedReason}); " +
                         "the file contains the product structure only.",
                 )
-                geometry = GeometryReport(false, shapeCount, occt, plan.unmergedReason)
+                geometry = GeometryReport(false, shapeCount, occt, plan.unmergedReason, placementCount)
             }
         }
     }
@@ -503,7 +512,9 @@ private fun exportModel(
         )
     } else {
         if (geometry?.merged == true) {
-            println("Exported ${model.roots.size} root(s) with $shapeCount geometric shape(s) to $outPath")
+            val placed = geometry.usageCount
+            val placedText = if (placed > 0) " and $placed placed usage(s)" else ""
+            println("Exported ${model.roots.size} root(s) with $shapeCount geometric shape(s)$placedText to $outPath")
         } else {
             println("Exported ${model.roots.size} root(s) to $outPath")
         }

@@ -2,9 +2,14 @@ package dev.kstep.script
 
 import dev.kstep.core.DslViolation
 import dev.kstep.core.ValidationResult
+import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.geometry.OcctShape
+import dev.kstep.shape.RigidPlacement
+import dev.kstep.shape.Rotation
 import dev.kstep.shape.ShapeAssignment
+import dev.kstep.shape.UsagePlacement
+import dev.kstep.shape.Vec3
 import dev.kstep.step21.Part21Header
 
 /**
@@ -30,6 +35,12 @@ data class KStepModel(
     val roots: List<Any>,
     val violations: List<DslViolation>,
     val shapes: List<ShapeAssignment> = emptyList(),
+    /**
+     * Component placements registered via [KStepModelBuilder.place] (ADR-0028). Like [shapes], a
+     * separate additive channel: it never becomes a `roots` entry and is only consulted when
+     * `kstep export` merges geometry.
+     */
+    val placements: List<UsagePlacement> = emptyList(),
 ) {
     val isValid: Boolean get() = violations.isEmpty()
 
@@ -61,6 +72,7 @@ class KStepModelBuilder internal constructor() {
     private val validRoots = mutableListOf<Any>()
     private val collectedViolations = mutableListOf<DslViolation>()
     private val registeredShapes = mutableListOf<ShapeAssignment>()
+    private val registeredPlacements = mutableListOf<UsagePlacement>()
 
     /** Registers an already-validated entity (typically the result of a builder's `getOrThrow()`). */
     fun root(entity: Any) {
@@ -88,6 +100,43 @@ class KStepModelBuilder internal constructor() {
         shapeName: String = "",
     ) {
         registeredShapes += ShapeAssignment(productDefinition, shape, shapeName)
+    }
+
+    /**
+     * Positions the component of [usage] relative to its parent assembly: `pParent = R * pChild + t`
+     * (translation in millimetres; [rotation] via `Rotation.about(axis, degrees)` or
+     * `Rotation.fromAxes`). The placement belongs to the *usage*, not to the part, so one part can be
+     * used several times (a screw) at different places. It only takes effect in `kstep export` when
+     * geometry is merged, and the usage must be registered via `root(...)` and have a child that
+     * carries geometry -- otherwise the export fails closed. A usage without `place(...)` whose
+     * child has geometry is placed at the identity.
+     */
+    fun place(
+        usage: NextAssemblyUsageOccurrence,
+        translation: Vec3 = Vec3.ZERO,
+        rotation: Rotation = Rotation.IDENTITY,
+    ) {
+        registeredPlacements += UsagePlacement(usage, RigidPlacement(translation, rotation))
+    }
+
+    /** [place] with a ready-made [RigidPlacement]. */
+    fun place(
+        usage: NextAssemblyUsageOccurrence,
+        placement: RigidPlacement,
+    ) {
+        registeredPlacements += UsagePlacement(usage, placement)
+    }
+
+    /** [place] for a raw [ValidationResult]: an invalid usage contributes its violations instead of aborting the script. */
+    fun place(
+        usage: ValidationResult<NextAssemblyUsageOccurrence>,
+        translation: Vec3 = Vec3.ZERO,
+        rotation: Rotation = Rotation.IDENTITY,
+    ) {
+        when (usage) {
+            is ValidationResult.Valid -> place(usage.value, translation, rotation)
+            is ValidationResult.Invalid -> collectedViolations += usage.violations
+        }
     }
 
     /** Registers a raw [ValidationResult]: an [ValidationResult.Invalid] contributes its
@@ -130,6 +179,7 @@ class KStepModelBuilder internal constructor() {
             roots = validRoots.toList(),
             violations = collectedViolations.toList(),
             shapes = registeredShapes.toList(),
+            placements = registeredPlacements.toList(),
         )
 }
 

@@ -6,6 +6,7 @@ import dev.kstep.step21.Part21Header
 import dev.kstep.step21.Part21ReadMode
 import dev.kstep.step21.Part21Reader
 import dev.kstep.step21.Part21SimpleInstance
+import dev.kstep.step21.Part21Value
 import dev.kstep.step21.Part21Writer
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.io.IOException
@@ -48,7 +49,7 @@ object Ap242ShapeExporter {
     fun export(
         header: Part21Header,
         assignment: ShapeAssignment,
-    ): String = export(header, listOf(assignment.productDefinition), listOf(assignment))
+    ): String = export(header, listOf(assignment.productDefinition), listOf(assignment), emptyList())
 
     /**
      * Multi-root, multi-shape variant (ADR-0027): emits ALL of [roots] (so assembly structure --
@@ -56,8 +57,14 @@ object Ap242ShapeExporter {
      * overload, which only emits its one product definition) and binds each of [assignments] to
      * its product definition via `PRODUCT_DEFINITION_SHAPE` + `SHAPE_DEFINITION_REPRESENTATION`.
      *
-     * One part per assignment, each in its own coordinate system: there is no
-     * `ITEM_DEFINED_TRANSFORMATION`, so parts overlap at the origin in a viewer.
+     * Assembly usages whose child carries geometry (directly or through descendants) additionally
+     * get a `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` chain (ADR-0028), without which OCCT/FreeCAD
+     * drop the child from the assembly. Without [placements] every such usage is placed at the
+     * identity; [placements] position the component relative to its parent
+     * (`pParent = R * pChild + t`). Usages whose subtree carries no geometry, and exports without any
+     * assembly usage, are written exactly as before ADR-0028.
+     *
+     * @param placements at most one per usage; the usage must be a root with a geometric child
      *
      * @throws ShapeExportException if [assignments] is empty or exceeds [MAX_SHAPES], two
      *   assignments share one product definition, an assignment's product definition is not
@@ -70,6 +77,7 @@ object Ap242ShapeExporter {
         header: Part21Header,
         roots: List<Any>,
         assignments: List<ShapeAssignment>,
+        placements: List<UsagePlacement> = emptyList(),
     ): String {
         if (assignments.isEmpty()) throw ShapeExportException("at least one shape assignment is required")
         if (assignments.size > MAX_SHAPES) {
@@ -99,10 +107,14 @@ object Ap242ShapeExporter {
                 }
             }
 
+        val plan = AssemblyGeometryGraph.plan(roots, assignments.map { it.productDefinition }, placements)
+
         var offset = structure.nextId - 1
         var totalInstances = 0
         val geometryAll = mutableListOf<Part21EntityInstance>()
-        val bridge = mutableListOf<Part21SimpleInstance>()
+        // PD (identity) -> id of its already-renumbered shape representation
+        val representationOf = java.util.IdentityHashMap<Any, Int>()
+        val bridge = mutableListOf<Part21EntityInstance>()
         for ((index, assignment) in assignments.withIndex()) {
             val occtText = writeOcctStepText(assignment)
             val occtDoc = Part21Reader.readRawDocument(occtText, Part21ReadMode.TOLERANT)
@@ -124,6 +136,7 @@ object Ap242ShapeExporter {
             val productDefinitionShapeId = nextFreeId
             val shapeDefinitionRepresentationId = addExactId(nextFreeId, 1)
             geometryAll += renumbered
+            representationOf[assignment.productDefinition] = rootRepresentationId
             bridge +=
                 Ap242ShapeBridgeEntities.productDefinitionShape(
                     productDefinitionShapeId,
@@ -137,6 +150,30 @@ object Ap242ShapeExporter {
                     rootRepresentationId,
                 )
             offset = shapeDefinitionRepresentationId
+        }
+
+        if (plan.usages.isNotEmpty()) {
+            val geometryById = geometryAll.associateBy { it.id }
+            val result =
+                Ap242PlacementBridge.build(
+                    plan = plan,
+                    startId = addExactId(offset, 1),
+                    shapedRepresentationId = { representationOf[it] },
+                    representation = { geometryById.getValue(it) },
+                    contextId = {
+                        sharedRepresentationContextId(
+                            geometryById,
+                            representationOf.getValue(assignments.first().productDefinition),
+                        )
+                    },
+                    productDefinitionId = { structure.idOf(it) },
+                    usageId = { structure.idOf(it) },
+                )
+            for (i in geometryAll.indices) {
+                result.replaced[geometryAll[i].id]?.let { geometryAll[i] = it }
+            }
+            bridge += result.added
+            offset = result.added.maxOf { it.id }
         }
 
         // applicationProtocolDefinition + productRelatedProductCategory hang off the application
@@ -161,6 +198,20 @@ object Ap242ShapeExporter {
         val merged = Part21Document.concat(structureDoc, geometryAll, bridge)
         val document = merged.copy(header = header.copy(schemaIdentifiers = listOf(AP242_SCHEMA_IDENTIFIER)))
         return document.render()
+    }
+
+    // The geometric representation context OCCT wrote for the first shape: reused for synthesized
+    // representations of parts that have no geometry of their own (all OCCT contexts are millimetres).
+    private fun sharedRepresentationContextId(
+        geometryById: Map<Int, Part21EntityInstance>,
+        representationId: Int,
+    ): Int {
+        val rep = geometryById[representationId] as? Part21SimpleInstance
+        val context = rep?.args?.getOrNull(2) as? Part21Value.Ref
+        return context?.id
+            ?: throw ShapeExportException(
+                "cannot find the representation context of representation #$representationId",
+            )
     }
 
     // [Math.addExact]'s overflow check, surfaced as ShapeExportException: without it, an id near
@@ -194,8 +245,9 @@ object Ap242ShapeExporter {
         roots: List<Any>,
         assignments: List<ShapeAssignment>,
         target: Path,
+        placements: List<UsagePlacement> = emptyList(),
     ): Path {
-        val text = export(header, roots, assignments)
+        val text = export(header, roots, assignments, placements)
         val absolute = target.toAbsolutePath().normalize()
         Files.createDirectories(absolute.parent)
         Files.writeString(absolute, text)

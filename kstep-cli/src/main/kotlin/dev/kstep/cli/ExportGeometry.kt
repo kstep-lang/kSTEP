@@ -25,6 +25,8 @@ internal sealed interface ExportGeometryPlan {
     data class StructureOnly(
         /** Non-null when shapes were registered but could not be merged (stderr warning text). */
         val unmergedReason: String? = null,
+        /** Non-null when `place(...)` calls were made but no geometry is merged, so they have no effect. */
+        val ignoredPlacementsNote: String? = null,
     ) : ExportGeometryPlan
 
     /** Merge every registered shape via [Ap242ShapeExporter]. */
@@ -42,6 +44,7 @@ internal fun planExportGeometry(
     shapeCount: Int,
     requireGeometry: Boolean,
     occt: OcctAvailability,
+    placementCount: Int = 0,
 ): ExportGeometryPlan =
     when {
         shapeCount == 0 && requireGeometry ->
@@ -50,7 +53,14 @@ internal fun planExportGeometry(
                 KStepScriptOutcomeCodes.GEOMETRY_REQUIRED,
                 "--require-geometry set, but the script registers no shape(...). Nothing was written.",
             )
-        shapeCount == 0 -> ExportGeometryPlan.StructureOnly()
+        shapeCount == 0 ->
+            ExportGeometryPlan.StructureOnly(
+                ignoredPlacementsNote =
+                    placementCount
+                        .takeIf {
+                            it > 0
+                        }?.let { "$it placement(s) ignored: the script registers no shape(...)" },
+            )
         occt is OcctAvailability.Available -> ExportGeometryPlan.Merge
         requireGeometry ->
             ExportGeometryPlan.Fail(
@@ -59,7 +69,13 @@ internal fun planExportGeometry(
                 "--require-geometry set, but OCCT is unavailable (${(occt as OcctAvailability.Unavailable).reason}). " +
                     "Nothing was written.",
             )
-        else -> ExportGeometryPlan.StructureOnly((occt as OcctAvailability.Unavailable).reason)
+        else ->
+            ExportGeometryPlan.StructureOnly(
+                (occt as OcctAvailability.Unavailable).reason,
+                placementCount.takeIf { it > 0 }?.let {
+                    "$it placement(s) ignored: no geometry was merged (OCCT unavailable)"
+                },
+            )
     }
 
 /** Result of the geometry step, for the success report. */
@@ -68,6 +84,10 @@ internal data class GeometryReport(
     val shapeCount: Int,
     val occt: OcctAvailability,
     val unmergedReason: String? = null,
+    /** Number of `place(...)` registrations of the model. */
+    val placementCount: Int = 0,
+    /** Number of assembly usages that received a placement chain (CDSR) in the merged file. */
+    val usageCount: Int = 0,
 )
 
 /**
@@ -77,7 +97,7 @@ internal data class GeometryReport(
  */
 internal fun mergeGeometry(model: KStepModel): Result<String> =
     try {
-        Result.success(Ap242ShapeExporter.export(model.header, model.roots, model.shapes))
+        Result.success(Ap242ShapeExporter.export(model.header, model.roots, model.shapes, model.placements))
     } catch (e: ShapeExportException) {
         Result.failure(GeometryExportFailure(e.message ?: "geometry export failed"))
     } catch (e: OcctGeometryException) {
@@ -99,6 +119,10 @@ internal fun mergeGeometry(model: KStepModel): Result<String> =
         Result.failure(GeometryExportFailure(e.message ?: "Part 21 limit exceeded"))
     }
 
+/** Number of placed assembly usages in a merged file (one `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` instance head each; anchored at line start so string literals cannot inflate it). */
+internal fun countPlacedUsages(text: String): Int =
+    Regex("^#\\d+\\s*=\\s*CONTEXT_DEPENDENT_SHAPE_REPRESENTATION\\(", RegexOption.MULTILINE).findAll(text).count()
+
 internal class GeometryExportFailure(
     message: String,
 ) : RuntimeException(message)
@@ -112,6 +136,8 @@ internal fun geometryJson(report: GeometryReport): JsonElement =
     buildJsonObject {
         put("merged", report.merged)
         put("shapeCount", report.shapeCount)
+        put("placementCount", report.placementCount)
+        put("usageCount", report.usageCount)
         putJsonObject("occt") {
             when (val occt = report.occt) {
                 is OcctAvailability.Available -> {

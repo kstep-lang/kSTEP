@@ -7,8 +7,8 @@ import dev.kstep.geometry.OcctShape
  * Genuinely one AP242 product definition, coupled to genuinely one OCCT solid.
  *
  * One shape per product definition (ADR-0009). Several assignments may be exported together
- * (ADR-0027), one part per assignment, each in its own coordinate system: placing them relative
- * to one another via `ITEM_DEFINED_TRANSFORMATION` is a Folge-Welle.
+ * (ADR-0027), one part per assignment, each in its own coordinate system; the placement of a part
+ * relative to its parent assembly is a property of the assembly usage, see [UsagePlacement] (ADR-0028).
  *
  * Ownership: [Ap242ShapeExporter] does NOT close [shape] — the caller retains ownership,
  * exactly like the documented rule for `OcctKernel.fillet`'s input shape. [productDefinition]

@@ -54,9 +54,9 @@ reports a runtime error).
 
 == Consequences and limitations
 
-* Several parts share no placement: there is no `ITEM_DEFINED_TRANSFORMATION`, each part lives in its
-  own coordinate system and parts overlap at the origin in a viewer. Placed assembly geometry is a
-  later wave.
+* _Historical, superseded by ADR-0028:_ several parts shared no placement; there was no
+  `ITEM_DEFINED_TRANSFORMATION`, each part lived in its own coordinate system. ADR-0028 adds placed
+  assembly geometry.
 * New error codes `KSTEP-S-006` to `-008` in `KStepScriptOutcomeCodes`.
 * A script that builds shapes with OCCT still fails in the script run, with exit 1 and `KSTEP-S-003`,
   when OCCT is missing; the "OCCT unavailable" fallback is reachable only if the bridge disappears
@@ -75,7 +75,7 @@ reports a runtime error).
   `AdvancedFace` x6. FreeCAD `Part.read`: `Solid True 24000.0 6`.
 * `export-assembly-geometry.kstep.kts` (housing 50x40x30 containing bracket 10x20x5): OCCT reader
   `RetDone`, 696 entities, 0 undefined, model check 0/0, both assembly ends resolved, 12 faces.
-  *FreeCAD imports only the root*: one `Part::Feature` "Housing", volume 60000.0; the bracket is not
+  _(Historical, fixed by ADR-0028.)_ *FreeCAD imports only the root*: one `Part::Feature` "Housing", volume 60000.0; the bracket is not
   transferred and no hierarchy is visible. With two plain roots and no usage FreeCAD imports both
   ("Housing" 60000.0, "Bracket" 1000.0). One attempt that ran `Part.read` and `Import.insert` in the same `freecadcmd` session crashed FreeCAD
   ("Application unexpectedly terminated"); the figures above come from separate sessions.

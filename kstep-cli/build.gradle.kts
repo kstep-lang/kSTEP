@@ -63,3 +63,14 @@ dependencies {
     // above.
     implementation(libs.kotlinx.serialization.json)
 }
+
+// kstep-cli's own (small) test sourceset: planExportGeometry/countPlacedUsages are `internal`,
+// and kstep-tests only sees this module's public API (same reasoning as kstep-shape).
+dependencies {
+    testImplementation(libs.kotest.runner.junit5)
+    testImplementation(libs.kotest.assertions.core)
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
+}

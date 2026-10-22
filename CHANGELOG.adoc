@@ -18,8 +18,20 @@ minor versions may contain breaking changes.
   `KSTEP-S-008` (`GEOMETRY_EXPORT_FAILED`); `--output json` reports a `geometry` object when shapes
   are involved.
 
+* Placed assembly geometry (ADR-0028, Welle I): `place(usage, translation, rotation)` in the script
+  DSL with `vec(...)`, `Rotation.about(...)`, `Rotation.fromAxes(...)`; the exporter writes a
+  `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` chain per geometric usage, so OCCT and FreeCAD import the
+  components of an assembly (previously only the root). `kstep export --output json` reports
+  `geometry.placementCount`/`usageCount`. New interop tools `dump_xcaf_tree.cpp`,
+  `freecad_assembly_check.py`, `verify-placed-assembly.sh`. Gate (2026-10-22, macOS arm64, OCCT 7.9.3):
+  `clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true --no-build-cache`, 1277 tests,
+  0 failures, 0 errors, 6 skipped (the six known ones).
+
 === Changed
 
+* Geometry exports with assembly usages now carry an identity placement for usages without
+  `place(...)`; the export text line gains `and K placed usage(s)`. Render, preview and GLB still
+  ignore placements.
 * `kstep export` no longer prints "geometry merging is not wired into 'export' yet". A merge failure
   (unreachable or duplicate product definition, closed shape, OCCT error) fails with exit 1 instead
   of writing a structure-only file; native shape handles are closed on every path.

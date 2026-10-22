@@ -1,6 +1,7 @@
 // export-assembly-geometry.kstep.kts -- a two-part assembly (housing contains a bracket) where
-// the housing and the bracket each carry a box, for `kstep export` (ADR-0027). All parts sit in
-// their own coordinate system (no placement transformations), so they overlap at the origin.
+// the housing and the bracket each carry a box, for `kstep export` (ADR-0027). The usage is not
+// placed explicitly, so since ADR-0028 it is placed at the identity: both boxes overlap at the
+// origin. See export-placed-assembly-own-geometry.kstep.kts for the placed variant.
 val appCtx = applicationContext { application = "configuration control" }.getOrThrow()
 val prodCtx =
     productContext {

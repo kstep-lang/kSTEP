@@ -313,7 +313,8 @@ Applying the kSTEP security checklist (CLAUDE.md):
 | Geometrie Welle 4b
 | Assembly geometry: multiple `ShapeAssignment`s in one file,
   `NEXT_ASSEMBLY_USAGE_OCCURRENCE` + `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`
-  + `ITEM_DEFINED_TRANSFORMATION` for component placement.
+  + `ITEM_DEFINED_TRANSFORMATION` for component placement. *Implemented by
+  ADR-0027 (several shapes) and ADR-0028 (placement).*
 
 | Geometrie Welle 4c
 | DSL/tooling surface: a `shape { }` block in `.kstep.kts` (`kstep-script`),

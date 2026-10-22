@@ -451,7 +451,11 @@ this writing:
   (OCCT 7.9.3 typed reader; FreeCAD 1.1.4 on OCCT) were also shown to read the
   merged file: a valid `Solid` of volume 24000.0 with 6 faces. Other CAD/PLM
   readers, full schema conformance and a lossless write-back round trip remain
-  unverified, and geometry can only be produced where a system OCCT bridge is built (Linux x86-64 or macOS arm64). This wave's acceptance test is a self-roundtrip only
+  unverified. Since ADR-0028, placed assemblies (`place(usage, translation,
+  rotation)` in a script) were checked on 2026-10-22 with the OCCT 7.9.3 XCAF reader
+  and FreeCAD 1.1.4 (`Import.open`: an `App::Part` with the named components at
+  the designed locations; `Part.read`: all solids); `kstep render`, preview and
+  GLB still ignore placements. Geometry can only be produced where a system OCCT bridge is built (Linux x86-64 or macOS arm64). This wave's acceptance test is a self-roundtrip only
   (`Part21Reader.read(Part21Writer.write(header, model)) == model`,
   verified in `Part21RoundtripTest`). This closes the kSTEP-own-format
   half of the ADR-0001 bar, not the external-interop half; see
@@ -945,7 +949,11 @@ See <<roadmap,Roadmap>> for what's planned next.
   geometry subgraph (discarding OCCT's own placeholder product structure --
   see `Ap242GeometryExtraction`), and merges it with kSTEP's own validated
   product structure into one ISO 10303-21 file via
-  `PRODUCT_DEFINITION_SHAPE`/`SHAPE_DEFINITION_REPRESENTATION`. Deliberately
+  `PRODUCT_DEFINITION_SHAPE`/`SHAPE_DEFINITION_REPRESENTATION`. Since ADR-0028
+  `export(header, roots, assignments, placements)` also writes the placement chain
+  (`CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`) of every geometric assembly usage; in
+  a script: `place(nauo, translation = vec(30.0, 5.0, 10.0), rotation = Rotation.about(Vec3.Z, 90.0))`
+  (see `kstep-tests/src/test/resources/export-placed-assembly.kstep.kts`). Deliberately
   1:1 (one `ProductDefinition`, one `OcctShape`) this wave; no DSL/CLI/MCP
   surface yet. Depends on `kstep-core`, `kstep-step21`, and `kstep-geometry`
   (all `api`, since they appear in this module's own public signatures) --

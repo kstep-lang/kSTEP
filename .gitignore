@@ -10,3 +10,7 @@ out/
 # `npm ci`'d tool, never a build/runtime dependency of any published artifact. See
 # docs/adr/ADR-0016-gltf-glb-export.adoc.
 scripts/node_modules/
+
+# Python bytecode
+__pycache__/
+*.pyc

@@ -1,0 +1,97 @@
+= ADR-0028: Placed assembly geometry
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle I). Implements Geometrie Welle 4b of ADR-0009 and resolves the
+finding recorded in ADR-0027 ("FreeCAD imports only the root").
+
+== Context
+
+`Ap242ShapeExporter` (ADR-0009, ADR-0027) wrote `PRODUCT_DEFINITION_SHAPE` and
+`SHAPE_DEFINITION_REPRESENTATION` per part, but nothing for the assembly usage itself. ADR-0027
+observed that FreeCAD then imported only the root product.
+
+Evidence gathered before writing any code (OpenCascade 7.9.3, `scripts/interop/dump_xcaf_tree.cpp`,
+which reads through XCAF as a CAD application does):
+
+* An OCCT-authored reference assembly (`dump_xcaf_tree reference`) has, per usage, a
+  `PRODUCT_DEFINITION_SHAPE('Placement','Placement of an item',#nauo)` and a
+  `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#srr,#pds)`. The relationship is the complex instance
+  `( REPRESENTATION_RELATIONSHIP('','',#component_rep,#assembly_rep)
+  REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#idt) SHAPE_REPRESENTATION_RELATIONSHIP() )` with
+  `ITEM_DEFINED_TRANSFORMATION('','',#axis_in_component,#axis_in_assembly)`.
+* A file in kSTEP's pre-ADR-0028 shape (no such chain) gives XCAF one free shape without components.
+* Necessity: from a correct file, deleting the CDSR instances (or only the PDS on the usages) makes the
+  components vanish again.
+* Sufficiency: the placed fixture reads as an assembly with all components at the designed locations
+  (see Verification).
+
+== Decision
+
+* *Entities.* Written by hand as `Part21SimpleInstance`/`Part21ComplexInstance` in
+  `Ap242PlacementBridge`, following OCCT's own convention: `rep_1` is the component's
+  representation, `rep_2` the assembly's; `item_1` an axis in the component's representation (identity),
+  `item_2` the placement axis in the assembly's representation (`location` = translation, `axis` = R*ez,
+  `ref_direction` = R*ex). OCCT resolves both orders by itself (swapping them gave the same result), so
+  the convention only matters for readers that do not infer.
+* *Semantics.* `pParent = R * pChild + t`, millimetres, `R` a rotation only.
+* *DSL.* `place(usage, translation, rotation)` (and a `RigidPlacement` overload) on the script builder.
+  The placement belongs to the usage, not to the part: the same part (a screw) is used several times at
+  different places, and in the schema the CDSR hangs on the usage's product definition shape. It could
+  not be an argument of `nextAssemblyUsageOccurrence { }` because that builder lives in `kstep-core`
+  where no geometry may enter (same reason as the `shapes` channel, ADR-0009). `Rotation.about(axis,
+  degrees)` (multiples of 90 degrees are exact) and `Rotation.fromAxes(axis, refDirection)` (validated
+  orthonormal, never silently normalised). Scaling and mirroring are not representable.
+  `KStepModel.placements` is a new defaulted property.
+* *Defaults (resolves F1).* Every usage whose child carries geometry, directly or through descendants,
+  gets a placement chain, at the identity when `place(...)` is absent. This changes the output of
+  geometry exports with assembly usages (`export-assembly-geometry` now has a CDSR) and is the fix
+  itself. Exports without usages, and structure-only exports, are byte-identical to before.
+* *Parts without own shape.* A shape-less parent (the usual root "Baugruppe") gets a synthesized
+  `SHAPE_REPRESENTATION` holding its placement axes, with its own `PRODUCT_DEFINITION_SHAPE` and
+  `SHAPE_DEFINITION_REPRESENTATION`, in the representation context of the first shape.
+* *Parts with own shape.* The origin and placement axes are appended to the item list of their
+  `ADVANCED_BREP_SHAPE_REPRESENTATION` (a `axis2_placement_3d` is a legal item). A part with its own
+  shape that also contains components (resolves F4) works: XCAF and FreeCAD keep the bracket as a
+  component and the housing's own solid as an additional child named `SOLID` at the identity; the
+  fallback with a separate relationship was not needed.
+* *Graph rules* (`AssemblyGeometryGraph`): only `NEXT_ASSEMBLY_USAGE_OCCURRENCE` registered as roots,
+  between two plain product definitions; iterative closure and iterative cycle detection (a cycle is
+  rejected, otherwise OCCT could loop); at most 4096 geometric usages.
+  A `place` on a non-root usage, on a usage whose child has no geometry, or a second `place` on the same
+  usage fails closed (`ShapeExportException`, `KSTEP-S-008`, nothing written).
+* *Not extended (resolves F6).* `PRODUCT_RELATED_PRODUCT_CATEGORY` stays once for the first product;
+  FreeCAD named and placed all four parts correctly without it.
+* *No `.exp` extension (resolves F2).* Like the bridge entities of ADR-0009 these are handwritten.
+  Codegen for the SELECT-heavy geometry hierarchy would pull in reader, `construct`, the MCP entity
+  store and the validator; that is its own wave. NOTICE and the extracted EXPRESS are unchanged.
+* *CLI (resolves F3).* `place(...)` without merged geometry (no `shape(...)`, or OCCT absent) is not an
+  error: a stderr note names the ignored count and the structure-only output stays byte-identical;
+  `--require-geometry` fails as before. `--output json` adds `geometry.placementCount` and
+  `geometry.usageCount`; the text line gains `and K placed usage(s)` only when K > 0.
+* `Ap242PlacementReader` (public, diagnostic) reads placements back out of a Part 21 document.
+* Numbers are written through `stepReal` (always REAL lexemes, never `-0.0`).
+* *Out of scope (resolves F5).* `kstep render`, preview, viewer and GLB still ignore placements.
+  MCP is unaffected: `kstep-mcp` has no geometry channel, so placement is not exposed there.
+
+== Consequences
+
+* `kstep export` of an assembly with geometry now opens as an assembly in OCCT/XCAF and FreeCAD.
+* Output of assembly geometry exports changed (identity CDSR chains appear).
+* Render/GLB of an assembly still draw parts unplaced until a follow-up wave.
+
+== Verification (2026-10-22, macOS arm64, OCCT 7.9.3, FreeCAD 1.1.4)
+
+See `scripts/interop/README.adoc`. Summary for `export-placed-assembly.kstep.kts`: OCCT typed reader
+`RetDone`, 0 undefined, model check 0/0, four CDSR with the designed axes; XCAF one assembly with four
+components, volume 17384, box [0,40]x[0,40]x[0,22]; FreeCAD `Import.open` `App::Part` with four named
+children at the designed global boxes, `Part.read` four solids, volume 17384. The full gate result is
+recorded in the CHANGELOG entry.
+
+== Alternatives rejected
+
+* *Placement as a parameter of `shape(...)`.* The same definition can be used more than once.
+* *`MAPPED_ITEM`/representation maps.* OCCT can read them, but `SRR` with `ITEM_DEFINED_TRANSFORMATION`
+  is the AP214/AP242 standard path and what OCCT's own writer emits.
+* *`.exp` codegen* and *XCAF writer*: see above and ADR-0009.

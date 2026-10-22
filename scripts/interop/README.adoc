@@ -70,3 +70,48 @@ kstep export kstep-tests/src/test/resources/export-assembly-geometry.kstep.kts -
   hierarchy. The same two parts exported as two plain roots (no usage) both arrive (`Housing`
   60000.0, `Bracket` 1000.0). Reason: no placement transformation links the child representation to
   the assembly, so an OCCT/FreeCAD reader has nothing to position it with.
+
+== Result of 2026-10-22, placed assemblies (ADR-0028)
+
+Tools: `dump_xcaf_tree.cpp` (reads through OCCT's XCAF and prints names, component flags,
+locations, volumes and global bounding boxes; its `reference` mode writes an OCCT-authored
+assembly to document OCCT's own entity convention), the extended `read_step_structure.cpp` (now
+prints every `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` with both representations and both axes),
+`freecad_assembly_check.py` (FreeCAD headless, one mode per process) and
+`verify-placed-assembly.sh` (all of it, writing only below `build/interop/`).
+
+[source,bash]
+----
+P="$(brew --prefix opencascade)"
+c++ -std=c++17 -I"$P/include/opencascade" -L"$P/lib" -Wl,-rpath,"$P/lib" \
+  scripts/interop/dump_xcaf_tree.cpp -o build/interop/dump_xcaf_tree \
+  -lTKDESTEP -lTKXCAF -lTKLCAF -lTKCAF -lTKCDF -lTKXSBase -lTKBRep -lTKTopAlgo -lTKPrim \
+  -lTKG3d -lTKGeomBase -lTKMath -lTKernel -lTKService
+build/interop/dump_xcaf_tree dump out.step
+build/interop/dump_xcaf_tree reference ref.step
+STEP_FILE=$PWD/out.step STEP_MODE=open freecadcmd scripts/interop/freecad_assembly_check.py
+STEP_FILE=$PWD/out.step STEP_MODE=part freecadcmd scripts/interop/freecad_assembly_check.py
+----
+
+Fixture `export-placed-assembly.kstep.kts` (OpenCascade 7.9.3, FreeCAD 1.1.4, macOS arm64):
+
+* `read_step_structure`: `RetDone`, 1094 entities, 0 undefined, model check 0 fails / 0 warnings;
+  four `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`, the bracket with axis (0,0,1), ref (0,1,0),
+  location (30,5,10).
+* XCAF: one free assembly `Baugruppe`, four components (the screw referenced twice), locations and
+  global boxes as designed (bracket x 10..30, y 5..15, z 10..15), total volume 17384, box
+  [0,40]x[0,40]x[0,22].
+* FreeCAD `Import.open`: `App::Part` `Baugruppe` with four children `Gehaeuse`, `Halter`,
+  `Schraube`, `Schraube001`, global boxes identical to the above. FreeCAD `Part.read`: 4 solids,
+  volume 17384, box [0,40]x[0,40]x[0,22], valid.
+* Necessity (files derived from the output): removing the four CDSR instances, or only the
+  `PRODUCT_DEFINITION_SHAPE` on the usages, leaves XCAF with one empty free shape and no components.
+* OCCT infers the direction: swapping `rep_1`/`rep_2` or `item_1`/`item_2` gave the same XCAF result.
+  kSTEP follows OCCT's own writer (`rep_1` = component) for readers that do not infer.
+* `export-placed-assembly-own-geometry.kstep.kts` (housing with its own box and a placed bracket):
+  XCAF and FreeCAD keep both, the bracket as a component and the housing's own solid as an extra
+  child named `SOLID` at the identity.
+
+Not covered: other CAD/PLM readers, FreeCAD's own OCCT version differs from Homebrew's, assemblies
+nested more than one level in a real reader (covered by unit tests only), scaling/mirroring (not
+representable).

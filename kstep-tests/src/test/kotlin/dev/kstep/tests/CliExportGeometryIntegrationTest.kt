@@ -58,6 +58,8 @@ class CliExportGeometryIntegrationTest :
             token: String,
         ): Int = Regex(Regex.escape(token)).findAll(text).count()
 
+        fun text0(file: File): String = file.readText()
+
         "a 20x30x40 box is exported with its geometry merged and re-readable".config(enabled = available) {
             val script = copyFixture("export-box-20x30x40.kstep.kts")
             val out = File(workDir, "box.step").apply { delete() }
@@ -168,7 +170,10 @@ class CliExportGeometryIntegrationTest :
             val result = runner.run("export", script.name, "--out", out.name)
 
             result.exitCode shouldBe 0
-            result.stdout.trim() shouldBe "Exported 1 root(s) with 2 geometric shape(s) to ${out.name}"
+            // ADR-0028: the (unplaced) usage now carries an identity placement chain, hence the extra clause.
+            result.stdout.trim() shouldBe
+                "Exported 1 root(s) with 2 geometric shape(s) and 1 placed usage(s) to ${out.name}"
+            count(text0(out), "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(") shouldBe 1
             val text = out.readText()
             count(text, "NEXT_ASSEMBLY_USAGE_OCCURRENCE(") shouldBe 1
             count(text, "SHAPE_DEFINITION_REPRESENTATION(") shouldBe 2
@@ -267,5 +272,21 @@ class CliExportGeometryIntegrationTest :
             json.exitCode shouldBe 0
             val obj = Json.parseToJsonElement(json.stdout.trim()).jsonObject
             obj.keys shouldBe setOf("status", "outPath", "rootCount", "shapeCount")
+        }
+
+        "placements without any shape leave the export byte-identical to the golden file and are reported ignored" {
+            val script = copyFixture("export-golden-assembly-with-placement.kstep.kts")
+            val out = File(workDir, "golden-placement-out.step").apply { delete() }
+
+            val result = runner.run("export", script.name, "--out", out.name)
+
+            result.exitCode shouldBe 0
+            out.readText() shouldBe resourceText("export-golden-assembly.step")
+            result.stderr shouldContain "2 placement(s) ignored"
+
+            val json = runner.run("export", script.name, "--out", out.name, "--output", "json")
+            json.exitCode shouldBe 0
+            Json.parseToJsonElement(json.stdout.trim()).jsonObject.keys shouldBe
+                setOf("status", "outPath", "rootCount", "shapeCount")
         }
     })
