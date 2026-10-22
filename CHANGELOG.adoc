@@ -29,6 +29,8 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* CI/release workflows: every `apt-get` step now retries three times with a per-attempt timeout and a
+  15-minute step timeout, after a hung mirror stalled the Linux OCCT job for 61 minutes (2026-10-22).
 * Geometry exports with assembly usages now carry an identity placement for usages without
   `place(...)`; the export text line gains `and K placed usage(s)`. Render, preview and GLB still
   ignore placements.

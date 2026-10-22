@@ -53,11 +53,21 @@ jobs:
         # and guards them against regressions on every PR, long before a tag is pushed.
 
       - name: Install PlaneGCS build dependencies and Skiko runtime libraries
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libeigen3-dev libboost-dev \
-            libgl1 libfontconfig1 libfreetype6 libx11-6
+          # A hung mirror once stalled this step for 61 minutes (2026-10-22): bound each
+          # attempt and retry instead of waiting for the job timeout.
+          for attempt in 1 2 3; do
+            if sudo timeout 240 apt-get -o Acquire::Retries=3 update \
+              && sudo timeout 480 apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+                libeigen3-dev libboost-dev libgl1 libfontconfig1 libfreetype6 libx11-6; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt failed or timed out"
+            sleep 15
+          done
+          echo "::error::apt-get failed after 3 attempts"
+          exit 1
         # libeigen3-dev/libboost-dev: header-only inputs of kstep-constraints'
         #   compilePlaneGcsBridge (no -L/-l needed, see that module's build script).
         # libgl1/libfontconfig1/libx11-6: direct DT_NEEDED entries of Skiko's
@@ -202,13 +212,21 @@ jobs:
           persist-credentials: false
 
       - name: Install OCCT, PlaneGCS and Skiko runtime dependencies
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libocct-foundation-dev libocct-modeling-data-dev \
-            libocct-modeling-algorithms-dev libocct-data-exchange-dev \
-            libeigen3-dev libboost-dev \
-            libgl1 libfontconfig1 libfreetype6 libx11-6
+          # A hung mirror once stalled this step for 61 minutes (2026-10-22): bound each
+          # attempt and retry instead of waiting for the job timeout.
+          for attempt in 1 2 3; do
+            if sudo timeout 240 apt-get -o Acquire::Retries=3 update \
+              && sudo timeout 480 apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+                libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev libeigen3-dev libboost-dev libgl1 libfontconfig1 libfreetype6 libx11-6; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt failed or timed out"
+            sleep 15
+          done
+          echo "::error::apt-get failed after 3 attempts"
+          exit 1
         # Exactly the package set README's "Building -- optional OCCT geometry bridge" and
         # "Building -- optional PlaneGCS constraint solver" sections document. No cmake:
         # both bridges are single, direct g++ invocations (see their build scripts).
