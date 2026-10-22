@@ -294,6 +294,9 @@ jobs:
           # skipped. Only the normal `enabled = available` cases must have actually run, so
           # skips are only a problem for testcases that do NOT carry this marker.
           INVERSE_GATED_MARKER = "fails predictably when the native bridge is unavailable"
+          # OcctFreeCadImportTest's live case needs the FreeCAD application, which these
+          # runners do not install; it skips itself by design and carries this marker.
+          FREECAD_GATED_MARKER = "skipped when FreeCAD is not installed"
 
           unexpected_skips = []
           for path in sys.argv[1:]:
@@ -302,7 +305,7 @@ jobs:
                   if testcase.find("skipped") is None:
                       continue
                   name = testcase.get("name", "<unnamed>")
-                  if INVERSE_GATED_MARKER in name:
+                  if INVERSE_GATED_MARKER in name or FREECAD_GATED_MARKER in name:
                       continue
                   unexpected_skips.append(f"{path}::{name}")
 
@@ -485,6 +488,9 @@ jobs:
           # rules as the Linux native job: only the INVERSE-gated "fails predictably when
           # the native bridge is unavailable" cases may skip.
           INVERSE_GATED_MARKER = "fails predictably when the native bridge is unavailable"
+          # OcctFreeCadImportTest's live case needs the FreeCAD application, which these
+          # runners do not install; it skips itself by design and carries this marker.
+          FREECAD_GATED_MARKER = "skipped when FreeCAD is not installed"
 
           for label, pattern in (("OCCT", "TEST-*Occt*.xml"), ("PlaneGCS", "TEST-*PlaneGcs*.xml")):
               files = glob.glob("**/build/test-results/test/" + pattern, recursive=True)
@@ -499,7 +505,7 @@ jobs:
                       if testcase.find("skipped") is None:
                           continue
                       name = testcase.get("name", "<unnamed>")
-                      if INVERSE_GATED_MARKER in name:
+                      if INVERSE_GATED_MARKER in name or FREECAD_GATED_MARKER in name:
                           continue
                       unexpected.append(path + "::" + name)
               if unexpected:

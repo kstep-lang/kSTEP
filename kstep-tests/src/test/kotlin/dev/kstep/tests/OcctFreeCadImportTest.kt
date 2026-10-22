@@ -62,7 +62,7 @@ class OcctFreeCadImportTest :
             assertFreeCadBox(target)
         }
 
-        "a box written live by freecadcmd imports with exact volume, faces and bounding box".config(
+        "a live freecadcmd box imports exactly (skipped when FreeCAD is not installed)".config(
             enabled = available && freecad != null,
         ) {
             val out = File(workDir, "live-freecad-box.step").apply { delete() }
