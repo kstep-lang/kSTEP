@@ -94,6 +94,26 @@
 #include <gp_Vec.hxx>
 #include <gp_Vec3f.hxx>
 
+// Welle K (STEP import, ADR-0030): XCAF document reading.
+#include <Interface_InterfaceModel.hxx>
+#include <STEPCAFControl_Reader.hxx>
+#include <StepData_StepModel.hxx>
+#include <StepData_UndefinedEntity.hxx>
+#include <StepAP214_AppliedDocumentReference.hxx>
+#include <StepBasic_Document.hxx>
+#include <StepBasic_ProductDefinitionWithAssociatedDocuments.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TCollection_ExtendedString.hxx>
+#include <TDF_Label.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <TDF_Tool.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDocStd_Document.hxx>
+#include <UnitsMethods_LengthUnit.hxx>
+#include <XCAFApp_Application.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+
 #include <memory>
 #include <vector>
 
@@ -173,6 +193,47 @@ jlong registerShape(TopoDS_Shape&& shape) {
     g_shapes[handle] = heapShape;
     return handle;
 }
+
+/** Same as registerShape, for a caller that ALREADY holds g_mutex (never call from inside one). */
+jlong registerShapeLocked(TopoDS_Shape&& shape) {
+    auto* heapShape = new TopoDS_Shape(std::move(shape));
+    jlong handle = g_nextHandle++;
+    g_shapes[handle] = heapShape;
+    return handle;
+}
+
+// ------------------------------------------------------------------------------------------
+// Welle K (STEP import). See docs/adr/ADR-0030-read-geometry.adoc.
+// ------------------------------------------------------------------------------------------
+constexpr int kImportKindPart = 0;
+constexpr int kImportKindAssembly = 1;
+constexpr int kImportKindComponent = 2;
+constexpr int kMaxReportedUnknownTypes = 20;
+constexpr int kImportLimitCount = 6;
+
+struct ImportNode {
+    int kind = kImportKindPart;
+    int parent = -1;
+    int referred = -1;
+    int freeRoot = 0;
+    int rigid = 1;
+    std::u16string name;
+    double m[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    int shapeSlot = -1;
+};
+
+struct ImportSession {
+    std::vector<ImportNode> nodes;
+    std::vector<TopoDS_Shape> partShapes;
+    int entityCount = 0;
+    int unknownEntityCount = 0;
+    int freeRootCount = 0;
+    std::vector<std::string> unknownTypes;
+};
+
+// Guarded by g_mutex. Handles come from g_nextHandle (shared with shapes, so they never collide).
+std::unordered_map<jlong, ImportSession*> g_imports;
+
 
 // ------------------------------------------------------------------------------------------
 // Geometrie Welle 5a (extrude + fillet) additions below. See
@@ -531,6 +592,279 @@ struct PrinterSilencer {
     PrinterSilencer(const PrinterSilencer&) = delete;
     PrinterSilencer& operator=(const PrinterSilencer&) = delete;
 };
+
+// These helpers use C++ types in their signatures, so they must not have C linkage.
+extern "C++" {
+/** Closes the XCAF document on EVERY path: XCAFApp_Application keeps documents alive otherwise. */
+struct XcafDocumentGuard {
+    Handle(XCAFApp_Application) app;
+    Handle(TDocStd_Document) doc;
+    ~XcafDocumentGuard() {
+        try {
+            if (!app.IsNull() && !doc.IsNull()) {
+                app->Close(doc);
+            }
+        } catch (...) {
+        }
+    }
+};
+
+std::string sanitizeTypeName(const char* raw) {
+    std::string out;
+    if (raw == nullptr) return out;
+    for (const char* c = raw; *c != '\0' && out.size() < 64; ++c) {
+        char ch = *c;
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_') out.push_back(ch);
+    }
+    return out;
+}
+
+std::u16string labelName(const TDF_Label& label, int maxChars) {
+    Handle(TDataStd_Name) n;
+    if (!label.FindAttribute(TDataStd_Name::GetID(), n)) return std::u16string();
+    const TCollection_ExtendedString& ext = n->Get();
+    int len = ext.Length();
+    if (len > maxChars) len = maxChars;
+    std::u16string out;
+    out.reserve(static_cast<size_t>(len));
+    const Standard_ExtString raw = ext.ToExtString();
+    for (int i = 0; i < len; ++i) {
+        const char16_t ch = static_cast<char16_t>(raw[i]);
+        if (ch < 0x20 || (ch >= 0x7f && ch <= 0x9f)) continue;  // control characters never reach output
+        out.push_back(ch);
+    }
+    return out;
+}
+
+std::string labelEntry(const TDF_Label& label) {
+    TCollection_AsciiString e;
+    TDF_Tool::Entry(label, e);
+    return std::string(e.ToCString());
+}
+
+int countFaces(const TopoDS_Shape& shape) {
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    return faces.Extent();
+}
+
+/**
+ * Reads `bytes` through STEPCAFControl_Reader into `out`. MUST be called with g_mutex held
+ * (Interface_Static and XCAFApp_Application are process-global). On failure returns false and sets
+ * errClass/errMsg; the caller throws AFTER releasing g_mutex. Never throws a C++ exception except
+ * what the caller's catch cascade handles.
+ */
+bool readXcafLocked(
+    const std::string& bytes, const int limits[kImportLimitCount], ImportSession& out, std::string& errClass,
+    std::string& errMsg) {
+    const int maxEntities = limits[0];
+    const int maxNodes = limits[1];
+    const int maxComponents = limits[2];
+    const int maxParts = limits[3];
+    const int maxFaces = limits[4];
+    const int maxName = limits[5];
+
+    PrinterSilencer silencer;
+    std::istringstream stream(bytes);
+    STEPCAFControl_Reader reader;
+    reader.SetNameMode(true);
+    reader.SetColorMode(false);
+    reader.SetLayerMode(false);
+    reader.SetPropsMode(false);
+    reader.SetGDTMode(false);
+    reader.SetMatMode(false);
+    reader.SetViewMode(false);
+    reader.SetSHUOMode(false);
+    reader.SetMetaMode(false);
+    reader.SetProductMetaMode(false);
+
+    IFSelect_ReturnStatus status = reader.ReadStream("kstep-import.stp", stream);
+    if (status != IFSelect_RetDone) {
+        errClass = "java/lang/IllegalArgumentException";
+        errMsg = "not a readable STEP file: status " + std::to_string(static_cast<int>(status));
+        return false;
+    }
+
+    Handle(Interface_InterfaceModel) model = reader.ChangeReader().Model();
+    if (model.IsNull()) {
+        errClass = "java/lang/IllegalArgumentException";
+        errMsg = "not a readable STEP file: no model";
+        return false;
+    }
+    const int entityCount = model->NbEntities();
+    out.entityCount = entityCount;
+    if (entityCount > maxEntities) {
+        errClass = "java/lang/IllegalArgumentException";
+        errMsg = "limit: entity count " + std::to_string(entityCount) + " exceeds " + std::to_string(maxEntities);
+        return false;
+    }
+    for (int i = 1; i <= entityCount; ++i) {
+        // An entity type OCCT has no class for is stored as a StepData_UndefinedEntity (measured:
+        // Interface_InterfaceModel::IsUnknownEntity does NOT flag it, so the type is tested directly).
+        Handle(StepData_UndefinedEntity) undef = Handle(StepData_UndefinedEntity)::DownCast(model->Value(i));
+        if (undef.IsNull() && !model->IsUnknownEntity(i)) continue;
+        out.unknownEntityCount++;
+        if (static_cast<int>(out.unknownTypes.size()) >= kMaxReportedUnknownTypes) continue;
+        if (undef.IsNull()) continue;
+        std::string type = sanitizeTypeName(undef->StepType());
+        if (type.empty()) continue;
+        bool known = false;
+        for (const auto& t : out.unknownTypes) {
+            if (t == type) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) out.unknownTypes.push_back(type);
+    }
+
+    // Extern-file references (ADR-0030): STEPConstruct_ExternRefs opens files named by document
+    // entities during Transfer(), bypassing every limit here. The check is typed, not textual, so it
+    // is independent of the AP203/AP214 long/short entity names. StepBasic_DocumentFile is a subtype
+    // of StepBasic_Document. It MUST run before Transfer().
+    for (int i = 1; i <= entityCount; ++i) {
+        Handle(Standard_Transient) ent = model->Value(i);
+        if (ent.IsNull()) continue;
+        if (ent->IsKind(STANDARD_TYPE(StepBasic_Document)) ||
+            ent->IsKind(STANDARD_TYPE(StepAP214_AppliedDocumentReference)) ||
+            ent->IsKind(STANDARD_TYPE(StepBasic_ProductDefinitionWithAssociatedDocuments))) {
+            errClass = "java/lang/IllegalArgumentException";
+            errMsg = "external-reference: the file references external documents; external references are not followed";
+            return false;
+        }
+    }
+
+    XcafDocumentGuard guard;
+    guard.app = XCAFApp_Application::GetApplication();
+    guard.app->NewDocument("MDTV-XCAF", guard.doc);
+    XCAFDoc_DocumentTool::SetLengthUnit(guard.doc, 1.0, UnitsMethods_LengthUnit_Millimeter);
+    if (!reader.Transfer(guard.doc)) {
+        errClass = "java/lang/IllegalStateException";
+        errMsg = "STEP transfer into the XCAF document failed";
+        return false;
+    }
+
+    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(guard.doc->Main());
+    TDF_LabelSequence frees;
+    shapeTool->GetFreeShapes(frees);
+    out.freeRootCount = frees.Length();
+
+    // Iterative BFS; each label is visited exactly once (keyed by its entry string), so cycles in
+    // the traversal are impossible. `queue` holds node indices of ASSEMBLY/PART nodes still to expand.
+    std::unordered_map<std::string, int> indexByEntry;
+    std::vector<TDF_Label> nodeLabels;
+    long long totalFaces = 0;
+    int componentCount = 0;
+    int partCount = 0;
+
+    auto fail = [&](const std::string& what, int value, int limit) {
+        errClass = "java/lang/IllegalArgumentException";
+        errMsg = "limit: " + what + " " + std::to_string(value) + " exceeds " + std::to_string(limit);
+        return false;
+    };
+
+    // Returns node index for an item label (assembly or part), creating it if new; -1 on limit
+    // violation (errMsg set via fail by caller through `limitHit`).
+    bool limitHit = false;
+    auto internItem = [&](const TDF_Label& label, int freeRoot) -> int {
+        std::string key = labelEntry(label);
+        auto it = indexByEntry.find(key);
+        if (it != indexByEntry.end()) {
+            if (freeRoot) out.nodes[static_cast<size_t>(it->second)].freeRoot = 1;
+            return it->second;
+        }
+        if (static_cast<int>(out.nodes.size()) >= maxNodes) {
+            limitHit = true;
+            fail("node count", static_cast<int>(out.nodes.size()) + 1, maxNodes);
+            return -1;
+        }
+        ImportNode node;
+        node.freeRoot = freeRoot;
+        node.name = labelName(label, maxName);
+        if (XCAFDoc_ShapeTool::IsAssembly(label)) {
+            node.kind = kImportKindAssembly;
+        } else {
+            node.kind = kImportKindPart;
+            if (partCount >= maxParts) {
+                limitHit = true;
+                fail("part count", partCount + 1, maxParts);
+                return -1;
+            }
+            ++partCount;
+            TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            if (!shape.IsNull()) {
+                totalFaces += countFaces(shape);
+                if (totalFaces > maxFaces) {
+                    limitHit = true;
+                    fail("face count", static_cast<int>(totalFaces), maxFaces);
+                    return -1;
+                }
+                node.shapeSlot = static_cast<int>(out.partShapes.size());
+                out.partShapes.push_back(shape);
+            }
+        }
+        int index = static_cast<int>(out.nodes.size());
+        out.nodes.push_back(node);
+        nodeLabels.push_back(label);
+        indexByEntry[key] = index;
+        return index;
+    };
+
+    std::vector<int> queue;
+    size_t head = 0;
+    for (int i = 1; i <= frees.Length(); ++i) {
+        int idx = internItem(frees.Value(i), 1);
+        if (limitHit) return false;
+        if (idx >= 0) queue.push_back(idx);
+    }
+    // A free label is never revisited through the queue twice: guard with `expanded`.
+    std::vector<char> expanded;
+    while (head < queue.size()) {
+        int current = queue[head++];
+        if (static_cast<size_t>(current) >= expanded.size()) expanded.resize(static_cast<size_t>(current) + 1, 0);
+        if (expanded[static_cast<size_t>(current)]) continue;
+        expanded[static_cast<size_t>(current)] = 1;
+        if (out.nodes[static_cast<size_t>(current)].kind != kImportKindAssembly) continue;
+        TDF_Label asmLabel = nodeLabels[static_cast<size_t>(current)];
+        TDF_LabelSequence comps;
+        XCAFDoc_ShapeTool::GetComponents(asmLabel, comps, Standard_False);
+        for (int c = 1; c <= comps.Length(); ++c) {
+            TDF_Label compLabel = comps.Value(c);
+            if (componentCount >= maxComponents) return fail("component count", componentCount + 1, maxComponents);
+            ++componentCount;
+            if (static_cast<int>(out.nodes.size()) >= maxNodes) {
+                return fail("node count", static_cast<int>(out.nodes.size()) + 1, maxNodes);
+            }
+            TDF_Label referred = compLabel;
+            if (XCAFDoc_ShapeTool::IsReference(compLabel)) {
+                XCAFDoc_ShapeTool::GetReferredShape(compLabel, referred);
+            }
+            int refIndex = internItem(referred, 0);
+            if (limitHit) return false;
+            ImportNode comp;
+            comp.kind = kImportKindComponent;
+            comp.parent = current;
+            comp.referred = refIndex;
+            comp.name = labelName(compLabel, maxName);
+            TopLoc_Location loc = XCAFDoc_ShapeTool::GetLocation(compLabel);
+            gp_Trsf t = loc.Transformation();
+            for (int r = 1; r <= 3; ++r) {
+                for (int col = 1; col <= 4; ++col) comp.m[(r - 1) * 4 + (col - 1)] = t.Value(r, col);
+            }
+            comp.rigid = (std::abs(t.ScaleFactor() - 1.0) <= 1e-9 && !t.IsNegative()) ? 1 : 0;
+            int compIndex = static_cast<int>(out.nodes.size());
+            out.nodes.push_back(comp);
+            nodeLabels.push_back(compLabel);
+            (void)compIndex;
+            if (refIndex >= 0) queue.push_back(refIndex);
+        }
+    }
+    return true;
+}
+
+
+}  // extern "C++"
 }  // namespace
 
 JNIEXPORT jstring JNICALL
@@ -1875,6 +2209,348 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobjec
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error triangulating shape");
     }
     return nullptr;
+}
+
+// ------------------------------------------------------------------------------------------
+// Welle K: STEP import (XCAF read session). See docs/adr/ADR-0030-read-geometry.adoc.
+// Invariants as everywhere in this file: every dereference of a registry object happens inside
+// ONE g_mutex critical section; throwJava() only OUTSIDE it; full catch cascade; nothing is
+// registered on any failure path.
+// ------------------------------------------------------------------------------------------
+
+namespace {
+void throwUnknownImportHandle(JNIEnv* env, jlong handle) {
+    throwJava(env, "java/lang/IllegalStateException", "Unknown native STEP import session handle: " + std::to_string(handle));
+}
+}  // namespace
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeReadStepXcaf(JNIEnv* env, jobject /*self*/, jbyteArray content, jintArray limits) {
+    if (content == nullptr || limits == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", "nativeReadStepXcaf: content and limits must not be null");
+        return 0;
+    }
+    if (env->GetArrayLength(limits) != kImportLimitCount) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeReadStepXcaf: limits must have exactly " + std::to_string(kImportLimitCount) + " entries");
+        return 0;
+    }
+    int lim[kImportLimitCount];
+    {
+        IntArrayGuard guard(env, limits);
+        const jint* src = guard.elements();
+        if (src == nullptr) {
+            return 0;  // OutOfMemoryError already pending
+        }
+        for (int i = 0; i < kImportLimitCount; ++i) lim[i] = src[i];
+    }
+    for (int i = 0; i < kImportLimitCount; ++i) {
+        if (lim[i] <= 0) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeReadStepXcaf: limits[" + std::to_string(i) + "] must be positive");
+            return 0;
+        }
+    }
+    jsize length = env->GetArrayLength(content);
+    std::string bytes;
+    try {
+        bytes.resize(static_cast<size_t>(length));
+    } catch (const std::bad_alloc&) {
+        throwJava(env, "java/lang/OutOfMemoryError", "nativeReadStepXcaf: cannot allocate input buffer");
+        return 0;
+    }
+    if (length > 0) {
+        env->GetByteArrayRegion(content, 0, length, reinterpret_cast<jbyte*>(&bytes[0]));
+        if (env->ExceptionCheck()) {
+            return 0;
+        }
+    }
+
+    std::string errClass;
+    std::string errMsg;
+    jlong handle = 0;
+    try {
+        std::unique_ptr<ImportSession> session(new ImportSession());
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (readXcafLocked(bytes, lim, *session, errClass, errMsg)) {
+                handle = g_nextHandle++;
+                g_imports[handle] = session.release();
+            }
+        }  // g_mutex released here; `session` (if still owned) is freed on scope exit
+    } catch (const Standard_Failure& e) {
+        errClass = "java/lang/IllegalStateException";
+        errMsg = std::string("OCCT error reading STEP file: ") + e.GetMessageString();
+        handle = 0;
+    } catch (const std::exception& e) {
+        errClass = "java/lang/IllegalStateException";
+        errMsg = std::string("Native error reading STEP file: ") + e.what();
+        handle = 0;
+    } catch (...) {
+        errClass = "java/lang/IllegalStateException";
+        errMsg = "Unknown native error reading STEP file";
+        handle = 0;
+    }
+    if (handle == 0) {
+        if (errClass.empty()) {
+            errClass = "java/lang/IllegalStateException";
+            errMsg = "STEP read failed";
+        }
+        throwJava(env, errClass.c_str(), errMsg);
+        return 0;
+    }
+    return handle;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportNodeInts(JNIEnv* env, jobject /*self*/, jlong session) {
+    std::vector<jint> out;
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            for (const ImportNode& n : it->second->nodes) {
+                out.push_back(n.kind);
+                out.push_back(n.parent);
+                out.push_back(n.referred);
+                out.push_back(n.freeRoot);
+                out.push_back(n.rigid);
+                out.push_back(n.shapeSlot);
+            }
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading import nodes");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    jintArray result = env->NewIntArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    if (!out.empty()) env->SetIntArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportNodeMatrices(JNIEnv* env, jobject /*self*/, jlong session) {
+    std::vector<jdouble> out;
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            for (const ImportNode& n : it->second->nodes) {
+                for (int i = 0; i < 12; ++i) out.push_back(n.m[i]);
+            }
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading import matrices");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    if (!out.empty()) env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportNodeName(JNIEnv* env, jobject /*self*/, jlong session, jint index) {
+    std::u16string name;
+    bool found = false;
+    bool inRange = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            if (index >= 0 && static_cast<size_t>(index) < it->second->nodes.size()) {
+                inRange = true;
+                name = it->second->nodes[static_cast<size_t>(index)].name;
+            }
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading import node name");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    if (!inRange) {
+        throwJava(env, "java/lang/IllegalArgumentException", "node index out of range: " + std::to_string(index));
+        return nullptr;
+    }
+    // UTF-16 straight through: NewStringUTF would use modified UTF-8 and mangle non-BMP characters
+    // and embedded NULs.
+    return env->NewString(reinterpret_cast<const jchar*>(name.data()), static_cast<jsize>(name.size()));
+}
+
+JNIEXPORT jintArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportStats(JNIEnv* env, jobject /*self*/, jlong session) {
+    jint stats[4] = {0, 0, 0, 0};
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            stats[0] = it->second->entityCount;
+            stats[1] = it->second->unknownEntityCount;
+            stats[2] = it->second->freeRootCount;
+            stats[3] = static_cast<jint>(it->second->nodes.size());
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading import stats");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    jintArray result = env->NewIntArray(4);
+    if (result == nullptr) return nullptr;
+    env->SetIntArrayRegion(result, 0, 4, stats);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportUnknownTypes(JNIEnv* env, jobject /*self*/, jlong session) {
+    std::string joined;
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            for (size_t i = 0; i < it->second->unknownTypes.size(); ++i) {
+                if (i > 0) joined.push_back('\n');
+                joined += it->second->unknownTypes[i];
+            }
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading unknown types");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    // sanitizeTypeName guarantees [A-Z0-9_] only, so plain UTF is exact here.
+    return env->NewStringUTF(joined.c_str());
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportPartShape(JNIEnv* env, jobject /*self*/, jlong session, jint nodeIndex) {
+    bool found = false;
+    std::string argError;
+    jlong handle = 0;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            ImportSession* s = it->second;
+            if (nodeIndex < 0 || static_cast<size_t>(nodeIndex) >= s->nodes.size()) {
+                argError = "node index out of range: " + std::to_string(nodeIndex);
+            } else {
+                const ImportNode& n = s->nodes[static_cast<size_t>(nodeIndex)];
+                if (n.kind != kImportKindPart) {
+                    argError = "node " + std::to_string(nodeIndex) + " is not a part";
+                } else if (n.shapeSlot < 0 || static_cast<size_t>(n.shapeSlot) >= s->partShapes.size()) {
+                    argError = "part " + std::to_string(nodeIndex) + " has no geometry";
+                } else {
+                    handle = registerShapeLocked(TopoDS_Shape(s->partShapes[static_cast<size_t>(n.shapeSlot)]));
+                }
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error copying part shape: ") + e.GetMessageString());
+        return 0;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error copying part shape");
+        return 0;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return 0;
+    }
+    if (!argError.empty()) {
+        throwJava(env, "java/lang/IllegalArgumentException", argError);
+        return 0;
+    }
+    return handle;
+}
+
+JNIEXPORT void JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeReleaseImport(JNIEnv* env, jobject /*self*/, jlong session) {
+    // Idempotent, like nativeReleaseShape: an unknown handle is a silent no-op.
+    ImportSession* toDelete = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            toDelete = it->second;
+            g_imports.erase(it);
+        }
+    }
+    delete toDelete;
+    (void)env;
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportSessionCount(JNIEnv* env, jobject /*self*/) {
+    (void)env;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return static_cast<jint>(g_imports.size());
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeBoundingBox(JNIEnv* env, jobject /*self*/, jlong handle) {
+    bool found = false;
+    bool isVoid = true;
+    double box[6] = {0, 0, 0, 0, 0, 0};
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape != nullptr) {
+            found = true;
+            Bnd_Box b;
+            b.SetGap(0.0);
+            // AddOptimal without triangulation and without tolerance inflation: the exact box.
+            BRepBndLib::AddOptimal(*shape, b, Standard_False, Standard_False);
+            if (!b.IsVoid()) {
+                isVoid = false;
+                b.Get(box[0], box[1], box[2], box[3], box[4], box[5]);
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error computing bounding box: ") + e.GetMessageString());
+        return nullptr;
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error computing bounding box: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error computing bounding box");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(isVoid ? 0 : 6);
+    if (result == nullptr) return nullptr;
+    if (!isVoid) env->SetDoubleArrayRegion(result, 0, 6, box);
+    return result;
 }
 
 }  // extern "C"

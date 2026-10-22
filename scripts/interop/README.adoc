@@ -124,3 +124,14 @@ installed, prints shape type, validity, volume and face count. Manual, not part 
 2026-10-22 (OCCT 7.9.3, macOS arm64): all six files read with status `RetDone`, 0 undefined entities,
 model check 0 fails and 0 warnings; FreeCAD reports valid solids whose volumes and face counts equal the
 closed-form values (see ADR-0029's Verification table).
+
+== `kstep import` (ADR-0030, Welle K)
+
+`verify-import.sh` exports the Welle I/J scripts, imports them again with `kstep import --output json` and
+puts OCCT's own XCAF tree (`dump_xcaf_tree dump`) next to it. `dump_xcaf_tree nested <out.step>` writes an
+OCCT-authored nested assembly (Hauptbaugruppe, Unterbaugruppe, Klotz) used as the reference for the
+innermost-first placement order, and `freecad_make_box.py` has FreeCAD write a 10 x 20 x 30 box that kSTEP
+reads back. All artefacts go to `build/interop/import/`. Result of 2026-10-22 (OCCT 7.9.3, FreeCAD 1.1.4, macOS
+arm64): every volume, face count and bounding box agrees between hand calculation, `kstep import` and the XCAF
+dump; the placed assembly agrees with FreeCAD's `Part.read` (4 solids, volume 17384, same bounding box); the
+FreeCAD box reads back as volume 6000 with 6 faces.

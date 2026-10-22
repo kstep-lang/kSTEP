@@ -220,6 +220,20 @@ val compileOcctBridge =
                     "-lTKMesh",
                     "-lTKXSBase",
                     "-lTKDESTEP",
+                    // Welle K (STEP import, docs/adr/ADR-0030-read-geometry.adoc): the XCAF reader
+                    // pulls in the OCAF/XDE toolkits. Verified with `nm -gU` on macOS (`nm -D
+                    // --defined-only` on Linux): STEPCAFControl_Reader in TKDESTEP,
+                    // XCAFApp_Application/XCAFDoc_ShapeTool/XCAFDoc_DocumentTool in TKXCAF,
+                    // TDocStd_Document/TDataStd_Name/TDF_Tool/TDF_Label in TKLCAF, TKCAF/TKCDF as
+                    // their transitive dependencies. These are runtime dependencies of libTKDESTEP
+                    // already, so nothing new has to be installed where the bridge loads today; the
+                    // -l flags only make the link explicit. `-Wl,--no-undefined` re-verifies the set
+                    // at every Linux build.
+                    "-lTKXCAF",
+                    "-lTKLCAF",
+                    "-lTKCAF",
+                    "-lTKCDF",
+                    "-lTKDE",
                     // Ubuntu's g++ defaults to --enable-new-dtags, which makes -Wl,-rpath below
                     // emit DT_RUNPATH instead of DT_RPATH. ld.so does NOT consult DT_RUNPATH when
                     // resolving a shared object's own *transitive* dependencies (only DT_NEEDED

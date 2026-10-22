@@ -4,6 +4,7 @@
 //
 //   dump_xcaf_tree dump <file.step>        print the XCAF tree of a file
 //   dump_xcaf_tree reference <out.step>    write an OCCT-authored reference assembly (XCAF writer)
+//   dump_xcaf_tree nested <out.step>       write an OCCT-authored NESTED assembly (Welle K import fixture)
 //
 // The `reference` mode documents OCCT's own entity convention for placed assemblies (which side
 // of the representation relationship is the component, item order in ITEM_DEFINED_TRANSFORMATION)
@@ -186,14 +187,55 @@ static int reference(const char* out) {
   return 0;
 }
 
+// Nested reference (ADR-0030): Top -> Sub (Rz90, t=(100,0,0)) -> Box 10x20x5 (Rz90, t=(5,0,0)).
+// Expected global bbox of the box: [90,100]x[-15,5]x[0,5]; applying the two placements in the wrong
+// order would give [-5,5]x[80,100]x[0,5], which is what the import test discriminates.
+static int nested(const char* out) {
+  Handle(TDocStd_Document) doc;
+  Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+  app->NewDocument("MDTV-XCAF", doc);
+  Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+  TDF_Label box = st->AddShape(BRepPrimAPI_MakeBox(10, 20, 5).Shape(), false);
+  TDataStd_Name::Set(box, "Klotz");
+  TDF_Label sub = st->NewShape();
+  TDataStd_Name::Set(sub, "Unterbaugruppe");
+  TDF_Label top = st->NewShape();
+  TDataStd_Name::Set(top, "Hauptbaugruppe");
+  gp_Trsf inner;
+  inner.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), M_PI / 2.0);
+  inner.SetTranslationPart(gp_Vec(5, 0, 0));
+  TDF_Label innerUse = st->AddComponent(sub, box, TopLoc_Location(inner));
+  TDataStd_Name::Set(innerUse, "NAUO-KLOTZ");
+  gp_Trsf outer;
+  outer.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), M_PI / 2.0);
+  outer.SetTranslationPart(gp_Vec(100, 0, 0));
+  TDF_Label outerUse = st->AddComponent(top, sub, TopLoc_Location(outer));
+  TDataStd_Name::Set(outerUse, "NAUO-SUB");
+  st->UpdateAssemblies();
+  Interface_Static::SetCVal("write.step.schema", "AP242DIS");
+  STEPCAFControl_Writer w;
+  w.SetNameMode(true);
+  if (!w.Transfer(doc, STEPControl_AsIs)) {
+    std::cout << "writer transfer failed\n";
+    return 1;
+  }
+  if (w.Write(out) != IFSelect_RetDone) {
+    std::cout << "write failed\n";
+    return 1;
+  }
+  std::cout << "wrote " << out << "\n";
+  return 0;
+}
+
 int main(int argc, char** argv) {
   if (argc != 3) {
-    std::cerr << "usage: dump_xcaf_tree dump <file.step> | reference <out.step>\n";
+    std::cerr << "usage: dump_xcaf_tree dump <file.step> | reference <out.step> | nested <out.step>\n";
     return 2;
   }
   std::string mode = argv[1];
   if (mode == "dump") return dump(argv[2]);
   if (mode == "reference") return reference(argv[2]);
+  if (mode == "nested") return nested(argv[2]);
   std::cerr << "unknown mode\n";
   return 2;
 }

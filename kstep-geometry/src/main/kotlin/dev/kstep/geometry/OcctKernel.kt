@@ -439,6 +439,51 @@ object OcctKernel {
         return OcctShape(handle)
     }
 
+    /**
+     * Reads STEP [content] (the raw file bytes) into an XCAF model ([OcctStepDocument]) the caller
+     * must close. OCCT never opens a path itself, so there is no check-to-use gap between file
+     * validation and reading; extern-file references are NOT followed (the document is read from a
+     * stream with a synthetic, directory-less name). Input size and structure are bounded by
+     * [StepImportLimits] -- see ADR-0030.
+     *
+     * @throws IllegalArgumentException if [content] is empty, too large, or not a readable STEP file.
+     * @throws OcctImportLimitException if a structural limit is exceeded.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT fails while transferring the model.
+     */
+    fun readStep(content: ByteArray): OcctStepDocument = readStep(content, StepImportLimits.nativeLimits())
+
+    internal fun readStep(
+        content: ByteArray,
+        limits: IntArray,
+    ): OcctStepDocument {
+        require(content.isNotEmpty()) { "STEP content must not be empty" }
+        require(content.size <= StepImportLimits.MAX_FILE_BYTES) {
+            "STEP content exceeds ${StepImportLimits.MAX_FILE_BYTES} bytes"
+        }
+        requireAvailable()
+        val handle =
+            try {
+                OcctBridge.nativeReadStepXcaf(content, limits)
+            } catch (e: IllegalArgumentException) {
+                if (e.message?.startsWith("limit:") == true) {
+                    throw OcctImportLimitException(e.message.orEmpty())
+                }
+                if (e.message?.startsWith("external-reference:") == true) {
+                    throw OcctExternalReferenceException(e.message.orEmpty())
+                }
+                throw e
+            } catch (e: RuntimeException) {
+                throw OcctGeometryException("OCCT failed to read STEP content", e)
+            }
+        return try {
+            OcctStepDocument(handle)
+        } catch (e: Throwable) {
+            OcctBridge.nativeReleaseImport(handle)
+            throw e
+        }
+    }
+
     /** Union (`a + b`). See [boolean]. */
     fun union(
         a: OcctShape,

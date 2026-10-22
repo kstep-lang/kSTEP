@@ -188,4 +188,55 @@ object OcctBridge {
      *   by [dev.kstep.geometry.OcctShape.triangulate] into [dev.kstep.geometry.OcctGeometryException].
      */
     external fun nativeShapeTriangles(handle: Long): DoubleArray
+
+    // ---------------------------------------------------------------------------------------
+    // Welle K: STEP import via XCAF (docs/adr/ADR-0030-read-geometry.adoc)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Reads a STEP file (as BYTES -- OCCT never opens a path itself) into an XCAF document and
+     * returns a session handle describing its product structure. Release with [nativeReleaseImport].
+     *
+     * @param limits `[maxEntities, maxNodes, maxComponents, maxParts, maxFacesTotal, maxNameChars]`,
+     *   all positive; hand-synchronized with [dev.kstep.geometry.StepImportLimits].
+     * @throws NullPointerException if an argument is null.
+     * @throws IllegalArgumentException if `limits` is malformed, the bytes are not a readable STEP
+     *   file, or a limit is exceeded (message starts with `limit:`).
+     * @throws IllegalStateException if OCCT's transfer into the document fails.
+     */
+    external fun nativeReadStepXcaf(
+        content: ByteArray,
+        limits: IntArray,
+    ): Long
+
+    /** 6 ints per node: kind (0 part, 1 assembly, 2 component), parent, referred, freeRoot, rigid, shapeSlot. */
+    external fun nativeImportNodeInts(session: Long): IntArray
+
+    /** 12 doubles per node: row-major 3x4 local matrix (identity for non-components). */
+    external fun nativeImportNodeMatrices(session: Long): DoubleArray
+
+    external fun nativeImportNodeName(
+        session: Long,
+        index: Int,
+    ): String
+
+    /** `[entityCount, unknownEntityCount, freeRootCount, nodeCount]`. */
+    external fun nativeImportStats(session: Long): IntArray
+
+    /** Distinct unknown entity type names, `\n`-joined, ASCII `[A-Z0-9_]` only. */
+    external fun nativeImportUnknownTypes(session: Long): String
+
+    /** Registers a COPY of the part's shape as a normal shape handle (caller releases it). */
+    external fun nativeImportPartShape(
+        session: Long,
+        nodeIndex: Int,
+    ): Long
+
+    external fun nativeReleaseImport(session: Long)
+
+    /** Number of live import sessions; diagnostic, used by the leak-probe test. */
+    external fun nativeImportSessionCount(): Int
+
+    /** `[minX, minY, minZ, maxX, maxY, maxZ]`, or an empty array if the shape has no extent. */
+    external fun nativeShapeBoundingBox(handle: Long): DoubleArray
 }

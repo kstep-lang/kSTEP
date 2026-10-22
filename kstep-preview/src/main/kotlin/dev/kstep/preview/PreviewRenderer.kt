@@ -9,10 +9,8 @@ import dev.kstep.render.RenderLimits
 import dev.kstep.render.gltf.GlbExtras
 import dev.kstep.render.gltf.GlbWriteResult
 import dev.kstep.render.gltf.GlbWriter
-import dev.kstep.render.image.TriangleRasterizer
 import dev.kstep.render.mesh.MeshProjection
 import dev.kstep.render.mesh.ProjectedTriangle
-import dev.kstep.render.svg.TriangleSvgWriter
 import dev.kstep.render.text.TextCardRenderer
 import dev.kstep.script.KStepModel
 import dev.kstep.script.KStepScriptHost
@@ -294,27 +292,25 @@ object PreviewRenderer {
         }
         return when (format) {
             RenderFormat.SVG -> {
-                val svg =
+                val svgBytes =
                     if (content is RenderContent.Geometry) {
-                        TriangleSvgWriter.render(content.triangles, width, height)
+                        MeshPreview.svgBytes(content.triangles, width, height)
                     } else {
-                        TextCardRenderer.toSvg(lines, width, height)
+                        TextCardRenderer.toSvg(lines, width, height).toByteArray(Charsets.UTF_8)
                     }
-                svg.toByteArray(Charsets.UTF_8) to null
+                svgBytes to null
             }
             RenderFormat.PNG -> {
-                val image =
-                    if (content is RenderContent.Geometry) {
-                        TriangleRasterizer.render(content.triangles, width, height)
-                    } else {
-                        TextCardRenderer.toImage(lines, width, height)
+                if (content is RenderContent.Geometry) {
+                    MeshPreview.pngBytes(content.triangles, width, height) to null
+                } else {
+                    val out = ByteArrayOutputStream()
+                    val wrote = ImageIO.write(TextCardRenderer.toImage(lines, width, height), "png", out)
+                    if (!wrote) {
+                        throw PreviewEncodingException("no ImageIO writer available for 'png'")
                     }
-                val out = ByteArrayOutputStream()
-                val wrote = ImageIO.write(image, "png", out)
-                if (!wrote) {
-                    throw PreviewEncodingException("no ImageIO writer available for 'png'")
+                    out.toByteArray() to null
                 }
-                out.toByteArray() to null
             }
             RenderFormat.TEXT -> {
                 (lines.joinToString("\n") + "\n").toByteArray(Charsets.UTF_8) to null

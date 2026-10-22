@@ -461,10 +461,14 @@ this writing:
   half of the ADR-0001 bar, not the external-interop half; see
   <<roadmap,Roadmap>> below, which carries the FreeCAD/external-tool
   gap forward explicitly rather than overclaiming it.
-* `kstep-step21` has no CLI wiring yet (no `kstep render`/`kstep
-  import` command) — it is a library API only, callable from tests,
-  matching how Wave 2's codegen and Wave 3's WHERE-rule evaluator were
-  introduced as plain Kotlin APIs before any CLI wiring.
+* `kstep-step21` itself is still a library API (no CLI wiring of its own);
+  `kstep export` writes through it and, since Welle K (ADR-0030),
+  `kstep import <file.step>` reads geometry-carrying STEP files back (OCCT's
+  XCAF reader for structure, shapes and placements; the typed Part 21 layer
+  only for product/usage identifiers and `--validate`). Round trip kSTEP to STEP
+  to kSTEP and a box written by FreeCAD 1.1.4 were checked on 2026-10-22 (see
+  <<import-usage,Reading a STEP file back>>); other CAD tools, multi-body files,
+  colours/PMI and structure-only files are not covered.
 * (M1 Welle 6) The semantic model now captures `DERIVE`, `INVERSE`, and
   `UNIQUE` entity-body clauses — a gap flagged across three separate
   wave reviews (`ExpressEntity`'s own "losslessly captured" KDoc was,
@@ -1370,6 +1374,11 @@ triangulation) lives in `TKMesh`, from the same
 `BRepAlgoAPI_Fuse`/`Cut`/`Common`) live in `TKBO`, again from
 `libocct-modeling-algorithms-dev` (Homebrew's `opencascade` contains it too),
 and are an additional runtime dependency of the native bridge.
+Reading STEP files back (Welle K, `kstep import`, ADR-0030) additionally links the
+OCAF/XDE toolkits `TKXCAF`, `TKLCAF`, `TKCAF`, `TKCDF` and `TKDE`. They are runtime
+dependencies of `TKDESTEP` already; on Ubuntu/Debian the dev headers come with
+`libocct-ocaf-dev` (listed explicitly in the CI job that requires OCCT, in case the
+data-exchange package does not pull it in), Homebrew's `opencascade` contains them.
 
 === Building (macOS arm64, Homebrew)
 
@@ -2236,6 +2245,29 @@ alone is indistinguishable from one — the scanner checks the line above it
 first, matching Asciidoctor's own rule (Stolperfalle 12 in the ADR).
 
 [#roadmap]
+[[import-usage]]
+=== Reading a STEP file back (`kstep import`)
+
+[source,shell]
+----
+kstep export kstep-tests/src/test/resources/export-placed-assembly.kstep.kts --out build/placed.step
+kstep import build/placed.step                      # text report
+kstep import build/placed.step --output json        # one JSON document on stdout
+kstep import build/placed.step --validate           # also check the AP242 V1 entities (exit 1 on findings)
+kstep import build/placed.step --render build/placed.svg   # also render (svg, png or glb)
+----
+
+The text report lists the product structure, each part's exact volume, face count and bounding box, the
+placed occurrences (the assembly is expanded, a part used twice is two occurrences) and totals, in
+millimetres. For `export-placed-assembly.kstep.kts` that is 4 occurrences, volume 17384 mm3 and bounding box
+`[0,0,0]..[40,40,22]`. Warnings (unknown entity types, ignored colours/layers/PMI) go to stderr.
+
+`kstep import` is read-only: it writes nothing unless `--render` names a file. It refuses symbolic links,
+non-regular files, files above 50 MB and files that reference other files (`DOCUMENT_FILE` and friends); the
+limits are in ADR-0030. Errors are `KSTEP-I-001`..`KSTEP-I-012` (`--output json` carries `errorKind`, `code`
+and `message`). It needs the OCCT bridge; without it the command reports `geometry_unavailable`.
+See docs/adr/ADR-0030-read-geometry.adoc for what is and is not covered.
+
 == Roadmap (V1 scope)
 
 Per the project's scope-reduction decision (kSTEP-ADR-0001, analogous to

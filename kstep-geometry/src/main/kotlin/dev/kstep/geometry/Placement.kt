@@ -101,7 +101,56 @@ class Placement private constructor(
             m[11],
         )
 
+    /** A copy of the transform as a row-major 3x4 matrix, the layout [fromRowMajor3x4] accepts. */
+    fun rowMajor3x4(): DoubleArray = toMatrix12()
+
     companion object {
+        /**
+         * Builds a [Placement] from a row-major 3x4 matrix `[r00 r01 r02 tx, r10 r11 r12 ty, r20 r21 r22 tz]`.
+         *
+         * @throws IllegalArgumentException if [matrix] does not have 12 finite entries, or its rotation
+         *   block is not orthonormal (within [tolerance]) with a positive determinant -- the same
+         *   conditions `nativeTransformShape` enforces: no scaling, shear or reflection.
+         */
+        fun fromRowMajor3x4(
+            matrix: DoubleArray,
+            tolerance: Double = 1e-9,
+        ): Placement {
+            require(matrix.size == 12) { "matrix must have exactly 12 entries, got ${matrix.size}" }
+            require(matrix.all { it.isFinite() }) { "matrix must be finite" }
+            for (i in 0 until 3) {
+                for (j in 0 until 3) {
+                    var dot = 0.0
+                    for (k in 0 until 3) dot += matrix[4 * k + i] * matrix[4 * k + j]
+                    val expected = if (i == j) 1.0 else 0.0
+                    require(kotlin.math.abs(dot - expected) <= tolerance) {
+                        "rotation block must be orthonormal (no scaling or shear)"
+                    }
+                }
+            }
+            val det =
+                matrix[0] * (matrix[5] * matrix[10] - matrix[6] * matrix[9]) -
+                    matrix[1] * (matrix[4] * matrix[10] - matrix[6] * matrix[8]) +
+                    matrix[2] * (matrix[4] * matrix[9] - matrix[5] * matrix[8])
+            require(det > 0.0) { "rotation block must have a positive determinant (no reflection)" }
+            return Placement(
+                doubleArrayOf(
+                    matrix[0],
+                    matrix[1],
+                    matrix[2],
+                    matrix[4],
+                    matrix[5],
+                    matrix[6],
+                    matrix[8],
+                    matrix[9],
+                    matrix[10],
+                    matrix[3],
+                    matrix[7],
+                    matrix[11],
+                ),
+            )
+        }
+
         /** The no-op transform: rotation = identity, translation = zero. */
         val IDENTITY: Placement = Placement(identityMatrix() + doubleArrayOf(0.0, 0.0, 0.0))
 

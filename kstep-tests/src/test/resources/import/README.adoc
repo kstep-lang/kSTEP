@@ -1,0 +1,25 @@
+= Import fixtures (ADR-0030)
+
+STEP files cannot carry provenance comments here: the Part 21 reader used for identifier enrichment does not
+support `/* */` comments, so a comment would silently disable that enrichment. Provenance lives in this file.
+
+[cols="1,3"]
+|===
+|File |Origin
+
+|`box-20x30x40.step` |`kstep export export-box-20x30x40.kstep.kts` (OCCT 7.9.3 bridge). Volume 24000, 6 faces.
+|`unknown-entities.step` |`box-20x30x40.step` plus `#9999=KSTEP_UNKNOWN_THING('x');` before the closing `ENDSEC;`.
+|`external-ref.step` |`box-20x30x40.step` plus a `DOCUMENT_FILE` entity (`#9998`); must be rejected before OCCT sees it.
+|`cyclic-nauo.step` |`kstep export export-assembly-geometry.kstep.kts` plus a reverse `NEXT_ASSEMBLY_USAGE_OCCURRENCE`
+(`#9999`, bracket to housing) that forms a usage cycle with `#10`.
+|`broken.step` |`box-20x30x40.step` cut in the middle of an entity (no `ENDSEC;`).
+|`not-step.txt` |Plain text.
+|`empty.step` |Zero bytes.
+|`nested-occt-reference.step` |Written by `scripts/interop/dump_xcaf_tree.cpp`, mode `nested` (OCCT 7.9.3 XCAF writer):
+Hauptbaugruppe, Unterbaugruppe (Rz90, t=(100,0,0)), Klotz 10x20x5 (Rz90, t=(5,0,0)). Expected global bounding box of the
+box `[90,100]x[-15,5]x[0,5]`; the wrong composition order would give `[-5,5]x[80,100]x[0,5]`.
+|`placed-assembly.step` |`kstep export export-placed-assembly.kstep.kts`. Also kept in `kstep-geometry/src/test/resources/import/` for the native
+limit tests (8 XCAF nodes, 4 components, 3 parts, 18 faces, root assembly "Baugruppe").
+|`freecad-box-1.1.4.step` |Written by FreeCAD 1.1.4 (OCCT 7.8 STEP processor) with `scripts/interop/freecad_make_box.py`: one `Part::Box`
+10 x 20 x 30 labelled `FreeCADBox`, schema `AUTOMOTIVE_DESIGN`. A foreign writer that Linux CI (no FreeCAD) can still read.
+|===

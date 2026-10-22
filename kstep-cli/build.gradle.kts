@@ -44,6 +44,8 @@ dependencies {
     // them directly, not just transitively).
     implementation(project(":kstep-geometry"))
     implementation(project(":kstep-render"))
+    // `kstep import` (ADR-0030): StepImporter/StepImportValidation live in kstep-shape.
+    implementation(project(":kstep-shape"))
     // kstep-asciidoc/kstep-preview extraction (see docs/adr/ADR-0019-kstep-asciidoc.adoc): `api`,
     // not `implementation` -- RenderFormat/PreviewRenderer/PreviewOutcome/PreviewWriter appear in
     // CliCommand.Render's public signature and RenderCommand.kt's own public functions, and

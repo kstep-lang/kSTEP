@@ -1,0 +1,225 @@
+= ADR-0030: Reading geometry back from STEP (`kstep import`)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle K). Closes the loop opened by ADR-0027/0028/0029: geometry can be
+written; this ADR reads it back, from kSTEP's own files and from files written by other tools.
+
+== Context
+
+kSTEP could export a validated AP242 product structure with OCCT B-Rep geometry merged in, but it could
+not read geometry: `Part21Reader` only reconstructs the typed V1 product-structure entities, treats
+everything else as opaque, and its tokenizer is capped at 5 000 000 characters and 10 000 instances, far
+below what a real geometry file needs (the 14 KB box file already has 351 entities, a placed assembly
+1 094). A reader that is only as good as kSTEP's own writer would also prove nothing about foreign files.
+
+== Decision
+
+* *Command name: `kstep import <file.step>`.* Symmetric to `kstep export`, and the later DSL function is
+  `importStep(...)`. `inspect` was rejected: it would add a third verb style next to export/render/asciidoc,
+  and the command produces a kSTEP model, not a raw dump. The command is read-only; it writes nothing unless
+  `--render <path>` names an output explicitly, so "no file next to the input" holds structurally.
+* *OCCT's XCAF reader is the authority* for structure, shape and placement. Measured with the existing
+  `dump_xcaf_tree` before any code was written: `STEPCAFControl_Reader` + `Transfer` into an `XCAFApp`
+  document returns the assembly, its components (`NAUO-*`), the referred parts, each component's location
+  and exact global geometry. The typed Part 21 layer is demoted to *enrichment* (product ids, usage ids)
+  and to `--validate`; it is never on the critical path, so its limits cannot block an import.
+* *Bytes, not a path.* The CLI validates and reads the file, and the bytes go to
+  `STEPCAFControl_Reader::ReadStream` under the synthetic name `kstep-import.stp` (no directory). OCCT never
+  opens the file itself, so there is no check-to-use gap, and no relative extern-file path can resolve
+  against a real directory.
+* *Reader modes.* Names on; colours, layers, properties, GD&T, materials, views, SHUO, metadata and product
+  metadata off. `SetLengthUnit(mm)` is applied to the document before `Transfer`.
+* *Structure in native code, shapes on demand.* `nativeReadStepXcaf` returns a session handle; the node table
+  (`kind`, `parent`, `referred`, `freeRoot`, `rigid`, `shapeSlot`, name, row-major 3x4 matrix) is fetched with
+  four calls, and each part's B-Rep is registered as an ordinary shape handle by `nativeImportPartShape` (a
+  copy, owned by an `OcctShape`). The XCAF document is closed (`XCAFApp_Application::Close`, RAII) before the
+  read returns; only the part `TopoDS_Shape` handles survive.
+* *Expansion in Kotlin.* The assembly DAG is expanded iteratively, bounded by depth and occurrence count. A
+  part used twice appears as two occurrences sharing one part. Global placement of a part reached through
+  components `L1` (outermost) ... `Ln` (innermost) is `Ln.then(...).then(L1)`; the nested test fixture pins the
+  order (wrong order gives a different bounding box).
+* *Units.* Everything is millimetres. Conversion is OCCT's job; the document unit is set to millimetres. A
+  fixture in metres was not built, so the conversion of a metre file is an *untested assumption*.
+* *Identifiers by unique name.* `productId`/`usageId` are attached only when the XCAF name matches exactly
+  one `PRODUCT` / `NEXT_ASSEMBLY_USAGE_OCCURRENCE` name; otherwise they stay `null`.
+* *Part 21 comments.* The Part 21 tokenizer does not support `/* */` comments. A file with comments is read
+  correctly by OCCT but loses id enrichment (reported as a warning). Fixtures therefore carry their provenance
+  in `kstep-tests/src/test/resources/import/README.adoc`, not in comments.
+
+== Input hardening
+
+Everything below happens before OCCT sees a byte unless stated otherwise.
+
+[cols="2,3,2"]
+|===
+| Check | Behaviour | Error code
+| Path syntax (NUL, invalid) | rejected | `KSTEP-I-001` `invalid_path`
+| Existence (no symlink following) | rejected | `KSTEP-I-002` `file_not_found`
+| Symbolic link (last component only) | rejected, opened with `NOFOLLOW_LINKS` (`O_NOFOLLOW`) | `KSTEP-I-003` `symlink_rejected`
+| Not a regular file (directory, FIFO, device) | rejected | `KSTEP-I-004` `not_a_regular_file`
+| Empty file | rejected | `KSTEP-I-005` `empty_file`
+| Size above 50 000 000 bytes | rejected by attribute and again while reading (`maxBytes + 1`) | `KSTEP-I-006` `file_too_large`
+| Not `ISO-10303-21;` | rejected, with hints for STEP-XML and stpZ | `KSTEP-I-007` `not_step`
+| Extern-document keywords | rejected (see below) | `KSTEP-I-008` `external_reference`
+| OCCT cannot read it | `read_failed`, message without file contents | `KSTEP-I-009` `read_failed`
+| Structural limit | see the limits table | `KSTEP-I-010` `limit_exceeded`
+| No geometry found | structure-only import is a follow-up (K3) | `KSTEP-I-011` `no_content`
+| OCCT bridge missing | existing code | `KSTEP-S-007` `geometry_unavailable`
+| I/O error | rejected | `KSTEP-I-012` `io_error`
+|===
+
+*Parent directories may be symbolic links* (macOS `/tmp` is one); only the final component is checked.
+Realpath containment was considered and not done: there is no base directory to be contained in, the
+command reads one file the user named.
+
+*Extern references.* `STEPCAFControl_Reader::Transfer` can open other files named in the model:
+`STEPConstruct_ExternRefs` takes the file name from `StepBasic_DocumentFile`, from
+`StepAP214_AppliedDocumentReference` and, in the AP203 path, from the name of any `StepBasic_Document`.
+The stream name without a directory does _not_ prevent this: OCCT resolves the name with
+`OSD_Path::AbsolutePath` against the working directory, and absolute paths are opened unchanged. The
+protection therefore has two layers:
+
+. *Authoritative, typed:* after parsing and before `Transfer()`, the native reader walks the model and
+rejects any entity that `IsKind` of `StepBasic_Document` (includes `DOCUMENT_FILE`),
+`StepAP214_AppliedDocumentReference` or `StepBasic_ProductDefinitionWithAssociatedDocuments`. This is
+independent of how the entity is spelled (long or short names) and yields `KSTEP-I-008`.
+. *Fast first filter, textual:* the Kotlin prescan walks the file outside string literals and comments
+and rejects the long names plus the AP214 short names (`PDWAD`, `APDCRF`, `DCMFL`, `DCMNT`) and `DOCUMENT`.
+
+Extern files are never opened, so the file-size and entity limits cannot be bypassed through them.
+Names taken from the file (parts, assemblies, components) are stripped of control and format characters
+before they reach text or JSON output.
+
+=== Limits
+
+[cols="2,1,3"]
+|===
+| Limit | Value | Where
+| File size | 50 000 000 bytes | Kotlin, twice
+| STEP entity instances | 1 000 000 | native, before the transfer
+| XCAF nodes | 10 000 | native
+| Components | 10 000 | native
+| Distinct parts | 2 000 | native
+| Faces over all parts | 250 000 | native
+| Name length | 256 UTF-16 units | native, truncation
+| Expanded occurrences | 10 000 | Kotlin
+| Assembly depth | 32 | Kotlin (also stops usage cycles)
+| Reported unknown types | 20 | native
+|===
+
+`StepImportLimits` and the native `limits` array are a hand-synchronized pair (as in ADR-0007/0029); the
+native side validates the array length and positivity itself. A native `limit:` failure becomes
+`OcctImportLimitException` (a subclass of `OcctGeometryException`).
+
+*Restrisiko, not covered:* CPU time. The limits bound sizes, not the time OCCT needs for a small but
+expensive file, and the whole read runs under the process-wide native lock. A deadline abort or a read in a
+sacrificial subprocess is follow-up K6.
+
+== Native bridge
+
+Nine new JNI functions (`nativeReadStepXcaf`, `nativeImportNodeInts`, `nativeImportNodeMatrices`,
+`nativeImportNodeName`, `nativeImportStats`, `nativeImportUnknownTypes`, `nativeImportPartShape`,
+`nativeReleaseImport`, `nativeShapeBoundingBox`) plus the diagnostic `nativeImportSessionCount`. New link
+dependencies `-lTKXCAF -lTKLCAF -lTKCAF -lTKCDF -lTKDE`; these are runtime dependencies of `libTKDESTEP`
+already, so nothing new has to be installed where the bridge loads today. `-Wl,--no-undefined` re-verifies the
+set on every Linux build.
+
+* The whole read runs inside one `g_mutex` critical section (`Interface_Static` and
+  `XCAFApp_Application::GetApplication()` are process-global). `registerShape` takes the mutex itself, so the
+  session registers through `registerShapeLocked`/direct map insertion; `throwJava` runs only after the lock
+  is released (the same rule as every other function).
+* `PrinterSilencer` covers the read; without it the reader prints to stdout and breaks the `--output json`
+  contract (tested: stdout is exactly one JSON object).
+* `XcafDocumentGuard` closes the XCAF document on every path (`XCAFApp` otherwise keeps it: one leak per
+  import). The test imports a box 200 times and asserts the session count returns to its starting value.
+* The label traversal is iterative, keyed by `TDF_Tool::Entry` strings (the `TDF_LabelMapHasher` API differs
+  between OCCT 7.8 and 7.9), and visits each label once, so a cycle in the XCAF model cannot loop.
+* Names are copied as UTF-16 and returned with `NewString`, not `NewStringUTF` (modified UTF-8 would mangle
+  non-BMP characters and embedded NULs).
+* *Unknown entities.* `Interface_InterfaceModel::IsUnknownEntity` did not flag an invented entity type
+  (measured); an entity OCCT has no class for is stored as `StepData_UndefinedEntity`, so the type is tested
+  directly. Type names are upper-cased and reduced to `[A-Z0-9_]`.
+* `BRepBndLib::AddOptimal(shape, box, false, false)` gives the exact box; `Add` inflates by tolerances.
+
+== Placement
+
+`Placement.fromRowMajor3x4` accepts exactly what `nativeTransformShape` accepts (12 finite entries,
+orthonormal rotation within 1e-9, positive determinant). A component whose transform carries scaling, a
+reflection or noise beyond that is reported with `rigid = false` and is not moved; its global box is `null`
+and the totals' volume is `null`. Global occurrence boxes are exact, taken from the transformed B-Rep rather
+than from eight transformed box corners.
+
+== Render
+
+`MeshPreview` is the encoder half of `PreviewRenderer` made public (SVG, PNG, GLB from a `ColoredMesh`);
+`kstep render` output is byte-identical (its parity tests are unchanged). `kstep import --render` triangulates
+each part once, places the triangles per occurrence, colours by part, and renders. The existing mesh merge
+cap of `OcctKernel.MAX_TRIANGLES` (130 000 triangles in total) applies; a larger scene fails with
+`limit_exceeded`. The renderer is a painter's algorithm: touching or interpenetrating solids can show
+ordering artefacts (the bracket on the housing in the placed-assembly example), which is a property of the
+existing renderer, not of the import.
+
+== Not covered
+
+* No feature or parameter history: imported shapes are opaque B-Reps.
+* Freeform surfaces are read and measured by OCCT but not turned into kSTEP entities.
+* `--validate` covers the V1 entities only, and only inside the Part 21 reader's limits (5 MB, 10 000
+  instances); beyond them it reports `available: false` and exits 1 (ADR-0024: no verdict is a failure).
+  A validation finding or a missing verdict still prints the full report, with `status` `validation_failed`,
+  and exits 1.
+* Product and usage ids need unique names; comments in the file disable enrichment.
+* Units other than millimetres are converted by OCCT, untested.
+* STEP-XML and compressed stpZ are rejected.
+* Colours, layers, PMI, materials and SHUOs are ignored and counted (`ignored.colours` and so on).
+* Files without geometry are `no_content`: a structure-only import is follow-up K3.
+* CPU-time DoS by a small but expensive file (see Limits).
+* The OCCT-authored fixture for nested assemblies is flat in kSTEP's DSL: the script DSL cannot place nested
+  usages with geometry (`place` requires a root usage), so the nested case is covered by an OCCT-written
+  reference file, not a kSTEP-written one.
+
+== Follow-up waves
+
+[cols="1,4"]
+|===
+| Wave | Content
+| K2 | DSL `importStep(path)` returning a model or shape, and `shape(pd, imported)` for re-export. Deferred
+because script evaluation also runs inside the MCP server, and a file-reading capability in the DSL needs
+its own path and sandbox decision; re-export also meets the single-solid rule of ADR-0029.
+| K3 | Structure without OCCT (pure Part 21 path); also files that carry products but no geometry.
+| K4 | Colours, layers, PMI, materials, SHUO.
+| K5 | Controlled extern references with base-directory containment.
+| K6 | Files beyond 50 MB; timeout or subprocess isolation for the OCCT transfer.
+| K7 | A `kstep_import` tool in the MCP server.
+|===
+
+== Consequences
+
+* kSTEP can now check its own geometry export end to end (script, export, import, compare) and read files
+  from FreeCAD and OCCT.
+* The Linux CI job that requires OCCT additionally installs `libocct-ocaf-dev` and checks for
+  `libTKXCAF.so`. The release workflow is unchanged on purpose: the release zip must not contain native
+  bridges and it installs no OCCT.
+
+== Verification
+
+Reference table, macOS arm64, OCCT 7.9.3, `scripts/interop/verify-import.sh` (hand calculation | `kstep
+import` | OCCT XCAF dump | FreeCAD where applicable):
+
+[cols="3,2,2,2,2"]
+|===
+| Case | Hand calculation | `kstep import` | XCAF dump | FreeCAD
+| box 20 x 30 x 40 | 24000 | 24000.0, 6 faces | 24000.000000 | 24000 (earlier checks)
+| plate with hole | 15497.346 | 15497.34518, 7 faces | 15497.345175 | 15497.345 (ADR-0029)
+| revolved sleeve | 4712.389 | 4712.38898, 4 faces | 4712.388980 | -
+| boolean union | 7000 | 7000.0, 10 faces | 7000.000000 | 7000 (ADR-0029)
+| chamfered prism | 23920 | 23920.0, 7 faces | 23920.000000 | 23920 (ADR-0029)
+| placed assembly total | 17384, bbox [0,40]x[0,40]x[0,22] | 17384.0, 4 occurrences, same bbox | 17384.000000 | 17384.000, 4 solids, same bbox
+| bracket in the placed assembly | [10,30]x[5,15]x[10,15] | same | same | same
+| nested OCCT reference (innermost first) | [90,100]x[-15,5]x[0,5] | same | same | -
+| FreeCAD 1.1.4 box 10 x 20 x 30 | 6000, 6 faces | 6000.0, 6 faces, bbox [0,10]x[0,20]x[0,30] | - | writer
+|===
+
+The assembly with its own geometry shows OCCT's helper part named `SOLID` (the housing's own box), which is
+reported as an ordinary part and not treated as an error (ADR-0028).

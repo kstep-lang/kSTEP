@@ -9,6 +9,18 @@ minor versions may contain breaking changes.
 
 === Added
 
+* `kstep import <file.step>` (ADR-0030, Welle K): reads a STEP file (kSTEP, OCCT, FreeCAD) back through OCCT's
+  XCAF reader and reports product structure, per-part volume/faces/bounding box, the expanded placed
+  occurrences and totals, as text or `--output json`; `--validate` checks the AP242 V1 entities, `--render
+  <out.svg|png|glb>` renders the imported geometry. Read-only apart from `--render`. Kotlin API:
+  `dev.kstep.shape.importer.StepImporter`/`ImportedStepModel`/`StepImportValidation`,
+  `OcctKernel.readStep`/`OcctStepDocument`, `OcctShape.boundingBox`, `BoundingBox`, `Placement.fromRowMajor3x4`
+  and `rowMajor3x4`, `StepImportLimits`, `OcctImportLimitException`, `MeshPreview` (the SVG/PNG/GLB encoders
+  of `PreviewRenderer`, output unchanged). Input hardening: no symbolic links, regular files only, 50 MB cap,
+  extern-document references rejected, entity/node/part/face/occurrence/depth limits. Error codes
+  `KSTEP-I-001` to `KSTEP-I-012`. Linux CI that requires OCCT now installs `libocct-ocaf-dev`. New interop
+  tools: `dump_xcaf_tree nested`, `freecad_make_box.py`, `verify-import.sh`.
+
 * `kstep export` merges the geometry of `shape(...)` registrations into the exported Part 21 file
   (ADR-0027). `Ap242ShapeExporter.export(header, roots, assignments)` / `exportToFile` accept all
   roots and several shapes (one per product definition, limits `MAX_SHAPES` and

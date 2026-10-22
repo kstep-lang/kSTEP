@@ -49,6 +49,14 @@ Usage:
           --with-step                      Include the Part-21 text in the preview (svg/png/text)
           --require-geometry               Fail (exit 1) instead of silently falling back to text
           --output json                    Emit the result as a JSON document instead of text
+  kstep import <file.step> [opts]          Read a STEP file (kSTEP, OCCT, FreeCAD, ...) and report
+                                            its product structure and per-part geometry
+      --output json                        Emit the result as a JSON document instead of text
+      --validate                           Also validate the AP242 V1 entities (exit 1 on findings
+                                            or when no verdict is available)
+      --render <out.svg|out.png|out.glb>   Additionally render the imported geometry (format from
+                                            the extension; nothing is ever written implicitly)
+      -w, --width <px> / --height <px>     Image size for --render (svg/png), 16..4096
   kstep asciidoc [opts]                    Pre-render kstep blocks/macros in AsciiDoc files
       --input <file.adoc>                  Single-file mode (requires --output)
       --output <file.adoc>                 Output path for --input
@@ -84,6 +92,15 @@ sealed interface CliCommand {
         val withStep: Boolean,
         val requireGeometry: Boolean,
         val jsonOutput: Boolean,
+    ) : CliCommand
+
+    data class Import(
+        val path: String,
+        val jsonOutput: Boolean,
+        val validate: Boolean = false,
+        val renderOut: String? = null,
+        val width: Int = 1024,
+        val height: Int = 768,
     ) : CliCommand
 
     data class Asciidoc(
@@ -126,6 +143,7 @@ fun resolveCommand(args: Array<String>): CliCommand =
         args[0] == "export" -> resolveExportCommand(args.drop(1))
         args[0] == "render" -> resolveRenderCommand(args.drop(1))
         args[0] == "asciidoc" -> resolveAsciidocCommand(args.drop(1))
+        args[0] == "import" -> resolveImportCommand(args.drop(1))
         else -> CliCommand.ShowUsage(exitCode = 1)
     }
 
@@ -377,6 +395,7 @@ fun main(args: Array<String>) {
         is CliCommand.Export -> runExport(command)
         is CliCommand.Render -> runRender(command)
         is CliCommand.Asciidoc -> runAsciidoc(command)
+        is CliCommand.Import -> runImport(command)
         is CliCommand.ShowUsage -> {
             println(USAGE_TEXT)
             if (command.exitCode != 0) exitProcess(command.exitCode)

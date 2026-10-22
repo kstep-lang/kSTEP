@@ -100,6 +100,30 @@ class OcctShape internal constructor(
     }
 
     /**
+     * Exact axis-aligned bounding box (`BRepBndLib::AddOptimal`, no tolerance inflation), computed
+     * on first access and cached; `null` if the shape has no extent.
+     *
+     * [checkOpen] runs on every access, like [volume].
+     *
+     * @throws IllegalStateException if this shape is already [close]d.
+     */
+    val boundingBox: BoundingBox?
+        get() {
+            checkOpen()
+            return boundingBoxValue
+        }
+
+    private val boundingBoxValue: BoundingBox? by lazy {
+        val raw =
+            try {
+                OcctBridge.nativeShapeBoundingBox(handle)
+            } finally {
+                Reference.reachabilityFence(this)
+            }
+        if (raw.size == 6) BoundingBox(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]) else null
+    }
+
+    /**
      * Writes this shape to a real STEP (ISO 10303-21) file via OCCT's own `STEPControl_Writer`.
      *
      * Calling this from multiple threads concurrently (on this or any other [OcctShape]) is

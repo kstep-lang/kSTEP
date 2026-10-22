@@ -422,4 +422,94 @@ class CliMainTest :
         "USAGE_TEXT documents the asciidoc subcommand" {
             USAGE_TEXT shouldContain "kstep asciidoc"
         }
+
+        "\"import\" with a path resolves to Import with defaults" {
+            resolveCommand(arrayOf("import", "a.step")) shouldBe
+                CliCommand.Import(
+                    "a.step",
+                    jsonOutput = false,
+                    validate = false,
+                    renderOut = null,
+                    width = 1024,
+                    height = 768,
+                )
+        }
+
+        "\"import\" accepts --output json, --validate, --render and sizes in any order" {
+            resolveCommand(
+                arrayOf(
+                    "import",
+                    "--validate",
+                    "a.step",
+                    "--output",
+                    "json",
+                    "--render",
+                    "o.glb",
+                    "-w",
+                    "640",
+                    "--height",
+                    "480",
+                ),
+            ) shouldBe
+                CliCommand.Import(
+                    "a.step",
+                    jsonOutput = true,
+                    validate = true,
+                    renderOut = "o.glb",
+                    width = 640,
+                    height = 480,
+                )
+        }
+
+        "\"import --render\" accepts svg, png and glb extensions only" {
+            for (ext in listOf("svg", "png", "glb")) {
+                (resolveCommand(arrayOf("import", "a.step", "--render", "o.$ext")) is CliCommand.Import) shouldBe true
+            }
+            for (bad in listOf("o.txt", "o.step", "o", "o.gltf")) {
+                resolveCommand(arrayOf("import", "a.step", "--render", bad)) shouldBe CliCommand.ShowUsage(1)
+            }
+        }
+
+        "\"import --render\" rejects an out-of-range image size for svg and png as a usage error" {
+            for (ext in listOf("svg", "png")) {
+                val out = "o.$ext"
+                resolveCommand(arrayOf("import", "a.step", "--render", out, "-w", "5")) shouldBe CliCommand.ShowUsage(1)
+                resolveCommand(arrayOf("import", "a.step", "--render", out, "--height", "5000")) shouldBe
+                    CliCommand.ShowUsage(1)
+                resolveCommand(arrayOf("import", "a.step", "--render", out, "-w", "4096", "--height", "4096")) shouldBe
+                    CliCommand.ShowUsage(1)
+                (resolveCommand(arrayOf("import", "a.step", "--render", out, "-w", "16")) is CliCommand.Import) shouldBe
+                    true
+            }
+        }
+
+        "\"import --render o.glb\" ignores the image size: no usage error for any value" {
+            (
+                resolveCommand(
+                    arrayOf("import", "a.step", "--render", "o.glb", "-w", "8000"),
+                ) is CliCommand.Import
+            ) shouldBe
+                true
+            (
+                resolveCommand(
+                    arrayOf("import", "a.step", "--render", "o.glb", "--height", "1"),
+                ) is CliCommand.Import
+            ) shouldBe
+                true
+        }
+
+        "\"import\" without a path, with two paths, or with a bad flag resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("import")) shouldBe CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("import", "a.step", "b.step")) shouldBe CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("import", "a.step", "--bogus")) shouldBe CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("import", "a.step", "--output")) shouldBe CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("import", "a.step", "--output", "xml")) shouldBe CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("import", "a.step", "--render")) shouldBe CliCommand.ShowUsage(1)
+            resolveCommand(arrayOf("import", "a.step", "--width", "wide")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "USAGE_TEXT documents the import subcommand" {
+            USAGE_TEXT shouldContain "kstep import <file.step>"
+            USAGE_TEXT shouldContain "--render <out.svg|out.png|out.glb>"
+        }
     })

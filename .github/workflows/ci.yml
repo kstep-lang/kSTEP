@@ -219,7 +219,7 @@ jobs:
           for attempt in 1 2 3; do
             if sudo timeout 240 apt-get -o Acquire::Retries=3 update \
               && sudo timeout 480 apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-                libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev libeigen3-dev libboost-dev libgl1 libfontconfig1 libfreetype6 libx11-6; then
+                libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev libocct-ocaf-dev libeigen3-dev libboost-dev libgl1 libfontconfig1 libfreetype6 libx11-6; then
               exit 0
             fi
             echo "::warning::apt attempt $attempt failed or timed out"
@@ -237,6 +237,11 @@ jobs:
             echo "::error::This runner's OCCT predates 7.8 (no libTKDESTEP.so)." \
                  "kstep-geometry links -lTKDESTEP and cannot build here."
             find /usr/lib/x86_64-linux-gnu -maxdepth 1 -iname 'libTK*.so' -printf '%f\n' || true
+            exit 1
+          fi
+          # Welle K (STEP import) additionally links the OCAF/XDE toolkits (-lTKXCAF, -lTKLCAF).
+          if [ ! -f /usr/lib/x86_64-linux-gnu/libTKXCAF.so ]; then
+            echo "::error::No libTKXCAF.so (libocct-ocaf-dev); kstep-geometry links -lTKXCAF."
             exit 1
           fi
           grep -m1 'OCC_VERSION_COMPLETE  *"' /usr/include/opencascade/Standard_Version.hxx || true
