@@ -218,18 +218,34 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Compute the apt cache key (one cache entry per ISO week)
+        id: aptweek
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the downloaded apt packages (the OCCT dev set is ~450 MB)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-occt-ubuntu-26.04-${{ steps.aptweek.outputs.week }}
+          restore-keys: |
+            apt-occt-ubuntu-26.04-
+        # The OCCT -dev packages pull in VTK, GDAL, Qt and a full OpenJDK. A slow mirror held this job
+        # up twice on 2026-10-22; with a warm cache only changed packages are downloaded.
+
       - name: Install OCCT, PlaneGCS and Skiko runtime dependencies
         timeout-minutes: 40
         run: |
-          # A slow or stalled mirror once held this step for 61 minutes (2026-10-22) and a retry
-          # loop around the whole install timed out again. Download first (apt resumes partial
-          # files, so every retry makes progress), then install offline from the local cache.
+          # Download first (apt resumes partial files, so every retry makes progress), then install
+          # offline from the local cache. The archive directory is user-owned so actions/cache can
+          # save and restore it; apt then downloads as root instead of the sandbox user.
+          APT_DIR="$HOME/apt-archives"
+          mkdir -p "$APT_DIR/partial"
+          APT_OPTS=(-o Dir::Cache::Archives="$APT_DIR" -o APT::Sandbox::User=root -o Acquire::Retries=3 -o Acquire::http::Timeout=30)
           PKGS=(libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev libocct-ocaf-dev libeigen3-dev libboost-dev libgl1 libfontconfig1 libfreetype6 libx11-6)
           downloaded=0
           for attempt in 1 2 3; do
-            if sudo timeout 120 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
-                install -y --no-install-recommends --download-only "${PKGS[@]}"; then
+            if sudo timeout 120 apt-get "${APT_OPTS[@]}" update \
+              && sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends --download-only "${PKGS[@]}"; then
               downloaded=1
               break
             fi
@@ -240,7 +256,9 @@ jobs:
             echo "::error::apt-get could not download the packages after 3 attempts"
             exit 1
           fi
-          sudo timeout 300 apt-get install -y --no-install-recommends "${PKGS[@]}"
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends "${PKGS[@]}"
+          # apt created root-owned files (e.g. lock); hand the directory back so actions/cache can read it.
+          sudo chown -R "$(id -u):$(id -g)" "$APT_DIR"
         # Exactly the package set README's "Building -- optional OCCT geometry bridge" and
         # "Building -- optional PlaneGCS constraint solver" sections document. No cmake:
         # both bridges are single, direct g++ invocations (see their build scripts).
