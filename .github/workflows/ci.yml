@@ -47,6 +47,11 @@ jobs:
           # Gradle plugin or test could read it. Nothing in this workflow pushes.
           persist-credentials: false
 
+      - name: Self-test release scripts
+        run: bash scripts/release/test-release-scripts.sh
+        # scripts/release/*.sh back .github/workflows/release.yml (ADR-0025). Runs in seconds
+        # and guards them against regressions on every PR, long before a tag is pushed.
+
       - name: Install PlaneGCS build dependencies and Skiko runtime libraries
         run: |
           sudo apt-get update

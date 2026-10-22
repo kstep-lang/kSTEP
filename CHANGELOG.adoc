@@ -9,6 +9,12 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Release pipeline (`.github/workflows/release.yml`, ADR-0025): pushing a `vX.Y.Z` tag builds
+  `kstep-cli-X.Y.Z.zip` (without native bridges) with a SHA-256 checksum and creates or updates the
+  GitHub release; pre-release automatically while the major version is 0. No Maven Central,
+  Homebrew or signing yet.
+* `scripts/release/` (tag validation, version check, checksum, release notes, distribution
+  verification) and its self-test `test-release-scripts.sh`, which also runs in CI.
 * `kstep export --validate`: opt-in population-level model validation (`USEDIN`, `INVERSE`,
   `UNIQUE`, acyclic usages) before the Part 21 file is written. Findings give exit code 1 and no
   file; if no verdict can be reached (limits, unsupported construct) it fails closed with the new

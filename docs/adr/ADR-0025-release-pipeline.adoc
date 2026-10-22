@@ -1,0 +1,71 @@
+= ADR-0025: Release pipeline (`.github/workflows/release.yml`)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle F).
+
+== Context
+
+kSTEP had a CI workflow (`ci.yml`) but no way to turn a tag into downloadable artifacts. The `v0.1.0`
+GitHub release exists without assets. Lessons carried over from kUML: a tag pushed while the
+hard-coded version still names the previous release (kUML v0.53.0) produces wrongly versioned
+artifacts, and `softprops/action-gh-release` fails with HTTP 401 while finalizing a release.
+
+A second, kSTEP-specific hazard: `kstep-geometry` and `kstep-constraints` copy the native bridges they
+build into their own jars via `processResources`. On a Linux runner with Eigen/Boost headers the
+PlaneGCS `.so` would end up unnoticed in a zip that is meant to be platform independent.
+
+== Decision
+
+* *Triggers:* push of a tag `v*.*.*`, and `workflow_dispatch` with the inputs `tag` and `dry_run`
+  (default `true`, so a manual run publishes nothing unless asked to).
+* *Strict tags:* only `vMAJOR.MINOR.PATCH` is accepted (no pre-release suffix). A major version of 0
+  is published as a GitHub pre-release automatically.
+* *Hard version check as the first real step,* before Java or Gradle: the version in the `allprojects`
+  block of `build.gradle.kts` must equal the tag. Exactly one match is required so the check cannot
+  pass vacuously. The distribution file name (from `project.version`) is a second, independent proof.
+* *The tag must be reachable from `master`.* This prevents releases of orphaned commits.
+* *Two jobs with separated rights.* `build` has `contents: read` and runs repository code. `publish`
+  has `contents: write`, checks out nothing, runs no repository code and re-validates every value it
+  receives from `build`.
+* *Native bridges switched off deterministically* with `-Pkstep.occt.includeDir=/nonexistent` (and the
+  Eigen and Boost equivalents). The verification script additionally fails if the zip or any module
+  jar contains native parts. OCCT and PlaneGCS functions use their documented unavailable path.
+* *Two checkouts.* The scripts come from the workflow's own revision (`tools/`), the code from the tag
+  (`src/`). Older tags, such as `v0.1.0`, do not contain `scripts/release/` yet and can still be rebuilt.
+* *`gh` CLI only,* idempotent: an existing release is edited (including an explicit `--prerelease`
+  value, so a flag set earlier does not stick) and its assets are replaced with `--clobber`. Only the
+  message "release not found" leads to `create`; authentication or network errors fail the job.
+* *Integrity:* a SHA-256 checksum is written in the build job and verified in the publish job.
+* *Hardening:* all actions are pinned by commit SHA, event data reaches scripts only through `env:`,
+  `persist-credentials: false`, `cache-read-only: true`, per-job timeouts, and a per-tag concurrency
+  group that never cancels a running publish.
+* *Logic lives in `scripts/release/*.sh`,* runnable and testable without GitHub. Their self-test runs in
+  `ci.yml` on every push and pull request.
+
+== Consequences
+
+* The release job runs `./gradlew clean check`, which takes a while but protects tags placed on
+  untested commits.
+* Release notes are converted from AsciiDoc to Markdown only superficially (headings). Inline markup
+  such as `*bold*` or `link:` macros is shown as is on GitHub.
+* The zip launcher is `bin/kstep-cli`, while the usage text names the command `kstep`.
+* The pipeline publishes no signature or provenance.
+
+== Alternatives considered
+
+* `softprops/action-gh-release`: rejected because of the HTTP 401 failure mode.
+* One job with write access: rejected, least privilege.
+* `jlink`/`jpackage` bundles per platform: left to a follow-up wave.
+
+== Follow-up waves
+
+Maven Central publishing, a Homebrew tap, signing (Sigstore or GPG) with provenance, native bundles
+per platform.
+
+== Verification
+
+* `scripts/release/test-release-scripts.sh` (tag validation, version check, release-notes extraction,
+  checksum including the `shasum` fallback, negative cases of the distribution check).
+* `actionlint` on the workflows, and a local dry run of every shell step against `v0.1.0`.

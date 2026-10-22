@@ -1,0 +1,252 @@
+name: Release
+
+# Builds the kstep-cli distribution for a pushed vX.Y.Z tag, verifies it, and creates or
+# updates the GitHub release with the zip and its SHA-256 checksum. See ADR-0025.
+#
+# Design notes
+# - GitHub release handling uses the `gh` CLI only. softprops/action-gh-release is avoided
+#   (known HTTP 401 failure while finalizing the release).
+# - Two jobs with separated rights: `build` runs repository code and has contents: read;
+#   `publish` has contents: write but checks out and runs no repository code.
+# - The native bridges (OCCT, PlaneGCS) are switched off with -P...includeDir=/nonexistent:
+#   kstep-geometry/kstep-constraints put the built .so into their own jars via
+#   processResources, so a runner image with Eigen/Boost headers would otherwise leak a
+#   Linux-only library into a zip that is advertised as platform independent.
+# - Not part of this workflow (follow-up waves): Maven Central, Homebrew tap, signing and
+#   provenance.
+# - Deliberately NOT pull_request_target and no secrets other than the job's github.token.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build, e.g. v0.2.0'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build and verify only; publish nothing'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# A running publish is never cancelled: a half-uploaded release is worse than a queued one.
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build + verify distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - name: Resolve and validate tag
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # First step, before any checkout or build. Event data only arrives via env.
+          # Regex identical to scripts/release/validate-tag.sh (no checkout exists yet).
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then TAG="$INPUT_TAG"; else TAG="$REF_NAME"; fi
+          RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ "$TAG" =~ $RE ]]; then
+            echo "::error::Invalid release tag. Expected vMAJOR.MINOR.PATCH, no suffix."
+            exit 1
+          fi
+          PRERELEASE=false
+          if [ "${BASH_REMATCH[1]}" = "0" ]; then PRERELEASE=true; fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out release tooling (workflow revision)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          persist-credentials: false
+          sparse-checkout: scripts/release
+        # No ref: this is the commit the workflow itself runs from. Older tags (e.g. v0.1.0)
+        # do not contain scripts/release/ yet, hence the second checkout below.
+
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.resolve.outputs.tag }}
+          path: src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag is on master
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          COMMIT="$(git -C src rev-parse "refs/tags/$TAG^{commit}")"
+          if ! git -C src merge-base --is-ancestor "$COMMIT" origin/master; then
+            echo "::error::Tag $TAG ($COMMIT) is not reachable from master; refusing to release an orphaned commit."
+            exit 1
+          fi
+          if [ "$(git -C src cat-file -t "refs/tags/$TAG")" != "tag" ]; then
+            echo "::warning::Tag $TAG is lightweight; annotated tags are the convention."
+          fi
+
+      - name: Version check (tag vs build.gradle.kts)
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          # Must run before Java and Gradle so a wrong tag fails within seconds.
+          bash tools/scripts/release/validate-tag.sh "$TAG"
+          bash tools/scripts/release/check-version.sh "$VERSION" src/build.gradle.kts
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          # Same reasoning as ci.yml: a release build must never write the shared cache.
+          cache-read-only: true
+
+      - name: Install Skiko runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libfontconfig1 libfreetype6 libx11-6
+        # Needed by kstep-viewer's tests under check. Explicitly NO Eigen, Boost or OCCT:
+        # the release zip must not contain native bridges.
+
+      - name: Build and test (native bridges disabled)
+        working-directory: src
+        run: |
+          ./gradlew clean check :kstep-cli:distZip \
+            -Pkstep.occt.includeDir=/nonexistent \
+            -Pkstep.eigen.includeDir=/nonexistent \
+            -Pkstep.boost.includeDir=/nonexistent \
+            --stacktrace
+
+      - name: Verify distribution
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          # The file name comes from project.version, a second, independent proof of the version check.
+          cd src
+          bash ../tools/scripts/release/verify-dist.sh \
+            "kstep-cli/build/distributions/kstep-cli-$VERSION.zip" "$VERSION" \
+            kstep-tests/src/test/resources/hello-assembly.kstep.kts
+
+      - name: Assemble release assets
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          mkdir release-assets
+          cp "src/kstep-cli/build/distributions/kstep-cli-$VERSION.zip" release-assets/
+          bash tools/scripts/release/checksum.sh "release-assets/kstep-cli-$VERSION.zip"
+          bash tools/scripts/release/extract-release-notes.sh "$VERSION" src/CHANGELOG.adoc release-assets/RELEASE_NOTES.md
+          ls -l release-assets
+          cat "release-assets/kstep-cli-$VERSION.zip.sha256"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: release-assets/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-build-reports
+          path: |
+            src/**/build/reports/
+            src/**/build/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  publish:
+    name: publish GitHub release
+    needs: build
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job with write access. It checks out and executes no repository code.
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Re-validate tag and verify checksum
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # Defense in depth: job outputs are never trusted unchecked.
+          RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ "$TAG" =~ $RE ]] || [ "$VERSION" != "${TAG#v}" ]; then
+            echo "::error::Invalid tag/version from build job."
+            exit 1
+          fi
+          cd release-assets
+          sha256sum -c "kstep-cli-$VERSION.zip.sha256"
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          ZIP="release-assets/kstep-cli-$VERSION.zip"
+          SUM="$ZIP.sha256"
+          NOTES="release-assets/RELEASE_NOTES.md"
+          ERR="$(mktemp)"
+          if gh release view "$TAG" >/dev/null 2>"$ERR"; then
+            gh release edit "$TAG" --title "kSTEP $VERSION" --notes-file "$NOTES" \
+              --prerelease="$PRERELEASE" --draft=false
+            gh release upload "$TAG" "$ZIP" "$SUM" --clobber
+          elif grep -qi 'release not found' "$ERR"; then
+            FLAGS=()
+            if [ "$PRERELEASE" = "true" ]; then FLAGS+=(--prerelease --latest=false); fi
+            gh release create "$TAG" "$ZIP" "$SUM" --verify-tag \
+              --title "kSTEP $VERSION" --notes-file "$NOTES" "${FLAGS[@]}"
+          else
+            # Auth or network failure must not be mistaken for "release does not exist".
+            cat "$ERR" >&2
+            exit 1
+          fi
+
+      - name: Summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          {
+            echo '### Release'
+            echo '```json'
+            gh release view "$TAG" --json url,isPrerelease,assets
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
