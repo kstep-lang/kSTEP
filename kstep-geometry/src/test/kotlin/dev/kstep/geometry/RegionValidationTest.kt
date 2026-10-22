@@ -211,6 +211,24 @@ class RegionValidationTest :
             encoded.data.size shouldBe 30
             encoded.data.slice(24..26) shouldBe listOf(2.0, 1.0, 0.5)
         }
+
+        "revolveRegion validates the region before any native call" {
+            val open =
+                ProfileLoop(
+                    listOf(
+                        ProfileSegment.Line(p(10.0, 0.0), p(20.0, 0.0)),
+                        ProfileSegment.Line(p(20.0, 0.0), p(20.0, 5.0)),
+                        ProfileSegment.Line(p(20.0, 5.0), p(15.0, 3.0)),
+                    ),
+                )
+            shouldThrow<IllegalArgumentException> { OcctKernel.revolveRegion(ProfileRegion(open), 360.0) }
+                .message!! shouldContain "not closed"
+            val outside = ProfileRegion(rect(10.0, 0.0, 20.0, 5.0), listOf(rect(30.0, 1.0, 35.0, 4.0)))
+            shouldThrow<IllegalArgumentException> { OcctKernel.revolveRegion(outside, 360.0) }
+            shouldThrow<IllegalArgumentException> {
+                OcctKernel.revolveRegionNamed(outside, 360.0, sources = emptyList())
+            }
+        }
     })
 
 private fun Double.plusOrMinusAbs(tolerance: Double) = this plusOrMinus tolerance

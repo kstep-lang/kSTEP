@@ -1,6 +1,7 @@
 package dev.kstep.geometry.feature
 
 import dev.kstep.geometry.OcctShape
+import dev.kstep.geometry.select.EdgeNamingException
 import dev.kstep.geometry.select.EdgeSelectionException
 
 /**
@@ -41,4 +42,11 @@ class FeatureRebuildException(
      */
     val selectionFailure: EdgeSelectionException?
         get() = cause as? EdgeSelectionException
+
+    /**
+     * The structured naming failure (with generated images and candidate edges) when [feature] failed because
+     * an edge named by a `GeneratedEdges` reference could not be resolved -- `null` for every other failure.
+     */
+    val namingFailure: EdgeNamingException?
+        get() = cause as? EdgeNamingException
 }

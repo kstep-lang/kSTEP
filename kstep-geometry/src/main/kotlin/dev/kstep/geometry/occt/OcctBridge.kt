@@ -327,4 +327,53 @@ object OcctBridge {
 
     /** `[volume, faceCount]` for every solid of the shape (at most 1024 solids), ADR-0032. */
     external fun nativeSolidSummaries(handle: Long): DoubleArray
+
+    /**
+     * Same as [nativeExtrudeProfile] (one shared construction path, so the edge indices are identical) and
+     * additionally stores the encoded generation map in `outMap[0]`; see `dev.kstep.geometry.decodeGenerationMap`.
+     * `vertexXy` holds x,y pairs, `segQuery` six values per segment (start, end, midpoint or NaN NaN).
+     */
+    external fun nativeExtrudeProfileNamed(
+        profileXy: DoubleArray,
+        height: Double,
+        vertexXy: DoubleArray,
+        segQuery: DoubleArray,
+        outMap: Array<IntArray?>,
+    ): Long
+
+    /** Same as [nativeRevolveProfile] plus the encoded generation map in `outMap[0]`. */
+    external fun nativeRevolveProfileNamed(
+        profileXy: DoubleArray,
+        angleDegrees: Double,
+        axis: Int,
+        vertexXy: DoubleArray,
+        segQuery: DoubleArray,
+        outMap: Array<IntArray?>,
+    ): Long
+
+    /** Same as [nativeExtrudeRegion] plus the encoded generation map in `outMap[0]`. */
+    external fun nativeExtrudeRegionNamed(
+        loopSizes: IntArray,
+        segKinds: IntArray,
+        segData: DoubleArray,
+        height: Double,
+        vertexXy: DoubleArray,
+        segQuery: DoubleArray,
+        outMap: Array<IntArray?>,
+    ): Long
+
+    /** Same as [nativeRevolveRegion] plus the encoded generation map in `outMap[0]`. */
+    external fun nativeRevolveRegionNamed(
+        loopSizes: IntArray,
+        segKinds: IntArray,
+        segData: DoubleArray,
+        angleDegrees: Double,
+        axis: Int,
+        vertexXy: DoubleArray,
+        segQuery: DoubleArray,
+        outMap: Array<IntArray?>,
+    ): Long
+
+    /** Number of shapes currently registered in the native handle registry (test-only handle hygiene). */
+    external fun nativeLiveShapeCount(): Int
 }

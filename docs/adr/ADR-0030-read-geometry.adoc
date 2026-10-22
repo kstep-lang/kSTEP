@@ -135,7 +135,7 @@ set on every Linux build.
 * `XcafDocumentGuard` closes the XCAF document on every path (`XCAFApp` otherwise keeps it: one leak per
   import). The test imports a box 200 times and asserts the session count returns to its starting value.
 * The label traversal is iterative, keyed by `TDF_Tool::Entry` strings (the `TDF_LabelMapHasher` API differs
-  between OCCT 7.8 and 7.9), and visits each label once, so a cycle in the XCAF model cannot loop.
+  between OCCT 7.8 and 7.9; 7.8 itself is not tested), and visits each label once, so a cycle in the XCAF model cannot loop.
 * Names are copied as UTF-16 and returned with `NewString`, not `NewStringUTF` (modified UTF-8 would mangle
   non-BMP characters and embedded NULs).
 * *Unknown entities.* `Interface_InterfaceModel::IsUnknownEntity` did not flag an invented entity type

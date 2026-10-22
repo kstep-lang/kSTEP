@@ -1,6 +1,7 @@
 package dev.kstep.script
 
 import dev.kstep.core.DslViolation
+import dev.kstep.geometry.select.EdgeNamingException
 import dev.kstep.geometry.select.EdgeSelectionException
 import dev.kstep.sketch.SketchException
 import dev.kstep.sketch.SketchSolverUnavailableException
@@ -169,6 +170,10 @@ object KStepScriptHost {
                     is EdgeSelectionException ->
                         KStepScriptOutcomeCodes.EDGE_SELECTION_FAILED to
                             (current.message ?: "edge selection failed")
+                    // Welle N (ADR-0033): edges named by what generated them are the same user-facing family.
+                    is EdgeNamingException ->
+                        KStepScriptOutcomeCodes.EDGE_SELECTION_FAILED to
+                            (current.message ?: "edge naming failed")
                     else -> null to null
                 }
             if (code != null && text != null) {

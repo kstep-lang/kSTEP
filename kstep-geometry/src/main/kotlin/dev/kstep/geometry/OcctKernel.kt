@@ -244,13 +244,7 @@ object OcctKernel {
         height: Double,
     ): OcctShape {
         validateProfile(profile, MAX_PROFILE_POINTS)
-        require(height.isFinite()) { "height must be finite, got $height" }
-        require(abs(height) > MIN_DIMENSION) {
-            "height magnitude must be greater than $MIN_DIMENSION, got $height"
-        }
-        require(abs(height) <= MAX_DIMENSION) {
-            "height magnitude must be at most $MAX_DIMENSION, got $height"
-        }
+        requireExtrudeHeight(height)
         requireAvailable()
         val handle =
             try {
@@ -607,19 +601,7 @@ object OcctKernel {
         angleDegrees: Double = 360.0,
         axis: RevolveAxis = RevolveAxis.Y,
     ): OcctShape {
-        validateProfile(profile, MAX_REVOLVE_PROFILE_POINTS)
-        require(angleDegrees.isFinite()) { "angleDegrees must be finite, got $angleDegrees" }
-        require(angleDegrees >= MIN_REVOLVE_ANGLE_DEGREES) {
-            "angleDegrees must be at least $MIN_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
-        }
-        require(angleDegrees <= MAX_REVOLVE_ANGLE_DEGREES) {
-            "angleDegrees must be at most $MAX_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
-        }
-        val radial: (ProfilePoint) -> Double = if (axis == RevolveAxis.Y) { p -> p.x } else { p -> p.y }
-        require(profile.none { radial(it) > 0.0 } || profile.none { radial(it) < 0.0 }) {
-            "profile crosses the rotation axis ${axis.name}: all " +
-                "${if (axis == RevolveAxis.Y) "x" else "y"} coordinates must have the same sign"
-        }
+        requireRevolveProfileArguments(profile, angleDegrees, axis)
         requireAvailable()
         val handle =
             try {
@@ -882,9 +864,7 @@ object OcctKernel {
         height: Double,
     ): OcctShape {
         RegionValidation.validate(region)
-        require(height.isFinite()) { "height must be finite, got $height" }
-        require(abs(height) > MIN_DIMENSION) { "height magnitude must be greater than $MIN_DIMENSION, got $height" }
-        require(abs(height) <= MAX_DIMENSION) { "height magnitude must be at most $MAX_DIMENSION, got $height" }
+        requireExtrudeHeight(height)
         requireAvailable()
         val encoded = RegionValidation.encode(RegionValidation.normalized(region))
         val handle =
@@ -914,20 +894,7 @@ object OcctKernel {
         angleDegrees: Double = 360.0,
         axis: RevolveAxis = RevolveAxis.Y,
     ): OcctShape {
-        RegionValidation.validate(region)
-        require(angleDegrees.isFinite()) { "angleDegrees must be finite, got $angleDegrees" }
-        require(angleDegrees >= MIN_REVOLVE_ANGLE_DEGREES) {
-            "angleDegrees must be at least $MIN_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
-        }
-        require(angleDegrees <= MAX_REVOLVE_ANGLE_DEGREES) {
-            "angleDegrees must be at most $MAX_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
-        }
-        val radial: (ProfilePoint) -> Double = if (axis == RevolveAxis.Y) { p -> p.x } else { p -> p.y }
-        val samples = (listOf(region.outer) + region.holes).flatMap { RegionValidation.polygon(it) }
-        require(samples.none { radial(it) > 1e-9 } || samples.none { radial(it) < -1e-9 }) {
-            "region crosses the rotation axis ${axis.name}: all " +
-                "${if (axis == RevolveAxis.Y) "x" else "y"} coordinates must have the same sign"
-        }
+        requireRevolveRegionArguments(region, angleDegrees, axis)
         requireAvailable()
         val encoded = RegionValidation.encode(RegionValidation.normalized(region))
         val handle =
@@ -1018,6 +985,235 @@ object OcctKernel {
             return OcctShape(handle)
         } finally {
             parts.forEach { it.close() }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Welle N (ADR-0033): persistent naming of the edges a sweep generates.
+    // ---------------------------------------------------------------------------------------------
+
+    /** Upper bound on the generation sources of one named sweep, enforced in Kotlin and natively. */
+    const val MAX_NAMING_SOURCES: Int = 1024
+
+    /**
+     * [extrudeProfile] that also reports, for every requested [sources] entry, the edges generated from it
+     * ([ProfileVertex] -> SIDE edge, [ProfileEdge] -> START / END copies). The edge indices are identical to
+     * the ones [extrudeProfile] returns (one shared native construction path).
+     *
+     * @throws IllegalArgumentException as [extrudeProfile], and for an out-of-range, duplicate, foreign or more
+     *   than [MAX_NAMING_SOURCES] sources.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT itself fails.
+     */
+    fun extrudeProfileNamed(
+        profile: List<ProfilePoint>,
+        height: Double,
+        sources: List<GenerationSource>,
+    ): NamedShape {
+        validateProfile(profile, MAX_PROFILE_POINTS)
+        requireExtrudeHeight(height)
+        val queries = resolveProfileSources(profile, sources)
+        requireAvailable()
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            nativeSweep("extrude profile of ${profile.size} points to height $height") {
+                OcctBridge.nativeExtrudeProfileNamed(
+                    toXyArray(profile),
+                    height,
+                    queries.vertexXy,
+                    queries.segQuery,
+                    holder,
+                )
+            }
+        return namedResult(handle, holder, queries)
+    }
+
+    /** [revolveProfile] with a generation map; see [extrudeProfileNamed]. */
+    fun revolveProfileNamed(
+        profile: List<ProfilePoint>,
+        angleDegrees: Double = 360.0,
+        axis: RevolveAxis = RevolveAxis.Y,
+        sources: List<GenerationSource>,
+    ): NamedShape {
+        requireRevolveProfileArguments(profile, angleDegrees, axis)
+        val queries = resolveProfileSources(profile, sources)
+        requireAvailable()
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            nativeSweep("revolve profile of ${profile.size} points by $angleDegrees degrees") {
+                OcctBridge.nativeRevolveProfileNamed(
+                    toXyArray(profile),
+                    angleDegrees,
+                    axis.nativeCode,
+                    queries.vertexXy,
+                    queries.segQuery,
+                    holder,
+                )
+            }
+        return namedResult(handle, holder, queries)
+    }
+
+    /**
+     * [extrudeRegion] with a generation map ([RegionVertex] -> SIDE, [RegionEdge] -> START / END). The sources
+     * refer to the region AS GIVEN; the orientation normalisation is undone by coordinate matching. Several
+     * separate regions (multi-body) cannot be named yet, see ADR-0033.
+     */
+    fun extrudeRegionNamed(
+        region: ProfileRegion,
+        height: Double,
+        sources: List<GenerationSource>,
+    ): NamedShape {
+        RegionValidation.validate(region)
+        requireExtrudeHeight(height)
+        val queries = resolveRegionSources(region, sources)
+        requireAvailable()
+        val encoded = RegionValidation.encode(RegionValidation.normalized(region))
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            nativeSweep("extrude a region of ${encoded.kinds.size} segments to height $height") {
+                OcctBridge.nativeExtrudeRegionNamed(
+                    encoded.loopSizes,
+                    encoded.kinds,
+                    encoded.data,
+                    height,
+                    queries.vertexXy,
+                    queries.segQuery,
+                    holder,
+                )
+            }
+        return namedResult(handle, holder, queries)
+    }
+
+    /** [revolveRegion] with a generation map; see [extrudeRegionNamed]. */
+    fun revolveRegionNamed(
+        region: ProfileRegion,
+        angleDegrees: Double = 360.0,
+        axis: RevolveAxis = RevolveAxis.Y,
+        sources: List<GenerationSource>,
+    ): NamedShape {
+        requireRevolveRegionArguments(region, angleDegrees, axis)
+        val queries = resolveRegionSources(region, sources)
+        requireAvailable()
+        val encoded = RegionValidation.encode(RegionValidation.normalized(region))
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            nativeSweep("revolve a region by $angleDegrees degrees") {
+                OcctBridge.nativeRevolveRegionNamed(
+                    encoded.loopSizes,
+                    encoded.kinds,
+                    encoded.data,
+                    angleDegrees,
+                    axis.nativeCode,
+                    queries.vertexXy,
+                    queries.segQuery,
+                    holder,
+                )
+            }
+        return namedResult(handle, holder, queries)
+    }
+
+    /**
+     * The edge indices (into `named.shape.edges`) generated from [sources] with [role], sorted and distinct.
+     * Strict: every source must have at least one image.
+     *
+     * @param expected if set, the number of resulting edges must equal it.
+     * @throws EdgeNamingException if a source has no image, or the count differs from [expected].
+     * @throws IllegalArgumentException for a source that was not requested or a role that does not fit it.
+     */
+    fun generatedEdges(
+        named: NamedShape,
+        sources: List<GenerationSource>,
+        role: GeneratedRole = GeneratedRole.SIDE,
+        expected: Int? = null,
+    ): List<Int> = resolveGeneratedImages(named.generation, sources, role, expected, named.shape, null)
+
+    /** [fillet] on the edges generated from [sources] (see [generatedEdges]). */
+    fun fillet(
+        named: NamedShape,
+        sources: List<GenerationSource>,
+        radius: Double,
+        role: GeneratedRole = GeneratedRole.SIDE,
+        expected: Int? = null,
+    ): OcctShape = fillet(named.shape, generatedEdges(named, sources, role, expected), radius)
+
+    /** [chamfer] on the edges generated from [sources] (see [generatedEdges]). */
+    fun chamfer(
+        named: NamedShape,
+        sources: List<GenerationSource>,
+        distance: Double,
+        role: GeneratedRole = GeneratedRole.SIDE,
+        expected: Int? = null,
+    ): OcctShape = chamfer(named.shape, generatedEdges(named, sources, role, expected), distance)
+
+    private fun nativeSweep(
+        what: String,
+        call: () -> Long,
+    ): Long =
+        try {
+            call()
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (e: RuntimeException) {
+            throw OcctGeometryException("OCCT failed to $what", e)
+        }
+
+    private fun namedResult(
+        handle: Long,
+        holder: Array<IntArray?>,
+        queries: NamingQueries,
+    ): NamedShape {
+        val shape = OcctShape(handle)
+        try {
+            val raw = checkNotNull(holder[0]) { "native bridge returned no generation map" }
+            return NamedShape(shape, decodeGenerationMap(raw, queries, shape.topology.edges))
+        } catch (e: Throwable) {
+            shape.close()
+            throw e
+        }
+    }
+
+    private fun requireExtrudeHeight(height: Double) {
+        require(height.isFinite()) { "height must be finite, got $height" }
+        require(abs(height) > MIN_DIMENSION) { "height magnitude must be greater than $MIN_DIMENSION, got $height" }
+        require(abs(height) <= MAX_DIMENSION) { "height magnitude must be at most $MAX_DIMENSION, got $height" }
+    }
+
+    private fun requireRevolveAngle(angleDegrees: Double) {
+        require(angleDegrees.isFinite()) { "angleDegrees must be finite, got $angleDegrees" }
+        require(angleDegrees >= MIN_REVOLVE_ANGLE_DEGREES) {
+            "angleDegrees must be at least $MIN_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
+        }
+        require(angleDegrees <= MAX_REVOLVE_ANGLE_DEGREES) {
+            "angleDegrees must be at most $MAX_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
+        }
+    }
+
+    private fun requireRevolveProfileArguments(
+        profile: List<ProfilePoint>,
+        angleDegrees: Double,
+        axis: RevolveAxis,
+    ) {
+        validateProfile(profile, MAX_REVOLVE_PROFILE_POINTS)
+        requireRevolveAngle(angleDegrees)
+        val radial: (ProfilePoint) -> Double = if (axis == RevolveAxis.Y) { p -> p.x } else { p -> p.y }
+        require(profile.none { radial(it) > 0.0 } || profile.none { radial(it) < 0.0 }) {
+            "profile crosses the rotation axis ${axis.name}: all " +
+                "${if (axis == RevolveAxis.Y) "x" else "y"} coordinates must have the same sign"
+        }
+    }
+
+    private fun requireRevolveRegionArguments(
+        region: ProfileRegion,
+        angleDegrees: Double,
+        axis: RevolveAxis,
+    ) {
+        RegionValidation.validate(region)
+        requireRevolveAngle(angleDegrees)
+        val radial: (ProfilePoint) -> Double = if (axis == RevolveAxis.Y) { p -> p.x } else { p -> p.y }
+        val samples = (listOf(region.outer) + region.holes).flatMap { RegionValidation.polygon(it) }
+        require(samples.none { radial(it) > 1e-9 } || samples.none { radial(it) < -1e-9 }) {
+            "region crosses the rotation axis ${axis.name}: all " +
+                "${if (axis == RevolveAxis.Y) "x" else "y"} coordinates must have the same sign"
         }
     }
 

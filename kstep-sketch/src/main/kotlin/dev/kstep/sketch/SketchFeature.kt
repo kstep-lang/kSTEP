@@ -1,5 +1,7 @@
 package dev.kstep.sketch
 
+import dev.kstep.geometry.GenerationSource
+import dev.kstep.geometry.NamedShape
 import dev.kstep.geometry.OcctShape
 import dev.kstep.geometry.RevolveAxis
 import dev.kstep.geometry.feature.ExternalRootFeature
@@ -104,6 +106,21 @@ class SketchFeature(
         return when (val op = operation) {
             is SketchOperation.Extrude -> solved.extrude(op.height)
             is SketchOperation.Revolve -> solved.revolve(op.angleDegrees, op.axis)
+        }
+    }
+
+    override val supportsGeneratedNaming: Boolean get() = true
+
+    /**
+     * Builds the shape and reports the edges generated from [sources] ([SketchCorner] / [SketchEdgeOf] by point
+     * name). The names come from the sketch definition, so they survive parameter changes. See
+     * [SolvedSketch.extrudeNamed] for the errors.
+     */
+    override fun buildNamedShape(sources: List<GenerationSource>): NamedShape {
+        val solved = solve()
+        return when (val op = operation) {
+            is SketchOperation.Extrude -> solved.extrudeNamed(op.height, sources)
+            is SketchOperation.Revolve -> solved.revolveNamed(op.angleDegrees, op.axis, sources)
         }
     }
 

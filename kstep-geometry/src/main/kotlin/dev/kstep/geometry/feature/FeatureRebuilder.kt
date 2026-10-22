@@ -2,10 +2,16 @@ package dev.kstep.geometry.feature
 
 import dev.kstep.geometry.EdgeFate
 import dev.kstep.geometry.EdgeHistory
+import dev.kstep.geometry.GenerationMap
+import dev.kstep.geometry.GenerationSource
+import dev.kstep.geometry.NamedShape
 import dev.kstep.geometry.OcctGeometryException
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctShape
 import dev.kstep.geometry.TrackedShape
+import dev.kstep.geometry.describe
+import dev.kstep.geometry.resolveGeneratedImages
+import dev.kstep.geometry.select.EdgeNamingException
 import dev.kstep.geometry.select.EdgeSelectionException
 
 /**
@@ -14,10 +20,9 @@ import dev.kstep.geometry.select.EdgeSelectionException
  * history needs: change one [Feature]'s value, call [rebuild] again, get a new, independently
  * measurable shape.
  *
- * Deliberately NOT the whole of "Geometrie Welle 5b": no stable *geometric* edge identity (this
- * wave inherits [OcctKernel.fillet]'s opaque, construction-order-dependent edge indices as-is, see
- * that function's KDoc and ADR-0008), no undo/redo, no feature-tree UI, no serialization. See
- * `docs/adr/ADR-0015-parametric-feature-history-foundation.adoc`.
+ * Edges can be addressed by opaque index, geometrically ([SelectEdges], [TrackedEdges], ADR-0031) or by
+ * what generated them ([GeneratedEdges], Welle N, ADR-0033). Undo/redo lives in [FeatureHistory]; there is
+ * no feature-tree UI and no serialization. See `docs/adr/ADR-0015-parametric-feature-history-foundation.adoc`.
  */
 object FeatureRebuilder {
     /**
@@ -72,34 +77,25 @@ object FeatureRebuilder {
      */
     fun rebuild(sequence: FeatureSequence): FeatureRebuildResult {
         require(sequence.features.isNotEmpty()) { "sequence must not be empty" }
-        require(sequence.features.size <= MAX_SEQUENCE_LENGTH) {
-            "sequence must have at most $MAX_SEQUENCE_LENGTH features, got ${sequence.features.size}"
-        }
-        sequence.features.forEachIndexed { index, feature ->
-            if (feature is DerivedFeature) {
-                feature.baseIndices.forEach { base ->
-                    require(base in 0 until index) {
-                        "feature[$index] baseIndex $base must refer to an earlier " +
-                            "position in the sequence (0..${index - 1})"
-                    }
-                }
-            }
-        }
-
-        // Structural planning of TrackedEdges (ancestor / unique-path checks) -- still pure Kotlin.
-        val plan = TrackingPlanner.plan(sequence.features)
+        val plan = planStructure(sequence)
         val histories = HashMap<Int, EdgeHistory>()
+        val namings = HashMap<Int, GenerationMap>()
 
         val built = ArrayList<OcctShape>(sequence.features.size)
         sequence.features.forEachIndexed { index, feature ->
             val shape =
                 try {
-                    if (index in plan.needsHistory) {
-                        val tracked = buildTracked(index, sequence.features, built, histories, plan)
+                    val generated = plan.namingByGenerator[index]
+                    if (generated != null) {
+                        val named = buildNamed(index, sequence.features[index], generated)
+                        namings[index] = named.generation
+                        named.shape
+                    } else if (index in plan.needsHistory) {
+                        val tracked = buildTracked(index, sequence.features, built, histories, plan, namings)
                         histories[index] = tracked.history
                         tracked.shape
                     } else {
-                        buildPlain(index, sequence.features, built, histories, plan)
+                        buildPlain(index, sequence.features, built, histories, plan, namings)
                     }
                 } catch (e: IllegalArgumentException) {
                     built.forEach { it.close() }
@@ -131,12 +127,43 @@ object FeatureRebuilder {
         return FeatureRebuildResult(built)
     }
 
+    /**
+     * Pure-Kotlin structural validation of [sequence], without any native call: [MAX_SEQUENCE_LENGTH], every
+     * [DerivedFeature] index referring to a strictly earlier position, and the planning of [TrackedEdges] and
+     * [GeneratedEdges] (ancestor, unique path, generator support). An EMPTY sequence is valid here ([rebuild]
+     * rejects it separately); [FeatureHistory] uses this to check every state before it enters the history.
+     *
+     * @throws IllegalArgumentException on the first structural problem found.
+     */
+    fun validateStructure(sequence: FeatureSequence) {
+        planStructure(sequence)
+    }
+
+    private fun planStructure(sequence: FeatureSequence): TrackingPlan {
+        require(sequence.features.size <= MAX_SEQUENCE_LENGTH) {
+            "sequence must have at most $MAX_SEQUENCE_LENGTH features, got ${sequence.features.size}"
+        }
+        sequence.features.forEachIndexed { index, feature ->
+            if (feature is DerivedFeature) {
+                feature.baseIndices.forEach { base ->
+                    require(base in 0 until index) {
+                        "feature[$index] baseIndex $base must refer to an earlier " +
+                            "position in the sequence (0..${index - 1})"
+                    }
+                }
+            }
+        }
+        // Structural planning of TrackedEdges / GeneratedEdges (ancestor, unique-path, generator checks).
+        return TrackingPlanner.plan(sequence.features)
+    }
+
     private fun buildPlain(
         index: Int,
         features: List<Feature>,
         built: List<OcctShape>,
         histories: Map<Int, EdgeHistory>,
         plan: TrackingPlan,
+        namings: Map<Int, GenerationMap>,
     ): OcctShape =
         when (val feature = features[index]) {
             is BoxFeature -> OcctKernel.makeBox(feature.dx, feature.dy, feature.dz)
@@ -183,13 +210,13 @@ object FeatureRebuilder {
             is SelectedFilletFeature ->
                 OcctKernel.fillet(
                     built[feature.baseIndex],
-                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features, namings),
                     feature.radius,
                 )
             is SelectedChamferFeature ->
                 OcctKernel.chamfer(
                     built[feature.baseIndex],
-                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features, namings),
                     feature.distance,
                 )
         }
@@ -199,9 +226,14 @@ object FeatureRebuilder {
      * wrapped by [rebuild] like those of any other feature); any other runtime failure is labelled and
      * wrapped in an [ExternalFeatureException] so that [rebuild] still closes every shape built so far.
      */
-    private fun buildExternal(feature: ExternalRootFeature): OcctShape =
+    private fun buildExternal(feature: ExternalRootFeature): OcctShape = guardExternal(feature) { feature.buildShape() }
+
+    private fun <T> guardExternal(
+        feature: ExternalRootFeature,
+        build: () -> T,
+    ): T =
         try {
-            feature.buildShape()
+            build()
         } catch (e: IllegalArgumentException) {
             throw e
         } catch (e: OcctGeometryException) {
@@ -214,6 +246,30 @@ object FeatureRebuilder {
             throw ExternalFeatureException("feature '${feature.label}' failed: ${e.message}", e)
         }
 
+    /** Builds a generator feature together with the generation map of the sources its consumers name. */
+    private fun buildNamed(
+        index: Int,
+        feature: Feature,
+        sources: Set<GenerationSource>,
+    ): NamedShape {
+        val list = sources.toList()
+        return when (feature) {
+            is ExtrudeFeature -> OcctKernel.extrudeProfileNamed(feature.profile, feature.height, list)
+            is RevolveFeature ->
+                OcctKernel.revolveProfileNamed(
+                    feature.profile,
+                    feature.angleDegrees,
+                    feature.axis,
+                    list,
+                )
+            is ExtrudeRegionFeature -> OcctKernel.extrudeRegionNamed(feature.region, feature.height, list)
+            is RevolveRegionFeature ->
+                OcctKernel.revolveRegionNamed(feature.region, feature.angleDegrees, feature.axis, list)
+            is ExternalRootFeature -> guardExternal(feature) { feature.buildNamedShape(list) }
+            else -> error("feature[$index] (${feature::class.simpleName}) cannot be built with a generation map")
+        }
+    }
+
     /** Builds a feature that lies on a tracked-edge path, keeping the edge history OCCT recorded for it. */
     private fun buildTracked(
         index: Int,
@@ -221,6 +277,7 @@ object FeatureRebuilder {
         built: List<OcctShape>,
         histories: Map<Int, EdgeHistory>,
         plan: TrackingPlan,
+        namings: Map<Int, GenerationMap>,
     ): TrackedShape =
         when (val feature = features[index]) {
             is FilletFeature ->
@@ -259,13 +316,13 @@ object FeatureRebuilder {
             is SelectedFilletFeature ->
                 OcctKernel.filletWithHistory(
                     built[feature.baseIndex],
-                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features, namings),
                     feature.radius,
                 )
             is SelectedChamferFeature ->
                 OcctKernel.chamferWithHistory(
                     built[feature.baseIndex],
-                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features, namings),
                     feature.distance,
                 )
             // Root features have no operands and are never planned onto a tracking path.
@@ -290,6 +347,7 @@ object FeatureRebuilder {
         histories: Map<Int, EdgeHistory>,
         plan: TrackingPlan,
         features: List<Feature>,
+        namings: Map<Int, GenerationMap>,
     ): List<Int> =
         when (reference) {
             is SelectEdges ->
@@ -300,6 +358,8 @@ object FeatureRebuilder {
                     reference.tolerance,
                 )
             is TrackedEdges -> resolveTracked(index, reference, baseIndex, built, histories, plan, features)
+            is GeneratedEdges ->
+                resolveGenerated(index, reference, baseIndex, built, histories, plan, features, namings)
         }
 
     private fun resolveTracked(
@@ -312,36 +372,25 @@ object FeatureRebuilder {
         features: List<Feature>,
     ): List<Int> {
         val source = built[reference.sourceIndex]
-        var current = OcctKernel.selectEdges(source, reference.selector, null, reference.tolerance)
+        val initial = OcctKernel.selectEdges(source, reference.selector, null, reference.tolerance)
         val steps = checkNotNull(plan.stepsByConsumer[index]) { "no tracking plan for feature[$index]" }
-        var holder = reference.sourceIndex
-        for (step in steps) {
-            // `current` indexes the edges of built[holder] (the intermediate shape), not of `source`.
-            val holderShape = built[holder]
-            val fates =
-                checkNotNull(histories[step.nodeIndex]) {
-                    "no edge history for feature[${step.nodeIndex}]"
-                }.operands[step.operandSlot]
-            val next = java.util.TreeSet<Int>()
-            for (edge in current) {
-                val fate = fates[edge]
-                if (fate.resultEdges.isEmpty()) {
-                    val verdict = if (fate is EdgeFate.Deleted) "deleted" else "lost"
-                    throw EdgeSelectionException(
-                        "tracked edge $edge of feature[$holder] was $verdict by " +
-                            "feature[${step.nodeIndex}] " +
-                            "(${features[step.nodeIndex]::class.simpleName}; the edge no longer exists after that operation; selected by ${reference.selector} on feature[${reference.sourceIndex}])",
-                        reference.selector,
-                        reference.expected,
-                        current,
-                        current.map { holderShape.edges[it] },
-                    )
-                }
-                next.addAll(fate.resultEdges)
+        val (current, holder) =
+            followSteps(reference.sourceIndex, initial, steps, histories, built) {
+                edge,
+                holderShape,
+                verdict,
+                node,
+                ->
+                throw EdgeSelectionException(
+                    "tracked edge $edge of feature[${node.holder}] was $verdict by " +
+                        "feature[${node.step}] " +
+                        "(${features[node.step]::class.simpleName}; the edge no longer exists after that operation; selected by ${reference.selector} on feature[${reference.sourceIndex}])",
+                    reference.selector,
+                    reference.expected,
+                    node.current,
+                    node.current.map { holderShape.edges[it] },
+                )
             }
-            current = next.toList()
-            holder = step.nodeIndex
-        }
         val target = built[baseIndex]
         if (reference.expected != null && current.size != reference.expected) {
             throw EdgeSelectionException(
@@ -354,6 +403,109 @@ object FeatureRebuilder {
             )
         }
         return current
+    }
+
+    /** Where an edge was lost: the holder feature, the operation that lost it, and the edges followed so far. */
+    private class LossPoint(
+        val holder: Int,
+        val step: Int,
+        val current: List<Int>,
+    )
+
+    /**
+     * Follows [initial] (edge indices of feature [start]) through [steps] using the recorded edge histories.
+     * Returns the resulting edge indices (of the last step's feature) and that feature's index. [onLost] must
+     * throw when an edge has no successor.
+     */
+    private fun followSteps(
+        start: Int,
+        initial: List<Int>,
+        steps: List<TrackStep>,
+        histories: Map<Int, EdgeHistory>,
+        built: List<OcctShape>,
+        onLost: (edge: Int, holderShape: OcctShape, verdict: String, at: LossPoint) -> Nothing,
+    ): Pair<List<Int>, Int> {
+        var current = initial
+        var holder = start
+        for (step in steps) {
+            // `current` indexes the edges of built[holder] (the intermediate shape), not of the start shape.
+            val holderShape = built[holder]
+            val fates =
+                checkNotNull(histories[step.nodeIndex]) {
+                    "no edge history for feature[${step.nodeIndex}]"
+                }.operands[step.operandSlot]
+            val next = java.util.TreeSet<Int>()
+            for (edge in current) {
+                val fate = fates[edge]
+                if (fate.resultEdges.isEmpty()) {
+                    val verdict = if (fate is EdgeFate.Deleted) "deleted" else "lost"
+                    onLost(edge, holderShape, verdict, LossPoint(holder, step.nodeIndex, current))
+                }
+                next.addAll(fate.resultEdges)
+            }
+            current = next.toList()
+            holder = step.nodeIndex
+        }
+        return current to holder
+    }
+
+    private fun resolveGenerated(
+        index: Int,
+        reference: GeneratedEdges,
+        baseIndex: Int,
+        built: List<OcctShape>,
+        histories: Map<Int, EdgeHistory>,
+        plan: TrackingPlan,
+        features: List<Feature>,
+        namings: Map<Int, GenerationMap>,
+    ): List<Int> {
+        val generation =
+            checkNotNull(namings[reference.featureIndex]) { "no generation map for feature[${reference.featureIndex}]" }
+        val generatorShape = built[reference.featureIndex]
+        val initial =
+            resolveGeneratedImages(generation, reference.sources, reference.role, null, generatorShape, index)
+        val steps = checkNotNull(plan.stepsByConsumer[index]) { "no tracking plan for feature[$index]" }
+        val perSource = reference.sources.associate { it.describe() to generation.images(it, reference.role) }
+        val named = reference.sources.joinToString { it.describe() }
+        val (followed, holder) =
+            followSteps(reference.featureIndex, initial, steps, histories, built) {
+                edge,
+                holderShape,
+                verdict,
+                node,
+                ->
+                throw EdgeNamingException(
+                    "generated edge $edge of feature[${node.holder}] was $verdict by feature[${node.step}] " +
+                        "(${features[node.step]::class.simpleName}; the edge no longer exists after that operation; " +
+                        "named by [$named] on feature[${reference.featureIndex}])\n" +
+                        EdgeNamingException.detail(perSource, holderShape.edges),
+                    index,
+                    reference.sources,
+                    node.current,
+                    perSource,
+                    holderShape.edges,
+                )
+            }
+        val target = built[baseIndex]
+        var result = followed
+        if (reference.within != null) {
+            val inside = OcctKernel.selectEdges(target, reference.within, null, reference.tolerance).toSet()
+            result = followed.filter { it in inside }
+        }
+        val wrongCount = if (reference.expected != null) result.size != reference.expected else result.isEmpty()
+        if (wrongCount) {
+            throw EdgeNamingException(
+                "generated edge selection from feature[${reference.featureIndex}] is ambiguous at feature[$holder]: " +
+                    (if (reference.expected != null) "expected ${reference.expected} edge(s) but " else "") +
+                    "${result.size} edge(s) result: $result\n" + EdgeNamingException.detail(perSource, target.edges),
+                index,
+                reference.sources,
+                result,
+                perSource,
+                target.edges,
+            )
+        }
+        return result
     }
 
     private fun wrapFailure(

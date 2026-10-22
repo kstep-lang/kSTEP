@@ -19,13 +19,18 @@ import dev.kstep.constraints.SketchScalar
 import dev.kstep.constraints.TangentCircleCircleConstraint
 import dev.kstep.constraints.TangentLineCircleConstraint
 import dev.kstep.constraints.VerticalConstraint
+import dev.kstep.geometry.ExternalGenerationSource
+import dev.kstep.geometry.GenerationSource
+import dev.kstep.geometry.NamedShape
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctShape
+import dev.kstep.geometry.PointAt
 import dev.kstep.geometry.ProfileLoop
 import dev.kstep.geometry.ProfilePoint
 import dev.kstep.geometry.ProfileRegion
 import dev.kstep.geometry.ProfileSegment
 import dev.kstep.geometry.RevolveAxis
+import dev.kstep.geometry.SegmentAt
 import dev.kstep.geometry.feature.ExtrudeRegionFeature
 import dev.kstep.geometry.feature.ExtrudeRegionsFeature
 import dev.kstep.geometry.feature.Feature
@@ -293,6 +298,26 @@ class Sketch internal constructor(
 
     internal fun constraintLabels(): List<String> = constraints.map { it.label }
 
+    /** Names of the non-construction points, in creation order (for diagnostics of named profile edges). */
+    internal fun profilePointNames(): List<String> = points.filter { !it.construction }.map { it.name }
+
+    /** Solved position of the unique non-construction point called [name], or null if there is none. */
+    internal fun solvedPointNamed(
+        name: String,
+        coords: DoubleArray,
+    ): ProfilePoint? {
+        val matches = points.indices.filter { !points[it].construction && points[it].name == name }
+        if (matches.size > 1) {
+            throw SketchException(
+                SketchErrorKind.INVALID_INPUT,
+                "point name '$name' is not unique (${matches.size} points); give the points distinct names",
+                profilePointNames(),
+            )
+        }
+        val i = matches.singleOrNull() ?: return null
+        return ProfilePoint(coords[2 * i], coords[2 * i + 1])
+    }
+
     internal fun ownsPoint(ref: SketchPointRef) = ref.owner === token && ref.index in points.indices
 
     internal fun ownsRound(ref: SketchRoundRef) = ref.owner === token && ref.scalar in scalars.indices
@@ -498,6 +523,150 @@ class SolvedSketch internal constructor(
         } else {
             OcctKernel.revolveRegions(regions, angleDegrees, axis)
         }
+    }
+
+    /**
+     * [extrude] for a single-contour profile that also reports the edges generated from [sources] (ADR-0033):
+     * [SketchCorner] and [SketchEdgeOf] by point name, or any region-level source ([dev.kstep.geometry.RegionVertex],
+     * [dev.kstep.geometry.PointAt], ...). The returned map is keyed by the sources AS GIVEN.
+     *
+     * @throws SketchException with [SketchErrorKind.INVALID_INPUT] (and the available point names in `details`)
+     *   for an unknown or duplicate point name, a point that is not a corner of the profile, a missing edge, or
+     *   a sketch with several separate contours (not supported yet).
+     */
+    fun extrudeNamed(
+        height: Double,
+        sources: List<GenerationSource>,
+    ): NamedShape {
+        val (region, translated, back) = prepareNamed(sources)
+        return OcctKernel.extrudeRegionNamed(region, height, translated).rekeyed(back)
+    }
+
+    /** [revolve] with a generation map; see [extrudeNamed]. */
+    fun revolveNamed(
+        angleDegrees: Double = 360.0,
+        axis: RevolveAxis = RevolveAxis.Y,
+        sources: List<GenerationSource>,
+    ): NamedShape {
+        val (region, translated, back) = prepareNamed(sources)
+        return OcctKernel.revolveRegionNamed(region, angleDegrees, axis, translated).rekeyed(back)
+    }
+
+    private data class NamedPlan(
+        val region: ProfileRegion,
+        val translated: List<GenerationSource>,
+        val back: Map<GenerationSource, GenerationSource>,
+    )
+
+    private fun prepareNamed(sources: List<GenerationSource>): NamedPlan {
+        val regions = toRegions()
+        if (regions.size != 1) {
+            throw SketchException(
+                SketchErrorKind.INVALID_INPUT,
+                "naming generated edges needs a single contour; this sketch has ${regions.size} separate outer " +
+                    "contours (multi-body naming is not supported yet, see ADR-0033)",
+            )
+        }
+        val region = regions[0]
+        val segments = (listOf(region.outer) + region.holes).flatMap { it.segments }
+        val corners = segments.filterNot { it is ProfileSegment.Circle }.map { cornerOf(it) }
+
+        fun near(
+            a: ProfilePoint,
+            b: ProfilePoint,
+        ) = abs(a.x - b.x) <= NAME_MATCH_TOLERANCE && abs(a.y - b.y) <= NAME_MATCH_TOLERANCE
+
+        fun lookup(name: String): ProfilePoint =
+            sketch.solvedPointNamed(name, coords)
+                ?: throw SketchException(
+                    SketchErrorKind.INVALID_INPUT,
+                    "unknown point name '$name'; available names: ${sketch.profilePointNames()}",
+                    sketch.profilePointNames(),
+                )
+
+        fun requireCorner(
+            name: String,
+            p: ProfilePoint,
+        ) {
+            if (corners.none { near(it, p) }) {
+                throw SketchException(
+                    SketchErrorKind.INVALID_INPUT,
+                    "point '$name' is not a corner of the profile (a centre or construction point?); " +
+                        "available names: ${sketch.profilePointNames()}",
+                    sketch.profilePointNames(),
+                )
+            }
+        }
+        val translated = ArrayList<GenerationSource>(sources.size)
+        val back = LinkedHashMap<GenerationSource, GenerationSource>()
+        sources.forEach { source ->
+            val t: GenerationSource =
+                when (source) {
+                    is SketchCorner -> {
+                        val p = lookup(source.pointName)
+                        requireCorner(source.pointName, p)
+                        PointAt(p.x, p.y)
+                    }
+                    is SketchEdgeOf -> {
+                        val a = lookup(source.fromName)
+                        val b = lookup(source.toName)
+                        requireCorner(source.fromName, a)
+                        requireCorner(source.toName, b)
+                        val exists =
+                            segments.any { seg ->
+                                val s = segmentStart(seg)
+                                val e = segmentEnd(seg)
+                                (near(s, a) && near(e, b)) || (near(s, b) && near(e, a))
+                            }
+                        if (!exists) {
+                            throw SketchException(
+                                SketchErrorKind.INVALID_INPUT,
+                                "the profile has no edge between '${source.fromName}' and '${source.toName}'",
+                                sketch.profilePointNames(),
+                            )
+                        }
+                        SegmentAt(a.x, a.y, b.x, b.y)
+                    }
+                    is ExternalGenerationSource ->
+                        throw SketchException(
+                            SketchErrorKind.INVALID_INPUT,
+                            "unsupported generation source '${source.description}' for a sketch",
+                        )
+                    else -> source
+                }
+            translated.add(t)
+            // Known limitation: the feature rebuilder passes the UNION of the sources of all consumers of
+            // this sketch. Two consumers that name the same element differently (e.g. SketchCorner("a") and
+            // PointAt(<solved coordinates of a>)) are each valid alone but collide here; the rebuild then
+            // fails loudly with this error rather than producing wrong geometry.
+            if (back.put(t, source) != null) {
+                throw SketchException(
+                    SketchErrorKind.INVALID_INPUT,
+                    "two generation sources name the same profile element: $source",
+                )
+            }
+        }
+        return NamedPlan(region, translated, back)
+    }
+
+    private fun cornerOf(seg: ProfileSegment): ProfilePoint = segmentStart(seg)
+
+    private fun segmentStart(seg: ProfileSegment): ProfilePoint =
+        when (seg) {
+            is ProfileSegment.Line -> seg.start
+            is ProfileSegment.Arc -> seg.start
+            is ProfileSegment.Circle -> ProfilePoint(seg.center.x + seg.radius, seg.center.y)
+        }
+
+    private fun segmentEnd(seg: ProfileSegment): ProfilePoint =
+        when (seg) {
+            is ProfileSegment.Line -> seg.end
+            is ProfileSegment.Arc -> seg.end
+            is ProfileSegment.Circle -> ProfilePoint(seg.center.x + seg.radius, seg.center.y)
+        }
+
+    private companion object {
+        const val NAME_MATCH_TOLERANCE = 1e-6
     }
 
     /** The extrusion as a feature-history step (a plain value; the region is solved already). */

@@ -1,5 +1,7 @@
 package dev.kstep.geometry.feature
 
+import dev.kstep.geometry.GenerationSource
+import dev.kstep.geometry.NamedShape
 import dev.kstep.geometry.OcctShape
 
 /**
@@ -21,6 +23,23 @@ interface ExternalRootFeature : Feature {
      * cache or share the returned shape, and must close every intermediate [OcctShape] they create.
      */
     fun buildShape(): OcctShape
+
+    /**
+     * True if this feature can report the edges it generated from [GenerationSource]s (Welle N, ADR-0033).
+     * [FeatureRebuilder] checks this flag in its structural planning, so a `GeneratedEdges` reference to a
+     * feature without naming support fails with a clear message before any native call.
+     *
+     * A feature must not hold a native handle (the feature history snapshots features by reference).
+     */
+    val supportsGeneratedNaming: Boolean get() = false
+
+    /**
+     * Builds the shape like [buildShape] and the [dev.kstep.geometry.GenerationMap] for [sources]. The default
+     * throws; override together with [supportsGeneratedNaming]. Same contract as [buildShape]: NEW shape owned
+     * by the caller, no side effects, intermediate shapes closed.
+     */
+    fun buildNamedShape(sources: List<GenerationSource>): NamedShape =
+        throw UnsupportedOperationException("feature '$label' cannot name generated edges")
 }
 
 /**

@@ -44,7 +44,8 @@ object KStepScriptOutcomeCodes {
     const val SKETCH_INVALID = "KSTEP-S-010"
 
     /** An edge selector matched nothing, matched the wrong number of edges, or a tracked edge was
-     * deleted; the message lists the candidate edges (ADR-0031). */
+     * deleted; the message lists the candidate edges (ADR-0031). Also used when edges named by what
+     * generated them (`GeneratedEdges`) cannot be resolved (ADR-0033). */
     const val EDGE_SELECTION_FAILED = "KSTEP-S-011"
 }
 

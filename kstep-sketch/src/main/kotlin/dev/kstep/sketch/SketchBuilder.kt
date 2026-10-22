@@ -249,6 +249,10 @@ class SketchBuilder internal constructor() {
      * Adds a rectangle with its origin corner at ([x], [y]) -- four points, four lines, horizontal
      * and vertical constraints and the two dimensions [width] and [height]. With [fixCorner] the
      * origin corner is held, which makes the rectangle fully constrained.
+     *
+     * The corners are called `p<index>` by default, where the index counts ALL points of the sketch so far -- so
+     * inserting a point before the rectangle shifts the names. Pass [names] (four names, counter-clockwise from the
+     * origin corner) to give the corners stable names, for example to refer to them with [SketchCorner].
      */
     fun rectangle(
         x: Double,
@@ -256,13 +260,17 @@ class SketchBuilder internal constructor() {
         width: Double,
         height: Double,
         fixCorner: Boolean = true,
+        names: List<String>? = null,
     ): SketchRectangle {
         requireMeasure("width", width)
         requireMeasure("height", height)
-        val p0 = point(x, y, fixed = fixCorner)
-        val p1 = point(x + width, y)
-        val p2 = point(x + width, y + height)
-        val p3 = point(x, y + height)
+        require(names == null || names.size == 4) {
+            fail(SketchErrorKind.INVALID_INPUT, "rectangle names must be four names, got ${names?.size}")
+        }
+        val p0 = point(x, y, fixed = fixCorner, name = names?.get(0))
+        val p1 = point(x + width, y, name = names?.get(1))
+        val p2 = point(x + width, y + height, name = names?.get(2))
+        val p3 = point(x, y + height, name = names?.get(3))
         val corners = listOf(p0, p1, p2, p3)
         val edges = corners.indices.map { line(corners[it], corners[(it + 1) % 4]) }
         horizontal(edges[0])

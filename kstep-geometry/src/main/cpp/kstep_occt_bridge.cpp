@@ -30,6 +30,7 @@
 // error into a JVM crash instead of a catchable exception -- the opposite of invariant 1 above.
 #include <jni.h>
 
+#include <algorithm>
 #include <cmath>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -64,6 +65,8 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -849,6 +852,247 @@ bool buildRegionFace(
     return true;
 }
 
+// ------------------------------------------------------------------------------------------
+// Welle N (persistent naming of generated edges). See docs/adr/ADR-0033-persistent-naming-and-undo.adoc.
+// Hand-synchronized with dev.kstep.geometry.OcctKernel.MAX_NAMING_SOURCES.
+// ------------------------------------------------------------------------------------------
+constexpr int kMaxNamingVertices = 1024;
+constexpr int kMaxNamingSegments = 1024;
+constexpr double kNamingTolerance = 1e-6;
+
+/** Coordinate queries of one named sweep: vertices (x y) and segments (sx sy ex ey mx my; mid may be NaN). */
+struct NamingQuery {
+    std::vector<double> vertices;
+    std::vector<double> segments;
+};
+
+/** Reads and validates the two query arrays of a *Named entry point. Returns false with a pending exception. */
+bool readNamingQuery(JNIEnv* env, jdoubleArray verticesArr, jdoubleArray segmentsArr, const char* fnName, NamingQuery& out) {
+    const std::string fn(fnName);
+    if (verticesArr == nullptr || segmentsArr == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", fn + ": naming queries must not be null");
+        return false;
+    }
+    jsize vLen = env->GetArrayLength(verticesArr);
+    jsize sLen = env->GetArrayLength(segmentsArr);
+    if (vLen % 2 != 0 || vLen / 2 > kMaxNamingVertices) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            fn + ": vertex query must be x,y pairs with at most " + std::to_string(kMaxNamingVertices) + " points");
+        return false;
+    }
+    if (sLen % 6 != 0 || sLen / 6 > kMaxNamingSegments) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            fn + ": segment query must be 6 values per segment with at most " + std::to_string(kMaxNamingSegments) +
+                " segments");
+        return false;
+    }
+    if (vLen + sLen == 0) {
+        throwJava(env, "java/lang/IllegalArgumentException", fn + ": naming query must not be empty");
+        return false;
+    }
+    out.vertices.assign(static_cast<size_t>(vLen), 0.0);
+    out.segments.assign(static_cast<size_t>(sLen), 0.0);
+    if (vLen > 0) env->GetDoubleArrayRegion(verticesArr, 0, vLen, out.vertices.data());
+    if (sLen > 0) env->GetDoubleArrayRegion(segmentsArr, 0, sLen, out.segments.data());
+    if (env->ExceptionCheck()) return false;
+    auto bad = [](double v) { return !std::isfinite(v) || std::abs(v) > kMaxAbsCoordinate; };
+    for (double v : out.vertices) {
+        if (bad(v)) {
+            throwJava(env, "java/lang/IllegalArgumentException", fn + ": naming query coordinates must be finite and bounded");
+            return false;
+        }
+    }
+    for (size_t s = 0; s + 5 < out.segments.size(); s += 6) {
+        for (size_t k = 0; k < 4; ++k) {
+            if (bad(out.segments[s + k])) {
+                throwJava(env, "java/lang/IllegalArgumentException", fn + ": naming query coordinates must be finite and bounded");
+                return false;
+            }
+        }
+        const double mx = out.segments[s + 4];
+        const double my = out.segments[s + 5];
+        const bool midAbsent = std::isnan(mx) && std::isnan(my);
+        if (!midAbsent && (bad(mx) || bad(my))) {
+            throwJava(env, "java/lang/IllegalArgumentException", fn + ": naming query midpoint must be finite or absent");
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Adds the result-edge index of every non-degenerated edge inside `s` to `images` (deduplicated). */
+void collectResultEdges(const TopoDS_Shape& s, const TopTools_IndexedMapOfShape& resultEdges, std::vector<jint>& images) {
+    for (TopExp_Explorer ex(s, TopAbs_EDGE); ex.More(); ex.Next()) {
+        if (BRep_Tool::Degenerated(TopoDS::Edge(ex.Current()))) continue;
+        int idx = resultEdges.FindIndex(ex.Current());
+        if (idx <= 0) continue;
+        jint image = static_cast<jint>(idx - 1);
+        bool seen = false;
+        for (jint known : images) seen = seen || known == image;
+        if (!seen) images.push_back(image);
+    }
+}
+
+/** Finds the unique vertex of `verts` within tolerance of (x, y). 0 = found, 1 = none, 2 = ambiguous. */
+int findNamingVertex(const TopTools_IndexedMapOfShape& verts, double x, double y, int& index) {
+    int found = 0;
+    for (int i = 1; i <= verts.Extent(); ++i) {
+        const TopoDS_Vertex& v = TopoDS::Vertex(verts(i));
+        gp_Pnt p = BRep_Tool::Pnt(v);
+        double tol = std::max(kNamingTolerance, BRep_Tool::Tolerance(v));
+        if (std::hypot(p.X() - x, p.Y() - y) <= tol) {
+            ++found;
+            index = i;
+        }
+    }
+    return found == 0 ? 1 : (found == 1 ? 0 : 2);
+}
+
+/**
+ * Encodes, for a freshly swept `face`, the images of the queried vertices (SIDE edges, `Generated(vertex)`) and
+ * segments (START / END copies, `FirstShape(edge)` / `LastShape(edge)`) as indices into the edge map of `result`.
+ * Layout: [vCount, (n, idx...)*, sCount, (nStart, idx..., nEnd, idx...)*]. The face and the freshly built sweep share no
+ * TShape with a registered shape, so no lock is needed. Returns 0 on success, 1 if the encoding is too large, 2 with
+ * `error` set when a query does not match the face (an unknown PointAt / SegmentAt, or ambiguous).
+ */
+template <class Maker>
+int encodeGeneration(
+    Maker& maker, const TopoDS_Face& face, const NamingQuery& q, const TopoDS_Shape& result, std::vector<jint>& out,
+    std::string& error) {
+    TopTools_IndexedMapOfShape faceVerts;
+    TopTools_IndexedMapOfShape faceEdges;
+    TopTools_IndexedMapOfShape resultEdges;
+    TopExp::MapShapes(face, TopAbs_VERTEX, faceVerts);
+    TopExp::MapShapes(face, TopAbs_EDGE, faceEdges);
+    TopExp::MapShapes(result, TopAbs_EDGE, resultEdges);
+    out.clear();
+    const size_t vCount = q.vertices.size() / 2;
+    out.push_back(static_cast<jint>(vCount));
+    for (size_t i = 0; i < vCount; ++i) {
+        int vi = 0;
+        int status = findNamingVertex(faceVerts, q.vertices[2 * i], q.vertices[2 * i + 1], vi);
+        if (status != 0) {
+            error = std::string("vertex query ") + std::to_string(i) +
+                (status == 1 ? " matches no vertex of the profile face" : " is ambiguous (two vertices within tolerance)");
+            return 2;
+        }
+        std::vector<jint> images;
+        const TopTools_ListOfShape& generated = maker.Generated(faceVerts(vi));
+        for (TopTools_ListIteratorOfListOfShape it(generated); it.More(); it.Next()) {
+            if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+            collectResultEdges(it.Value(), resultEdges, images);
+        }
+        out.push_back(static_cast<jint>(images.size()));
+        for (jint image : images) out.push_back(image);
+        if (out.size() > kMaxHistoryInts) return 1;
+    }
+    const size_t sCount = q.segments.size() / 6;
+    out.push_back(static_cast<jint>(sCount));
+    for (size_t i = 0; i < sCount; ++i) {
+        const double* d = &q.segments[i * 6];
+        int vs = 0;
+        int ve = 0;
+        int a = findNamingVertex(faceVerts, d[0], d[1], vs);
+        int b = findNamingVertex(faceVerts, d[2], d[3], ve);
+        if (a != 0 || b != 0) {
+            error = std::string("segment query ") + std::to_string(i) +
+                " has an end point that matches no unique vertex of the profile face";
+            return 2;
+        }
+        const bool hasMid = !std::isnan(d[4]);
+        int matches = 0;
+        TopoDS_Edge matched;
+        for (int e = 1; e <= faceEdges.Extent(); ++e) {
+            const TopoDS_Edge edge = TopoDS::Edge(faceEdges(e));
+            TopoDS_Vertex v1;
+            TopoDS_Vertex v2;
+            TopExp::Vertices(edge, v1, v2);
+            if (v1.IsNull() || v2.IsNull()) continue;
+            int i1 = faceVerts.FindIndex(v1);
+            int i2 = faceVerts.FindIndex(v2);
+            if (!((i1 == vs && i2 == ve) || (i1 == ve && i2 == vs))) continue;
+            if (hasMid) {
+                BRepBuilderAPI_MakeVertex midMaker(gp_Pnt(d[4], d[5], 0.0));
+                BRepExtrema_DistShapeShape dist(edge, midMaker.Vertex());
+                if (!dist.IsDone() || dist.Value() > kNamingTolerance) continue;
+            }
+            ++matches;
+            matched = edge;
+        }
+        if (matches != 1) {
+            error = std::string("segment query ") + std::to_string(i) +
+                (matches == 0 ? " matches no edge of the profile face" : " is ambiguous (several edges match)");
+            return 2;
+        }
+        std::vector<jint> starts;
+        std::vector<jint> ends;
+        collectResultEdges(maker.FirstShape(matched), resultEdges, starts);
+        collectResultEdges(maker.LastShape(matched), resultEdges, ends);
+        out.push_back(static_cast<jint>(starts.size()));
+        for (jint image : starts) out.push_back(image);
+        out.push_back(static_cast<jint>(ends.size()));
+        for (jint image : ends) out.push_back(image);
+        if (out.size() > kMaxHistoryInts) return 1;
+    }
+    return 0;
+}
+
+/**
+ * The ONE construction path of every extrude/revolve of a planar face (plain and named): builds the sweep and, if
+ * `q` is set, the generation map. Returns false with a pending Java exception.
+ */
+bool buildSweep(
+    JNIEnv* env, const TopoDS_Face& face, bool revolve, double height, double angleDeg, int axis, const NamingQuery* q,
+    TopoDS_Shape& result, std::vector<jint>& map) {
+    std::string error;
+    int status = 0;
+    if (!revolve) {
+        BRepPrimAPI_MakePrism maker(face, gp_Vec(0.0, 0.0, height));
+        maker.Build();
+        if (!maker.IsDone()) {
+            throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakePrism did not complete");
+            return false;
+        }
+        result = TopoDS_Shape(maker.Shape());
+        if (q != nullptr) status = encodeGeneration(maker, face, *q, result, map, error);
+    } else {
+        gp_Ax1 rotationAxis(gp::Origin(), axis == 1 ? gp::DY() : gp::DX());
+        // Full revolution uses the angle-less overload (a closed solid); passing 2*pi can leave seam artefacts.
+        const bool full = std::abs(angleDeg - 360.0) <= 1e-9;
+        if (full) {
+            BRepPrimAPI_MakeRevol maker(face, rotationAxis);
+            maker.Build();
+            if (!maker.IsDone()) {
+                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
+                return false;
+            }
+            result = TopoDS_Shape(maker.Shape());
+            if (q != nullptr) status = encodeGeneration(maker, face, *q, result, map, error);
+        } else {
+            BRepPrimAPI_MakeRevol maker(face, rotationAxis, angleDeg * M_PI / 180.0);
+            maker.Build();
+            if (!maker.IsDone()) {
+                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
+                return false;
+            }
+            result = TopoDS_Shape(maker.Shape());
+            if (q != nullptr) status = encodeGeneration(maker, face, *q, result, map, error);
+        }
+    }
+    if (status == 1) {
+        throwJava(env, "java/lang/IllegalArgumentException", "generation map exceeds the size limit");
+        return false;
+    }
+    if (status == 2) {
+        // A user-supplied PointAt / SegmentAt that matches nothing is an argument error.
+        throwJava(env, "java/lang/IllegalArgumentException", "generation map: " + error);
+        return false;
+    }
+    return true;
+}
+
 extern "C" {
 
 namespace {
@@ -1452,9 +1696,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeReleaseShape(JNIEnv* env, jobject 
 // deadlock/exception-safety pitfalls the two functions below exist to avoid.
 // ------------------------------------------------------------------------------------------
 
-JNIEXPORT jlong JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
-    JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble height) {
+static jlong extrudeProfileImpl(
+    JNIEnv* env, jdoubleArray profileXy, jdouble height, const NamingQuery* query, jobjectArray outMap) {
     // Null/length/range/coincidence validation lives in readProfileXy (shared with
     // nativeRevolveProfile); its messages are word-for-word the ones this function always had.
     std::vector<double> xy;
@@ -1476,15 +1719,13 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
             return 0;
         }
 
-        BRepPrimAPI_MakePrism prismMaker(face, gp_Vec(0.0, 0.0, height));
-        prismMaker.Build();
-        if (!prismMaker.IsDone()) {
-            throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakePrism did not complete");
+        // The shared construction path (plain and named); buildSweep copies Shape() into `result` for the
+        // same reason as nativeMakeBox above (registerShape takes a `TopoDS_Shape&&`).
+        TopoDS_Shape result;
+        std::vector<jint> map;
+        if (!buildSweep(env, face, false, height, 0.0, 0, query, result, map)) {
             return 0;
         }
-        // Same explicit-copy rationale as nativeMakeBox above: Shape() returns `const&`, which
-        // does not bind to registerShape's `TopoDS_Shape&&` parameter directly.
-        TopoDS_Shape result(prismMaker.Shape());
 
         // Mandatory post-check, the actual security value of this function: a degenerate profile
         // (collinear points, or a self-crossing "bowtie" polygon) reaches OCCT successfully and
@@ -1510,7 +1751,9 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
                 "nativeExtrudeProfile: resulting solid has zero volume (degenerate profile?)");
             return 0;
         }
-
+        if (outMap != nullptr && !publishHistory(env, outMap, map)) {
+            return 0;
+        }
         return registerShape(std::move(result));
     } catch (const Standard_Failure& e) {
         throwJava(
@@ -1523,6 +1766,26 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error extruding profile");
     }
     return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
+    JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble height) {
+    return extrudeProfileImpl(env, profileXy, height, nullptr, nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfileNamed(
+    JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble height, jdoubleArray vertexXy,
+    jdoubleArray segQuery, jobjectArray outMap) {
+    if (!checkHistoryHolder(env, outMap, "nativeExtrudeProfileNamed")) {
+        return 0;
+    }
+    NamingQuery query;
+    if (!readNamingQuery(env, vertexXy, segQuery, "nativeExtrudeProfileNamed", query)) {
+        return 0;
+    }
+    return extrudeProfileImpl(env, profileXy, height, &query, outMap);
 }
 
 static jlong filletEdgesImpl(
@@ -2059,9 +2322,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOpTracked(
     return booleanOpImpl(env, op, left, right, outHistory);
 }
 
-JNIEXPORT jlong JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveProfile(
-    JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble angleDeg, jint axis) {
+static jlong revolveProfileImpl(
+    JNIEnv* env, jdoubleArray profileXy, jdouble angleDeg, jint axis, const NamingQuery* query, jobjectArray outMap) {
     std::vector<double> xy;
     if (!readProfileXy(env, profileXy, kMaxRevolveProfilePoints, "nativeRevolveProfile", xy)) {
         return 0;
@@ -2103,30 +2365,16 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveProfile(
         if (!buildProfileFace(env, xy, "nativeRevolveProfile", face)) {
             return 0;
         }
-        gp_Ax1 rotationAxis(gp::Origin(), axis == 1 ? gp::DY() : gp::DX());
-        // Full revolution uses the angle-less overload (a closed solid); passing 2*pi can leave
-        // seam artefacts.
-        bool full = std::abs(angleDeg - 360.0) <= 1e-9;
         TopoDS_Shape result;
-        if (full) {
-            BRepPrimAPI_MakeRevol maker(face, rotationAxis);
-            maker.Build();
-            if (!maker.IsDone()) {
-                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
-                return 0;
-            }
-            result = TopoDS_Shape(maker.Shape());
-        } else {
-            BRepPrimAPI_MakeRevol maker(face, rotationAxis, angleDeg * M_PI / 180.0);
-            maker.Build();
-            if (!maker.IsDone()) {
-                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
-                return 0;
-            }
-            result = TopoDS_Shape(maker.Shape());
+        std::vector<jint> map;
+        if (!buildSweep(env, face, true, 0.0, angleDeg, axis, query, result, map)) {
+            return 0;
         }
         // A degenerate profile is an input error (like extrude), hence IllegalArgumentException.
         if (!postCheckSolid(env, result, "nativeRevolveProfile", "java/lang/IllegalArgumentException")) {
+            return 0;
+        }
+        if (outMap != nullptr && !publishHistory(env, outMap, map)) {
             return 0;
         }
         return registerShape(std::move(result));
@@ -2139,6 +2387,26 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveProfile(
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error revolving profile");
     }
     return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveProfile(
+    JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble angleDeg, jint axis) {
+    return revolveProfileImpl(env, profileXy, angleDeg, axis, nullptr, nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveProfileNamed(
+    JNIEnv* env, jobject /*self*/, jdoubleArray profileXy, jdouble angleDeg, jint axis, jdoubleArray vertexXy,
+    jdoubleArray segQuery, jobjectArray outMap) {
+    if (!checkHistoryHolder(env, outMap, "nativeRevolveProfileNamed")) {
+        return 0;
+    }
+    NamingQuery query;
+    if (!readNamingQuery(env, vertexXy, segQuery, "nativeRevolveProfileNamed", query)) {
+        return 0;
+    }
+    return revolveProfileImpl(env, profileXy, angleDeg, axis, &query, outMap);
 }
 
 static jlong chamferEdgesImpl(
@@ -3176,9 +3444,9 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeFaceEdges(JNIEnv* env, jobjec
     return result;
 }
 
-JNIEXPORT jlong JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeRegion(
-    JNIEnv* env, jobject /*self*/, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble height) {
+static jlong extrudeRegionImpl(
+    JNIEnv* env, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble height,
+    const NamingQuery* query, jobjectArray outMap) {
     if (!std::isfinite(height) || std::abs(height) <= kMinDimension || std::abs(height) > kMaxDimension) {
         throwJava(
             env, "java/lang/IllegalArgumentException",
@@ -3192,14 +3460,15 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeRegion(
         if (!buildRegionFace(env, loopSizes, segKinds, segData, "nativeExtrudeRegion", face, samples)) {
             return 0;
         }
-        BRepPrimAPI_MakePrism prismMaker(face, gp_Vec(0.0, 0.0, height));
-        prismMaker.Build();
-        if (!prismMaker.IsDone()) {
-            throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakePrism did not complete");
+        TopoDS_Shape result;
+        std::vector<jint> map;
+        if (!buildSweep(env, face, false, height, 0.0, 0, query, result, map)) {
             return 0;
         }
-        TopoDS_Shape result(prismMaker.Shape());
         if (!postCheckSolid(env, result, "nativeExtrudeRegion", "java/lang/IllegalArgumentException")) {
+            return 0;
+        }
+        if (outMap != nullptr && !publishHistory(env, outMap, map)) {
             return 0;
         }
         return registerShape(std::move(result));
@@ -3214,9 +3483,28 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeRegion(
 }
 
 JNIEXPORT jlong JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveRegion(
-    JNIEnv* env, jobject /*self*/, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble angleDeg,
-    jint axis) {
+Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeRegion(
+    JNIEnv* env, jobject /*self*/, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble height) {
+    return extrudeRegionImpl(env, loopSizes, segKinds, segData, height, nullptr, nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeRegionNamed(
+    JNIEnv* env, jobject /*self*/, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble height,
+    jdoubleArray vertexXy, jdoubleArray segQuery, jobjectArray outMap) {
+    if (!checkHistoryHolder(env, outMap, "nativeExtrudeRegionNamed")) {
+        return 0;
+    }
+    NamingQuery query;
+    if (!readNamingQuery(env, vertexXy, segQuery, "nativeExtrudeRegionNamed", query)) {
+        return 0;
+    }
+    return extrudeRegionImpl(env, loopSizes, segKinds, segData, height, &query, outMap);
+}
+
+static jlong revolveRegionImpl(
+    JNIEnv* env, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble angleDeg, jint axis,
+    const NamingQuery* query, jobjectArray outMap) {
     if (!std::isfinite(angleDeg) || angleDeg < kMinRevolveAngleDeg || angleDeg > kMaxRevolveAngleDeg) {
         throwJava(
             env, "java/lang/IllegalArgumentException",
@@ -3250,27 +3538,15 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveRegion(
                     " coordinates must have the same sign)");
             return 0;
         }
-        gp_Ax1 rotationAxis(gp::Origin(), axis == 1 ? gp::DY() : gp::DX());
-        bool full = std::abs(angleDeg - 360.0) <= 1e-9;
         TopoDS_Shape result;
-        if (full) {
-            BRepPrimAPI_MakeRevol maker(face, rotationAxis);
-            maker.Build();
-            if (!maker.IsDone()) {
-                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
-                return 0;
-            }
-            result = TopoDS_Shape(maker.Shape());
-        } else {
-            BRepPrimAPI_MakeRevol maker(face, rotationAxis, angleDeg * M_PI / 180.0);
-            maker.Build();
-            if (!maker.IsDone()) {
-                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
-                return 0;
-            }
-            result = TopoDS_Shape(maker.Shape());
+        std::vector<jint> map;
+        if (!buildSweep(env, face, true, 0.0, angleDeg, axis, query, result, map)) {
+            return 0;
         }
         if (!postCheckSolid(env, result, "nativeRevolveRegion", "java/lang/IllegalArgumentException")) {
+            return 0;
+        }
+        if (outMap != nullptr && !publishHistory(env, outMap, map)) {
             return 0;
         }
         return registerShape(std::move(result));
@@ -3280,6 +3556,41 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveRegion(
         throwJava(env, "java/lang/IllegalStateException", std::string("Native error revolving region: ") + e.what());
     } catch (...) {
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error revolving region");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveRegion(
+    JNIEnv* env, jobject /*self*/, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble angleDeg,
+    jint axis) {
+    return revolveRegionImpl(env, loopSizes, segKinds, segData, angleDeg, axis, nullptr, nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveRegionNamed(
+    JNIEnv* env, jobject /*self*/, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble angleDeg,
+    jint axis, jdoubleArray vertexXy, jdoubleArray segQuery, jobjectArray outMap) {
+    if (!checkHistoryHolder(env, outMap, "nativeRevolveRegionNamed")) {
+        return 0;
+    }
+    NamingQuery query;
+    if (!readNamingQuery(env, vertexXy, segQuery, "nativeRevolveRegionNamed", query)) {
+        return 0;
+    }
+    return revolveRegionImpl(env, loopSizes, segKinds, segData, angleDeg, axis, &query, outMap);
+}
+
+/** Number of shapes currently registered (test-only: handle hygiene). */
+JNIEXPORT jint JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeLiveShapeCount(JNIEnv* env, jobject /*self*/) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        return static_cast<jint>(g_shapes.size());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error counting shapes: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error counting shapes");
     }
     return 0;
 }
