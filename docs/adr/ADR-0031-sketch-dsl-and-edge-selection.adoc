@@ -1,0 +1,235 @@
+= ADR-0031: Sketch DSL and stable geometric edge selection (Welle L)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle L). Supersedes in part the statements in ADR-0008, ADR-0015 and ADR-0029 that
+kSTEP has "no stable geometric edge identity", and delivers the "full sketch DSL" item that ADR-0006/-0007/-0014
+left open after the points-only constraint API.
+
+== Context
+
+Two gaps kept kSTEP's geometry from being usable for real parts from a script:
+
+* *Edges were addressed by index.* `OcctKernel.fillet`/`chamfer` take 0-based positions in
+  `TopExp::MapShapes(TopAbs_EDGE)`, reproducible for one construction sequence but meaningless to a human and
+  not stable when a parameter changes the topology of the construction (ADR-0008, ADR-0015). A feature history
+  built on such indices breaks silently or, worse, rounds the wrong edges.
+* *A profile was a polygon.* `extrudeProfile`/`revolveProfile` took a point list: no arcs, no circles, no holes,
+  and no way to dimension the profile. `kstep-constraints` solved point systems, but nothing connected it to
+  geometry.
+
+Everything below was measured on macOS arm64 with OCCT 7.9.3 and PlaneGCS at the vendored commit.
+
+== Decision
+
+=== Edges are chosen by geometry, never by guess
+
+`dev.kstep.geometry.select` adds value-only selectors: `Edges.all/parallelTo/ofType/atMax/atMin/ofFace/longest/
+shortest/seams`, `Faces.normal/atMax/atMin/ofType`, combined with `and`/`or`/`minus`. A selector is a plain data
+class (structural `equals`), so it can live inside a feature history and is re-resolved against the freshly built
+shape on every rebuild.
+
+* *Pure Kotlin core.* Selectors are evaluated against `EdgeInfo`/`FaceInfo` lists (`EdgeSelection.resolve`), which
+  the bridge fills from OCCT (`OcctShape.edges`/`faces`). The evaluation is therefore testable without OCCT
+  (`EdgeSelectorTest` uses a synthetic 12-edge box).
+* *Never guess.* An empty result is an error. If `expected` is given and the count differs, it is an error. A tie
+  (`longest()` on a 40x40x10 box matches 8 edges) returns all tied edges; only `expected = 1` turns the tie into an
+  error. `EdgeSelectionException` carries `matched` and the full candidate list; the message lists at most 32
+  candidates (index, kind, length, midpoint, direction or radius).
+* *Seam and degenerated edges are excluded* from every selector except `Edges.seams()`: a cylinder's seam line is
+  parallel to its axis and would otherwise be caught by `parallelTo(Z)`, and a fillet on it fails.
+* *Tolerances* are explicit (`SelectionTolerance`, linear `[1e-9, 1.0]`, angular `[1e-9, 0.1]` rad). `atMax`/`atMin`
+  require all three sampled points of an edge (start, mid, end) in the extreme plane; face `atMax` is
+  centroid-based.
+* *The index API is unchanged.* `fillet(shape, selector, radius, expected, tolerance)` resolves and delegates to
+  the existing index overload; `FilletFeature`/`ChamferFeature` keep their shape, so `copy` and `componentN` are
+  unaffected. The selector variants are separate features: `SelectedFilletFeature`/`SelectedChamferFeature` with an
+  `EdgeReference` (`SelectEdges` or `TrackedEdges`).
+
+Stability is exactly as strong as the predicate: the selection survives a parameter change while the geometric
+statement stays true (a 40-wide and a 60-wide box both have four edges parallel to Z). It does not survive a change
+that makes the predicate false, and it is not a persistent-naming scheme.
+
+=== Edges are followed through operations by OCCT's own history
+
+A pocket cut into a block doubles the edges parallel to Z (4 -> 8), so `parallelTo(Z), expected = 4` is ambiguous on
+the pocketed body. `TrackedEdges(sourceIndex, selector)` selects on an EARLIER shape (the block) and follows those
+edges through every operation up to the consuming feature, using the history OCCT records
+(`BRepBuilderAPI_MakeShape::Modified`/`IsDeleted`) -- `BRepTools_History` is not used directly; it is unnecessary,
+the maker objects expose the same information.
+
+* *Native side.* The `*Tracked` entry points (`nativeFilletEdgesTracked`, `nativeChamferEdgesTracked`,
+  `nativeBooleanOpTracked`, `nativeTransformShapeTracked`) share one implementation with the untracked ones (the
+  existing JNI functions now call the same `static` helper with a null holder, so their behaviour is unchanged). The
+  history is encoded INSIDE the same `g_mutex` critical section as the operation (operands and result share TShapes
+  with registry shapes), against `TopExp::MapShapes(result, TopAbs_EDGE)` of exactly the shape that is registered
+  afterwards: `[operandCount, (edgeCount, {status, imageCount, images...}*)*]`, status
+  `0 kept / 1 modified / 2 deleted / 3 lost`. The Java array is allocated and stored in the `Array<IntArray?>` holder
+  BEFORE `registerShape`, outside the lock, so a failure there can never leak a registered handle.
+* *Measured pitfall: `IsDeleted()` lies for fillet and chamfer.* On a 40x40x10 box with one filleted vertical
+  edge, `BRepFilletAPI_MakeFillet::IsDeleted` reported 8 of 12 edges as deleted although 7 of them survive in the
+  result (found by probing; the first test of `filletWithHistory` failed with "expected 11 but was 4"). The encoding
+  therefore decides in this order: successors from `Modified()`, else survival by identity in the result
+  (`FindIndex`), and only then `IsDeleted()`. After the fix a filleted edge is `Deleted`, its four neighbours are
+  `Modified` and the other seven `Kept`. Booleans (including `SimplifyResult`) and rigid transforms behave as
+  documented (the boolean history survives `SimplifyResult` and `unwrapSingleSolid`; every edge of a translated copy
+  maps to exactly one moved edge).
+* *Kotlin side.* `TrackingPlanner` (pure, runs before any native call) checks that `sourceIndex` is before the
+  consumer's `baseIndex`, is an ancestor of it, and that exactly ONE operation path leads there (a boolean of the
+  source with itself is ambiguous); features on the path, and only those, are built with their `*WithHistory`
+  variant, so nothing pays for history when nothing tracks. Resolution maps the source selection through each
+  operation's `EdgeFate`s; an edge that was `Deleted`/`Lost` is a structured `EdgeSelectionException` ("tracked edge
+  7 of feature[0] was deleted by feature[3] (BooleanFeature ...)"), reachable as
+  `FeatureRebuildException.selectionFailure`. A split edge maps to all its pieces. `expected` is checked on the final
+  mapped count, and the result must be non-empty.
+
+=== Regions with holes, arcs and circles
+
+`ProfileRegion` (outer `ProfileLoop` plus holes of `Line`/three-point `Arc`/`Circle` segments) is validated in Kotlin
+(closed continuous loops, collinear and degenerate arcs, circle alone in its loop, limits of 64 loops and 512
+segments, holes inside the outer loop by polygon approximation and segment intersection, holes pairwise disjoint)
+and normalised (outer counter-clockwise, holes clockwise). The native side re-validates independently (sizes,
+finiteness, continuity, kinds, radii) and also fixes the orientation from the signed area of its own sampled
+boundary, then builds `BRepBuilderAPI_MakeWire`/`MakeFace` (+ `Add` for each hole), prisms or revolves it and runs the
+usual `BRepCheck_Analyzer` and positive-volume post-check. Self-intersection of one loop is deliberately not
+checked in Kotlin; OCCT's validity check rejects the solid. A revolve rejects a region whose boundary samples cross
+the axis (also arcs that bulge across it).
+
+=== A new module, `kstep-sketch`
+
+`kstep-geometry` must not depend on the solver, and `kstep-constraints` has no notion of geometry, so a sketch --
+which joins both -- is a new module (the README already named it). It has no native code, which is why it is safe in
+the release zip (`verify-dist.sh` now checks it for native resources too). It exposes no `kstep-constraints` type
+(`implementation` dependency, own error types), so scripts need only `dev.kstep.sketch.*`; `kstep-script` depends on
+it with `api`, and the script default imports gained `dev.kstep.geometry.select.*` and `dev.kstep.sketch.*` (no name
+collides with the generated AP242 types or `kotlin.*`).
+
+=== Degrees of freedom are analysed in Kotlin, not by PlaneGCS
+
+The unknowns are the coordinates of the non-fixed points; every constraint contributes analytic residual rows
+(coincidence 2, all others 1). The Jacobian rank is computed by incremental Gram-Schmidt in INPUT ORDER, so the
+constraint that first makes the system dependent is the one reported (deterministic, explainable); the null space
+gives the points that can still move. PlaneGCS's own `diagnose` was rejected: it would add a native entry point on
+two platforms and the result would be the solver's, not independently checkable. The Kotlin analysis is verified
+against finite differences (`DofAnalysisTest`).
+
+`Sketch.solve()`:
+
+. *Before the solver:* rank at the start values. A redundant constraint is `OVER_CONSTRAINED` with the constraint
+  labels (a constraint between two fixed points carries no information and counts as redundant; an over-dimensioned slot in this wave's own test -- a horizontal on top of two points
+  already pinned by their arc radii -- was caught the same way). Free degrees of freedom with
+  `requireFullyConstrained = true` (the default) are `UNDER_CONSTRAINED`, naming the movable points. Both fail
+  without ever touching PlaneGCS, so they work in builds without the native bridge.
+. *Solve.* A sketch without free points skips the solver (PlaneGCS rejects an all-fixed system). A missing bridge is
+  `SketchSolverUnavailableException` ("... the release zip ships without native bridges").
+. *After the solver:* every constraint's residual is recomputed in Kotlin (tolerance `1e-6 * scale`); a violation is
+  `SOLVER_FAILED` even when the solver reported success. The rank is recomputed at the result.
+
+`toRegion()` finds loops by point identity (every profile point must join exactly two segments, else `NOT_CLOSED`
+naming the point), builds arc midpoints from centre, radius and direction, takes the loop of largest area as the
+outer contour and the others as holes, and maps validation errors to `INVALID_PROFILE`.
+
+Decisions that were open when this wave was planned, and how they were taken: unconstrained sketches are an error
+by default (consistent with "structured errors, never silent guessing"); circle and arc radii are fixed measures,
+not unknowns; the sketch is its own module; a sketch is solved once (see below); tracked edge history is included.
+
+== Script surface and error codes
+
+Failures arrive in scripts as exceptions; `KStepScriptHost` walks the cause chain (bounded to 8) and reports
+`KSTEP-S-009` (`SKETCH_SOLVER_UNAVAILABLE`), `KSTEP-S-010` (`SKETCH_INVALID`, message starts with the
+`SketchErrorKind`, details listed) and `KSTEP-S-011` (`EDGE_SELECTION_FAILED`, candidates in the message). The code
+is also the first token of the message, and `KStepScriptOutcome.RuntimeError` has a new `code` property (default
+`KSTEP-S-003`) that `--output json` prints. Numbers were checked against the existing S-001..S-008 and are only ever
+appended. No stack trace is surfaced (tests assert the absence of `\tat `).
+
+== Native bridge
+
+[cols="2,3"]
+|===
+| Function | Contract
+| `nativeShapeEdgeInfo` | 20 doubles per edge (kind, length, start/end/mid, direction or axis, circle centre, radius, seam, degenerated); `IllegalArgumentException` above 20 000 edges / 10 000 faces
+| `nativeShapeFaceInfo` | 12 doubles per face (kind, area, centroid, outward normal or axis, axis origin, radius)
+| `nativeShapeFaceEdges` | CSR face-to-edge adjacency
+| `native{Fillet,Chamfer}EdgesTracked`, `nativeBooleanOpTracked`, `nativeTransformShapeTracked` | the untracked function plus the encoded history in a holder slot
+| `nativeExtrudeRegion`, `nativeRevolveRegion` | region extrude/revolve with independent validation
+|===
+
+All readers run under `g_mutex`; `throwJava`, `NewIntArray`/`NewDoubleArray` and `registerShape` run outside it
+(the deadlock rule of ADR-0008). *No new OCCT toolkit:* `BRepAdaptor_Curve`/`BRepAdaptor_Surface` are in TKBRep,
+`GCPnts_AbscissaPoint` and `GC_MakeArcOfCircle` in TKGeomBase, `BRepBuilderAPI_MakeEdge`/`MakeWire` and `BRepGProp` in
+TKTopAlgo (checked with `nm -gU`; the link line is unchanged and links). Only APIs present in OCCT 7.8 and 7.9 are
+used.
+
+== Security
+
+[cols="1,3"]
+|===
+| Area | Measure
+| DoS | Query limits (20 000 edges, 10 000 faces), history payload (2 000 000 ints, checked natively and in
+`decodeEdgeHistory`), selector tree (depth 32, 256 nodes, validated iteratively so a deep tree cannot overflow the
+stack), region (64 loops, 512 segments; the pairwise hole test is pruned by bounding boxes), sketch (64 points, 128
+constraints, 128 segments, coordinates up to 1e7, names up to 64 printable ASCII characters), rank matrix at most
+256 x 128, candidate list in messages at most 32. Every limit is enforced in Kotlin and independently natively.
+| Hostile input | Decoders validate every length, count, index and kind before use and throw
+`IllegalStateException`; native entry points are exercised directly with hostile arrays
+(`OcctRegionExtrudeTest`, `OcctEdgeTrackingTest`, `OcctEdgeQueryTest`).
+| Resource leaks | `TrackedShape` is `AutoCloseable`; `trackedResult` closes the new shape if decoding fails; the
+rebuilder closes every shape on failure including `*WithHistory` results; there is no global history registry.
+| Concurrency | Every reader inside one critical section; no Java call under the lock.
+| Logging | No caller paths or data; messages contain geometry values and sanitised point names.
+| Licence | No new dependency.
+|===
+
+== Not covered / follow-up waves
+
+* Undo/redo.
+* Radius as a solver unknown and new constraint types (tangency, equal radius, angle): need new PlaneGCS constraint
+  kinds (C-Welle 3).
+* A `SketchFeature` in the geometry history that re-solves on rebuild. It would make `kstep-geometry` depend on
+  `kstep-constraints`; today parametrics go through "rebuild the sketch, `solve()`, `extrudeFeature`".
+* Persistent naming for edges generated by an operation (`Generated`), through revolve or extrude sources, or across
+  predicate-changing edits.
+* Several disjoint outer contours in one sketch, an inner contour touching the outer one, a `nearest(point)`
+  selector, selection of vertices and faces for operations.
+* Tracking through operations that report no usable history.
+
+== Consequences
+
+* A part can be described as dimensioned sketch plus geometric edge choices, with every failure a structured error
+  instead of a wrong solid.
+* `FeatureRebuilder` gained two planning/resolution steps; histories are computed only on tracked paths.
+* The release zip gains `kstep-sketch` and `kstep-constraints` jars without native resources; solving a sketch in it
+  fails with `KSTEP-S-009` and a hint (the same graceful path as every other native feature).
+
+== Verification
+
+Hand-computed, then measured (`OcctSelectedFilletChamferTest`, `OcctEdgeTrackingTest`, `OcctRegionExtrudeTest`,
+`PlaneGcsSketchSolveTest`, `OcctSketchExtrudeTest`, `CliExportSketchSelectionIntegrationTest`):
+
+[cols="3,2,1"]
+|===
+| Case | Volume (mm3) | Faces
+| 40x40x10 box, four vertical edges r=2 (selector) | 15965.664 | 10
+| same selection after widening to 60x40x10 | 23965.664 | 10
+| top-face edges chamfered 1 (frustum slab 1/3 (1600 + 1444 + 1520)) | 15921.333 | 10
+| block with 10x10 through-pocket | 15000 | 10
+| ... outer edges rounded via `TrackedEdges` | 14965.664 | 14
+| ... after widening to 60x40x10 | 22965.664 | 14
+| 40x20 plate, hole r=3, h=10 (region and sketch) | 7717.257 | 7
+| slot (10x10 + two r=5 arcs), h=10 | 1785.398 | 6
+| ring x 10..20, y 0..10, hole r=2 at (15,5), revolved 360 degrees (Pappus 2 pi 15 (100 - 4 pi)) | 8240.43 | 5
+|===
+
+`scripts/interop/verify-sketch-selection.sh` exports the four example scripts and reads each with OCCT's typed
+reader (`read status: RetDone`, 0 unknown entities, model check 0 fails) and FreeCAD (`Solid True`), with the same
+volumes and face counts as above (FreeCAD: 7717.257/7, 15965.664/10, 15921.333/10, 14965.664/14).
+
+Gate (2026-10-22, macOS arm64, OCCT 7.9.3): `./gradlew clean check -Pkstep.occt.require=true
+-Pkstep.planegcs.require=true --no-build-cache`, 1590 tests, 0 failures, 0 errors, 8 skipped (all inverse-gated or
+property-gated: the "fails predictably when the native bridge is unavailable" cases, the OCCT-absent import case
+and the optional glTF validator). Release-style build without native bridges (`clean check :kstep-cli:distZip` with
+non-existent OCCT/Eigen/Boost include dirs): 1590 tests, 0 failures, 289 skipped (native-gated), and
+`scripts/release/verify-dist.sh` passes on the resulting zip, which contains `kstep-sketch` and
+`kstep-constraints` jars without native resources. From that zip, `hello-sketch-unconstrained.kstep.kts` exits 1
+with `KSTEP-S-010`, and the sketch plate exits 1 with `KSTEP-S-009`, neither with a stack trace.

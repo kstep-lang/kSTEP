@@ -33,7 +33,7 @@ NATIVE="$(printf '%s\n' "$LIST" | grep -E '\.(so|dylib|dll)$' || true)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 unzip -q "$ZIP" -d "$TMP/x"
-for pat in kstep-geometry kstep-constraints; do
+for pat in kstep-geometry kstep-constraints kstep-sketch; do
   for jar in "$TMP/x/$ROOT/lib/$pat"-*.jar; do
     [ -f "$jar" ] || continue
     if unzip -Z1 "$jar" | grep -qE '^dev/kstep/[^/]+/native/'; then

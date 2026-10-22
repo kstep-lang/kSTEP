@@ -39,7 +39,22 @@
 #include <string>
 #include <unordered_map>
 
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeShape.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <GC_MakeArcOfCircle.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
+#include <GeomAbs_CurveType.hxx>
+#include <GeomAbs_SurfaceType.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Lin.hxx>
+#include <gp_Pln.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -569,6 +584,266 @@ bool postCheckSolid(JNIEnv* env, const TopoDS_Shape& shape, const char* fnName, 
 }
 
 }  // namespace
+
+// ------------------------------------------------------------------------------------------
+// Welle L (stable edge selection + sketch regions). See docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc.
+// Hand-synchronized with dev.kstep.geometry.OcctKernel's MAX_QUERY_EDGES/MAX_QUERY_FACES and with
+// dev.kstep.geometry.ProfileRegion's limits.
+// ------------------------------------------------------------------------------------------
+constexpr int kMaxQueryEdges = 20000;
+constexpr int kMaxQueryFaces = 10000;
+constexpr int kEdgeRecord = 20;
+constexpr int kFaceRecord = 12;
+constexpr size_t kMaxHistoryInts = 2000000;
+constexpr int kMaxRegionLoops = 64;
+constexpr int kMaxRegionSegments = 512;
+constexpr int kSegmentRecord = 6;
+constexpr double kRegionContinuityTolerance = 1e-7;
+constexpr int kFateKept = 0;
+constexpr int kFateModified = 1;
+constexpr int kFateDeleted = 2;
+constexpr int kFateLost = 3;
+
+/**
+ * Encodes, per operand edge, what the modelling algorithm `maker` did to it, expressed as 0-based
+ * indices into the edge map of `result` (`TopExp::MapShapes(result, TopAbs_EDGE)`; that order is
+ * deterministic for one TopoDS_Shape, and `result` is exactly the shape later registered).
+ * Layout: [operandCount, (edgeCount, {status, imageCount, images...}*)*].
+ * MUST run while g_mutex is held (operands and result share TShapes with registry shapes).
+ * Returns false if the encoding would exceed kMaxHistoryInts. Never throws a Java exception.
+ */
+bool encodeEdgeHistory(
+    BRepBuilderAPI_MakeShape& maker, const std::vector<const TopoDS_Shape*>& operands, const TopoDS_Shape& result,
+    std::vector<jint>& out) {
+    TopTools_IndexedMapOfShape resultEdges;
+    TopExp::MapShapes(result, TopAbs_EDGE, resultEdges);
+    out.clear();
+    out.push_back(static_cast<jint>(operands.size()));
+    for (const TopoDS_Shape* operand : operands) {
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(*operand, TopAbs_EDGE, edges);
+        out.push_back(static_cast<jint>(edges.Extent()));
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            const TopoDS_Shape& edge = edges(i);
+            std::vector<jint> images;
+            int status = kFateLost;
+            // Order matters: BRepFilletAPI_MakeFillet/MakeChamfer report IsDeleted()==true for edges
+            // that are in fact still present in the result (verified on a box with one filleted edge:
+            // 8 of 12 edges were "deleted" although 7 of them survive), so IsDeleted() is consulted
+            // only when the edge has neither a recorded successor nor survives by identity.
+            const TopTools_ListOfShape& modified = maker.Modified(edge);
+            for (TopTools_ListIteratorOfListOfShape it(modified); it.More(); it.Next()) {
+                if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+                int idx = resultEdges.FindIndex(it.Value());
+                if (idx > 0) {
+                    jint image = static_cast<jint>(idx - 1);
+                    bool seen = false;
+                    for (jint known : images) seen = seen || known == image;
+                    if (!seen) images.push_back(image);
+                }
+            }
+            if (!images.empty()) {
+                status = kFateModified;
+            } else if (modified.IsEmpty()) {
+                int idx = resultEdges.FindIndex(edge);
+                if (idx > 0) {
+                    status = kFateKept;
+                    images.push_back(static_cast<jint>(idx - 1));
+                } else if (maker.IsDeleted(edge)) {
+                    status = kFateDeleted;
+                }
+            } else if (maker.IsDeleted(edge)) {
+                status = kFateDeleted;
+            }
+            out.push_back(status);
+            out.push_back(static_cast<jint>(images.size()));
+            for (jint image : images) out.push_back(image);
+            if (out.size() > kMaxHistoryInts) return false;
+        }
+    }
+    return true;
+}
+
+/** Copies `history` into a new jintArray stored at outHistory[0]. Returns false with a pending JVM exception. */
+bool publishHistory(JNIEnv* env, jobjectArray outHistory, const std::vector<jint>& history) {
+    jintArray arr = env->NewIntArray(static_cast<jsize>(history.size()));
+    if (arr == nullptr) return false;
+    env->SetIntArrayRegion(arr, 0, static_cast<jsize>(history.size()), history.data());
+    if (env->ExceptionCheck()) return false;
+    env->SetObjectArrayElement(outHistory, 0, arr);
+    env->DeleteLocalRef(arr);
+    return !env->ExceptionCheck();
+}
+
+/** Validates the out-holder of a *Tracked entry point. Returns false with a pending exception. */
+bool checkHistoryHolder(JNIEnv* env, jobjectArray outHistory, const char* fnName) {
+    const std::string fn(fnName);
+    if (outHistory == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", fn + ": outHistory must not be null");
+        return false;
+    }
+    if (env->GetArrayLength(outHistory) < 1) {
+        throwJava(env, "java/lang/IllegalArgumentException", fn + ": outHistory must have at least one slot");
+        return false;
+    }
+    return true;
+}
+
+/** One parsed sketch-region loop; samples are a polygon approximation used for orientation/axis checks. */
+struct RegionLoop {
+    TopoDS_Wire wire;
+    double signedArea = 0.0;
+    std::vector<gp_Pnt> samples;
+};
+
+/**
+ * Validates and builds the planar face (XY plane) of a region: an outer loop plus optional holes.
+ * Layout: loopSizes[l] = segment count of loop l; segKinds[s] in {0 line, 1 arc, 2 circle};
+ * segData has kSegmentRecord doubles per segment (line: x1 y1 x2 y2; arc: x1 y1 xm ym x2 y2;
+ * circle: cx cy r). Loop 0 is the outer contour. Orientation is normalised natively (outer CCW,
+ * holes CW). `allSamples` receives every sampled boundary point (for the revolve axis check).
+ * Error texts use IllegalArgumentException; returns false with a pending exception.
+ */
+bool buildRegionFace(
+    JNIEnv* env, jintArray loopSizesArr, jintArray segKindsArr, jdoubleArray segDataArr, const char* fnName,
+    TopoDS_Face& out, std::vector<gp_Pnt>& allSamples) {
+    const std::string fn(fnName);
+    auto fail = [&](const std::string& msg) {
+        throwJava(env, "java/lang/IllegalArgumentException", fn + ": " + msg);
+        return false;
+    };
+    if (loopSizesArr == nullptr || segKindsArr == nullptr || segDataArr == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", fn + ": region arrays must not be null");
+        return false;
+    }
+    jsize loopCount = env->GetArrayLength(loopSizesArr);
+    jsize segCount = env->GetArrayLength(segKindsArr);
+    jsize dataLength = env->GetArrayLength(segDataArr);
+    if (loopCount < 1 || loopCount > kMaxRegionLoops) {
+        return fail("region must have between 1 and " + std::to_string(kMaxRegionLoops) + " loops, got " + std::to_string(loopCount));
+    }
+    if (segCount < 1 || segCount > kMaxRegionSegments) {
+        return fail(
+            "region must have between 1 and " + std::to_string(kMaxRegionSegments) + " segments, got " +
+            std::to_string(segCount));
+    }
+    if (static_cast<long long>(dataLength) != static_cast<long long>(segCount) * kSegmentRecord) {
+        return fail("segData length must be " + std::to_string(kSegmentRecord) + " x segment count");
+    }
+    std::vector<jint> loopSizes(loopCount);
+    std::vector<jint> kinds(segCount);
+    std::vector<double> data(dataLength);
+    env->GetIntArrayRegion(loopSizesArr, 0, loopCount, loopSizes.data());
+    env->GetIntArrayRegion(segKindsArr, 0, segCount, kinds.data());
+    env->GetDoubleArrayRegion(segDataArr, 0, dataLength, data.data());
+    if (env->ExceptionCheck()) return false;
+    long long total = 0;
+    for (jint size : loopSizes) {
+        if (size < 1) return fail("every loop must have at least one segment");
+        total += size;
+    }
+    if (total != segCount) return fail("loop sizes must sum to the segment count");
+    for (double v : data) {
+        if (!std::isfinite(v) || std::abs(v) > kMaxAbsCoordinate) {
+            return fail("segment data must be finite and within +/-" + std::to_string(kMaxAbsCoordinate));
+        }
+    }
+
+    std::vector<RegionLoop> loops;
+    int segIndex = 0;
+    for (jsize l = 0; l < loopCount; ++l) {
+        RegionLoop loop;
+        BRepBuilderAPI_MakeWire wireMaker;
+        const int n = loopSizes[l];
+        gp_Pnt firstStart;
+        gp_Pnt previousEnd;
+        for (int k = 0; k < n; ++k, ++segIndex) {
+            const double* d = &data[static_cast<size_t>(segIndex) * kSegmentRecord];
+            const int kind = kinds[segIndex];
+            if (kind == 2) {
+                if (n != 1) return fail("a circle segment must be the only segment of its loop");
+                double r = d[2];
+                if (r < kMinDimension || r > kMaxDimension) {
+                    return fail("circle radius must be within [" + std::to_string(kMinDimension) + ", " + std::to_string(kMaxDimension) + "]");
+                }
+                gp_Circ circ(gp_Ax2(gp_Pnt(d[0], d[1], 0.0), gp::DZ()), r);
+                BRepBuilderAPI_MakeEdge edgeMaker(circ);
+                if (!edgeMaker.IsDone()) return fail("failed to build a circle edge");
+                wireMaker.Add(edgeMaker.Edge());
+                for (int i = 0; i < 32; ++i) {
+                    double a = 2.0 * M_PI * i / 32.0;
+                    loop.samples.push_back(gp_Pnt(d[0] + r * std::cos(a), d[1] + r * std::sin(a), 0.0));
+                }
+                firstStart = gp_Pnt(d[0] + r, d[1], 0.0);
+                previousEnd = firstStart;
+            } else if (kind == 0 || kind == 1) {
+                gp_Pnt a(d[0], d[1], 0.0);
+                gp_Pnt b = kind == 0 ? gp_Pnt(d[2], d[3], 0.0) : gp_Pnt(d[4], d[5], 0.0);
+                if (k == 0) {
+                    firstStart = a;
+                } else if (a.Distance(previousEnd) > kRegionContinuityTolerance) {
+                    return fail("loop " + std::to_string(l) + " is not continuous at segment " + std::to_string(k));
+                }
+                if (a.Distance(b) <= Precision::Confusion()) {
+                    return fail("segment " + std::to_string(segIndex) + " has coincident start and end");
+                }
+                if (kind == 0) {
+                    BRepBuilderAPI_MakeEdge edgeMaker(a, b);
+                    if (!edgeMaker.IsDone()) return fail("failed to build a line edge");
+                    wireMaker.Add(edgeMaker.Edge());
+                    loop.samples.push_back(a);
+                } else {
+                    gp_Pnt m(d[2], d[3], 0.0);
+                    GC_MakeArcOfCircle arcMaker(a, m, b);
+                    if (!arcMaker.IsDone()) return fail("segment " + std::to_string(segIndex) + " is not a valid three-point arc (collinear points?)");
+                    Handle(Geom_TrimmedCurve) arc = arcMaker.Value();
+                    BRepBuilderAPI_MakeEdge edgeMaker(arc, arc->FirstParameter(), arc->LastParameter());
+                    if (!edgeMaker.IsDone()) return fail("failed to build an arc edge");
+                    wireMaker.Add(edgeMaker.Edge());
+                    for (int i = 0; i < 16; ++i) {
+                        double u = arc->FirstParameter() + (arc->LastParameter() - arc->FirstParameter()) * i / 16.0;
+                        loop.samples.push_back(arc->Value(u));
+                    }
+                }
+                previousEnd = b;
+            } else {
+                return fail("segment kind must be 0 (line), 1 (arc) or 2 (circle), got " + std::to_string(kind));
+            }
+        }
+        if (n > 1 && previousEnd.Distance(firstStart) > kRegionContinuityTolerance) {
+            return fail("loop " + std::to_string(l) + " is not closed");
+        }
+        if (!wireMaker.IsDone()) {
+            return fail("failed to assemble loop " + std::to_string(l) + " into a wire (BRepBuilderAPI_WireError=" + std::to_string(static_cast<int>(wireMaker.Error())) + ")");
+        }
+        loop.wire = wireMaker.Wire();
+        double area = 0.0;
+        for (size_t i = 0; i < loop.samples.size(); ++i) {
+            const gp_Pnt& p = loop.samples[i];
+            const gp_Pnt& q = loop.samples[(i + 1) % loop.samples.size()];
+            area += p.X() * q.Y() - q.X() * p.Y();
+        }
+        loop.signedArea = area / 2.0;
+        if (std::abs(loop.signedArea) <= 1e-12) return fail("loop " + std::to_string(l) + " encloses no area");
+        for (const gp_Pnt& p : loop.samples) allSamples.push_back(p);
+        loops.push_back(std::move(loop));
+    }
+    // Outer contour counter-clockwise (face normal +Z), holes clockwise.
+    TopoDS_Wire outer = loops[0].wire;
+    if (loops[0].signedArea < 0.0) outer.Reverse();
+    BRepBuilderAPI_MakeFace faceMaker(outer, Standard_True);
+    if (!faceMaker.IsDone()) {
+        return fail("failed to build a planar face from the outer loop (BRepBuilderAPI_FaceError=" + std::to_string(static_cast<int>(faceMaker.Error())) + ")");
+    }
+    for (size_t l = 1; l < loops.size(); ++l) {
+        TopoDS_Wire hole = loops[l].wire;
+        if (loops[l].signedArea > 0.0) hole.Reverse();
+        faceMaker.Add(hole);
+    }
+    if (!faceMaker.IsDone()) return fail("failed to add a hole loop to the face");
+    out = faceMaker.Face();
+    return true;
+}
 
 extern "C" {
 
@@ -1241,9 +1516,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfile(
     return 0;
 }
 
-JNIEXPORT jlong JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
-    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble radius) {
+static jlong filletEdgesImpl(
+    JNIEnv* env, jlong handle, jintArray edgeIndices, jdouble radius, jobjectArray outHistory) {
     if (edgeIndices == nullptr) {
         throwJava(env, "java/lang/NullPointerException", "nativeFilletEdges: edgeIndices must not be null");
         return 0;
@@ -1281,6 +1555,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
         int edgeCount = 0;
         bool built = false;
         SolidCheckResult check;
+        std::vector<jint> history;
+        bool historyTooLarge = false;
         // Result lives here, on the stack, as a plain local -- deliberately NOT registered while
         // g_mutex is held. registerShape() itself takes g_mutex (see its definition above), and
         // g_mutex is a plain, non-recursive std::mutex: calling registerShape() from inside the
@@ -1329,6 +1605,9 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
                             built = true;
                             // Shares TShapes with the registered operand: check under g_mutex.
                             check = runSolidChecks(result);
+                            if (outHistory != nullptr) {
+                                historyTooLarge = !encodeEdgeHistory(filletMaker, {shape}, result, history);
+                            }
                         }
                     }
                 }
@@ -1380,6 +1659,13 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
             throwJava(env, "java/lang/IllegalStateException", "nativeFilletEdges: resulting solid has zero volume");
             return 0;
         }
+        if (historyTooLarge) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeFilletEdges: edge history exceeds the size limit");
+            return 0;
+        }
+        if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
+            return 0;
+        }
 
         return registerShape(std::move(result));
     } catch (const Standard_Failure& e) {
@@ -1393,6 +1679,21 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
     return 0;
 }
 
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble radius) {
+    return filletEdgesImpl(env, handle, edgeIndices, radius, nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdgesTracked(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble radius, jobjectArray outHistory) {
+    if (!checkHistoryHolder(env, outHistory, "nativeFilletEdgesTracked")) {
+        return 0;
+    }
+    return filletEdgesImpl(env, handle, edgeIndices, radius, outHistory);
+}
+
 // ------------------------------------------------------------------------------------------
 // Welle J: transform, cylinder, booleans, revolve, chamfer. See
 // docs/adr/ADR-0029-geometry-operations.adoc. Every function follows the invariants documented
@@ -1401,9 +1702,7 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdges(
 // registered on any failure path.
 // ------------------------------------------------------------------------------------------
 
-JNIEXPORT jlong JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeTransformShape(
-    JNIEnv* env, jobject /*self*/, jlong handle, jdoubleArray matrix12) {
+static jlong transformShapeImpl(JNIEnv* env, jlong handle, jdoubleArray matrix12, jobjectArray outHistory) {
     if (matrix12 == nullptr) {
         throwJava(env, "java/lang/NullPointerException", "nativeTransformShape: matrix must not be null");
         return 0;
@@ -1471,6 +1770,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeTransformShape(
 
     try {
         bool found = false;
+        bool historyTooLarge = false;
+        std::vector<jint> history;
         TopoDS_Shape result;
         {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -1481,10 +1782,20 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeTransformShape(
                 trsf.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
                 BRepBuilderAPI_Transform transformer(*shape, trsf, Standard_True);
                 result = TopoDS_Shape(transformer.Shape());
+                if (outHistory != nullptr) {
+                    historyTooLarge = !encodeEdgeHistory(transformer, {shape}, result, history);
+                }
             }
         }  // g_mutex released here
         if (!found) {
             throwUnknownHandle(env, handle);
+            return 0;
+        }
+        if (historyTooLarge) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeTransformShape: edge history exceeds the size limit");
+            return 0;
+        }
+        if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
             return 0;
         }
         return registerShape(std::move(result));
@@ -1497,6 +1808,21 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeTransformShape(
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error transforming shape");
     }
     return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeTransformShape(
+    JNIEnv* env, jobject /*self*/, jlong handle, jdoubleArray matrix12) {
+    return transformShapeImpl(env, handle, matrix12, nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeTransformShapeTracked(
+    JNIEnv* env, jobject /*self*/, jlong handle, jdoubleArray matrix12, jobjectArray outHistory) {
+    if (!checkHistoryHolder(env, outHistory, "nativeTransformShapeTracked")) {
+        return 0;
+    }
+    return transformShapeImpl(env, handle, matrix12, outHistory);
 }
 
 JNIEXPORT jlong JNICALL
@@ -1550,8 +1876,7 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeMakeCylinder(
     return 0;
 }
 
-JNIEXPORT jlong JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOp(JNIEnv* env, jobject /*self*/, jint op, jlong left, jlong right) {
+static jlong booleanOpImpl(JNIEnv* env, jint op, jlong left, jlong right, jobjectArray outHistory) {
     if (op < 0 || op > 2) {
         throwJava(
             env, "java/lang/IllegalArgumentException",
@@ -1570,6 +1895,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOp(JNIEnv* env, jobject /*s
         int shells = 0;
         double volume = 0.0;
         SolidCheckResult check;
+        std::vector<jint> history;
+        bool historyTooLarge = false;
         TopoDS_Shape result;
         {
             // BOTH lookups and the whole boolean run in ONE critical section (left == right is
@@ -1631,6 +1958,9 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOp(JNIEnv* env, jobject /*s
                             shells = countShells(result);
                             if (shells == 1 && volume > Precision::Confusion()) {
                                 check = runSolidChecks(result);
+                                if (outHistory != nullptr) {
+                                    historyTooLarge = !encodeEdgeHistory(*algo, {a, b}, result, history);
+                                }
                             }
                         }
                     }
@@ -1687,6 +2017,13 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOp(JNIEnv* env, jobject /*s
             throwJava(env, "java/lang/IllegalStateException", "nativeBooleanOp: resulting solid has zero volume");
             return 0;
         }
+        if (historyTooLarge) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeBooleanOp: edge history exceeds the size limit");
+            return 0;
+        }
+        if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
+            return 0;
+        }
         return registerShape(std::move(result));
     } catch (const Standard_Failure& e) {
         throwJava(
@@ -1697,6 +2034,20 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOp(JNIEnv* env, jobject /*s
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error in boolean operation");
     }
     return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOp(JNIEnv* env, jobject /*self*/, jint op, jlong left, jlong right) {
+    return booleanOpImpl(env, op, left, right, nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOpTracked(
+    JNIEnv* env, jobject /*self*/, jint op, jlong left, jlong right, jobjectArray outHistory) {
+    if (!checkHistoryHolder(env, outHistory, "nativeBooleanOpTracked")) {
+        return 0;
+    }
+    return booleanOpImpl(env, op, left, right, outHistory);
 }
 
 JNIEXPORT jlong JNICALL
@@ -1781,9 +2132,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveProfile(
     return 0;
 }
 
-JNIEXPORT jlong JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdges(
-    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble distance) {
+static jlong chamferEdgesImpl(
+    JNIEnv* env, jlong handle, jintArray edgeIndices, jdouble distance, jobjectArray outHistory) {
     if (edgeIndices == nullptr) {
         throwJava(env, "java/lang/NullPointerException", "nativeChamferEdges: edgeIndices must not be null");
         return 0;
@@ -1818,6 +2168,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdges(
         int edgeCount = 0;
         bool built = false;
         SolidCheckResult check;
+        std::vector<jint> history;
+        bool historyTooLarge = false;
         TopoDS_Shape result;
         {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -1850,6 +2202,9 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdges(
                             built = true;
                             // Shares TShapes with the registered operand: check under g_mutex.
                             check = runSolidChecks(result);
+                            if (outHistory != nullptr) {
+                                historyTooLarge = !encodeEdgeHistory(chamferMaker, {shape}, result, history);
+                            }
                         }
                     }
                 }
@@ -1890,6 +2245,13 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdges(
             throwJava(env, "java/lang/IllegalStateException", "nativeChamferEdges: resulting solid has zero volume");
             return 0;
         }
+        if (historyTooLarge) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeChamferEdges: edge history exceeds the size limit");
+            return 0;
+        }
+        if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
+            return 0;
+        }
         return registerShape(std::move(result));
     } catch (const Standard_Failure& e) {
         throwJava(
@@ -1900,6 +2262,21 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdges(
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error building chamfer");
     }
     return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdges(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble distance) {
+    return chamferEdgesImpl(env, handle, edgeIndices, distance, nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdgesTracked(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble distance, jobjectArray outHistory) {
+    if (!checkHistoryHolder(env, outHistory, "nativeChamferEdgesTracked")) {
+        return 0;
+    }
+    return chamferEdgesImpl(env, handle, edgeIndices, distance, outHistory);
 }
 
 // ------------------------------------------------------------------------------------------
@@ -2551,6 +2928,351 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeBoundingBox(JNIEnv* env, jobj
     if (result == nullptr) return nullptr;
     if (!isVoid) env->SetDoubleArrayRegion(result, 0, 6, box);
     return result;
+}
+
+// ------------------------------------------------------------------------------------------
+// Welle L: edge/face geometry queries and sketch regions. See ADR-0031. Same invariants as the
+// rest of this file: every dereference of a registry shape inside ONE g_mutex critical section;
+// throwJava()/NewXArray()/registerShape() only OUTSIDE it; nothing is registered on a failure path.
+// Edge order = TopExp::MapShapes(TopAbs_EDGE), face order = MapShapes(TopAbs_FACE).
+// ------------------------------------------------------------------------------------------
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeEdgeInfo(JNIEnv* env, jobject /*self*/, jlong handle) {
+    bool found = false;
+    bool tooMany = false;
+    int edgeCount = 0;
+    std::vector<double> rec;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape != nullptr) {
+            found = true;
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(*shape, TopAbs_EDGE, edges);
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+            edgeCount = edges.Extent();
+            if (edgeCount > kMaxQueryEdges || faces.Extent() > kMaxQueryFaces) {
+                tooMany = true;
+            } else {
+                std::vector<double> seam(static_cast<size_t>(edgeCount), 0.0);
+                for (int f = 1; f <= faces.Extent(); ++f) {
+                    const TopoDS_Face face = TopoDS::Face(faces(f));
+                    TopTools_IndexedMapOfShape local;
+                    TopExp::MapShapes(face, TopAbs_EDGE, local);
+                    for (int i = 1; i <= local.Extent(); ++i) {
+                        const TopoDS_Edge e = TopoDS::Edge(local(i));
+                        if (BRep_Tool::IsClosed(e, face)) {
+                            int idx = edges.FindIndex(e);
+                            if (idx > 0) seam[static_cast<size_t>(idx - 1)] = 1.0;
+                        }
+                    }
+                }
+                rec.assign(static_cast<size_t>(edgeCount) * kEdgeRecord, 0.0);
+                for (int i = 1; i <= edgeCount; ++i) {
+                    double* r = &rec[static_cast<size_t>(i - 1) * kEdgeRecord];
+                    const TopoDS_Edge e = TopoDS::Edge(edges(i));
+                    r[18] = seam[static_cast<size_t>(i - 1)];
+                    if (BRep_Tool::Degenerated(e)) {
+                        r[0] = 2.0;
+                        r[19] = 1.0;
+                        continue;
+                    }
+                    BRepAdaptor_Curve curve(e);
+                    const double first = curve.FirstParameter();
+                    const double last = curve.LastParameter();
+                    gp_Pnt s = curve.Value(first);
+                    gp_Pnt t = curve.Value(last);
+                    gp_Pnt m = curve.Value((first + last) / 2.0);
+                    r[1] = GCPnts_AbscissaPoint::Length(curve);
+                    r[2] = s.X(); r[3] = s.Y(); r[4] = s.Z();
+                    r[5] = t.X(); r[6] = t.Y(); r[7] = t.Z();
+                    r[8] = m.X(); r[9] = m.Y(); r[10] = m.Z();
+                    if (curve.GetType() == GeomAbs_Line) {
+                        r[0] = 0.0;
+                        gp_Vec v(s, t);
+                        if (v.Magnitude() > Precision::Confusion()) {
+                            v.Normalize();
+                            r[11] = v.X(); r[12] = v.Y(); r[13] = v.Z();
+                        }
+                    } else if (curve.GetType() == GeomAbs_Circle) {
+                        r[0] = 1.0;
+                        gp_Circ c = curve.Circle();
+                        gp_Dir axis = c.Axis().Direction();
+                        r[11] = axis.X(); r[12] = axis.Y(); r[13] = axis.Z();
+                        r[14] = c.Location().X(); r[15] = c.Location().Y(); r[16] = c.Location().Z();
+                        r[17] = c.Radius();
+                    } else {
+                        r[0] = 2.0;
+                    }
+                }
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error reading edge info: ") + e.GetMessageString());
+        return nullptr;
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error reading edge info: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error reading edge info");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    if (tooMany) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeShapeEdgeInfo: shape exceeds the query limits (" + std::to_string(kMaxQueryEdges) + " edges / " +
+                std::to_string(kMaxQueryFaces) + " faces)");
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(rec.size()));
+    if (result == nullptr) return nullptr;
+    if (!rec.empty()) env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(rec.size()), rec.data());
+    return result;
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeFaceInfo(JNIEnv* env, jobject /*self*/, jlong handle) {
+    bool found = false;
+    bool tooMany = false;
+    std::vector<double> rec;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape != nullptr) {
+            found = true;
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+            if (faces.Extent() > kMaxQueryFaces) {
+                tooMany = true;
+            } else {
+                rec.assign(static_cast<size_t>(faces.Extent()) * kFaceRecord, 0.0);
+                for (int i = 1; i <= faces.Extent(); ++i) {
+                    double* r = &rec[static_cast<size_t>(i - 1) * kFaceRecord];
+                    const TopoDS_Face face = TopoDS::Face(faces(i));
+                    BRepAdaptor_Surface surf(face);
+                    GProp_GProps props;
+                    BRepGProp::SurfaceProperties(face, props);
+                    r[1] = props.Mass();
+                    gp_Pnt c = props.CentreOfMass();
+                    r[2] = c.X(); r[3] = c.Y(); r[4] = c.Z();
+                    if (surf.GetType() == GeomAbs_Plane) {
+                        r[0] = 0.0;
+                        gp_Dir n = surf.Plane().Axis().Direction();
+                        double sign = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
+                        r[5] = sign * n.X(); r[6] = sign * n.Y(); r[7] = sign * n.Z();
+                    } else if (surf.GetType() == GeomAbs_Cylinder) {
+                        r[0] = 1.0;
+                        gp_Cylinder cyl = surf.Cylinder();
+                        gp_Dir a = cyl.Axis().Direction();
+                        r[5] = a.X(); r[6] = a.Y(); r[7] = a.Z();
+                        r[8] = cyl.Location().X(); r[9] = cyl.Location().Y(); r[10] = cyl.Location().Z();
+                        r[11] = cyl.Radius();
+                    } else {
+                        r[0] = 2.0;
+                    }
+                }
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error reading face info: ") + e.GetMessageString());
+        return nullptr;
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error reading face info: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error reading face info");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    if (tooMany) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeShapeFaceInfo: shape has more than " + std::to_string(kMaxQueryFaces) + " faces");
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(rec.size()));
+    if (result == nullptr) return nullptr;
+    if (!rec.empty()) env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(rec.size()), rec.data());
+    return result;
+}
+
+/** CSR layout: [faceCount, offsets (faceCount+1)..., edge indices...] into the global edge map. */
+JNIEXPORT jintArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeFaceEdges(JNIEnv* env, jobject /*self*/, jlong handle) {
+    bool found = false;
+    bool tooMany = false;
+    std::vector<jint> csr;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape != nullptr) {
+            found = true;
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(*shape, TopAbs_EDGE, edges);
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+            if (edges.Extent() > kMaxQueryEdges || faces.Extent() > kMaxQueryFaces) {
+                tooMany = true;
+            } else {
+                std::vector<jint> offsets;
+                std::vector<jint> indices;
+                offsets.push_back(0);
+                for (int f = 1; f <= faces.Extent(); ++f) {
+                    TopTools_IndexedMapOfShape local;
+                    TopExp::MapShapes(faces(f), TopAbs_EDGE, local);
+                    for (int i = 1; i <= local.Extent(); ++i) {
+                        int idx = edges.FindIndex(local(i));
+                        if (idx > 0) indices.push_back(static_cast<jint>(idx - 1));
+                    }
+                    offsets.push_back(static_cast<jint>(indices.size()));
+                }
+                csr.push_back(static_cast<jint>(faces.Extent()));
+                csr.insert(csr.end(), offsets.begin(), offsets.end());
+                csr.insert(csr.end(), indices.begin(), indices.end());
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error reading face edges: ") + e.GetMessageString());
+        return nullptr;
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error reading face edges: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error reading face edges");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    if (tooMany) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeShapeFaceEdges: shape exceeds the query limits (" + std::to_string(kMaxQueryEdges) + " edges / " +
+                std::to_string(kMaxQueryFaces) + " faces)");
+        return nullptr;
+    }
+    jintArray result = env->NewIntArray(static_cast<jsize>(csr.size()));
+    if (result == nullptr) return nullptr;
+    env->SetIntArrayRegion(result, 0, static_cast<jsize>(csr.size()), csr.data());
+    return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeRegion(
+    JNIEnv* env, jobject /*self*/, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble height) {
+    if (!std::isfinite(height) || std::abs(height) <= kMinDimension || std::abs(height) > kMaxDimension) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeExtrudeRegion: height magnitude must be finite and within (" + std::to_string(kMinDimension) + ", " +
+                std::to_string(kMaxDimension) + "], got " + std::to_string(height));
+        return 0;
+    }
+    try {
+        TopoDS_Face face;
+        std::vector<gp_Pnt> samples;
+        if (!buildRegionFace(env, loopSizes, segKinds, segData, "nativeExtrudeRegion", face, samples)) {
+            return 0;
+        }
+        BRepPrimAPI_MakePrism prismMaker(face, gp_Vec(0.0, 0.0, height));
+        prismMaker.Build();
+        if (!prismMaker.IsDone()) {
+            throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakePrism did not complete");
+            return 0;
+        }
+        TopoDS_Shape result(prismMaker.Shape());
+        if (!postCheckSolid(env, result, "nativeExtrudeRegion", "java/lang/IllegalArgumentException")) {
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error extruding region: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error extruding region: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error extruding region");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveRegion(
+    JNIEnv* env, jobject /*self*/, jintArray loopSizes, jintArray segKinds, jdoubleArray segData, jdouble angleDeg,
+    jint axis) {
+    if (!std::isfinite(angleDeg) || angleDeg < kMinRevolveAngleDeg || angleDeg > kMaxRevolveAngleDeg) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeRevolveRegion: angle must be finite and within [" + std::to_string(kMinRevolveAngleDeg) + ", " +
+                std::to_string(kMaxRevolveAngleDeg) + "] degrees, got " + std::to_string(angleDeg));
+        return 0;
+    }
+    if (axis != 0 && axis != 1) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeRevolveRegion: axis must be 0 (X) or 1 (Y), got " + std::to_string(axis));
+        return 0;
+    }
+    try {
+        TopoDS_Face face;
+        std::vector<gp_Pnt> samples;
+        if (!buildRegionFace(env, loopSizes, segKinds, segData, "nativeRevolveRegion", face, samples)) {
+            return 0;
+        }
+        bool anyPositive = false;
+        bool anyNegative = false;
+        for (const gp_Pnt& p : samples) {
+            double c = axis == 1 ? p.X() : p.Y();
+            if (c > 1e-9) anyPositive = true;
+            if (c < -1e-9) anyNegative = true;
+        }
+        if (anyPositive && anyNegative) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                std::string("nativeRevolveRegion: region crosses the rotation axis (all ") + (axis == 1 ? "x" : "y") +
+                    " coordinates must have the same sign)");
+            return 0;
+        }
+        gp_Ax1 rotationAxis(gp::Origin(), axis == 1 ? gp::DY() : gp::DX());
+        bool full = std::abs(angleDeg - 360.0) <= 1e-9;
+        TopoDS_Shape result;
+        if (full) {
+            BRepPrimAPI_MakeRevol maker(face, rotationAxis);
+            maker.Build();
+            if (!maker.IsDone()) {
+                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
+                return 0;
+            }
+            result = TopoDS_Shape(maker.Shape());
+        } else {
+            BRepPrimAPI_MakeRevol maker(face, rotationAxis, angleDeg * M_PI / 180.0);
+            maker.Build();
+            if (!maker.IsDone()) {
+                throwJava(env, "java/lang/IllegalStateException", "BRepPrimAPI_MakeRevol did not complete");
+                return 0;
+            }
+            result = TopoDS_Shape(maker.Shape());
+        }
+        if (!postCheckSolid(env, result, "nativeRevolveRegion", "java/lang/IllegalArgumentException")) {
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error revolving region: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error revolving region: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error revolving region");
+    }
+    return 0;
 }
 
 }  // extern "C"

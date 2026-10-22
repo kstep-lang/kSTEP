@@ -1,6 +1,10 @@
 package dev.kstep.geometry
 
 import dev.kstep.geometry.occt.OcctBridge
+import dev.kstep.geometry.select.EdgeInfo
+import dev.kstep.geometry.select.FaceInfo
+import dev.kstep.geometry.select.decodeEdgeInfo
+import dev.kstep.geometry.select.decodeFaceInfo
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.lang.ref.Cleaner
 import java.lang.ref.Reference
@@ -93,6 +97,45 @@ class OcctShape internal constructor(
     private val volumeValue: Double by lazy {
         try {
             OcctBridge.nativeShapeVolume(handle)
+        } finally {
+            // See topologyValue's KDoc above -- same use-after-free hazard, same fix.
+            Reference.reachabilityFence(this)
+        }
+    }
+
+    /**
+     * Geometry of every edge, in the same order [OcctKernel.fillet]/[OcctKernel.chamfer] index
+     * edges (computed on first access and cached). Welle L, ADR-0031.
+     *
+     * @throws IllegalStateException if this shape is already [close]d.
+     * @throws IllegalArgumentException if the shape exceeds [OcctKernel.MAX_QUERY_EDGES] /
+     *   [OcctKernel.MAX_QUERY_FACES].
+     */
+    val edges: List<EdgeInfo>
+        get() {
+            checkOpen()
+            return geometryValue.first
+        }
+
+    /**
+     * Geometry of every face (computed on first access and cached). Welle L, ADR-0031.
+     *
+     * @throws IllegalStateException if this shape is already [close]d.
+     * @throws IllegalArgumentException if the shape exceeds the query limits.
+     */
+    val faces: List<FaceInfo>
+        get() {
+            checkOpen()
+            return geometryValue.second
+        }
+
+    private val geometryValue: Pair<List<EdgeInfo>, List<FaceInfo>> by lazy {
+        try {
+            val edgeRaw = OcctBridge.nativeShapeEdgeInfo(handle)
+            val faceRaw = OcctBridge.nativeShapeFaceInfo(handle)
+            val adjacency = OcctBridge.nativeShapeFaceEdges(handle)
+            val edgeInfos = decodeEdgeInfo(edgeRaw, adjacency)
+            Pair(edgeInfos, decodeFaceInfo(faceRaw, adjacency, edgeInfos.size))
         } finally {
             // See topologyValue's KDoc above -- same use-after-free hazard, same fix.
             Reference.reachabilityFence(this)

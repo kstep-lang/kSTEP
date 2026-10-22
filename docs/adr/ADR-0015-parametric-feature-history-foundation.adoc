@@ -6,7 +6,7 @@
 Accepted, implemented. Covers only the value-sequence-plus-replay foundation
 named in ADR-0008's "Geometrie Welle 5b" row -- NOT the whole of that row.
 Deliberately left open by this wave, unchanged from ADR-0008: a stable,
-*geometric* edge identity (this wave inherits `OcctKernel.fillet`'s opaque,
+*geometric* edge identity (superseded in part by ADR-0031, Welle L: edges can now be selected by geometry and followed through later operations; this wave inherits `OcctKernel.fillet`'s opaque,
 construction-order-dependent edge indices exactly as-is), undo/redo, a
 feature-tree UI, and serialization (JSON/Part-21).
 

@@ -907,8 +907,9 @@ See <<roadmap,Roadmap>> for what's planned next.
   `Feature`'s value (e.g. a `FilletFeature.radius` via `.copy(...)`) and
   rebuild to get a new, independently measurable result. Still opaque,
   construction-order-dependent fillet edge indices (unchanged from
-  Geometrie Welle 5a); still no stable geometric edge identity, undo/redo,
-  feature-tree UI, or serialization -- see
+  Geometrie Welle 5a; since Welle L, `SelectedFilletFeature` and
+  `TrackedEdges` choose edges geometrically, see ADR-0031); still no
+  undo/redo, feature-tree UI, or serialization -- see
   docs/adr/ADR-0015-parametric-feature-history-foundation.adoc for the full
   scope boundary and what remains for Geometrie Welle 5b's continuation.
   (Welle J) `OcctKernel` also offers `makeCylinder`, `translate`/`transformed`
@@ -919,6 +920,11 @@ See <<roadmap,Roadmap>> for what's planned next.
   `HoleFeature`, `ChamferFeature` and the `DerivedFeature` interface. See
   docs/adr/ADR-0029-geometry-operations.adoc for the measured limits, the
   single-solid rule and the exception mapping.
+  (Welle L, ADR-0031) Edges are chosen by geometry instead of index: `Edges.parallelTo(...)`/`atMax`/`atMin`/
+  `ofType`/`ofFace`/`longest`/`shortest` combined with `and`/`or`/`minus`, resolved by `OcctKernel.selectEdges`
+  and accepted by `fillet`/`chamfer`; `OcctShape.edges`/`faces` expose the geometry; `TrackedEdges` follows edges
+  through later operations by OCCT's own edge history; `extrudeRegion`/`revolveRegion` accept arcs, circles and
+  holes (`ProfileRegion`).
 
 | `kstep-constraints`
 | PlaneGCS 2D geometric constraint-solver bridge -- Geometrie Welle 6,
@@ -950,6 +956,20 @@ See <<roadmap,Roadmap>> for what's planned next.
   `PlaneGcsSolver.availability()` reports `PlaneGcsAvailability.Unavailable`
   at runtime with a human-readable reason. See Building below for the
   required `apt-get install`.
+
+| `kstep-sketch`
+| Constraint-sketch DSL -- Welle L (`dev.kstep.sketch`)
+| Working: `sketch { ... }` builds points, lines, arcs and circles with `horizontal`/`vertical`/`distance`/
+  `length`/`coincident`/`pointOnLine`/`parallel`/`perpendicular`, plus the sugar `rectangle(...)` and `offset(...)`;
+  `Sketch.solve()` runs a degrees-of-freedom analysis in plain Kotlin (redundant or contradictory constraints are
+  named before the solver is called), solves through `kstep-constraints` (PlaneGCS), checks the result against every
+  constraint and reports the remaining freedom; `SolvedSketch.toRegion()/extrude(h)/revolve(angle, axis)/
+  extrudeFeature(h)` turn the profile (outer loop plus holes) into geometry. Failures are `SketchException`s with a
+  `SketchErrorKind` (`KSTEP-S-010` in scripts); a missing PlaneGCS bridge is `SketchSolverUnavailableException`
+  (`KSTEP-S-009`). Circle and arc radii are fixed measures (not solver unknowns); tangency, equal-radius and angle
+  constraints are not available yet. Needs the PlaneGCS bridge to solve and the OCCT bridge to extrude; contains no
+  native code itself, so the release zip carries it without native resources. See
+  docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc.
 
 | `kstep-shape`
 | AP242 shape assignment -- Geometrie Welle 4, merges `kstep-core` product
@@ -2244,6 +2264,40 @@ never mistaken for such a delimiter opener, even though a `-----------` run
 alone is indistinguishable from one — the scanner checks the line above it
 first, matching Asciidoctor's own rule (Stolperfalle 12 in the ADR).
 
+[[sketch-usage]]
+=== Sketches and edge selection (Welle L)
+
+[source,kotlin]
+----
+// export-sketch-plate-with-hole.kstep.kts (excerpt): 40 x 20 plate, hole d = 6, 20 / 10 from the corner
+val solved =
+    sketch {
+        val frame = rectangle(0.0, 0.0, 40.0, 20.0)          // corner fixed, H/V and both dimensions
+        val centre = point(20.0, 10.0)                       // start value: where the solver begins
+        offset(frame.bottomLeft, centre, dx = 20.0, dy = 10.0)
+        circle(centre, radius = 3.0)
+    }.solve()                                                // fully constrained, or a structured error
+val shape = solved.extrude(10.0)                             // volume 8000 - 90*pi = 7717.257, 7 faces
+
+// export-box-fillet-z-edges.kstep.kts (excerpt): edges by geometry, not by index
+val rounded = OcctKernel.fillet(blank, Edges.parallelTo(Direction3.Z), 2.0, expected = 4)
+val chamfered = OcctKernel.chamfer(blank, Edges.ofFace(Faces.atMax(Direction3.Z)), 1.0, expected = 4)
+----
+
+Start values matter: the solver converges to the solution nearest the coordinates a point was created with, so
+the side of a dimension comes from those coordinates (`distance` and `length` are unsigned). `solve()` fails with
+`UNDER_CONSTRAINED` (naming the points that can still move), `OVER_CONSTRAINED` (naming the redundant
+constraints) or `SOLVER_FAILED`; pass `requireFullyConstrained = false` to accept free degrees of freedom. A
+selector never guesses: an empty result, or a count different from `expected`, is an error listing the
+candidate edges (`KSTEP-S-011`). A selector that matches several look-alike edges after a later operation (a
+pocket doubles the vertical edges) is resolved with `TrackedEdges(sourceIndex, selector)` in a `FeatureSequence`:
+it selects on the original shape and follows the edges through OCCT's history
+(`export-pocket-tracked-fillet.kstep.kts`: volume 14965.664, 14 faces). Seam edges of cylinders are never
+matched except by `Edges.seams()`. Without the PlaneGCS bridge (for example the release zip) `solve()` fails with
+`KSTEP-S-009` and a hint; everything that does not solve a sketch is unaffected.
+`scripts/interop/verify-sketch-selection.sh` re-checks all four example exports with OCCT and FreeCAD. See
+docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc.
+
 [#roadmap]
 [[import-usage]]
 === Reading a STEP file back (`kstep import`)
@@ -2604,9 +2658,18 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
   rendering.adoc`. **(gltf-glb-export wave, done)** `kstep render -f glb`
   additionally exports a self-contained, Khronos-validator-clean binary
   glTF 2.0 document — see `docs/adr/ADR-0016-gltf-glb-export.adoc`. Still
-  open: undo/redo, a full sketch DSL beyond the points-only constraint API
-  above, stable geometric edge identity, and multi-platform distribution of
-  the viewer/CLI beyond linux-x86-64 and macOS arm64.
+  **(Welle L, done)** The constraint-sketch DSL (`kstep-sketch`: `sketch { }`,
+  degrees-of-freedom analysis, extrude/revolve of regions with holes) and
+  geometric edge selection with edge tracking through OCCT's history for
+  `fillet`/`chamfer` -- see ADR-0031 and the "Sketches and edge selection"
+  usage section. Honest scope: circle/arc radii are fixed measures (no
+  tangency, equal-radius or angle constraints yet), a sketch is solved once
+  and is not a re-solving history feature, tracked edges follow only
+  operations that report a history (no revolve/extrude source, no generated
+  edges), and the selection is stable only while its geometric predicate
+  stays true. Still open: undo/redo, those sketch follow-ups, and
+  multi-platform distribution of the viewer/CLI beyond linux-x86-64 and
+  macOS arm64.
 
 == License and attribution
 

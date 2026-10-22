@@ -644,7 +644,7 @@ private fun errorJson(outcome: KStepScriptOutcome): JsonObject =
             buildJsonObject {
                 put("status", "error")
                 put("errorKind", "runtime_error")
-                put("code", KStepScriptOutcomeCodes.RUNTIME_ERROR)
+                put("code", outcome.code)
                 put("message", outcome.message)
                 put("exceptionClass", outcome.exceptionClass)
             }

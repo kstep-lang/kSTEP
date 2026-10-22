@@ -239,4 +239,83 @@ object OcctBridge {
 
     /** `[minX, minY, minZ, maxX, maxY, maxZ]`, or an empty array if the shape has no extent. */
     external fun nativeShapeBoundingBox(handle: Long): DoubleArray
+
+    // ---------------------------------------------------------------------------------------
+    // Welle L: edge/face queries, edge-history-tracking variants, sketch regions
+    // (docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * One record of `EDGE_RECORD = 20` doubles per edge, in `TopExp::MapShapes(TopAbs_EDGE)` order:
+     * `kind` (0 line, 1 circle, 2 other), `length`, start xyz, end xyz, midpoint xyz, direction xyz
+     * (line: unit direction; circle: axis), circle centre xyz, radius, `seam`, `degenerated`.
+     * Throws `IllegalArgumentException` above 20 000 edges / 10 000 faces.
+     */
+    external fun nativeShapeEdgeInfo(handle: Long): DoubleArray
+
+    /**
+     * One record of `FACE_RECORD = 12` doubles per face (`MapShapes(TopAbs_FACE)` order): `kind`
+     * (0 plane, 1 cylinder, 2 other), area, centroid xyz, normal xyz (plane: outward; cylinder:
+     * axis), axis origin xyz, radius.
+     */
+    external fun nativeShapeFaceInfo(handle: Long): DoubleArray
+
+    /** CSR face-to-edge adjacency: `[faceCount, offsets (faceCount + 1)..., edge indices...]`. */
+    external fun nativeShapeFaceEdges(handle: Long): IntArray
+
+    /**
+     * Same as [nativeFilletEdges]; additionally stores the encoded edge history (see
+     * `dev.kstep.geometry.decodeEdgeHistory`) in `outHistory[0]`.
+     */
+    external fun nativeFilletEdgesTracked(
+        handle: Long,
+        edgeIndices: IntArray,
+        radius: Double,
+        outHistory: Array<IntArray?>,
+    ): Long
+
+    /** Same as [nativeChamferEdges] plus the encoded edge history in `outHistory[0]`. */
+    external fun nativeChamferEdgesTracked(
+        handle: Long,
+        edgeIndices: IntArray,
+        distance: Double,
+        outHistory: Array<IntArray?>,
+    ): Long
+
+    /** Same as [nativeBooleanOp] plus the encoded edge history (two operands) in `outHistory[0]`. */
+    external fun nativeBooleanOpTracked(
+        op: Int,
+        left: Long,
+        right: Long,
+        outHistory: Array<IntArray?>,
+    ): Long
+
+    /** Same as [nativeTransformShape] plus the encoded edge history in `outHistory[0]`. */
+    external fun nativeTransformShapeTracked(
+        handle: Long,
+        matrix: DoubleArray,
+        outHistory: Array<IntArray?>,
+    ): Long
+
+    /**
+     * Extrudes a planar region (outer loop + holes) along +Z. `loopSizes[l]` is the segment count
+     * of loop `l` (loop 0 is the outer contour); `segKinds[s]` is 0 line, 1 arc, 2 circle;
+     * `segData` holds 6 doubles per segment (line `x1 y1 x2 y2`, arc `x1 y1 xm ym x2 y2`, circle
+     * `cx cy r`).
+     */
+    external fun nativeExtrudeRegion(
+        loopSizes: IntArray,
+        segKinds: IntArray,
+        segData: DoubleArray,
+        height: Double,
+    ): Long
+
+    /** Revolves a planar region about the X (0) or Y (1) axis; same region encoding as [nativeExtrudeRegion]. */
+    external fun nativeRevolveRegion(
+        loopSizes: IntArray,
+        segKinds: IntArray,
+        segData: DoubleArray,
+        angleDegrees: Double,
+        axis: Int,
+    ): Long
 }

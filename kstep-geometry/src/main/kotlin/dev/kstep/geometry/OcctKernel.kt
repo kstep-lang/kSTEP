@@ -2,6 +2,9 @@ package dev.kstep.geometry
 
 import dev.kstep.geometry.occt.OcctBridge
 import dev.kstep.geometry.occt.OcctNativeLibrary
+import dev.kstep.geometry.select.EdgeSelection
+import dev.kstep.geometry.select.EdgeSelector
+import dev.kstep.geometry.select.SelectionTolerance
 import kotlin.math.abs
 
 /**
@@ -157,6 +160,16 @@ object OcctKernel {
      *  right next to it. */
     const val MAX_TRIANGLES: Int = 130_000
 
+    /** Welle L: upper bound on the edges of a shape whose edge geometry may be queried
+     *  ([OcctShape.edges]); mirrors `kMaxQueryEdges` in `kstep_occt_bridge.cpp`. */
+    const val MAX_QUERY_EDGES: Int = 20_000
+
+    /** Welle L: upper bound on the faces of a queryable shape ([OcctShape.faces]); mirrors `kMaxQueryFaces`. */
+    const val MAX_QUERY_FACES: Int = 10_000
+
+    /** Welle L: upper bound on the size of a native edge-history payload; mirrors `kMaxHistoryInts`. */
+    const val MAX_HISTORY_INTS: Int = 2_000_000
+
     /**
      * Whether the native bridge is available on this JVM, and diagnostic detail either way.
      * Resolved once per process and cached -- see [OcctNativeLibrary.availability].
@@ -277,8 +290,8 @@ object OcctKernel {
      * sequence (verified: five identical rebuilds produce identical per-index edge lengths) but is
      * NOT geometrically meaningful and is NOT stable across a change to how the shape was built --
      * treat it as an opaque, shape-specific address, never as a durable identifier. Making edges
-     * addressable by a stable, geometric identity is exactly what the parametric-history wave
-     * (Geometrie Welle 5b) has to solve, and is deliberately out of scope here.
+     * addressable by a stable, geometric identity is what the selector overloads below
+     * ([fillet] with an [EdgeSelector], ADR-0031) provide.
      *
      * @throws IllegalArgumentException if `edgeIndices` is empty, larger than [MAX_FILLET_EDGES],
      *   contains an out-of-range index, if `shape` has more than [MAX_FILLET_INPUT_FACES] faces,
@@ -294,16 +307,7 @@ object OcctKernel {
         edgeIndices: Collection<Int>,
         radius: Double,
     ): OcctShape {
-        require(edgeIndices.isNotEmpty()) { "edgeIndices must not be empty" }
-        require(edgeIndices.size <= MAX_FILLET_EDGES) {
-            "edgeIndices must have at most $MAX_FILLET_EDGES entries, got ${edgeIndices.size}"
-        }
-        edgeIndices.forEach { index ->
-            require(index >= 0) { "edge index must not be negative, got $index" }
-        }
-        require(radius.isFinite()) { "radius must be finite, got $radius" }
-        require(radius >= MIN_FILLET_RADIUS) { "radius must be at least $MIN_FILLET_RADIUS, got $radius" }
-        require(radius <= MAX_FILLET_RADIUS) { "radius must be at most $MAX_FILLET_RADIUS, got $radius" }
+        requireFilletArguments(edgeIndices, radius)
 
         // checkOpen() (via withHandle, below) covers "already closed"; this call intentionally
         // does not read shape.topology first to check MAX_FILLET_INPUT_FACES here in Kotlin --
@@ -656,16 +660,7 @@ object OcctKernel {
         edgeIndices: Collection<Int>,
         distance: Double,
     ): OcctShape {
-        require(edgeIndices.isNotEmpty()) { "edgeIndices must not be empty" }
-        require(edgeIndices.size <= MAX_CHAMFER_EDGES) {
-            "edgeIndices must have at most $MAX_CHAMFER_EDGES entries, got ${edgeIndices.size}"
-        }
-        edgeIndices.forEach { index ->
-            require(index >= 0) { "edge index must not be negative, got $index" }
-        }
-        require(distance.isFinite()) { "distance must be finite, got $distance" }
-        require(distance >= MIN_CHAMFER_DISTANCE) { "distance must be at least $MIN_CHAMFER_DISTANCE, got $distance" }
-        require(distance <= MAX_CHAMFER_DISTANCE) { "distance must be at most $MAX_CHAMFER_DISTANCE, got $distance" }
+        requireChamferArguments(edgeIndices, distance)
         requireAvailable()
         val edgeIndicesArray = edgeIndices.toIntArray()
         val resultHandle =
@@ -682,6 +677,303 @@ object OcctKernel {
                 }
             }
         return OcctShape(resultHandle)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Welle L (ADR-0031): geometric edge selection, edge history, sketch regions.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Resolves [selector] against the edges and faces of [shape] and returns the matching 0-based
+     * edge indices (ascending) -- the same indices [fillet]/[chamfer] accept. Never guesses: an
+     * empty result, or a count different from [expected], throws
+     * [dev.kstep.geometry.select.EdgeSelectionException] listing the candidates.
+     *
+     * @throws IllegalArgumentException for an invalid selector (depth/node limits) or tolerance.
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     */
+    fun selectEdges(
+        shape: OcctShape,
+        selector: EdgeSelector,
+        expected: Int? = null,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): List<Int> {
+        requireAvailable()
+        return EdgeSelection.resolve(shape.edges, shape.faces, selector, expected, tolerance)
+    }
+
+    /** [fillet] on the edges [selector] resolves to (see [selectEdges]). */
+    fun fillet(
+        shape: OcctShape,
+        selector: EdgeSelector,
+        radius: Double,
+        expected: Int? = null,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): OcctShape = fillet(shape, selectEdges(shape, selector, expected, tolerance), radius)
+
+    /** [chamfer] on the edges [selector] resolves to (see [selectEdges]). */
+    fun chamfer(
+        shape: OcctShape,
+        selector: EdgeSelector,
+        distance: Double,
+        expected: Int? = null,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): OcctShape = chamfer(shape, selectEdges(shape, selector, expected, tolerance), distance)
+
+    /**
+     * [fillet] that also returns the [EdgeHistory] of the operation: for every edge of [shape], the
+     * fate (kept / modified / deleted / lost) against the edges of the new shape. Same contract
+     * and exceptions as [fillet]; the returned [TrackedShape] must be closed.
+     */
+    fun filletWithHistory(
+        shape: OcctShape,
+        edgeIndices: Collection<Int>,
+        radius: Double,
+    ): TrackedShape {
+        requireFilletArguments(edgeIndices, radius)
+        requireAvailable()
+        val indices = edgeIndices.toIntArray()
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeFilletEdgesTracked(h, indices, radius, holder)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException(
+                        "OCCT failed to fillet ${edgeIndices.size} edge(s) at radius $radius",
+                        e,
+                    )
+                }
+            }
+        return trackedResult(handle, holder, listOf(shape))
+    }
+
+    /** [chamfer] that also returns the [EdgeHistory]; see [filletWithHistory]. */
+    fun chamferWithHistory(
+        shape: OcctShape,
+        edgeIndices: Collection<Int>,
+        distance: Double,
+    ): TrackedShape {
+        requireChamferArguments(edgeIndices, distance)
+        requireAvailable()
+        val indices = edgeIndices.toIntArray()
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeChamferEdgesTracked(h, indices, distance, holder)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException(
+                        "OCCT failed to chamfer ${edgeIndices.size} edge(s) at distance $distance",
+                        e,
+                    )
+                }
+            }
+        return trackedResult(handle, holder, listOf(shape))
+    }
+
+    /** [boolean] that also returns the [EdgeHistory] (two operands: [a] then [b]); see [filletWithHistory]. */
+    fun booleanWithHistory(
+        op: BooleanOperation,
+        a: OcctShape,
+        b: OcctShape,
+    ): TrackedShape {
+        requireAvailable()
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            a.withHandle { ha ->
+                b.withHandle { hb ->
+                    try {
+                        OcctBridge.nativeBooleanOpTracked(op.nativeCode, ha, hb, holder)
+                    } catch (e: IllegalArgumentException) {
+                        throw e
+                    } catch (e: OcctEmptyResultException) {
+                        throw e
+                    } catch (e: RuntimeException) {
+                        throw OcctGeometryException("OCCT failed to compute boolean $op: ${e.message}", e)
+                    }
+                }
+            }
+        return trackedResult(handle, holder, listOf(a, b))
+    }
+
+    /** [translate] that also returns the [EdgeHistory] (every edge is `Modified`/`Kept` to its moved copy). */
+    fun translateWithHistory(
+        shape: OcctShape,
+        dx: Double,
+        dy: Double,
+        dz: Double,
+    ): TrackedShape {
+        requireCoordinate("dx", dx)
+        requireCoordinate("dy", dy)
+        requireCoordinate("dz", dz)
+        requireAvailable()
+        val matrix = Placement.translation(dx, dy, dz).toMatrix12()
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeTransformShapeTracked(h, matrix, holder)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to transform shape", e)
+                }
+            }
+        return trackedResult(handle, holder, listOf(shape))
+    }
+
+    /**
+     * [hole] that also returns the [EdgeHistory]; the history has two operands (the shape, then
+     * the drill cylinder, which is closed before returning).
+     */
+    fun holeWithHistory(
+        shape: OcctShape,
+        diameter: Double,
+        depth: Double,
+        x: Double,
+        y: Double,
+        z: Double,
+        dirX: Double = 0.0,
+        dirY: Double = 0.0,
+        dirZ: Double = -1.0,
+    ): TrackedShape {
+        validateDimension("diameter", diameter)
+        validateDimension("depth", depth)
+        return makeCylinder(diameter / 2.0, depth, x, y, z, dirX, dirY, dirZ).use { tool ->
+            booleanWithHistory(BooleanOperation.CUT, shape, tool)
+        }
+    }
+
+    private fun trackedResult(
+        handle: Long,
+        holder: Array<IntArray?>,
+        operands: List<OcctShape>,
+    ): TrackedShape {
+        val shape = OcctShape(handle)
+        try {
+            val raw = checkNotNull(holder[0]) { "native bridge returned no edge history" }
+            val history = decodeEdgeHistory(raw, operands.map { it.topology.edges }, shape.topology.edges)
+            return TrackedShape(shape, history)
+        } catch (e: Throwable) {
+            shape.close()
+            throw e
+        }
+    }
+
+    /**
+     * Extrudes a planar [region] (outer loop plus holes, XY plane) by [height] along +Z. Like
+     * [extrudeProfile], but the profile may contain arcs, circles and holes.
+     *
+     * @throws IllegalArgumentException for an invalid region (see [ProfileRegion]) or height.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT itself fails.
+     */
+    fun extrudeRegion(
+        region: ProfileRegion,
+        height: Double,
+    ): OcctShape {
+        RegionValidation.validate(region)
+        require(height.isFinite()) { "height must be finite, got $height" }
+        require(abs(height) > MIN_DIMENSION) { "height magnitude must be greater than $MIN_DIMENSION, got $height" }
+        require(abs(height) <= MAX_DIMENSION) { "height magnitude must be at most $MAX_DIMENSION, got $height" }
+        requireAvailable()
+        val encoded = RegionValidation.encode(RegionValidation.normalized(region))
+        val handle =
+            try {
+                OcctBridge.nativeExtrudeRegion(encoded.loopSizes, encoded.kinds, encoded.data, height)
+            } catch (e: IllegalArgumentException) {
+                throw e
+            } catch (e: RuntimeException) {
+                throw OcctGeometryException(
+                    "OCCT failed to extrude a region of ${encoded.kinds.size} segments to height $height",
+                    e,
+                )
+            }
+        return OcctShape(handle)
+    }
+
+    /**
+     * Revolves a planar [region] about [axis] (as [revolveProfile], but with arcs, circles and
+     * holes). Every boundary sample must lie on one side of the axis.
+     *
+     * @throws IllegalArgumentException for an invalid region or angle, or a region crossing the axis.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT itself fails.
+     */
+    fun revolveRegion(
+        region: ProfileRegion,
+        angleDegrees: Double = 360.0,
+        axis: RevolveAxis = RevolveAxis.Y,
+    ): OcctShape {
+        RegionValidation.validate(region)
+        require(angleDegrees.isFinite()) { "angleDegrees must be finite, got $angleDegrees" }
+        require(angleDegrees >= MIN_REVOLVE_ANGLE_DEGREES) {
+            "angleDegrees must be at least $MIN_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
+        }
+        require(angleDegrees <= MAX_REVOLVE_ANGLE_DEGREES) {
+            "angleDegrees must be at most $MAX_REVOLVE_ANGLE_DEGREES, got $angleDegrees"
+        }
+        val radial: (ProfilePoint) -> Double = if (axis == RevolveAxis.Y) { p -> p.x } else { p -> p.y }
+        val samples = (listOf(region.outer) + region.holes).flatMap { RegionValidation.polygon(it) }
+        require(samples.none { radial(it) > 1e-9 } || samples.none { radial(it) < -1e-9 }) {
+            "region crosses the rotation axis ${axis.name}: all " +
+                "${if (axis == RevolveAxis.Y) "x" else "y"} coordinates must have the same sign"
+        }
+        requireAvailable()
+        val encoded = RegionValidation.encode(RegionValidation.normalized(region))
+        val handle =
+            try {
+                OcctBridge.nativeRevolveRegion(
+                    encoded.loopSizes,
+                    encoded.kinds,
+                    encoded.data,
+                    angleDegrees,
+                    axis.nativeCode,
+                )
+            } catch (e: IllegalArgumentException) {
+                throw e
+            } catch (e: RuntimeException) {
+                throw OcctGeometryException("OCCT failed to revolve a region by $angleDegrees degrees", e)
+            }
+        return OcctShape(handle)
+    }
+
+    private fun requireFilletArguments(
+        edgeIndices: Collection<Int>,
+        radius: Double,
+    ) {
+        require(edgeIndices.isNotEmpty()) { "edgeIndices must not be empty" }
+        require(edgeIndices.size <= MAX_FILLET_EDGES) {
+            "edgeIndices must have at most $MAX_FILLET_EDGES entries, got ${edgeIndices.size}"
+        }
+        edgeIndices.forEach { index ->
+            require(index >= 0) { "edge index must not be negative, got $index" }
+        }
+        require(radius.isFinite()) { "radius must be finite, got $radius" }
+        require(radius >= MIN_FILLET_RADIUS) { "radius must be at least $MIN_FILLET_RADIUS, got $radius" }
+        require(radius <= MAX_FILLET_RADIUS) { "radius must be at most $MAX_FILLET_RADIUS, got $radius" }
+    }
+
+    private fun requireChamferArguments(
+        edgeIndices: Collection<Int>,
+        distance: Double,
+    ) {
+        require(edgeIndices.isNotEmpty()) { "edgeIndices must not be empty" }
+        require(edgeIndices.size <= MAX_CHAMFER_EDGES) {
+            "edgeIndices must have at most $MAX_CHAMFER_EDGES entries, got ${edgeIndices.size}"
+        }
+        edgeIndices.forEach { index ->
+            require(index >= 0) { "edge index must not be negative, got $index" }
+        }
+        require(distance.isFinite()) { "distance must be finite, got $distance" }
+        require(distance >= MIN_CHAMFER_DISTANCE) { "distance must be at least $MIN_CHAMFER_DISTANCE, got $distance" }
+        require(distance <= MAX_CHAMFER_DISTANCE) { "distance must be at most $MAX_CHAMFER_DISTANCE, got $distance" }
     }
 
     /** Shared Kotlin-side profile validation of [extrudeProfile] and [revolveProfile]; the native

@@ -15,6 +15,7 @@ import dev.kstep.render.text.TextCardRenderer
 import dev.kstep.script.KStepModel
 import dev.kstep.script.KStepScriptHost
 import dev.kstep.script.KStepScriptOutcome
+import dev.kstep.script.KStepScriptOutcomeCodes
 import java.io.ByteArrayOutputStream
 import javax.imageio.ImageIO
 
@@ -94,7 +95,9 @@ object PreviewRenderer {
         return when (val outcome = evalSource(request.source)) {
             is KStepScriptOutcome.Success -> renderSuccess(request, outcome.model)
             is KStepScriptOutcome.RuntimeError ->
-                if (outcome.exceptionClass == OCCT_UNAVAILABLE_EXCEPTION_CLASS) {
+                if (outcome.exceptionClass == OCCT_UNAVAILABLE_EXCEPTION_CLASS ||
+                    outcome.code == KStepScriptOutcomeCodes.SKETCH_SOLVER_UNAVAILABLE
+                ) {
                     renderNoModelOcctFallback(request, outcome)
                 } else {
                     PreviewOutcome.ScriptFailed(outcome)

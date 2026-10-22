@@ -16,6 +16,7 @@ dependencies {
     implementation(project(":kstep-cli"))
     implementation(project(":kstep-geometry"))
     implementation(project(":kstep-constraints"))
+    implementation(project(":kstep-sketch"))
     implementation(project(":kstep-shape"))
     // FilletShadingTest projects a real, filleted OCCT shape via MeshProjection (this wave's
     // multi-shape-composition-and-fill-light coverage, see

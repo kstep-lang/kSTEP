@@ -9,6 +9,34 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Sketch DSL and geometric edge selection (ADR-0031, Welle L). New module `kstep-sketch`
+  (`dev.kstep.sketch`): `sketch { }` with points, lines, arcs, circles, `horizontal`/`vertical`/`distance`/`length`/
+  `coincident`/`pointOnLine`/`parallel`/`perpendicular` and the sugar `rectangle`/`offset`; `Sketch.solve(
+  requireFullyConstrained, maxIterations)` analyses degrees of freedom in plain Kotlin (redundant and
+  contradictory constraints are named before the solver runs), solves through PlaneGCS and verifies the result;
+  `SolvedSketch.toRegion()`/`extrude`/`revolve`/`extrudeFeature`/`revolveFeature`. Structured failures:
+  `SketchException` with `SketchErrorKind`, `SketchSolverUnavailableException`. Circle/arc radii are fixed
+  measures in this version. `kstep-geometry`: `Edges`/`Faces` selectors (`parallelTo`, `ofType`, `atMax`, `atMin`,
+  `ofFace`, `longest`, `shortest`, `seams`, combined with `and`/`or`/`minus`), `Direction3`, `Point3`,
+  `SelectionTolerance`, `EdgeSelection.resolve`, `EdgeSelectionException` (candidate list, `expected` count),
+  `OcctKernel.selectEdges` and selector overloads of `fillet`/`chamfer` (the index API is unchanged),
+  `OcctShape.edges`/`faces` (`EdgeInfo`/`FaceInfo`), `SelectedFilletFeature`/`SelectedChamferFeature` with
+  `SelectEdges`/`TrackedEdges` (edges followed through later operations via OCCT's `Modified`/`IsDeleted`
+  history: `filletWithHistory`, `chamferWithHistory`, `booleanWithHistory`, `translateWithHistory`,
+  `holeWithHistory`, `EdgeHistory`, `TrackedShape`), `FeatureRebuildException.selectionFailure`, and regions
+  with arcs, circles and holes (`ProfileRegion`, `OcctKernel.extrudeRegion`/`revolveRegion`,
+  `ExtrudeRegionFeature`/`RevolveRegionFeature`). Scripts import `dev.kstep.geometry.select.*` and
+  `dev.kstep.sketch.*` by default. New error codes `KSTEP-S-009` (`SKETCH_SOLVER_UNAVAILABLE`), `KSTEP-S-010`
+  (`SKETCH_INVALID`) and `KSTEP-S-011` (`EDGE_SELECTION_FAILED`); `KStepScriptOutcome.RuntimeError` gained a
+  `code` property (default `KSTEP-S-003`), and `--output json` reports it. Native: no new OCCT toolkit; new JNI
+  functions `nativeShapeEdgeInfo`/`FaceInfo`/`FaceEdges`, `native*Tracked`, `nativeExtrudeRegion`/
+  `nativeRevolveRegion`, each limit re-checked natively. Examples `export-sketch-plate-with-hole`,
+  `export-box-fillet-z-edges`, `export-box-chamfer-top-edges`, `export-pocket-tracked-fillet`,
+  `hello-sketch-unconstrained`; interop check `scripts/interop/verify-sketch-selection.sh`. Gate (2026-10-22, macOS
+  arm64, OCCT 7.9.3): `clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true --no-build-cache`, 1590
+  tests, 0 failures, 0 errors, 8 skipped (inverse-/property-gated); release-style build without natives: 0 failures,
+  `verify-dist.sh` green.
+
 * `kstep import <file.step>` (ADR-0030, Welle K): reads a STEP file (kSTEP, OCCT, FreeCAD) back through OCCT's
   XCAF reader and reports product structure, per-part volume/faces/bounding box, the expanded placed
   occurrences and totals, as text or `--output json`; `--validate` checks the AP242 V1 entities, `--render

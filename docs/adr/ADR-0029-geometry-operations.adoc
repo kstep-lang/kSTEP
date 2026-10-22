@@ -44,6 +44,8 @@ and no boss or pocket at a given place; without booleans there is no hole.
   Arbitrary axes are out of scope.
 * *Chamfer* `chamfer(shape, edgeIndices, distance)` (`BRepFilletAPI_MakeChamfer`, symmetric distance) with
   the same opaque 0-based `TopExp::MapShapes(EDGE)` addressing as `fillet`; no stable edge identity.
+  _Update (Welle L, ADR-0031): the index addressing remains as is, and geometric edge selection
+  (`Edges`/`Faces` selectors, `TrackedEdges`) now exists on top of it -- the "no stable edge identity" statement here is superseded in part by ADR-0031._
 * *Vectors.* `kstep-geometry` cannot use `dev.kstep.shape.Vec3` (module direction is shape to geometry), and
   a new vector type would collide with the script default imports `dev.kstep.shape.*`. All new functions
   take named `Double` parameters, consistent with `makeBox(dx, dy, dz)`.

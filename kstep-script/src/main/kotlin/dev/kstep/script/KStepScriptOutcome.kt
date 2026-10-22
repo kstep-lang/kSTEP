@@ -35,6 +35,17 @@ object KStepScriptOutcomeCodes {
 
     /** Merging the script's geometry into the exported file failed (ADR-0027). Fail closed. */
     const val GEOMETRY_EXPORT_FAILED = "KSTEP-S-008"
+
+    /** A script used `sketch { }.solve()` but the native PlaneGCS bridge is unavailable (ADR-0031). */
+    const val SKETCH_SOLVER_UNAVAILABLE = "KSTEP-S-009"
+
+    /** A sketch failed with a structured [dev.kstep.sketch.SketchErrorKind] (limit, invalid input,
+     * under-/over-constrained, solver failure, open or invalid profile; ADR-0031). */
+    const val SKETCH_INVALID = "KSTEP-S-010"
+
+    /** An edge selector matched nothing, matched the wrong number of edges, or a tracked edge was
+     * deleted; the message lists the candidate edges (ADR-0031). */
+    const val EDGE_SELECTION_FAILED = "KSTEP-S-011"
 }
 
 /** One compiler diagnostic, stripped down to what a CLI/JSON consumer needs: no internal
@@ -92,5 +103,8 @@ sealed interface KStepScriptOutcome {
     data class RuntimeError(
         val message: String,
         val exceptionClass: String,
+        /** [KStepScriptOutcomeCodes.RUNTIME_ERROR] unless the failure is one of the structured
+         *  script-layer families (sketch, edge selection); then that code, and [message] starts with it. */
+        val code: String = KStepScriptOutcomeCodes.RUNTIME_ERROR,
     ) : KStepScriptOutcome
 }

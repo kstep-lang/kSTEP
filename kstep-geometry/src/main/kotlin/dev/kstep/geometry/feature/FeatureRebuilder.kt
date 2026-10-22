@@ -1,8 +1,12 @@
 package dev.kstep.geometry.feature
 
+import dev.kstep.geometry.EdgeFate
+import dev.kstep.geometry.EdgeHistory
 import dev.kstep.geometry.OcctGeometryException
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctShape
+import dev.kstep.geometry.TrackedShape
+import dev.kstep.geometry.select.EdgeSelectionException
 
 /**
  * Replays a [FeatureSequence] against the existing, unchanged [OcctKernel] API, producing a fresh
@@ -82,46 +86,20 @@ object FeatureRebuilder {
             }
         }
 
+        // Structural planning of TrackedEdges (ancestor / unique-path checks) -- still pure Kotlin.
+        val plan = TrackingPlanner.plan(sequence.features)
+        val histories = HashMap<Int, EdgeHistory>()
+
         val built = ArrayList<OcctShape>(sequence.features.size)
         sequence.features.forEachIndexed { index, feature ->
             val shape =
                 try {
-                    when (feature) {
-                        is BoxFeature -> OcctKernel.makeBox(feature.dx, feature.dy, feature.dz)
-                        is ExtrudeFeature -> OcctKernel.extrudeProfile(feature.profile, feature.height)
-                        is FilletFeature ->
-                            OcctKernel.fillet(built[feature.baseIndex], feature.edgeIndices, feature.radius)
-                        is CylinderFeature ->
-                            OcctKernel.makeCylinder(
-                                feature.radius,
-                                feature.height,
-                                feature.x,
-                                feature.y,
-                                feature.z,
-                                feature.dirX,
-                                feature.dirY,
-                                feature.dirZ,
-                            )
-                        is RevolveFeature ->
-                            OcctKernel.revolveProfile(feature.profile, feature.angleDegrees, feature.axis)
-                        is TranslateFeature ->
-                            OcctKernel.translate(built[feature.baseIndex], feature.dx, feature.dy, feature.dz)
-                        is BooleanFeature ->
-                            OcctKernel.boolean(feature.operation, built[feature.leftIndex], built[feature.rightIndex])
-                        is HoleFeature ->
-                            OcctKernel.hole(
-                                built[feature.baseIndex],
-                                feature.diameter,
-                                feature.depth,
-                                feature.x,
-                                feature.y,
-                                feature.z,
-                                feature.dirX,
-                                feature.dirY,
-                                feature.dirZ,
-                            )
-                        is ChamferFeature ->
-                            OcctKernel.chamfer(built[feature.baseIndex], feature.edgeIndices, feature.distance)
+                    if (index in plan.needsHistory) {
+                        val tracked = buildTracked(index, sequence.features, built, histories, plan)
+                        histories[index] = tracked.history
+                        tracked.shape
+                    } else {
+                        buildPlain(index, sequence.features, built, histories, plan)
                     }
                 } catch (e: IllegalArgumentException) {
                     built.forEach { it.close() }
@@ -148,6 +126,204 @@ object FeatureRebuilder {
             built.add(shape)
         }
         return FeatureRebuildResult(built)
+    }
+
+    private fun buildPlain(
+        index: Int,
+        features: List<Feature>,
+        built: List<OcctShape>,
+        histories: Map<Int, EdgeHistory>,
+        plan: TrackingPlan,
+    ): OcctShape =
+        when (val feature = features[index]) {
+            is BoxFeature -> OcctKernel.makeBox(feature.dx, feature.dy, feature.dz)
+            is ExtrudeFeature -> OcctKernel.extrudeProfile(feature.profile, feature.height)
+            is FilletFeature -> OcctKernel.fillet(built[feature.baseIndex], feature.edgeIndices, feature.radius)
+            is CylinderFeature ->
+                OcctKernel.makeCylinder(
+                    feature.radius,
+                    feature.height,
+                    feature.x,
+                    feature.y,
+                    feature.z,
+                    feature.dirX,
+                    feature.dirY,
+                    feature.dirZ,
+                )
+            is RevolveFeature -> OcctKernel.revolveProfile(feature.profile, feature.angleDegrees, feature.axis)
+            is TranslateFeature -> OcctKernel.translate(built[feature.baseIndex], feature.dx, feature.dy, feature.dz)
+            is BooleanFeature ->
+                OcctKernel.boolean(
+                    feature.operation,
+                    built[feature.leftIndex],
+                    built[feature.rightIndex],
+                )
+            is HoleFeature ->
+                OcctKernel.hole(
+                    built[feature.baseIndex],
+                    feature.diameter,
+                    feature.depth,
+                    feature.x,
+                    feature.y,
+                    feature.z,
+                    feature.dirX,
+                    feature.dirY,
+                    feature.dirZ,
+                )
+            is ChamferFeature -> OcctKernel.chamfer(built[feature.baseIndex], feature.edgeIndices, feature.distance)
+            is ExtrudeRegionFeature -> OcctKernel.extrudeRegion(feature.region, feature.height)
+            is RevolveRegionFeature -> OcctKernel.revolveRegion(feature.region, feature.angleDegrees, feature.axis)
+            is SelectedFilletFeature ->
+                OcctKernel.fillet(
+                    built[feature.baseIndex],
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
+                    feature.radius,
+                )
+            is SelectedChamferFeature ->
+                OcctKernel.chamfer(
+                    built[feature.baseIndex],
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
+                    feature.distance,
+                )
+        }
+
+    /** Builds a feature that lies on a tracked-edge path, keeping the edge history OCCT recorded for it. */
+    private fun buildTracked(
+        index: Int,
+        features: List<Feature>,
+        built: List<OcctShape>,
+        histories: Map<Int, EdgeHistory>,
+        plan: TrackingPlan,
+    ): TrackedShape =
+        when (val feature = features[index]) {
+            is FilletFeature ->
+                OcctKernel.filletWithHistory(
+                    built[feature.baseIndex],
+                    feature.edgeIndices,
+                    feature.radius,
+                )
+            is ChamferFeature ->
+                OcctKernel.chamferWithHistory(
+                    built[feature.baseIndex],
+                    feature.edgeIndices,
+                    feature.distance,
+                )
+            is TranslateFeature ->
+                OcctKernel.translateWithHistory(
+                    built[feature.baseIndex],
+                    feature.dx,
+                    feature.dy,
+                    feature.dz,
+                )
+            is BooleanFeature ->
+                OcctKernel.booleanWithHistory(feature.operation, built[feature.leftIndex], built[feature.rightIndex])
+            is HoleFeature ->
+                OcctKernel.holeWithHistory(
+                    built[feature.baseIndex],
+                    feature.diameter,
+                    feature.depth,
+                    feature.x,
+                    feature.y,
+                    feature.z,
+                    feature.dirX,
+                    feature.dirY,
+                    feature.dirZ,
+                )
+            is SelectedFilletFeature ->
+                OcctKernel.filletWithHistory(
+                    built[feature.baseIndex],
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
+                    feature.radius,
+                )
+            is SelectedChamferFeature ->
+                OcctKernel.chamferWithHistory(
+                    built[feature.baseIndex],
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features),
+                    feature.distance,
+                )
+            // Root features have no operands and are never planned onto a tracking path.
+            is BoxFeature,
+            is ExtrudeFeature,
+            is CylinderFeature,
+            is RevolveFeature,
+            is ExtrudeRegionFeature,
+            is RevolveRegionFeature,
+            ->
+                error("feature[$index] (${feature::class.simpleName}) cannot be built with edge history")
+        }
+
+    private fun resolveEdges(
+        index: Int,
+        reference: EdgeReference,
+        baseIndex: Int,
+        built: List<OcctShape>,
+        histories: Map<Int, EdgeHistory>,
+        plan: TrackingPlan,
+        features: List<Feature>,
+    ): List<Int> =
+        when (reference) {
+            is SelectEdges ->
+                OcctKernel.selectEdges(
+                    built[baseIndex],
+                    reference.selector,
+                    reference.expected,
+                    reference.tolerance,
+                )
+            is TrackedEdges -> resolveTracked(index, reference, baseIndex, built, histories, plan, features)
+        }
+
+    private fun resolveTracked(
+        index: Int,
+        reference: TrackedEdges,
+        baseIndex: Int,
+        built: List<OcctShape>,
+        histories: Map<Int, EdgeHistory>,
+        plan: TrackingPlan,
+        features: List<Feature>,
+    ): List<Int> {
+        val source = built[reference.sourceIndex]
+        var current = OcctKernel.selectEdges(source, reference.selector, null, reference.tolerance)
+        val steps = checkNotNull(plan.stepsByConsumer[index]) { "no tracking plan for feature[$index]" }
+        var holder = reference.sourceIndex
+        for (step in steps) {
+            // `current` indexes the edges of built[holder] (the intermediate shape), not of `source`.
+            val holderShape = built[holder]
+            val fates =
+                checkNotNull(histories[step.nodeIndex]) {
+                    "no edge history for feature[${step.nodeIndex}]"
+                }.operands[step.operandSlot]
+            val next = java.util.TreeSet<Int>()
+            for (edge in current) {
+                val fate = fates[edge]
+                if (fate.resultEdges.isEmpty()) {
+                    val verdict = if (fate is EdgeFate.Deleted) "deleted" else "lost"
+                    throw EdgeSelectionException(
+                        "tracked edge $edge of feature[$holder] was $verdict by " +
+                            "feature[${step.nodeIndex}] " +
+                            "(${features[step.nodeIndex]::class.simpleName}; the edge no longer exists after that operation; selected by ${reference.selector} on feature[${reference.sourceIndex}])",
+                        reference.selector,
+                        reference.expected,
+                        current,
+                        current.map { holderShape.edges[it] },
+                    )
+                }
+                next.addAll(fate.resultEdges)
+            }
+            current = next.toList()
+            holder = step.nodeIndex
+        }
+        val target = built[baseIndex]
+        if (reference.expected != null && current.size != reference.expected) {
+            throw EdgeSelectionException(
+                "tracked edge selection from feature[${reference.sourceIndex}] is ambiguous at feature[$holder]: " +
+                    "expected ${reference.expected} edge(s) but ${current.size} edge(s) result: $current",
+                reference.selector,
+                reference.expected,
+                current,
+                current.map { target.edges[it] },
+            )
+        }
+        return current
     }
 
     private fun wrapFailure(

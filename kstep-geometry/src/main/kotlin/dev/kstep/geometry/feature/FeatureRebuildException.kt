@@ -1,6 +1,7 @@
 package dev.kstep.geometry.feature
 
 import dev.kstep.geometry.OcctShape
+import dev.kstep.geometry.select.EdgeSelectionException
 
 /**
  * Thrown by [FeatureRebuilder.rebuild] when replaying a [FeatureSequence] fails -- either a
@@ -32,4 +33,12 @@ class FeatureRebuildException(
     val closedShapes: List<OcctShape>,
     message: String,
     cause: Throwable? = null,
-) : RuntimeException(message, cause)
+) : RuntimeException(message, cause) {
+    /**
+     * The structured selector failure (with the full candidate list) when [feature] failed because
+     * an edge selector matched nothing, matched the wrong number of edges, or a tracked edge was
+     * deleted -- `null` for every other failure. Convenience view of [cause].
+     */
+    val selectionFailure: EdgeSelectionException?
+        get() = cause as? EdgeSelectionException
+}

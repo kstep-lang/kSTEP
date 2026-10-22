@@ -39,6 +39,9 @@ include(
     "kstep-mcp",
     "kstep-geometry",
     "kstep-constraints",
+    // Constraint-sketch DSL (ADR-0031): joins kstep-constraints (PlaneGCS) and kstep-geometry
+    // (profile regions) without making kstep-geometry depend on the solver.
+    "kstep-sketch",
     "kstep-shape",
     "kstep-render",
     // Shared preview pipeline extracted from kstep-cli's RenderCommand.kt so `kstep render`

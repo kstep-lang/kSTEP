@@ -90,6 +90,12 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
         // OcctEmptyResultException to that set; none collides with another default import
         // (checked by grep, and no new vector type is introduced -- dev.kstep.shape owns Vec3).
         "dev.kstep.geometry.*",
+        // Welle L (ADR-0031): Edges, Faces, Direction3, Point3, EdgeKind, FaceKind, EdgeSelector,
+        // SelectionTolerance, EdgeSelectionException -- geometric edge selection for fillet/chamfer.
+        // No name collides with the generated AP242 types, dev.kstep.geometry or kotlin.* (checked by grep).
+        "dev.kstep.geometry.select.*",
+        // Welle L (ADR-0031): sketch { }, Sketch, SketchException and the sketch error types.
+        "dev.kstep.sketch.*",
         // ShapeAssignment -- the type `shape(...)` registers on KStepModel.shapes.
         "dev.kstep.shape.*",
         // stepFile { } / KStepModel / KStepModelBuilder

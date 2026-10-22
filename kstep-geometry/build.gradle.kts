@@ -234,6 +234,11 @@ val compileOcctBridge =
                     "-lTKCAF",
                     "-lTKCDF",
                     "-lTKDE",
+                    // Welle L (ADR-0031) adds no toolkit. Verified with `nm -gU` on macOS: BRepAdaptor_Curve/
+                    // BRepAdaptor_Surface in TKBRep, GCPnts_AbscissaPoint and GC_MakeArcOfCircle in TKGeomBase,
+                    // BRepBuilderAPI_MakeEdge/MakeWire and BRepGProp in TKTopAlgo -- all already linked above --
+                    // verified by the unchanged link line linking cleanly (ld64 rejects undefined symbols;
+                    // `-Wl,--no-undefined` does the same on Linux).
                     // Ubuntu's g++ defaults to --enable-new-dtags, which makes -Wl,-rpath below
                     // emit DT_RUNPATH instead of DT_RPATH. ld.so does NOT consult DT_RUNPATH when
                     // resolving a shared object's own *transitive* dependencies (only DT_NEEDED

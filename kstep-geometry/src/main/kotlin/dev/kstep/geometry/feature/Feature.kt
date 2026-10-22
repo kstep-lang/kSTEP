@@ -2,7 +2,10 @@ package dev.kstep.geometry.feature
 
 import dev.kstep.geometry.BooleanOperation
 import dev.kstep.geometry.ProfilePoint
+import dev.kstep.geometry.ProfileRegion
 import dev.kstep.geometry.RevolveAxis
+import dev.kstep.geometry.select.EdgeSelector
+import dev.kstep.geometry.select.SelectionTolerance
 
 /**
  * One step of a [FeatureSequence]: a value-only description of a single OCCT operation, replayed
@@ -121,6 +124,68 @@ data class HoleFeature(
 data class ChamferFeature(
     val baseIndex: Int,
     val edgeIndices: List<Int>,
+    val distance: Double,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/** Replays [dev.kstep.geometry.OcctKernel.extrudeRegion] (Welle L, ADR-0031): a planar region with holes, extruded along +Z. */
+data class ExtrudeRegionFeature(
+    val region: ProfileRegion,
+    val height: Double,
+) : Feature
+
+/** Replays [dev.kstep.geometry.OcctKernel.revolveRegion] (Welle L, ADR-0031). */
+data class RevolveRegionFeature(
+    val region: ProfileRegion,
+    val angleDegrees: Double = 360.0,
+    val axis: RevolveAxis = RevolveAxis.Y,
+) : Feature
+
+/**
+ * Which edges a [SelectedFilletFeature] / [SelectedChamferFeature] acts on, described
+ * geometrically instead of by opaque index (Welle L, ADR-0031).
+ */
+sealed interface EdgeReference
+
+/**
+ * Resolve [selector] against the shape of the feature's own `baseIndex`, afresh on every rebuild.
+ * [expected], if set, must equal the number of matched edges.
+ */
+data class SelectEdges(
+    val selector: EdgeSelector,
+    val expected: Int? = null,
+    val tolerance: SelectionTolerance = SelectionTolerance(),
+) : EdgeReference
+
+/**
+ * Resolve [selector] against the shape of the EARLIER feature [sourceIndex] (e.g. the original box
+ * before a pocket was cut), then follow those edges through every operation between [sourceIndex]
+ * and the consuming feature's `baseIndex` using OCCT's own edge history (`Modified`/`IsDeleted`).
+ * That keeps an edge addressable by what it WAS even after later operations created look-alike
+ * edges. [expected], if set, must equal the number of resulting edges (a split edge maps to all its
+ * pieces). Requires exactly one operation path from [sourceIndex] to the consuming `baseIndex`.
+ */
+data class TrackedEdges(
+    val sourceIndex: Int,
+    val selector: EdgeSelector,
+    val expected: Int? = null,
+    val tolerance: SelectionTolerance = SelectionTolerance(),
+) : EdgeReference
+
+/** Like [FilletFeature], but the edges are chosen by an [EdgeReference] instead of by index. */
+data class SelectedFilletFeature(
+    val baseIndex: Int,
+    val edges: EdgeReference,
+    val radius: Double,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/** Like [ChamferFeature], but the edges are chosen by an [EdgeReference] instead of by index. */
+data class SelectedChamferFeature(
+    val baseIndex: Int,
+    val edges: EdgeReference,
     val distance: Double,
 ) : DerivedFeature {
     override val baseIndices: List<Int> get() = listOf(baseIndex)

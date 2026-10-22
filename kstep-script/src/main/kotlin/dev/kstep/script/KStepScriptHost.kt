@@ -1,6 +1,9 @@
 package dev.kstep.script
 
 import dev.kstep.core.DslViolation
+import dev.kstep.geometry.select.EdgeSelectionException
+import dev.kstep.sketch.SketchException
+import dev.kstep.sketch.SketchSolverUnavailableException
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.io.File
 import java.time.Instant
@@ -43,6 +46,9 @@ private const val VALIDATION_FAILURE_MARKER = "kSTEP DSL validation failed:"
  * process approach then, not now.
  */
 object KStepScriptHost {
+    private const val MAX_CAUSE_DEPTH = 8
+    private const val MAX_DETAIL_LINES = 16
+
     private val host = BasicJvmScriptingHost()
     private val compilationConfig = createJvmCompilationConfigurationFromTemplate<KStepScript>()
 
@@ -134,11 +140,48 @@ object KStepScriptHost {
                     ),
             )
         } else {
-            KStepScriptOutcome.RuntimeError(
-                message = message ?: (error::class.qualifiedName ?: "unknown error"),
-                exceptionClass = error::class.qualifiedName ?: "unknown",
-            )
+            structuredFailure(error)
+                ?: KStepScriptOutcome.RuntimeError(
+                    message = message ?: (error::class.qualifiedName ?: "unknown error"),
+                    exceptionClass = error::class.qualifiedName ?: "unknown",
+                )
         }
+    }
+
+    // Welle L (ADR-0031): sketch and edge-selection failures are user-facing, structured families
+    // with their own codes. They may arrive wrapped (FeatureRebuildException carries the selector
+    // failure as its cause), so the cause chain is walked (bounded). No stack trace is ever kept.
+    private fun structuredFailure(error: Throwable): KStepScriptOutcome.RuntimeError? {
+        var current: Throwable? = error
+        var depth = 0
+        while (current != null && depth < MAX_CAUSE_DEPTH) {
+            val (code, text) =
+                when (current) {
+                    is SketchSolverUnavailableException ->
+                        KStepScriptOutcomeCodes.SKETCH_SOLVER_UNAVAILABLE to
+                            (current.message ?: "PlaneGCS bridge unavailable")
+                    is SketchException ->
+                        KStepScriptOutcomeCodes.SKETCH_INVALID to
+                            (
+                                "${current.kind}: ${current.message}" +
+                                    current.details.take(MAX_DETAIL_LINES).joinToString("") { "\n  - $it" }
+                            )
+                    is EdgeSelectionException ->
+                        KStepScriptOutcomeCodes.EDGE_SELECTION_FAILED to
+                            (current.message ?: "edge selection failed")
+                    else -> null to null
+                }
+            if (code != null && text != null) {
+                return KStepScriptOutcome.RuntimeError(
+                    message = "[$code] $text",
+                    exceptionClass = current::class.qualifiedName ?: "unknown",
+                    code = code,
+                )
+            }
+            current = current.cause
+            depth++
+        }
+        return null
     }
 
     // A blank timestamp is a legitimate way for a script author to say "I don't care, use now"

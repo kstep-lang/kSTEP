@@ -22,6 +22,10 @@ dependencies {
     // along too (kstep-shape declares that as `api` itself) -- exactly what a script needs to
     // build and register geometry in one module dependency.
     api(project(":kstep-shape"))
+    // Welle L (ADR-0031): the `sketch { }` DSL must resolve inside `.kstep.kts` scripts, which see the
+    // whole classpath of the host JVM -- hence `api`. kstep-constraints (PlaneGCS) comes along only as
+    // a runtime dependency of kstep-sketch and is deliberately NOT in the scripts' default imports.
+    api(project(":kstep-sketch"))
 
     implementation(libs.kotlin.scripting.common)
     implementation(libs.kotlin.scripting.jvm)
