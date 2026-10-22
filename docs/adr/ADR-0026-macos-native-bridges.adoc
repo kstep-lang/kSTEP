@@ -85,6 +85,5 @@ code signing and notarization. These stay open (see the Folge-Wellen rows in ADR
   `RetDone`, 0 undefined entities, model check 0 fails and 0 warnings, one
   `AdvancedBrepShapeRepresentation` and one `ManifoldSolidBrep` each) and imported with FreeCAD
   1.1.4 (`freecadcmd`): one valid `Solid` each, volume 24000.0 and 23785.398.
-* Gap: `kstep export` does not yet merge OCCT geometry into the Part 21 output ("geometry merging
-  is not wired into 'export' yet"), so the geometry files above come from the test suite, not from
-  the CLI.
+* Gap (closed by ADR-0027): at the time of this ADR `kstep export` did not yet merge OCCT geometry
+  into the Part 21 output, so the geometry files above came from the test suite, not from the CLI.

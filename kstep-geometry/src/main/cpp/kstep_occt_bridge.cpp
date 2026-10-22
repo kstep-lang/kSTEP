@@ -57,6 +57,9 @@
 #include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
 #include <STEPControl_StepModelType.hxx>
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_SequenceOfPrinters.hxx>
 #include <STEPControl_Writer.hxx>
 #include <Standard_Failure.hxx>
 #include <Standard_Version.hxx>
@@ -306,6 +309,28 @@ private:
 
 extern "C" {
 
+namespace {
+// Detaches OCCT's default message printers for its lifetime. See the call site in
+// nativeWriteStep for why.
+struct PrinterSilencer {
+    Handle(Message_Messenger) messenger;
+    Message_SequenceOfPrinters saved;
+    PrinterSilencer() : messenger(Message::DefaultMessenger()) {
+        if (!messenger.IsNull()) {
+            saved = messenger->Printers();
+            messenger->ChangePrinters().Clear();
+        }
+    }
+    ~PrinterSilencer() {
+        if (!messenger.IsNull()) {
+            messenger->ChangePrinters() = saved;
+        }
+    }
+    PrinterSilencer(const PrinterSilencer&) = delete;
+    PrinterSilencer& operator=(const PrinterSilencer&) = delete;
+};
+}  // namespace
+
 JNIEXPORT jstring JNICALL
 Java_dev_kstep_geometry_occt_OcctBridge_nativeOcctVersion(JNIEnv* env, jobject /*self*/) {
     try {
@@ -524,6 +549,13 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStep(
             if (shape != nullptr) {
                 found = true;
                 STEPControl_Writer writer;
+                // OCCT's STEP writer prints "Statistics on Transfer" banners to the process's
+                // stdout through the default messenger. For a CLI whose stdout is a machine-read
+                // JSON document (or an MCP stdio stream) that is corruption, so the default
+                // printers are detached for the duration of the write and restored afterwards
+                // (RAII, also on exceptions). Still under g_mutex, so no concurrent bridge call
+                // can observe the detached state.
+                PrinterSilencer silencer;
                 schemaAccepted = Interface_Static::SetCVal("write.step.schema", schemaValue.c_str());
                 if (schemaAccepted) {
                     transferStatus = writer.Transfer(*shape, STEPControl_AsIs);

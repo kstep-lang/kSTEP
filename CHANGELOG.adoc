@@ -7,6 +7,25 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Added
+
+* `kstep export` merges the geometry of `shape(...)` registrations into the exported Part 21 file
+  (ADR-0027). `Ap242ShapeExporter.export(header, roots, assignments)` / `exportToFile` accept all
+  roots and several shapes (one per product definition, limits `MAX_SHAPES` and
+  `MAX_TOTAL_GEOMETRY_INSTANCES`); the single-assignment overload is unchanged in output.
+* `kstep export --require-geometry`: exit 1 and no file unless geometry was merged.
+* Error codes `KSTEP-S-006` (`GEOMETRY_REQUIRED`), `KSTEP-S-007` (`GEOMETRY_UNAVAILABLE`) and
+  `KSTEP-S-008` (`GEOMETRY_EXPORT_FAILED`); `--output json` reports a `geometry` object when shapes
+  are involved.
+
+=== Changed
+
+* `kstep export` no longer prints "geometry merging is not wired into 'export' yet". A merge failure
+  (unreachable or duplicate product definition, closed shape, OCCT error) fails with exit 1 instead
+  of writing a structure-only file; native shape handles are closed on every path.
+* The OCCT bridge detaches OCCT's default message printers while writing STEP, so OCCT's
+  "Statistics on Transfer" banners no longer pollute stdout (and `--output json`).
+
 == 0.1.1 — 2026-10-22 (pre-release)
 
 Second pre-release. The GitHub release carries a platform-independent `kstep-cli-0.1.1.zip` (JVM only, without native bridges; about 86 MB because

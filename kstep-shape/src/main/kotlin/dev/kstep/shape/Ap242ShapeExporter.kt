@@ -48,62 +48,117 @@ object Ap242ShapeExporter {
     fun export(
         header: Part21Header,
         assignment: ShapeAssignment,
+    ): String = export(header, listOf(assignment.productDefinition), listOf(assignment))
+
+    /**
+     * Multi-root, multi-shape variant (ADR-0027): emits ALL of [roots] (so assembly structure --
+     * `NEXT_ASSEMBLY_USAGE_OCCURRENCE` roots -- is preserved, unlike the single-assignment
+     * overload, which only emits its one product definition) and binds each of [assignments] to
+     * its product definition via `PRODUCT_DEFINITION_SHAPE` + `SHAPE_DEFINITION_REPRESENTATION`.
+     *
+     * One part per assignment, each in its own coordinate system: there is no
+     * `ITEM_DEFINED_TRANSFORMATION`, so parts overlap at the origin in a viewer.
+     *
+     * @throws ShapeExportException if [assignments] is empty or exceeds [MAX_SHAPES], two
+     *   assignments share one product definition, an assignment's product definition is not
+     *   reachable from [roots], or OCCT's STEP output has an unexpected structure.
+     * @throws dev.kstep.geometry.OcctUnavailableException if the native OCCT bridge is not available.
+     * @throws dev.kstep.geometry.OcctGeometryException if OCCT's writer itself fails.
+     * @throws IllegalStateException if an assignment's shape is already closed.
+     */
+    fun export(
+        header: Part21Header,
+        roots: List<Any>,
+        assignments: List<ShapeAssignment>,
     ): String {
-        val occtText = writeOcctStepText(assignment)
-        val occtDoc = Part21Reader.readRawDocument(occtText, Part21ReadMode.TOLERANT)
-        val geometry = Ap242GeometryExtraction.extract(occtDoc)
+        if (assignments.isEmpty()) throw ShapeExportException("at least one shape assignment is required")
+        if (assignments.size > MAX_SHAPES) {
+            throw ShapeExportException("too many shape assignments: ${assignments.size} (limit $MAX_SHAPES)")
+        }
+        val seen = java.util.IdentityHashMap<Any, Boolean>()
+        for (a in assignments) {
+            if (seen.put(a.productDefinition, true) != null) {
+                throw ShapeExportException(
+                    "more than one shape is bound to product definition '${a.productDefinition.id}'; " +
+                        "exactly one shape per product definition is supported",
+                )
+            }
+        }
 
-        val structure = Part21Writer.emit(listOf(assignment.productDefinition), startId = 1)
-        val offset = structure.nextId - 1
+        val structure = Part21Writer.emit(roots, startId = 1)
+        val ids =
+            assignments.map { a ->
+                try {
+                    structure.idOf(a.productDefinition)
+                } catch (e: NoSuchElementException) {
+                    throw ShapeExportException(
+                        "a shape is bound to product definition '${a.productDefinition.id}' " +
+                            "that is not reachable from the exported roots",
+                        e,
+                    )
+                }
+            }
 
-        // The two Part21Document algebra operations ADR-0009 introduces this merge for — see
-        // that ADR's "kstep-step21: one renderer, a Part21Document algebra" section. Wrapping
-        // the geometry subgraph in a throwaway Part21Document (its header is discarded, only
-        // renumbered's instance/reference shift matters here) keeps this the SAME renumbering
-        // path Part21DocumentMergeTest exercises directly, instead of a second, independently
-        // maintained instance-list-map that could silently drift from it.
-        val geometryRenumbered: List<Part21EntityInstance> =
-            Part21Document(header, geometry.instances).renumbered(offset).instances
-        val rootRepresentationId = geometry.rootRepresentationId + offset
+        var offset = structure.nextId - 1
+        var totalInstances = 0
+        val geometryAll = mutableListOf<Part21EntityInstance>()
+        val bridge = mutableListOf<Part21SimpleInstance>()
+        for ((index, assignment) in assignments.withIndex()) {
+            val occtText = writeOcctStepText(assignment)
+            val occtDoc = Part21Reader.readRawDocument(occtText, Part21ReadMode.TOLERANT)
+            val geometry = Ap242GeometryExtraction.extract(occtDoc)
+            totalInstances += geometry.instances.size
+            if (totalInstances > MAX_TOTAL_GEOMETRY_INSTANCES) {
+                throw ShapeExportException(
+                    "combined geometry exceeds the instance limit of $MAX_TOTAL_GEOMETRY_INSTANCES",
+                )
+            }
 
-        val nextFreeId = addExactId(geometryRenumbered.maxOf { it.id }, 1)
-        val productDefinitionShapeId = nextFreeId
-        val shapeDefinitionRepresentationId = addExactId(nextFreeId, 1)
-        val applicationProtocolDefinitionId = addExactId(nextFreeId, 2)
-        val productRelatedProductCategoryId = addExactId(nextFreeId, 3)
-
-        val applicationContext = assignment.productDefinition.frameOfReference.frameOfReference
-        val product = assignment.productDefinition.formation.ofProduct
-
-        val bridge: List<Part21SimpleInstance> =
-            listOf(
+            // The two Part21Document algebra operations ADR-0009 introduces this merge for.
+            // Wrapping the geometry subgraph in a throwaway Part21Document keeps this the SAME
+            // renumbering path Part21DocumentMergeTest exercises directly.
+            val renumbered: List<Part21EntityInstance> =
+                Part21Document(header, geometry.instances).renumbered(offset).instances
+            val rootRepresentationId = geometry.rootRepresentationId + offset
+            val nextFreeId = addExactId(renumbered.maxOf { it.id }, 1)
+            val productDefinitionShapeId = nextFreeId
+            val shapeDefinitionRepresentationId = addExactId(nextFreeId, 1)
+            geometryAll += renumbered
+            bridge +=
                 Ap242ShapeBridgeEntities.productDefinitionShape(
                     productDefinitionShapeId,
                     assignment.shapeName,
-                    structure.idOf(assignment.productDefinition),
-                ),
+                    ids[index],
+                )
+            bridge +=
                 Ap242ShapeBridgeEntities.shapeDefinitionRepresentation(
                     shapeDefinitionRepresentationId,
                     productDefinitionShapeId,
                     rootRepresentationId,
-                ),
-                Ap242ShapeBridgeEntities.applicationProtocolDefinition(
-                    applicationProtocolDefinitionId,
-                    structure.idOf(applicationContext),
-                ),
-                Ap242ShapeBridgeEntities.productRelatedProductCategory(
-                    productRelatedProductCategoryId,
-                    structure.idOf(product),
-                ),
+                )
+            offset = shapeDefinitionRepresentationId
+        }
+
+        // applicationProtocolDefinition + productRelatedProductCategory hang off the application
+        // context / product, not off a shape: emitted exactly once (first assignment's product).
+        val first = assignments.first()
+        val applicationProtocolDefinitionId = addExactId(offset, 1)
+        val productRelatedProductCategoryId = addExactId(offset, 2)
+        bridge +=
+            Ap242ShapeBridgeEntities.applicationProtocolDefinition(
+                applicationProtocolDefinitionId,
+                structure.idOf(first.productDefinition.frameOfReference.frameOfReference),
+            )
+        bridge +=
+            Ap242ShapeBridgeEntities.productRelatedProductCategory(
+                productRelatedProductCategoryId,
+                structure.idOf(first.productDefinition.formation.ofProduct),
             )
 
         // Part21Document.concat's own duplicate-#N guard (Part21WriteException) is real
-        // protection here, not just documentation: it is the only thing standing between a
-        // future change to the offset arithmetic above (or a third merge participant) and a
-        // silently-written file with two instances sharing one #N, since kSTEP's own product
-        // structure and OCCT's renumbered geometry are otherwise merged by plain concatenation.
+        // protection against a future change to the offset arithmetic above.
         val structureDoc = Part21Document(header, structure.instances)
-        val merged = Part21Document.concat(structureDoc, geometryRenumbered, bridge)
+        val merged = Part21Document.concat(structureDoc, geometryAll, bridge)
         val document = merged.copy(header = header.copy(schemaIdentifiers = listOf(AP242_SCHEMA_IDENTIFIER)))
         return document.render()
     }
@@ -126,6 +181,26 @@ object Ap242ShapeExporter {
                 e,
             )
         }
+
+    /** Upper bound on shapes per export (DoS guard, ADR-0027). */
+    const val MAX_SHAPES: Int = 256
+
+    /** Upper bound on the summed geometry instance count over all shapes (DoS guard, ADR-0027). */
+    const val MAX_TOTAL_GEOMETRY_INSTANCES: Int = 5_000_000
+
+    /** Multi-shape [exportToFile]; see the multi-root [export]. */
+    fun exportToFile(
+        header: Part21Header,
+        roots: List<Any>,
+        assignments: List<ShapeAssignment>,
+        target: Path,
+    ): Path {
+        val text = export(header, roots, assignments)
+        val absolute = target.toAbsolutePath().normalize()
+        Files.createDirectories(absolute.parent)
+        Files.writeString(absolute, text)
+        return absolute
+    }
 
     /** [export] plus writing the result to [target]. Returns the absolute, normalized path actually written. */
     fun exportToFile(

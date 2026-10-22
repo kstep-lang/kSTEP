@@ -446,8 +446,11 @@ this writing:
   OpenCascade 7.9.3 reader (`scripts/interop/`) additionally resolves
   the products, definitions and both ends of every assembly usage with
   a clean model check. This proves product-structure read interop with
-  one external implementation; geometry interop, other CAD/PLM readers,
-  full schema conformance and a lossless write-back round trip remain
+  one external implementation. Since `kstep export` merges geometry
+  (ADR-0027, verified 2026-10-22 with a `20x30x40` box), OCCT-based readers
+  (OCCT 7.9.3 typed reader; FreeCAD 1.1.4 on OCCT) were also shown to read the
+  merged file: a valid `Solid` of volume 24000.0 with 6 faces. Other CAD/PLM
+  readers, full schema conformance and a lossless write-back round trip remain
   unverified, and geometry can only be produced where a system OCCT bridge is built (Linux x86-64 or macOS arm64). This wave's acceptance test is a self-roundtrip only
   (`Part21Reader.read(Part21Writer.write(header, model)) == model`,
   verified in `Part21RoundtripTest`). This closes the kSTEP-own-format
@@ -700,8 +703,9 @@ scan before either lands.
   `KStepModel` gained a `shapes: List<ShapeAssignment>` field and a
   `shape(...)` builder function (`kstep-script` now depends on
   `kstep-shape`), so a script can register an `OcctShape` for preview
-  independently of `root(...)` — `kstep export`'s `Part21Writer` output is
-  completely unaffected. Never a silently-swapped file type: the
+  independently of `root(...)`. (Originally `kstep export` ignored these; since
+  ADR-0027 it merges them into the exported file, see the `export` usage below.)
+  Never a silently-swapped file type: the
   requested/resolved container (SVG/PNG/`.txt`) is always honored, only
   the content varies. See the ADR for the full content/exit-code matrix
   and the two distinct "OCCT is unavailable" failure points this wave had
@@ -934,7 +938,9 @@ See <<roadmap,Roadmap>> for what's planned next.
 | `kstep-shape`
 | AP242 shape assignment -- Geometrie Welle 4, merges `kstep-core` product
   structure with `kstep-geometry` B-Rep solids (`dev.kstep.shape`)
-| Working: `Ap242ShapeExporter.export(header, ShapeAssignment(productDefinition,
+| Working: since ADR-0027 also `Ap242ShapeExporter.export(header, roots,
+  assignments)` (all roots, several shapes, one per product definition; used by
+  `kstep export`). `Ap242ShapeExporter.export(header, ShapeAssignment(productDefinition,
   occtShape))` writes the shape to a real temp STEP file, extracts its
   geometry subgraph (discarding OCCT's own placeholder product structure --
   see `Ap242GeometryExtraction`), and merges it with kSTEP's own validated
@@ -1979,6 +1985,27 @@ before anything is written. It is off by default. On findings the command
 exits with status 1 and writes no file; if no verdict can be reached (a
 limit is exceeded, a schema construct is unsupported) it fails closed with
 `KSTEP-S-005`. Only `root(...)` entities are validated, not `shape(...)`.
+
+*Geometry (ADR-0027).* A script that registers `shape(definition, occtShape)`
+(together with `root(...)` for the same product structure) is exported with its
+B-Rep geometry merged into the one Part 21 file, linked to the product
+definition via `PRODUCT_DEFINITION_SHAPE` and `SHAPE_DEFINITION_REPRESENTATION`.
+Several shapes are allowed (one per product definition, each reachable from the
+roots); every part stays in its own coordinate system, there are no placement
+transformations, so parts overlap at the origin. `--require-geometry` fails with
+exit 1 and writes nothing unless geometry was merged (`KSTEP-S-006`: the script
+registers no shape; `KSTEP-S-007`: OCCT unavailable). A failed merge
+(`KSTEP-S-008`: unreachable or duplicate product definition, closed shape, OCCT
+error) is never downgraded silently to a structure-only file: exit 1, nothing
+written. A script that needs OCCT to build its shapes still fails during the
+script run when OCCT is missing (exit 1, `KSTEP-S-003`), as before. With
+geometry merged, `FILE_SCHEMA` carries OCCT's AP242 MIM identifier instead of the
+structure-only identifier. `--output json` gains a `geometry` object
+(`merged`, `shapeCount`, `occt`) only when shapes or the flag are involved;
+otherwise the output is byte-identical to before.
+Interop (2026-10-22): FreeCAD 1.1.4 reads the exported box as one valid `Solid`;
+for an assembly it imports only the root product (the child's geometry is not
+transferred, no hierarchy), see ADR-0027.
 Example for a usage cycle (A uses B, B uses A):
 
 [source,shell]
@@ -2416,7 +2443,9 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
   written), and a typed OpenCascade 7.9.3 reader (`scripts/interop/`)
   resolved the product structure with a clean model check. That is
   product-structure read interop with one external implementation;
-  geometry interop and a lossless write-back round trip are unproven, so
+  geometry interop was added by ADR-0027 for a single box with OCCT-based readers
+  (FreeCAD 1.1.4 and the OCCT reader); assembly geometry is not transferred by
+  FreeCAD and a lossless write-back round trip is unproven, so
   acceptance criterion #2 is only partly met.
 . An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and
   the kSTEP DSL as generation targets. **(M2 Welle 1) Split into two

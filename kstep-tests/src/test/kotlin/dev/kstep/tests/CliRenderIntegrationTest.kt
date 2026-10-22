@@ -420,19 +420,26 @@ class CliRenderIntegrationTest :
         }
 
         // R17
-        "kstep export on a geometry-carrying script warns on stderr and reports shapeCount in JSON".config(
-            enabled = available,
-        ) {
-            val script = copyFixture("hello-box.kstep.kts")
+        "kstep export on a geometry-carrying script merges the geometry and reports shapeCount and geometry in JSON"
+            .config(
+                enabled = available,
+            ) {
+                val script = copyFixture("hello-box.kstep.kts")
 
-            val result = runner.run("export", "--output", "json", script.name, "--out", "hello-box-r17.step")
+                val result = runner.run("export", "--output", "json", script.name, "--out", "hello-box-r17.step")
 
-            result.exitCode shouldBe 0
-            File(workDir, "hello-box-r17.step").exists() shouldBe true
-            result.stderr shouldContain "geometry merging is not wired into 'export' yet"
-            val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
-            json["shapeCount"]?.jsonPrimitive?.int shouldBe 1
-        }
+                result.exitCode shouldBe 0
+                File(workDir, "hello-box-r17.step").exists() shouldBe true
+                result.stderr shouldNotContain "not wired into 'export'"
+                val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+                json["shapeCount"]?.jsonPrimitive?.int shouldBe 1
+                json["geometry"]
+                    ?.jsonObject
+                    ?.get("merged")
+                    ?.jsonPrimitive
+                    ?.boolean shouldBe true
+                File(workDir, "hello-box-r17.step").readText() shouldContain "ADVANCED_BREP_SHAPE_REPRESENTATION"
+            }
 
         // R18 -- regression test for a real, reproduced crash: a root(...) that is not one of the
         // twelve supported kstep-core AP242 V1/support entity types used to make Part21Writer.emit

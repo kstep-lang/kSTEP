@@ -1,6 +1,8 @@
 package dev.kstep.cli
 
 import dev.kstep.asciidoc.OnErrorPolicy
+import dev.kstep.geometry.OcctAvailability
+import dev.kstep.geometry.OcctKernel
 import dev.kstep.mcp.runStdioServer
 import dev.kstep.preview.RenderFormat
 import dev.kstep.script.KStepScriptHost
@@ -36,6 +38,8 @@ Usage:
       --output json                        Emit the result as a JSON document instead of text
       --validate                           Run model-level validation (USEDIN/INVERSE/UNIQUE, acyclic
                                             assemblies); exit 1 on violations, nothing is written
+      --require-geometry                   Fail (exit 1), writing nothing, unless the script's geometry
+                                            is merged into the file
   kstep render <script.kstep.kts> [opts]   Render a headless SVG/PNG/text/glTF preview of a script
       -f, --format <auto|svg|png|text|glb> Preview container (default: auto); "gltf" is an alias
                                             for "glb" -- both write binary glTF 2.0 (.glb)
@@ -68,6 +72,7 @@ sealed interface CliCommand {
         val outPath: String?,
         val jsonOutput: Boolean,
         val validate: Boolean = false,
+        val requireGeometry: Boolean = false,
     ) : CliCommand
 
     data class Render(
@@ -134,9 +139,14 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
     var outPath: String? = null
     var jsonOutput = false
     var validate = false
+    var requireGeometry = false
     var i = 0
     while (i < rest.size) {
         when (rest[i]) {
+            "--require-geometry" -> {
+                requireGeometry = true
+                i += 1
+            }
             "--out" -> {
                 outPath = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
                 i += 2
@@ -165,6 +175,7 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
         outPath = outPath,
         jsonOutput = jsonOutput,
         validate = validate,
+        requireGeometry = requireGeometry,
     )
 }
 
@@ -405,45 +416,97 @@ private fun writeExport(
     command: CliCommand.Export,
     outcome: KStepScriptOutcome.Success,
 ) {
+    val model = outcome.model
+    // Native shape handles are released on every path -- exitProcess skips `finally`, so every
+    // failure below closes explicitly BEFORE reporting (ADR-0027).
+    try {
+        exportModel(command, model)
+    } finally {
+        closeShapes(model)
+    }
+}
+
+private fun exportModel(
+    command: CliCommand.Export,
+    model: dev.kstep.script.KStepModel,
+) {
+    fun fail(report: () -> Nothing): Nothing {
+        closeShapes(model)
+        report()
+    }
     // Opt-in population-level validation (ADR-0024): runs BEFORE the writer and before any file
     // access, and exits 1 (never returning) on findings or when no verdict is available, so no
-    // output file is written and a stale one is never mistaken for fresh output.
-    val validation = if (command.validate) validateForExport(outcome.model, command.jsonOutput) else null
-    val text =
-        try {
-            Part21Writer.write(outcome.model.header, outcome.model.roots)
-        } catch (e: Part21WriteException) {
-            printError(command.jsonOutput, e.toRuntimeError())
-        } catch (e: Part21EncodingException) {
-            printError(command.jsonOutput, e.toRuntimeError())
-        } catch (e: Part21LimitExceededException) {
-            printError(command.jsonOutput, e.toRuntimeError())
+    // output file is written and a stale one is never mistaken for fresh output. It evaluates
+    // model.roots only; geometry is a separate channel and does not affect it.
+    val validation =
+        if (command.validate) validateForExport(model, command.jsonOutput) { closeShapes(model) } else null
+
+    val shapeCount = model.shapes.size
+    // Only probe the native bridge when geometry is actually in play.
+    val occt =
+        if (shapeCount > 0) OcctKernel.availability() else OcctAvailability.Unavailable("not queried")
+    val plan = planExportGeometry(shapeCount, command.requireGeometry, occt)
+    val text: String
+    var geometry: GeometryReport? = null
+    when (plan) {
+        is ExportGeometryPlan.Fail ->
+            fail { printGeometryExportError(command.jsonOutput, plan.errorKind, plan.code, plan.message) }
+        is ExportGeometryPlan.Merge -> {
+            val merged = mergeGeometry(model)
+            text =
+                merged.getOrElse { e ->
+                    fail {
+                        printGeometryExportError(
+                            command.jsonOutput,
+                            "geometry_export_failed",
+                            KStepScriptOutcomeCodes.GEOMETRY_EXPORT_FAILED,
+                            e.message ?: "geometry export failed",
+                        )
+                    }
+                }
+            geometry = GeometryReport(merged = true, shapeCount = shapeCount, occt = occt)
         }
-    val outPath = command.outPath ?: deriveOutputPath(command.scriptPath)
-    File(outPath).writeText(text)
-    val shapeCount = outcome.model.shapes.size
-    if (shapeCount > 0) {
-        // Geometry registered via shape(...) (kSTEP's headless-preview-rendering wave, see
-        // docs/adr/ADR-0011-headless-preview-rendering.adoc) is NOT merged into the exported
-        // Part-21 file this wave -- Part21Writer has no entity type for it yet (Ap242ShapeExporter
-        // merging is Folge-Welle R-1). Warn rather than silently dropping it.
-        System.err.println(
-            "kstep export: model carries $shapeCount geometric shape(s); geometry merging is not " +
-                "wired into 'export' yet -- see 'kstep render' for a preview.",
-        )
+        is ExportGeometryPlan.StructureOnly -> {
+            text =
+                try {
+                    Part21Writer.write(model.header, model.roots)
+                } catch (e: Part21WriteException) {
+                    fail { printError(command.jsonOutput, e.toRuntimeError()) }
+                } catch (e: Part21EncodingException) {
+                    fail { printError(command.jsonOutput, e.toRuntimeError()) }
+                } catch (e: Part21LimitExceededException) {
+                    fail { printError(command.jsonOutput, e.toRuntimeError()) }
+                }
+            if (plan.unmergedReason != null) {
+                System.err.println(
+                    "kstep export: geometry NOT written: OCCT unavailable (${plan.unmergedReason}); " +
+                        "the file contains the product structure only.",
+                )
+                geometry = GeometryReport(false, shapeCount, occt, plan.unmergedReason)
+            }
+        }
     }
+    val outPath = command.outPath ?: deriveOutputPath(command.scriptPath)
+    // The complete text exists before the file is opened, so a failure above never leaves a
+    // partial or truncated output file behind.
+    File(outPath).writeText(text)
     if (command.jsonOutput) {
         println(
             buildJsonObject {
                 put("status", "success")
                 put("outPath", outPath)
-                put("rootCount", outcome.model.roots.size)
+                put("rootCount", model.roots.size)
                 put("shapeCount", shapeCount)
                 if (validation != null) put("validation", validationSummaryJson(validation))
+                if (geometry != null) put("geometry", geometryJson(geometry))
             }.toString(),
         )
     } else {
-        println("Exported ${outcome.model.roots.size} root(s) to $outPath")
+        if (geometry?.merged == true) {
+            println("Exported ${model.roots.size} root(s) with $shapeCount geometric shape(s) to $outPath")
+        } else {
+            println("Exported ${model.roots.size} root(s) to $outPath")
+        }
         if (validation != null) println(validationSummaryText(validation))
     }
 }

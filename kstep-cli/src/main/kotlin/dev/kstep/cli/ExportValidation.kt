@@ -25,13 +25,20 @@ import kotlin.system.exitProcess
 internal fun validateForExport(
     model: KStepModel,
     jsonOutput: Boolean,
+    beforeExit: () -> Unit = {},
 ): ModelValidationResult =
     when (val outcome = model.validateModel()) {
         is ModelValidationOutcome.Checked -> {
-            if (!outcome.result.isValid) printValidationFindings(jsonOutput, outcome.result)
+            if (!outcome.result.isValid) {
+                beforeExit()
+                printValidationFindings(jsonOutput, outcome.result)
+            }
             outcome.result
         }
-        is ModelValidationOutcome.Unavailable -> printValidationUnavailable(jsonOutput, outcome)
+        is ModelValidationOutcome.Unavailable -> {
+            beforeExit()
+            printValidationUnavailable(jsonOutput, outcome)
+        }
     }
 
 private fun printValidationFindings(

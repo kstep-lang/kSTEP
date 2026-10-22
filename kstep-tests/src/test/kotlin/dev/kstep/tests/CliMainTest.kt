@@ -85,6 +85,46 @@ class CliMainTest :
                 CliCommand.Export(scriptPath = "a.kstep.kts", outPath = "b.step", jsonOutput = true)
         }
 
+        "\"export <path> --require-geometry\" resolves to Export with requireGeometry true" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--require-geometry")) shouldBe
+                CliCommand.Export(
+                    scriptPath = "a.kstep.kts",
+                    outPath = null,
+                    jsonOutput = false,
+                    requireGeometry = true,
+                )
+        }
+
+        "export --require-geometry combines with --validate, --out and --output json in any order" {
+            resolveCommand(
+                arrayOf(
+                    "export",
+                    "--output",
+                    "json",
+                    "--require-geometry",
+                    "a.kstep.kts",
+                    "--validate",
+                    "--out",
+                    "o.step",
+                ),
+            ) shouldBe
+                CliCommand.Export(
+                    scriptPath = "a.kstep.kts",
+                    outPath = "o.step",
+                    jsonOutput = true,
+                    validate = true,
+                    requireGeometry = true,
+                )
+        }
+
+        "export --require-geometry=true (a valued form) resolves to ShowUsage with exit code 1" {
+            resolveCommand(arrayOf("export", "a.kstep.kts", "--require-geometry=true")) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "USAGE_TEXT documents the export --require-geometry flag" {
+            USAGE_TEXT shouldContain "Fail (exit 1), writing nothing, unless the script's geometry"
+        }
+
         "\"export <path> --validate\" resolves to Export with validate true" {
             resolveCommand(arrayOf("export", "a.kstep.kts", "--validate")) shouldBe
                 CliCommand.Export(scriptPath = "a.kstep.kts", outPath = null, jsonOutput = false, validate = true)

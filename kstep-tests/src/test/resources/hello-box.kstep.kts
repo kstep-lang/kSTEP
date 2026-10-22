@@ -4,6 +4,7 @@
 // added in kSTEP's headless-preview-rendering wave (see docs/adr/ADR-0011-headless-preview-rendering.adoc).
 //
 // Run: kstep render hello-box.kstep.kts  ->  writes hello-box.svg
+//      kstep export hello-box.kstep.kts  ->  writes hello-box.step (product structure + geometry)
 
 val appCtx = applicationContext { application = "configuration control" }.getOrThrow()
 val prodCtx =

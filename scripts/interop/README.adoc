@@ -38,7 +38,7 @@ schema conformance, a lossless write-back round trip.
 
 Two files written by the OCCT JNI bridge during the test run (`box-ap242.step` from
 `OcctBridgeSmokeTest`, `extruded-filleted.step` from `OcctFeatureOperationsTest`; `kstep export`
-does not yet merge geometry) were checked:
+did not merge geometry at that time) were checked:
 
 * `read_step_structure`: read status `RetDone`, 0 undefined entities, model check 0 fails and 0
   warnings; the entity histogram contains one `StepShape_AdvancedBrepShapeRepresentation` and one
@@ -47,5 +47,26 @@ does not yet merge geometry) were checked:
   (box) and 23785.398 (extruded and filleted).
 
 This proves that OCCT and FreeCAD read the shape representation written by the bridge. It does not
-prove interoperability of the full kSTEP Part 21 output with geometry merged in, since that merging
-does not exist yet.
+prove interoperability of the full kSTEP Part 21 output with geometry merged in; that is covered by the
+next section.
+
+== Result of 2026-10-22, `kstep export` with geometry (ADR-0027)
+
+[source,bash]
+----
+kstep export kstep-tests/src/test/resources/export-box-20x30x40.kstep.kts --out box.step
+kstep export kstep-tests/src/test/resources/export-assembly-geometry.kstep.kts --out assembly.step
+./read_step_structure box.step
+./read_step_structure assembly.step
+----
+
+* `read_step_structure`: both files `RetDone`, 0 undefined entities, model check 0 fails and 0
+  warnings. `box.step`: 350 entities, 1 product, 1 `ProductDefinitionShape`, 1
+  `AdvancedBrepShapeRepresentation`, 6 `AdvancedFace`. `assembly.step`: 696 entities, 2 products,
+  1 assembly usage with both ends resolved, 2 shape representations, 12 `AdvancedFace`.
+* FreeCAD 1.1.4 `Part.read('box.step')`: `Solid True 24000.0 6`.
+* FreeCAD 1.1.4 on `assembly.step`: only the root product `Housing` arrives (one `Part::Feature`,
+  volume 60000.0, 6 faces); the child `Bracket` geometry is not transferred and there is no
+  hierarchy. The same two parts exported as two plain roots (no usage) both arrive (`Housing`
+  60000.0, `Bracket` 1000.0). Reason: no placement transformation links the child representation to
+  the assembly, so an OCCT/FreeCAD reader has nothing to position it with.

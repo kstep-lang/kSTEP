@@ -26,6 +26,15 @@ object KStepScriptOutcomeCodes {
      * reach a verdict (limit exceeded, unsupported construct, ...). Fail closed: nothing may be
      * assumed valid. */
     const val MODEL_VALIDATION_UNAVAILABLE = "KSTEP-S-005"
+
+    /** `kstep export --require-geometry` but the script registers no `shape(...)` (ADR-0027). */
+    const val GEOMETRY_REQUIRED = "KSTEP-S-006"
+
+    /** `kstep export --require-geometry` but OCCT is unavailable (ADR-0027). */
+    const val GEOMETRY_UNAVAILABLE = "KSTEP-S-007"
+
+    /** Merging the script's geometry into the exported file failed (ADR-0027). Fail closed. */
+    const val GEOMETRY_EXPORT_FAILED = "KSTEP-S-008"
 }
 
 /** One compiler diagnostic, stripped down to what a CLI/JSON consumer needs: no internal

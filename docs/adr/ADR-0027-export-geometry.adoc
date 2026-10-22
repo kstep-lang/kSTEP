@@ -1,0 +1,91 @@
+= ADR-0027: Geometry in `kstep export`
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle H). Amends ADR-0009 (one shape per exporter call) and ADR-0024
+(`--validate` interaction). Until now `kstep export` warned that "geometry merging is not wired into
+'export' yet" and wrote the product structure only.
+
+== Context
+
+`Ap242ShapeExporter` (ADR-0009) merges one validated product structure with one OCCT solid, but it
+emitted only the assignment's own product definition (`Part21Writer.emit(listOf(pd))`), so an
+assembly's `NEXT_ASSEMBLY_USAGE_OCCURRENCE` roots would have been dropped silently, and it accepted
+exactly one `ShapeAssignment`. The CLI never called it. A model with shapes already implies that OCCT
+was available while the script ran (`OcctKernel.makeBox` throws otherwise, and the script host then
+reports a runtime error).
+
+== Decision
+
+* *Exporter overload* `export(header, roots, assignments)` and `exportToFile(...)`. All roots are
+  emitted; each assignment is bound to its product definition through `idOf`. OCCT output is
+  renumbered per shape with a running offset. `APPLICATION_PROTOCOL_DEFINITION` and
+  `PRODUCT_RELATED_PRODUCT_CATEGORY` are emitted once (first assignment's product). The
+  single-assignment overload delegates with `roots = [pd]`; its output is unchanged (tested for
+  equality).
+* *Rejected inputs* (`ShapeExportException`): empty list, more than `MAX_SHAPES` (256), summed
+  geometry instances above `MAX_TOTAL_GEOMETRY_INSTANCES` (5,000,000), two assignments on one product
+  definition (ADR-0009's one-shape-per-definition rule stays), a product definition not reachable
+  from the roots (typically a forgotten `root(...)`).
+* *`--require-geometry`* on `export`, same name and boolean form as on `render`/`asciidoc`. Exit 1 and
+  no file unless geometry was merged: `KSTEP-S-006` (no `shape(...)` registered), `KSTEP-S-007` (OCCT
+  unavailable).
+* *Fallback rules.* No shapes: structure-only path, `Part21Writer.write` untouched (byte-identical,
+  checked against a golden file generated with the pre-change binary). Shapes and OCCT unavailable
+  without the flag: product structure plus a stderr warning. Shapes and a merge *error*: fail closed,
+  `KSTEP-S-008`, exit 1, nothing written. A partial result would write a geometry model without its
+  geometry; the fallback applies only to "OCCT absent", never to "OCCT reported an error".
+* *`--validate`* runs first and unchanged on `model.roots`; geometry is a separate channel and does not
+  influence it.
+* *No partial file.* The whole text is built in memory, then written. An existing output file is
+  neither deleted nor touched on failure.
+* *Handles.* `exitProcess` skips `finally`, so every failure path (including the validation exits,
+  via a `beforeExit` hook) closes all shapes first; the success path closes them in `finally`.
+* *Output.* Text: `Exported N root(s) with M geometric shape(s) to <path>` only when geometry was
+  merged, otherwise the old line. JSON: a `geometry` object (`merged`, `shapeCount`, `occt`, and
+  `reason` when not merged) appears only when shapes or the flag are involved. Error messages are
+  fixed strings or kSTEP's own messages, no native paths or stack traces.
+* *Schema identifier.* With geometry the file carries OCCT's AP242 MIM identifier (ADR-0009 section
+  7), different from the structure-only identifier.
+* *Bridge change.* OCCT's STEP writer printed "Statistics on Transfer" banners to stdout, which
+  corrupted `--output json`. The native writer now detaches the default message printers while it
+  writes (RAII, under the bridge mutex). This was found by the new integration tests.
+
+== Consequences and limitations
+
+* Several parts share no placement: there is no `ITEM_DEFINED_TRANSFORMATION`, each part lives in its
+  own coordinate system and parts overlap at the origin in a viewer. Placed assembly geometry is a
+  later wave.
+* New error codes `KSTEP-S-006` to `-008` in `KStepScriptOutcomeCodes`.
+* A script that builds shapes with OCCT still fails in the script run, with exit 1 and `KSTEP-S-003`,
+  when OCCT is missing; the "OCCT unavailable" fallback is reachable only if the bridge disappears
+  after the script ran or the script catches the exception itself. Tested through a nonexistent
+  bridge path (not OCCT-gated).
+
+== Verification (2026-10-22, macOS arm64, OCCT 7.9.3, FreeCAD 1.1.4)
+
+* `./gradlew clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true --no-build-cache
+  --rerun-tasks`: BUILD SUCCESSFUL, 1212 tests, 0 failures, 0 errors, 6 skipped. The 6 skips are the
+  five "fails predictably when the native bridge is unavailable" cases (3 OCCT, 2 PlaneGCS) and the
+  Khronos gltf-validator test; none is new. The new gated tests ran
+  (`CliExportGeometryIntegrationTest` 11 tests, `Ap242ShapeExportMultiTest` 6 tests, 0 skipped).
+* `kstep export export-box-20x30x40.kstep.kts`: `read_step_structure` read status `RetDone`, 350
+  entities, 0 undefined, model check 0 fails and 0 warnings; `AdvancedBrepShapeRepresentation` x1,
+  `AdvancedFace` x6. FreeCAD `Part.read`: `Solid True 24000.0 6`.
+* `export-assembly-geometry.kstep.kts` (housing 50x40x30 containing bracket 10x20x5): OCCT reader
+  `RetDone`, 696 entities, 0 undefined, model check 0/0, both assembly ends resolved, 12 faces.
+  *FreeCAD imports only the root*: one `Part::Feature` "Housing", volume 60000.0; the bracket is not
+  transferred and no hierarchy is visible. With two plain roots and no usage FreeCAD imports both
+  ("Housing" 60000.0, "Bracket" 1000.0). One attempt that ran `Part.read` and `Import.insert` in the same `freecadcmd` session crashed FreeCAD
+  ("Application unexpectedly terminated"); the figures above come from separate sessions.
+* Not checked: Extrude+Fillet through the CLI (its interop evidence remains the exporter test of
+  ADR-0009 and the bridge files of ADR-0026), other CAD/PLM readers, FreeCAD's own OCCT version
+  (1.1.4 bundles its own; Homebrew OCCT is 7.9.3).
+
+== Alternatives rejected
+
+* *Silent fallback to the product structure on a merge error.* Would write a file that looks like
+  success but lacks the geometry.
+* *Merge via XCAF (`STEPCAFControl_Writer`).* Rejected in ADR-0009 for the same reasons; unchanged.
+* *Several shapes per product definition.* Keeps ADR-0009's 1:1 rule; no consumer needs it yet.
