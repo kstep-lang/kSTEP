@@ -172,7 +172,7 @@ sentence does not hold for `kstep-constraints` -- and is not repeated here.
 . PlaneGCS solver sources vendored unmodified, commit pinned, license
   documented (`PROVENANCE.adoc`, this ADR, NOTICE).
 . Gradle compiles the vendored sources plus a hand-written JNI shim into
-  `libkstep_planegcs_bridge.so` (linux-x86-64 only, matching
+  `libkstep_planegcs_bridge.so` (linux-x86-64 only at the time; macos-aarch64 added by ADR-0026, matching
   `kstep-geometry`'s own platform scope this milestone) -- skipped, not
   failed, when Eigen/Boost dev headers or a C++ compiler are absent.
 . A closed, hardened native-library loading path in Kotlin
@@ -262,7 +262,7 @@ Ship `kstep-constraints` exactly as scoped above:
   `kstep-geometry` or `kstep-core` in this wave.
 * **Graceful degradation**: `compilePlaneGcsBridge` (a Gradle `Exec` task,
   structured identically to `kstep-geometry`'s `compileOcctBridge`) only
-  runs `onlyIf { nativeBuildable }` -- linux-x86-64, Eigen headers present
+  runs `onlyIf { nativeBuildable }` -- linux-x86-64 (since ADR-0026 also macos-aarch64), Eigen headers present
   (`Eigen/QR` under the configured include directory), Boost headers
   present (`boost/graph/adjacency_list.hpp`), and `g++` on `PATH`. Absent
   any of those, the task is skipped, no `.so` classpath resource ends up
@@ -675,7 +675,8 @@ from the separate planning-phase run described above.
   writer).
 
 | C-Welle 8
-| macOS (arm64/x86-64) and Windows support -- this is where the LGPL
+| macOS arm64 is done (ADR-0026, development use only, nothing shipped). Still open: macOS x86-64 and
+  Windows support -- this is where the LGPL
   section 6 bundling obligations discussed under "Vendoring decision"
   above become live for distributed artifacts, alongside Geometrie
   Welle 7/8's identical OCCT-bundling obligation.

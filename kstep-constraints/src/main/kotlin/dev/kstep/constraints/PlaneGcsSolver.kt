@@ -15,7 +15,7 @@ import dev.kstep.constraints.planegcs.PlaneGcsNativeLibrary
  * vendored and from where, and `docs/adr/ADR-0006-planegcs-constraint-bridge.adoc` /
  * `docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc` for the full rationale, license
  * analysis, and each wave's scope. When the Eigen/Boost dev headers or a C++ compiler were absent at
- * build time (or on any platform other than linux-x86-64, the only one built so far), the native
+ * build time (or on any platform other than linux-x86-64 and macos-aarch64), the native
  * shim is never compiled, no `.so` classpath resource exists, and [availability] reports
  * [PlaneGcsAvailability.Unavailable] -- every function here then fails predictably with
  * [PlaneGcsUnavailableException] rather than the build, or this whole module, failing outright. See

@@ -40,10 +40,12 @@ tasks.withType<Test>().configureEach {
 }
 
 // ---------------------------------------------------------------------------------------------
-// OCCT JNI bridge (Linux x86-64 only in this wave -- see docs/adr/ADR-0005-occt-jni-bridge.adoc
-// for the full rationale, license findings, and the folge-Wellen that extend platform coverage).
+// OCCT JNI bridge (Linux x86-64 and macOS arm64 -- see docs/adr/ADR-0005-occt-jni-bridge.adoc for
+// the full rationale and license findings, and docs/adr/ADR-0026-macos-native-bridges.adoc for the
+// macOS arm64 extension; Intel Mac and Windows are unsupported).
 // Compiles src/main/cpp/kstep_occt_bridge.cpp against a *system-installed* OCCT (Ubuntu
-// libocct-*-dev packages) with a single, direct g++ invocation -- no cmake, no pkg-config
+// libocct-*-dev packages, or Homebrew's `opencascade` on macOS) with a single, direct
+// g++ (Linux) / clang++ (macOS) invocation -- no cmake, no pkg-config
 // (neither ships an OCCT integration on this distro, and a single translation unit doesn't need a
 // build-system-within-a-build-system). When the OCCT dev headers are absent (e.g. on a machine
 // that hasn't run the apt-get install documented in README's "Building" section),
@@ -53,11 +55,46 @@ tasks.withType<Test>().configureEach {
 // a hard build failure in environments that must guarantee OCCT is actually present.
 // ---------------------------------------------------------------------------------------------
 
-val occtIncludeDir = providers.gradleProperty("kstep.occt.includeDir").orElse("/usr/include/opencascade")
-val occtLibDir = providers.gradleProperty("kstep.occt.libDir").orElse("/usr/lib/x86_64-linux-gnu")
-val nativeOutputDir = layout.buildDirectory.dir("native/linux-x86-64")
+/** Build-time description of a supported native platform. `null` platform means unsupported. */
+data class NativePlatform(
+    val id: String, // "linux-x86-64" | "macos-aarch64"; also the resource sub-directory
+    val compiler: String, // "g++" | "clang++"
+    val libExtension: String, // "so" | "dylib"
+    val jniOsInclude: String, // "linux" | "darwin"
+)
+
+val hostOsName: String = System.getProperty("os.name").orEmpty()
+val hostOsArch: String = System.getProperty("os.arch").orEmpty()
+val nativePlatform: NativePlatform? =
+    when {
+        hostOsName.contains("Linux", ignoreCase = true) && hostOsArch in setOf("amd64", "x86_64") ->
+            NativePlatform("linux-x86-64", "g++", "so", "linux")
+        hostOsName.contains("Mac", ignoreCase = true) && hostOsArch in setOf("aarch64", "arm64") ->
+            NativePlatform("macos-aarch64", "clang++", "dylib", "darwin")
+        // Intel Mac, Windows, other: unsupported, the task is skipped (never failed).
+        else -> null
+    }
+val isMacos = nativePlatform?.id == "macos-aarch64"
+// Homebrew prefix (macOS only). Deliberately NOT discovered via `brew --prefix` at configuration
+// time (slow, brittle); override with -Pkstep.brew.prefix or HOMEBREW_PREFIX.
+val brewPrefix =
+    providers
+        .gradleProperty("kstep.brew.prefix")
+        .orElse(providers.environmentVariable("HOMEBREW_PREFIX"))
+        .orElse("/opt/homebrew")
+        .get()
+val occtIncludeDir =
+    providers
+        .gradleProperty("kstep.occt.includeDir")
+        .orElse(if (isMacos) "$brewPrefix/opt/opencascade/include/opencascade" else "/usr/include/opencascade")
+val occtLibDir =
+    providers
+        .gradleProperty("kstep.occt.libDir")
+        .orElse(if (isMacos) "$brewPrefix/opt/opencascade/lib" else "/usr/lib/x86_64-linux-gnu")
+val jniOsInclude = nativePlatform?.jniOsInclude ?: "linux"
+val nativeOutputDir = layout.buildDirectory.dir("native/${nativePlatform?.id ?: "unsupported"}")
 val bridgeSource = layout.projectDirectory.file("src/main/cpp/kstep_occt_bridge.cpp")
-val nativeLibraryFileName = "libkstep_occt_bridge.so"
+val nativeLibraryFileName = "libkstep_occt_bridge.${nativePlatform?.libExtension ?: "so"}"
 
 // Plain, eagerly-evaluated configuration-time facts (Strings/Booleans only).
 //
@@ -75,41 +112,45 @@ val nativeLibraryFileName = "libkstep_occt_bridge.so"
 // "Multi-OS-Pipeline-Patterns" table (or moved out of a custom task entirely, per that table's
 // last row) because Configuration Cache is not enabled in gradle.properties -- so this is a
 // latent, pre-existing issue affecting two modules, not a regression, and not yet blocking.
-val isLinuxX8664 =
-    System.getProperty("os.name")?.contains("Linux", ignoreCase = true) == true &&
-        System.getProperty("os.arch") in setOf("amd64", "x86_64")
 val occtHeadersPresent = File(occtIncludeDir.get(), "Standard_Version.hxx").isFile
 val compilerAvailable =
     System.getenv("PATH").orEmpty().split(File.pathSeparator).any { dir ->
-        File(dir, "g++").let { it.isFile && it.canExecute() }
+        File(dir, nativePlatform?.compiler ?: "g++").let { it.isFile && it.canExecute() }
     }
-val nativeBuildable = isLinuxX8664 && occtHeadersPresent && compilerAvailable
-
-if (!nativeBuildable) {
-    logger.warn(
-        "kstep-geometry: the OCCT native bridge will NOT be compiled this run " +
-            "(isLinuxX8664=$isLinuxX8664, occtHeadersPresent=$occtHeadersPresent " +
-            "[looked in ${occtIncludeDir.get()}], compilerAvailable=$compilerAvailable). " +
-            "dev.kstep.geometry.OcctKernel will report OcctAvailability.Unavailable at runtime. " +
-            "See README 'Building' for the apt-get command that installs the required OCCT dev packages.",
-    )
-}
-
 private val javaToolchainService = project.extensions.getByType(JavaToolchainService::class.java)
 private val jdkHomeProvider =
     javaToolchainService
         .compilerFor { languageVersion.set(JavaLanguageVersion.of(21)) }
         .map { it.metadata.installationPath.asFile.absolutePath }
 
+// jni_md.h is platform-specific (include/linux vs include/darwin); verified against the toolchain JDK.
+val jniMdPresent =
+    nativePlatform != null &&
+        File(jdkHomeProvider.get(), "include/${nativePlatform.jniOsInclude}/jni_md.h").isFile
+val nativeBuildable = nativePlatform != null && occtHeadersPresent && compilerAvailable && jniMdPresent
+
+if (!nativeBuildable) {
+    logger.warn(
+        "kstep-geometry: the OCCT native bridge will NOT be compiled this run " +
+            "(platform=${nativePlatform?.id}, jniMdPresent=$jniMdPresent, occtHeadersPresent=$occtHeadersPresent " +
+            "[looked in ${occtIncludeDir.get()}], compilerAvailable=$compilerAvailable). " +
+            "dev.kstep.geometry.OcctKernel will report OcctAvailability.Unavailable at runtime. " +
+            "See README 'Building' for the apt-get (Linux) / brew (macOS arm64) command that installs " +
+            "the required OCCT dev packages.",
+    )
+}
+
 val compileOcctBridge =
     tasks.register<Exec>("compileOcctBridge") {
         group = "native"
         description =
-            "Compiles the OCCT JNI bridge (Linux x86-64 only; skipped when OCCT dev headers or g++ are absent)."
+            "Compiles the OCCT JNI bridge (Linux x86-64 / macOS arm64; skipped when OCCT dev headers or the C++ compiler are absent)."
         onlyIf { nativeBuildable }
         inputs.file(bridgeSource)
         inputs.property("occtIncludeDir", occtIncludeDir)
         inputs.property("occtLibDir", occtLibDir)
+        inputs.property("nativePlatform", nativePlatform?.id ?: "unsupported")
+        inputs.property("nativeCompiler", nativePlatform?.compiler ?: "g++")
         // Declared as a task input so a toolchain JDK change (a different `-I$jdkHome/include`)
         // correctly invalidates UP-TO-DATE-ness instead of leaving the existing .so compiled
         // against a stale jni.h -- read only inside the CommandLineArgumentProvider lambda below,
@@ -119,12 +160,12 @@ val compileOcctBridge =
         doFirst {
             nativeOutputDir.get().asFile.mkdirs()
         }
-        executable = "g++"
+        executable = nativePlatform?.compiler ?: "g++"
         argumentProviders.add(
             CommandLineArgumentProvider {
                 val jdkHome = jdkHomeProvider.get()
                 listOf(
-                    "-shared",
+                    if (isMacos) "-dynamiclib" else "-shared",
                     "-fPIC",
                     "-std=c++17",
                     "-O2",
@@ -133,9 +174,11 @@ val compileOcctBridge =
                     // Fail the BUILD on an undefined symbol, instead of letting the .so link
                     // successfully and only surfacing UnsatisfiedLinkError much later, at first
                     // native call -- far harder to diagnose in a test run.
-                    "-Wl,--no-undefined",
+                    // macOS: ld64 already fails on undefined symbols by default (and the explicit
+                    // `-undefined error` spelling is deprecated and warns), so nothing is passed.
+                    *(if (isMacos) emptyArray<String>() else arrayOf("-Wl,--no-undefined")),
                     "-I$jdkHome/include",
-                    "-I$jdkHome/include/linux",
+                    "-I$jdkHome/include/$jniOsInclude",
                     "-I${occtIncludeDir.get()}",
                     bridgeSource.asFile.absolutePath,
                     "-L${occtLibDir.get()}",
@@ -188,8 +231,24 @@ val compileOcctBridge =
                     // would have loaded transitive dependencies from there regardless -- the
                     // RPATH-vs-RUNPATH distinction this comment is actually about has not been
                     // exercised either way yet.
-                    "-Wl,--disable-new-dtags",
-                    "-Wl,-rpath,${occtLibDir.get()}",
+                    // The DT_RPATH discussion above is Linux-only; macOS has no such distinction.
+                    *(
+                        if (isMacos) {
+                            // macOS: LC_RPATH entries are consulted for transitive dependencies too,
+                            // so a plain -rpath suffices. install_name makes the dylib self-describing
+                            // as @rpath-relative (it is extracted to a temp dir and System.load()ed by
+                            // absolute path, so install_name is informational, not load-critical).
+                            arrayOf(
+                                "-Wl,-rpath,${occtLibDir.get()}",
+                                "-Wl,-install_name,@rpath/libkstep_occt_bridge.dylib",
+                            )
+                        } else {
+                            arrayOf(
+                                "-Wl,--disable-new-dtags",
+                                "-Wl,-rpath,${occtLibDir.get()}",
+                            )
+                        }
+                    ),
                     "-o",
                     nativeOutputDir
                         .get()
@@ -203,6 +262,6 @@ val compileOcctBridge =
 tasks.named<ProcessResources>("processResources") {
     dependsOn(compileOcctBridge)
     from(nativeOutputDir) {
-        into("dev/kstep/geometry/native/linux-x86-64")
+        into("dev/kstep/geometry/native/${nativePlatform?.id ?: "unsupported"}")
     }
 }

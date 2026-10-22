@@ -161,7 +161,7 @@ dropped):** additional primitives, boolean operations, STEP *import* via
 OCCT, a feature/parametric-history model, a PlaneGCS constraint solver, a
 desktop viewer, merging OCCT geometry with kSTEP's own AP242 product-
 structure Part 21 output into a single file, a `.kstep.kts` DSL surface for
-geometry, `kstep-cli`/`kstep-mcp` wiring, macOS/Windows/aarch64 support, and
+geometry, `kstep-cli`/`kstep-mcp` wiring, macOS/Windows/aarch64 support (macOS arm64 since ADR-0026), and
 shipping OCCT binaries in any distributed artifact.
 
 == Decision
@@ -177,7 +177,7 @@ Ship `kstep-geometry` (package `dev.kstep.geometry`, native/JNI internals in
   as Geometrie Welle 4, not a side effect of this wave.
 * **Graceful degradation, not a hard build dependency**: `compileOcctBridge`
   (a Gradle `Exec` task) only runs `onlyIf { nativeBuildable }` --
-  `nativeBuildable` requires linux-x86-64, the OCCT headers actually present
+  `nativeBuildable` requires linux-x86-64 (since ADR-0026 also macos-aarch64), the OCCT headers actually present
   at the configured include directory, and a `g++` on `PATH`. Absent any of
   those, the task is skipped, no native library resource ends up in the
   module's jar, and `dev.kstep.geometry.OcctKernel.availability()` reports
@@ -476,7 +476,8 @@ exercised either way).
   ("or later" covers 2.1 either way), but stated precisely there and here.
 
 | Geometrie Welle 7
-| macOS (arm64/x86-64) and Windows support; shipping native libraries in a
+| macOS arm64 is done (ADR-0026, development use only, nothing shipped). Still open: macOS x86-64 and
+  Windows support; shipping native libraries in a
   distributed artifact -- this is where the LGPL SS6 bundling obligations
   named under Context above become live.
 

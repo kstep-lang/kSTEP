@@ -1,0 +1,90 @@
+= ADR-0026: macOS arm64 native bridges (OCCT and PlaneGCS)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle G). Extends ADR-0005 and ADR-0006, which built both JNI bridges for
+linux-x86-64 only.
+
+== Context
+
+`kstep-geometry` (OCCT bridge, ADR-0005) and `kstep-constraints` (PlaneGCS bridge, ADR-0006) were
+hard-wired to Linux x86-64: compiler `g++`, `-shared`, `-Wl,--no-undefined`, `include/linux`, the
+output directory `native/linux-x86-64` and a `.so` resource path. On a Mac with Homebrew OCCT every
+native test therefore skipped (baseline of this wave: 121 skipped tests in the full build, 100 of
+them in the OCCT/PlaneGCS suites) and nothing native was ever exercised during development on that
+platform. The bridge sources themselves (`<jni.h>`, standard C++, OCCT headers) contain nothing
+Linux-specific.
+
+== Decision
+
+* *Platform matrix.* Exactly two platforms are supported: `linux-x86-64` (`g++`, `.so`,
+  `include/linux`) and `macos-aarch64` (`clang++`, `.dylib`, `include/darwin`). Every other
+  combination (Intel Mac, Windows, Linux aarch64) resolves to "unsupported": the Gradle task is
+  skipped and the runtime loader reports `Unavailable` with the reason
+  `unsupported platform os=... arch=... (supported: linux-x86-64, macos-aarch64)`. Neither case
+  fails a build.
+* *Build.* Both `build.gradle.kts` files carry a small `NativePlatform` holder (per-module copies,
+  following the existing convention; no `buildSrc`). Linux arguments are unchanged. On macOS:
+  `-dynamiclib`, the same `-lTK*` list, `-Wl,-rpath,<occt lib dir>` and
+  `-Wl,-install_name,@rpath/libkstep_<x>_bridge.dylib`; no `--disable-new-dtags`. No explicit
+  `-undefined error` is passed because ld64 already fails on undefined symbols by default and the
+  explicit spelling is deprecated (it only produces a linker warning); `dynamic_lookup` is never
+  used. PlaneGCS needs no `-L`/`-l`/rpath (header-only Eigen and Boost) but C++20. The platform id
+  and compiler are Gradle task inputs, and a configuration-time check requires
+  `include/<os>/jni_md.h` in the toolchain JDK.
+* *Defaults.* Homebrew locations under `/opt/homebrew` (override with `-Pkstep.brew.prefix` or
+  `HOMEBREW_PREFIX`; `brew --prefix` is not executed at configuration time). All `-Pkstep.*`
+  properties stay overridable. The Intel prefix `/usr/local` is out of scope.
+* *Loaders.* `OcctNativeLibrary` and `PlaneGcsNativeLibrary` gain pure functions `detectPlatform`,
+  `libraryFileName` and `resourcePath`. `detectPlatform` returns only whitelisted constants; the
+  classpath resource path and extracted file name are derived from those constants and never from
+  raw `os.name`/`os.arch`. The override property, the owner-only temp directory and the use of
+  `System.load` with a canonical absolute path are unchanged; `java.library.path` is still not used.
+
+== Non-goals
+
+Intel Macs (`macos-x86-64`), Windows, bundling of any native library into a distributed artifact,
+code signing and notarization. These stay open (see the Folge-Wellen rows in ADR-0005 and ADR-0006).
+
+== Consequences
+
+* *Not redistributable, development and self-build only.* Nothing is shipped: the LGPL bundling
+  question from ADR-0005/0006 does not become live. `scripts/release/verify-dist.sh` still rejects
+  any `dev/kstep/*/native/` entry in the jars and the zip, and `release.yml` still switches the
+  bridges off on Linux with `-P...includeDir=/nonexistent`. Release builds must not be run on a Mac
+  with Homebrew OCCT installed (the dylibs would be embedded and then rejected by `verify-dist.sh`);
+  if a release ever has to be built on macOS, use the same `/nonexistent` trick. No new property was
+  added for this.
+* *Trust assumption.* The dylib's `LC_RPATH` points at the Homebrew prefix (user-owned). Anybody who
+  can write to that prefix controls which OCCT libraries get loaded. This is the same trust as for
+  any Homebrew-installed tool and is accepted for a developer machine.
+* *Unsigned.* The built dylib is not code-signed. A locally installed JDK (Temurin, Oracle) loads
+  it without complaint; a JVM running with hardened runtime and library validation may refuse it.
+* *OCCT version.* The development machine uses Homebrew OCCT 7.9.3 (Linux CI: 7.9.2). No API drift
+  in the used headers; the OCCT version regex in the tests is `^7\.\d+\.\d+`. The build prints one
+  harmless `sprintf` deprecation warning from an OCCT header (`NCollection_UBTreeFiller.hxx`).
+* *CI.* A new job `build-native-macos` (`macos-latest`, arm64, `brew install opencascade eigen
+  boost`) runs `clean check` with both `require` flags and the same skipped-test guards as the Linux
+  native job (implemented with Python globbing because macOS ships bash 3.2). Its real result can
+  only be observed on GitHub after a push; locally it was not run.
+
+== Measured results (macOS arm64, Apple clang, OCCT 7.9.3, Eigen 5.0.1, Boost 1.92, 2026-10-22)
+
+* Both bridges compile warning-free in our own code and link; `otool -L` shows the OCCT toolkits
+  from `/opt/homebrew/opt/opencascade/lib`, `otool -D` shows the `@rpath/...` install name and
+  `LC_RPATH` is the OCCT lib directory. The vendored PlaneGCS sources needed no patch.
+* `./gradlew clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true --no-build-cache
+  --rerun-tasks`: BUILD SUCCESSFUL, 1191 tests, 0 failures, 6 skipped (baseline on master:
+  1179 tests, 121 skipped). Native suites: 135 tests, 5 skipped, all five being the inverse-gated
+  "fails predictably when the native bridge is unavailable" cases (3 OCCT, 2 PlaneGCS). The sixth
+  skipped test is unrelated and pre-existing. No numeric assertion had to be loosened.
+* `./gradlew clean check` without `require` flags gives the same numbers on this machine.
+* Interop: STEP files written by the OCCT bridge during the test run (`box-ap242.step`,
+  `extruded-filleted.step`) were read with `scripts/interop/read_step_structure.cpp` (read status
+  `RetDone`, 0 undefined entities, model check 0 fails and 0 warnings, one
+  `AdvancedBrepShapeRepresentation` and one `ManifoldSolidBrep` each) and imported with FreeCAD
+  1.1.4 (`freecadcmd`): one valid `Solid` each, volume 24000.0 and 23785.398.
+* Gap: `kstep export` does not yet merge OCCT geometry into the Part 21 output ("geometry merging
+  is not wired into 'export' yet"), so the geometry files above come from the test suite, not from
+  the CLI.

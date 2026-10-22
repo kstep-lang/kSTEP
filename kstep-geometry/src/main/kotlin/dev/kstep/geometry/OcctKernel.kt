@@ -13,8 +13,8 @@ import kotlin.math.abs
  * `docs/adr/ADR-0005-occt-jni-bridge.adoc`) -- it dynamically links, at build time, against a
  * system-installed OCCT (Ubuntu package `libocct-*-dev`, LGPL-2.1-only + Open CASCADE Exception
  * 1.0) via a small JNI shim compiled from `src/main/cpp/kstep_occt_bridge.cpp`. When those OCCT
- * headers were absent at build time (or on any platform other than linux-x86-64, the only one
- * built in this wave), the native shim is never compiled, no `.so` classpath resource exists, and
+ * headers were absent at build time (or on any platform other than linux-x86-64 and
+ * macos-aarch64), the native shim is never compiled, no `.so`/`.dylib` classpath resource exists, and
  * [availability] reports [OcctAvailability.Unavailable] -- every function here then fails
  * predictably with [OcctUnavailableException] rather than the build, or this whole module, failing
  * outright. See README's "Building" section for the `-Pkstep.occt.require=true` flag that turns

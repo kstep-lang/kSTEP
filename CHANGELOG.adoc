@@ -9,6 +9,10 @@ minor versions may contain breaking changes.
 
 === Added
 
+* macOS arm64 support for the OCCT and PlaneGCS native bridges (ADR-0026): platform-aware Gradle
+  build (`clang++`, `.dylib`, Homebrew defaults, `-Pkstep.brew.prefix`), platform whitelist in the
+  loaders (`detectPlatform`), unit tests for it, and a new CI job `build-native-macos`. Development
+  use only: nothing is bundled, the dylib is unsigned, Intel Macs and Windows stay unsupported.
 * Release pipeline (`.github/workflows/release.yml`, ADR-0025): pushing a `vX.Y.Z` tag builds
   `kstep-cli-X.Y.Z.zip` (without native bridges) with a SHA-256 checksum and creates or updates the
   GitHub release; pre-release automatically while the major version is 0. No Maven Central,

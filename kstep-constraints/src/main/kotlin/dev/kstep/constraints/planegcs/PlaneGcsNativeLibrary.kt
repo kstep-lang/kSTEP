@@ -26,10 +26,10 @@ private val logger = KotlinLogging.logger {}
  *    [Path.toRealPath] (which both canonicalizes symlinks and throws if the target does not exist)
  *    and must name a regular file. Logged at INFO so any override is visible in build/CI logs -- an
  *    unexpected override should never silently take effect unnoticed.
- * 2. Otherwise: the bundled classpath resource at [RESOURCE_PATH] (a compile-time constant, never
+ * 2. Otherwise: the bundled classpath resource at [resourcePath] (derived from a whitelisted platform id, never
  *    influenced by any runtime input) is extracted into a **freshly created**, owner-only-
  *    permission temp directory (never a predictable, shared path like a fixed name under `/tmp`),
- *    under a constant file name ([EXTRACTED_FILE_NAME] -- again never derived from any input), and
+ *    under a constant file name ([libraryFileName] -- again never derived from any input), and
  *    both the file and its containing directory are marked [java.io.File.deleteOnExit].
  *
  * `internal`: nothing outside this module needs to resolve or load the library directly --
@@ -48,9 +48,44 @@ internal object PlaneGcsNativeLibrary {
      */
     const val OVERRIDE_PROPERTY: String = "kstep.planegcs.bridge.library"
 
-    private const val RESOURCE_PATH: String =
-        "/dev/kstep/constraints/native/linux-x86-64/libkstep_planegcs_bridge.so"
-    private const val EXTRACTED_FILE_NAME: String = "libkstep_planegcs_bridge.so"
+    /** Platform ids this bridge can be built for; the ONLY values [detectPlatform] ever returns. */
+    internal const val PLATFORM_LINUX_X86_64: String = "linux-x86-64"
+    internal const val PLATFORM_MACOS_AARCH64: String = "macos-aarch64"
+
+    private const val BRIDGE_BASE_NAME: String = "libkstep_planegcs_bridge"
+    private const val RESOURCE_DIR: String = "/dev/kstep/constraints/native"
+
+    /**
+     * Maps `os.name` / `os.arch` onto one of the whitelisted platform ids, or `null` for any
+     * unsupported combination (Intel Mac, Windows, Linux aarch64, ...). Pure function so the
+     * mapping is unit-testable on every host. Never echoes its inputs into a resource path:
+     * only the constants above can flow into [resourcePath].
+     */
+    internal fun detectPlatform(
+        osName: String?,
+        osArch: String?,
+    ): String? {
+        val name = osName.orEmpty()
+        val arch = osArch.orEmpty()
+        return when {
+            name.contains("Linux", ignoreCase = true) && arch in setOf("amd64", "x86_64") -> PLATFORM_LINUX_X86_64
+            name.contains("Mac", ignoreCase = true) && arch in setOf("aarch64", "arm64") -> PLATFORM_MACOS_AARCH64
+            else -> null
+        }
+    }
+
+    /** File name of the bridge library on [platform] (`.so` on Linux, `.dylib` on macOS). */
+    internal fun libraryFileName(platform: String): String =
+        when (platform) {
+            PLATFORM_LINUX_X86_64 -> "$BRIDGE_BASE_NAME.so"
+            PLATFORM_MACOS_AARCH64 -> "$BRIDGE_BASE_NAME.dylib"
+            else -> throw IllegalArgumentException("Unsupported platform id: $platform")
+        }
+
+    /** Classpath resource path of the bundled bridge for [platform]; a whitelist-derived constant. */
+    internal fun resourcePath(platform: String): String = "$RESOURCE_DIR/$platform/${libraryFileName(platform)}"
+
+    private const val SUPPORTED_PLATFORMS: String = "linux-x86-64, macos-aarch64"
     private const val TEMP_DIR_PREFIX: String = "kstep-planegcs-"
 
     /** Resolved and cached on first access; every later access returns the same instance. */
@@ -101,12 +136,19 @@ internal object PlaneGcsNativeLibrary {
     }
 
     private fun extractBundledLibrary(): Path {
-        val resource =
-            PlaneGcsNativeLibrary::class.java.getResourceAsStream(RESOURCE_PATH)
+        val osName = System.getProperty("os.name")
+        val osArch = System.getProperty("os.arch")
+        val platform =
+            detectPlatform(osName, osArch)
                 ?: throw IOException(
-                    "Classpath resource not found: $RESOURCE_PATH (Eigen/Boost dev headers or a C++ " +
-                        "compiler were absent at build time, or this platform is not linux-x86-64 -- " +
-                        "see README 'Building' for the required apt-get install)",
+                    "unsupported platform os=$osName arch=$osArch (supported: $SUPPORTED_PLATFORMS)",
+                )
+        val resourcePath = resourcePath(platform)
+        val resource =
+            PlaneGcsNativeLibrary::class.java.getResourceAsStream(resourcePath)
+                ?: throw IOException(
+                    "Classpath resource not found: $resourcePath (this platform is not one of " +
+                        "$SUPPORTED_PLATFORMS, or the bridge was not built -- see README 'Building')",
                 )
         resource.use { input ->
             val supportsPosix = FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
@@ -118,13 +160,13 @@ internal object PlaneGcsNativeLibrary {
                     )
                 } else {
                     // Files.createTempDirectory's POSIX-permissions overload throws
-                    // UnsupportedOperationException on a non-POSIX filesystem (e.g. Windows) -- not
-                    // applicable to this wave (linux-x86-64 only) but kept defensive rather than
-                    // assuming the host filesystem.
+                    // UnsupportedOperationException on a non-POSIX filesystem (e.g. Windows) --
+                    // not expected on the supported platforms (linux-x86-64, macos-aarch64) but kept
+                    // defensive rather than assuming the host filesystem.
                     Files.createTempDirectory(TEMP_DIR_PREFIX)
                 }
             tempDir.toFile().deleteOnExit()
-            val target = tempDir.resolve(EXTRACTED_FILE_NAME)
+            val target = tempDir.resolve(libraryFileName(platform))
             Files.copy(input, target)
             target.toFile().deleteOnExit()
             return target.toRealPath()

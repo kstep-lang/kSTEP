@@ -29,7 +29,8 @@ sealed interface PlaneGcsAvailability {
     /**
      * The native bridge could not be loaded -- missing Eigen/Boost headers or a C++ compiler at
      * build time (so no `.so` classpath resource exists in this module's jar at all), a platform
-     * other than linux-x86-64 (the only one built in this wave), or a runtime link failure.
+     * other than linux-x86-64 or macos-aarch64 (the two supported ones), or a runtime link
+     * failure.
      * [reason] is meant to be read by a human or an LLM agent, not machine-parsed; it is also what
      * [PlaneGcsSolver]'s callers see inside [PlaneGcsUnavailableException]'s message.
      */

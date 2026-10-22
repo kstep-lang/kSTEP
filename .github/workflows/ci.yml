@@ -384,3 +384,117 @@ jobs:
             **/build/test-results/**
           retention-days: 7
           if-no-files-found: ignore
+
+  # -------------------------------------------------------------------------------------
+  # Job 3 -- real native coverage on macOS arm64 (ADR-0026), with Homebrew's OCCT, Eigen and
+  # Boost. `macos-latest` is arm64 today; the explicit `uname -m` guard below turns a future
+  # drift to Intel (which the build deliberately does not support) into one clear error.
+  # The result of this job can only be observed on GitHub after a push.
+  # -------------------------------------------------------------------------------------
+  build-native-macos:
+    name: check (macos-latest arm64, OCCT + PlaneGCS required)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify the runner is Apple Silicon
+        run: |
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "::error::This runner is $(uname -m), not arm64. kSTEP's macOS native" \
+                 "bridges support macos-aarch64 only (ADR-0026); Intel Macs are unsupported."
+            exit 1
+          fi
+
+      - name: Install OCCT, Eigen and Boost
+        run: brew install opencascade eigen boost
+        # Same inputs README's "Building (macOS arm64, Homebrew)" section documents. No cmake:
+        # both bridges are single, direct clang++ invocations (see their build scripts).
+
+      - name: Verify the runner's OCCT provides TKDESTEP and the Homebrew prefix matches
+        run: |
+          P="$(brew --prefix opencascade)"
+          if [ ! -f "$P/lib/libTKDESTEP.dylib" ]; then
+            echo "::error::This runner's OCCT predates 7.8 (no libTKDESTEP.dylib)."
+            ls "$P"/lib/libTK*.dylib | head -50 || true
+            exit 1
+          fi
+          grep -m1 'OCC_VERSION_COMPLETE  *"' "$P/include/opencascade/Standard_Version.hxx" || true
+          if [ "$(brew --prefix)" != "/opt/homebrew" ]; then
+            echo "::error::Homebrew prefix is $(brew --prefix), but the build default is" \
+                 "/opt/homebrew. Pass -Pkstep.brew.prefix=... to Gradle."
+            exit 1
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with dependency + build cache)
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          # See the identical comment on job 'build''s setup-gradle step.
+          cache-read-only: true
+
+      - name: ./gradlew clean check (native paths required)
+        run: |
+          ./gradlew clean check \
+            -Pkstep.occt.require=true \
+            -Pkstep.planegcs.require=true \
+            --stacktrace
+
+      - name: Verify the native-gated test suites actually ran (not skipped)
+        run: |
+          python3 - <<'PY'
+          import glob
+          import sys
+          import xml.etree.ElementTree as ET
+
+          # macOS ships bash 3.2 (no globstar), so globbing is done in Python here. Same
+          # rules as the Linux native job: only the INVERSE-gated "fails predictably when
+          # the native bridge is unavailable" cases may skip.
+          INVERSE_GATED_MARKER = "fails predictably when the native bridge is unavailable"
+
+          for label, pattern in (("OCCT", "TEST-*Occt*.xml"), ("PlaneGCS", "TEST-*PlaneGcs*.xml")):
+              files = glob.glob("**/build/test-results/test/" + pattern, recursive=True)
+              if not files:
+                  print("::error::No " + label + " test result files matched " + pattern +
+                        " -- the test classes were renamed/moved or the require flag never "
+                        "reached Gradle; this job would give no " + label + " coverage.")
+                  sys.exit(1)
+              unexpected = []
+              for path in files:
+                  for testcase in ET.parse(path).getroot().iter("testcase"):
+                      if testcase.find("skipped") is None:
+                          continue
+                      name = testcase.get("name", "<unnamed>")
+                      if INVERSE_GATED_MARKER in name:
+                          continue
+                      unexpected.append(path + "::" + name)
+              if unexpected:
+                  print("::error::" + str(len(unexpected)) + " " + label + "-gated test(s) were "
+                        "skipped although the require flag was passed: " + "; ".join(unexpected))
+                  sys.exit(1)
+              print("OK: checked " + str(len(files)) + " " + label +
+                    " test result file(s), no unexpectedly skipped testcase.")
+          PY
+
+      - name: Upload test and ktlint reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reports-macos-native
+          path: |
+            **/build/reports/tests/**
+            **/build/reports/ktlint/**
+            **/build/test-results/**
+          retention-days: 7
+          if-no-files-found: ignore

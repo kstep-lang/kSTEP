@@ -30,9 +30,10 @@ tasks.withType<Test>().configureEach {
 }
 
 // ---------------------------------------------------------------------------------------------
-// PlaneGCS JNI bridge (Linux x86-64 only in this wave -- see
-// docs/adr/ADR-0006-planegcs-constraint-bridge.adoc for the full rationale, license findings, and
-// the folge-Wellen that extend platform coverage). Unlike kstep-geometry's OCCT bridge, this does
+// PlaneGCS JNI bridge (Linux x86-64 and macOS arm64 -- see
+// docs/adr/ADR-0006-planegcs-constraint-bridge.adoc for the full rationale and license findings,
+// and docs/adr/ADR-0026-macos-native-bridges.adoc for the macOS arm64 extension; Intel Mac and
+// Windows are unsupported). Unlike kstep-geometry's OCCT bridge, this does
 // NOT link against a system-installed library: the PlaneGCS solver sources are vendored directly
 // under src/main/cpp/third_party/planegcs/ (see that directory's PROVENANCE.adoc) and compiled
 // straight into the shared object below, together with this module's own JNI shim
@@ -53,13 +54,47 @@ tasks.withType<Test>().configureEach {
 // that.
 val planeGcsCommit = "ee9b156da9827a91a56a888a53520f63d5cffaa6"
 
-val eigenIncludeDir = providers.gradleProperty("kstep.eigen.includeDir").orElse("/usr/include/eigen3")
-val boostIncludeDir = providers.gradleProperty("kstep.boost.includeDir").orElse("/usr/include")
-val nativeOutputDir = layout.buildDirectory.dir("native/linux-x86-64")
+/** Build-time description of a supported native platform. `null` platform means unsupported. */
+data class NativePlatform(
+    val id: String, // "linux-x86-64" | "macos-aarch64"; also the resource sub-directory
+    val compiler: String, // "g++" | "clang++"
+    val libExtension: String, // "so" | "dylib"
+    val jniOsInclude: String, // "linux" | "darwin"
+)
+
+val hostOsName: String = System.getProperty("os.name").orEmpty()
+val hostOsArch: String = System.getProperty("os.arch").orEmpty()
+val nativePlatform: NativePlatform? =
+    when {
+        hostOsName.contains("Linux", ignoreCase = true) && hostOsArch in setOf("amd64", "x86_64") ->
+            NativePlatform("linux-x86-64", "g++", "so", "linux")
+        hostOsName.contains("Mac", ignoreCase = true) && hostOsArch in setOf("aarch64", "arm64") ->
+            NativePlatform("macos-aarch64", "clang++", "dylib", "darwin")
+        // Intel Mac, Windows, other: unsupported, the task is skipped (never failed).
+        else -> null
+    }
+val isMacos = nativePlatform?.id == "macos-aarch64"
+val jniOsInclude = nativePlatform?.jniOsInclude ?: "linux"
+// Homebrew prefix (macOS only); not discovered via `brew --prefix` at configuration time.
+val brewPrefix =
+    providers
+        .gradleProperty("kstep.brew.prefix")
+        .orElse(providers.environmentVariable("HOMEBREW_PREFIX"))
+        .orElse("/opt/homebrew")
+        .get()
+val eigenIncludeDir =
+    providers
+        .gradleProperty("kstep.eigen.includeDir")
+        .orElse(if (isMacos) "$brewPrefix/include/eigen3" else "/usr/include/eigen3")
+val boostIncludeDir =
+    providers
+        .gradleProperty("kstep.boost.includeDir")
+        .orElse(if (isMacos) "$brewPrefix/include" else "/usr/include")
+val nativeOutputDir = layout.buildDirectory.dir("native/${nativePlatform?.id ?: "unsupported"}")
 val cppSourceDir = layout.projectDirectory.dir("src/main/cpp")
 val thirdPartyDir = cppSourceDir.dir("third_party/planegcs")
 val bridgeSource = cppSourceDir.file("kstep_planegcs_bridge.cpp")
-val nativeLibraryFileName = "libkstep_planegcs_bridge.so"
+val nativeLibraryFileName = "libkstep_planegcs_bridge.${nativePlatform?.libExtension ?: "so"}"
 
 // Plain, eagerly-evaluated configuration-time facts (Strings/Booleans only) -- same latent
 // Configuration-Cache incompatibility as kstep-geometry's compileOcctBridge (see that build file's
@@ -69,44 +104,49 @@ val nativeLibraryFileName = "libkstep_planegcs_bridge.so"
 // enabled in gradle.properties, so this is a known, pre-existing, non-blocking issue shared with
 // kstep-geometry and kstep-express -- not fixed in this wave (see CLAUDE.md's "Multi-OS-Pipeline-
 // Patterns" table for the eventual fix pattern, `object : Action<Task>`).
-val isLinuxX8664 =
-    System.getProperty("os.name")?.contains("Linux", ignoreCase = true) == true &&
-        System.getProperty("os.arch") in setOf("amd64", "x86_64")
 val eigenPresent = File(eigenIncludeDir.get(), "Eigen/QR").isFile
 val boostPresent = File(boostIncludeDir.get(), "boost/graph/adjacency_list.hpp").isFile
 val compilerAvailable =
     System.getenv("PATH").orEmpty().split(File.pathSeparator).any { dir ->
-        File(dir, "g++").let { it.isFile && it.canExecute() }
+        File(dir, nativePlatform?.compiler ?: "g++").let { it.isFile && it.canExecute() }
     }
-val nativeBuildable = isLinuxX8664 && eigenPresent && boostPresent && compilerAvailable
-
-if (!nativeBuildable) {
-    logger.warn(
-        "kstep-constraints: the PlaneGCS native bridge will NOT be compiled this run " +
-            "(isLinuxX8664=$isLinuxX8664, eigenPresent=$eigenPresent [looked in ${eigenIncludeDir.get()}], " +
-            "boostPresent=$boostPresent [looked in ${boostIncludeDir.get()}], compilerAvailable=$compilerAvailable). " +
-            "dev.kstep.constraints.PlaneGcsSolver will report PlaneGcsAvailability.Unavailable at runtime. " +
-            "See README 'Building' for the apt-get command that installs the required Eigen/Boost dev packages.",
-    )
-}
-
 private val javaToolchainService = project.extensions.getByType(JavaToolchainService::class.java)
 private val jdkHomeProvider =
     javaToolchainService
         .compilerFor { languageVersion.set(JavaLanguageVersion.of(21)) }
         .map { it.metadata.installationPath.asFile.absolutePath }
 
+// jni_md.h is platform-specific (include/linux vs include/darwin); verified against the toolchain JDK.
+val jniMdPresent =
+    nativePlatform != null &&
+        File(jdkHomeProvider.get(), "include/${nativePlatform.jniOsInclude}/jni_md.h").isFile
+val nativeBuildable = nativePlatform != null && eigenPresent && boostPresent && compilerAvailable && jniMdPresent
+
+if (!nativeBuildable) {
+    logger.warn(
+        "kstep-constraints: the PlaneGCS native bridge will NOT be compiled this run " +
+            "(platform=${nativePlatform?.id}, jniMdPresent=$jniMdPresent, " +
+            "eigenPresent=$eigenPresent [looked in ${eigenIncludeDir.get()}], " +
+            "boostPresent=$boostPresent [looked in ${boostIncludeDir.get()}], compilerAvailable=$compilerAvailable). " +
+            "dev.kstep.constraints.PlaneGcsSolver will report PlaneGcsAvailability.Unavailable at runtime. " +
+            "See README 'Building' for the apt-get (Linux) / brew (macOS arm64) command that installs " +
+            "the required Eigen/Boost dev packages.",
+    )
+}
+
 val compilePlaneGcsBridge =
     tasks.register<Exec>("compilePlaneGcsBridge") {
         group = "native"
         description =
             "Compiles the vendored PlaneGCS sources plus this module's JNI shim into one shared object " +
-            "(Linux x86-64 only; skipped when Eigen/Boost dev headers or g++ are absent)."
+            "(Linux x86-64 / macOS arm64; skipped when Eigen/Boost dev headers or the C++ compiler are absent)."
         onlyIf { nativeBuildable }
         inputs.dir(cppSourceDir)
         inputs.property("eigenIncludeDir", eigenIncludeDir)
         inputs.property("boostIncludeDir", boostIncludeDir)
         inputs.property("planeGcsCommit", planeGcsCommit)
+        inputs.property("nativePlatform", nativePlatform?.id ?: "unsupported")
+        inputs.property("nativeCompiler", nativePlatform?.compiler ?: "g++")
         // Declared as a task input so a toolchain JDK change (a different `-I$jdkHome/include`)
         // correctly invalidates UP-TO-DATE-ness instead of leaving the existing .so compiled
         // against a stale jni.h -- read only inside the CommandLineArgumentProvider lambda below,
@@ -117,12 +157,12 @@ val compilePlaneGcsBridge =
         doFirst {
             nativeOutputDir.get().asFile.mkdirs()
         }
-        executable = "g++"
+        executable = nativePlatform?.compiler ?: "g++"
         argumentProviders.add(
             CommandLineArgumentProvider {
                 val jdkHome = jdkHomeProvider.get()
                 listOf(
-                    "-shared",
+                    if (isMacos) "-dynamiclib" else "-shared",
                     "-fPIC",
                     // PlaneGCS uses <numbers> (third_party/planegcs/GCS.cpp's own includes) --
                     // requires C++20, unlike kstep-geometry's OCCT bridge (-std=c++17). Upstream's
@@ -139,12 +179,14 @@ val compilePlaneGcsBridge =
                     // successfully and only surfacing UnsatisfiedLinkError much later, at first
                     // native call -- far harder to diagnose in a test run. Mirrors
                     // kstep-geometry/build.gradle.kts.
-                    "-Wl,--no-undefined",
+                    // macOS: ld64 already fails on undefined symbols by default (and the explicit
+                    // `-undefined error` spelling is deprecated and warns), so nothing is passed.
+                    *(if (isMacos) emptyArray<String>() else arrayOf("-Wl,--no-undefined")),
                     // KSTEP_PLANEGCS_COMMIT: see nativePlaneGcsSourceCommit() in
                     // kstep_planegcs_bridge.cpp and this file's planeGcsCommit val above.
                     "-DKSTEP_PLANEGCS_COMMIT=\"$planeGcsCommit\"",
                     "-I$jdkHome/include",
-                    "-I$jdkHome/include/linux",
+                    "-I$jdkHome/include/$jniOsInclude",
                     // This module's own src/main/cpp MUST come before third_party/planegcs's
                     // include path below: third_party/planegcs/GCS.cpp:99 does
                     // `#include <Console.h>` (angle brackets), and this ordering is what makes that
@@ -178,6 +220,17 @@ val compilePlaneGcsBridge =
                     // subsystemfile.txt respectively) into the process's current working directory
                     // -- verified at third_party/planegcs/GCS.cpp:283 and :2577. See
                     // docs/adr/ADR-0006-planegcs-constraint-bridge.adoc's Security section.
+                    // macOS: install_name is informational (the dylib is extracted to a temp dir and
+                    // System.load()ed by absolute path); no rpath since nothing external is linked.
+                    *(
+                        if (isMacos) {
+                            arrayOf(
+                                "-Wl,-install_name,@rpath/libkstep_planegcs_bridge.dylib",
+                            )
+                        } else {
+                            emptyArray()
+                        }
+                    ),
                     "-o",
                     nativeOutputDir
                         .get()
@@ -191,6 +244,6 @@ val compilePlaneGcsBridge =
 tasks.named<ProcessResources>("processResources") {
     dependsOn(compilePlaneGcsBridge)
     from(nativeOutputDir) {
-        into("dev/kstep/constraints/native/linux-x86-64")
+        into("dev/kstep/constraints/native/${nativePlatform?.id ?: "unsupported"}")
     }
 }

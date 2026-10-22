@@ -595,5 +595,5 @@ wave's actual surface:
 
 | V-10
 | Packaging (`nativeDistributions`/jpackage) and Windows/macOS builds of
-  the native bridge itself (today linux-x86-64 only, see ADR-0005).
+  the native bridge itself (linux-x86-64 and, since ADR-0026, macos-aarch64; see ADR-0005).
 |===

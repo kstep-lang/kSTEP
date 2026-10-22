@@ -878,7 +878,7 @@ See <<roadmap,Roadmap>> for what's planned next.
   -- `Placement`'s vector/matrix arithmetic is its own, not a reuse of
   `kstep-render`'s internal `Vec3`). The native shim
   (`src/main/cpp/kstep_occt_bridge.cpp`) is compiled by Gradle against a
-  *system-installed* OCCT (linux-x86-64 only in this wave) and skipped
+  *system-installed* OCCT (linux-x86-64 and macOS arm64) and skipped
   entirely -- not failed -- when the OCCT dev headers are absent, in which
   case `OcctKernel.availability()` reports `OcctAvailability.Unavailable`
   at runtime with a human-readable reason. No OCCT binary/header/source is
@@ -924,7 +924,7 @@ See <<roadmap,Roadmap>> for what's planned next.
   that directory's `PROVENANCE.adoc`, NOTICE, and ADR-0006/-0007/-0014 for
   the full LGPL-2.0-or-later license analysis. The native shim
   (`src/main/cpp/kstep_planegcs_bridge.cpp`) is compiled by Gradle
-  (linux-x86-64 only so far) and skipped entirely -- not failed -- when the
+  (linux-x86-64 and macOS arm64) and skipped entirely -- not failed -- when the
   Eigen/Boost dev headers are absent, in which case
   `PlaneGcsSolver.availability()` reports `PlaneGcsAvailability.Unavailable`
   at runtime with a human-readable reason. See Building below for the
@@ -1326,8 +1326,9 @@ Gradle task is skipped (not failed), and
 `OcctBridgeSmokeTest`/`OcctFeatureOperationsTest`'s OCCT-dependent cases
 then skip cleanly instead of failing. `-Pkstep.occt.require=true` turns
 that into a hard test failure instead — pass it only on a machine where
-OCCT is expected to actually be present. This wave supports linux-x86-64
-only; see the ADRs' Folge-Wellen for the planned macOS/Windows follow-up.
+OCCT is expected to actually be present. Supported: linux-x86-64 and macOS
+arm64 (see "Building (macOS arm64, Homebrew)" below); Windows and Intel Macs
+are not supported.
 `BRepFilletAPI_MakeFillet` (Geometrie Welle 5a) lives in `TKFillet`, from
 the same `libocct-modeling-algorithms-dev` package as `TKPrim`/`TKTopAlgo`
 above — no additional `apt-get` package is required beyond the four already
@@ -1335,6 +1336,24 @@ listed. `BRepMesh_IncrementalMesh` (Viewer-Welle 1, `kstep-viewer`'s
 triangulation) lives in `TKMesh`, from the same
 `libocct-modeling-algorithms-dev` package too — still no additional
 `apt-get` package required.
+
+=== Building (macOS arm64, Homebrew)
+
+Both native bridges (OCCT and PlaneGCS) also build on Apple Silicon, using Homebrew:
+
+[source,bash]
+----
+brew install opencascade eigen boost
+./gradlew clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true
+----
+
+Defaults assume the Homebrew prefix `/opt/homebrew`; override it with `-Pkstep.brew.prefix=...` (or
+the `HOMEBREW_PREFIX` environment variable) or set the individual `-Pkstep.occt.includeDir`,
+`-Pkstep.occt.libDir`, `-Pkstep.eigen.includeDir` and `-Pkstep.boost.includeDir` properties. Limits:
+this is for development and self-builds only. Nothing native is bundled in a release artifact, the
+built dylib is unsigned, and Intel Macs and Windows are unsupported (the bridges then report
+`Unavailable`). Do not run release builds on a Mac that has Homebrew OCCT installed (the dylibs would
+be embedded into the jars and rejected by `scripts/release/verify-dist.sh`). Details: ADR-0026.
 
 === Building — headless preview rendering (`kstep render`)
 
@@ -1443,9 +1462,8 @@ Without those packages installed, `kstep-constraints`'s
 `PlaneGcsBridgeSmokeTest`'s PlaneGCS-dependent cases then skip cleanly
 instead of failing. `-Pkstep.planegcs.require=true` turns that into a hard
 test failure instead — pass it only on a machine where the bridge is
-expected to actually be present. This wave supports linux-x86-64 only,
-same as `kstep-geometry`; see the ADR's Folge-Wellen for the planned
-macOS/Windows follow-up. Unlike the OCCT bridge, no `-L`/`-l`/`-rpath`
+expected to actually be present. Same platforms as `kstep-geometry`
+(linux-x86-64 and macOS arm64). Unlike the OCCT bridge, no `-L`/`-l`/`-rpath`
 linker flags are needed at all — Eigen and Boost are both used here in a
 strictly header-only capacity, so nothing links against an external shared
 library.
@@ -2496,7 +2514,7 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
   glTF 2.0 document — see `docs/adr/ADR-0016-gltf-glb-export.adoc`. Still
   open: undo/redo, a full sketch DSL beyond the points-only constraint API
   above, stable geometric edge identity, and multi-platform distribution of
-  the viewer/CLI beyond linux-x86-64.
+  the viewer/CLI beyond linux-x86-64 and macOS arm64.
 
 == License and attribution
 

@@ -33,3 +33,19 @@ Produce a file with `kstep export script.kstep.kts --out out.step`.
 definitions and both assembly usages resolved to the correct ends. A deliberately broken file is
 rejected with a line-accurate error. Not covered: geometry, other CAD/PLM readers, full AP242
 schema conformance, a lossless write-back round trip.
+
+== Result of 2026-10-22, geometry-carrying files (OpenCascade 7.9.3, macOS arm64)
+
+Two files written by the OCCT JNI bridge during the test run (`box-ap242.step` from
+`OcctBridgeSmokeTest`, `extruded-filleted.step` from `OcctFeatureOperationsTest`; `kstep export`
+does not yet merge geometry) were checked:
+
+* `read_step_structure`: read status `RetDone`, 0 undefined entities, model check 0 fails and 0
+  warnings; the entity histogram contains one `StepShape_AdvancedBrepShapeRepresentation` and one
+  `StepShape_ManifoldSolidBrep` per file.
+* FreeCAD 1.1.4 (`freecadcmd`, `Import.insert`): one object of type `Solid`, valid, volume 24000.0
+  (box) and 23785.398 (extruded and filleted).
+
+This proves that OCCT and FreeCAD read the shape representation written by the bridge. It does not
+prove interoperability of the full kSTEP Part 21 output with geometry merged in, since that merging
+does not exist yet.
