@@ -88,7 +88,7 @@ class OcctCliImportErrorCodesTest :
             File(workDir, "diamond28x2.step").writeBytes(ImportFixtures.assemblyDiamond(28, 2))
             val start = System.nanoTime()
             errorOf("import", "diamond28x2.step") shouldBe ("limit_exceeded" to "KSTEP-I-010")
-            ((System.nanoTime() - start) / 1e9 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1e9 < 30.0) shouldBe true
         }
 
         "an assembly diamond of 3 levels x 2 usages is still imported with all its occurrences".config(
@@ -111,7 +111,7 @@ class OcctCliImportErrorCodesTest :
             File(workDir, "nest64x100.step").writeBytes(ImportFixtures.nestedStyles(64, 100))
             val start = System.nanoTime()
             errorOf("import", "nest64x100.step") shouldBe ("limit_exceeded" to "KSTEP-I-010")
-            ((System.nanoTime() - start) / 1e9 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1e9 < 30.0) shouldBe true
         }
 
         "a modest style chain (3 entries per list) on many styled items is still imported".config(

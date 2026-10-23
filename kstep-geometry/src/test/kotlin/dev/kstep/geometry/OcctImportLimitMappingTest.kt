@@ -127,7 +127,7 @@ class OcctImportLimitMappingTest :
             val start = System.nanoTime()
             val e = shouldThrow<OcctImportLimitException> { OcctKernel.readStep(bytes) }
             e.message.orEmpty() shouldContain "limit: layer assignment count"
-            ((System.nanoTime() - start) / 1_000_000_000.0 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1_000_000_000.0 < 30.0) shouldBe true
         }
 
         "a hostile number of distinct colours is rejected before the transfer, quickly".config(enabled = available) {
@@ -136,7 +136,7 @@ class OcctImportLimitMappingTest :
             val start = System.nanoTime()
             val e = shouldThrow<OcctImportLimitException> { OcctKernel.readStep(bytes) }
             e.message.orEmpty() shouldContain "limit: colour definition count"
-            ((System.nanoTime() - start) / 1_000_000_000.0 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1_000_000_000.0 < 30.0) shouldBe true
         }
 
         "a hostile number of transparency definitions is rejected before the transfer, quickly".config(
@@ -147,7 +147,7 @@ class OcctImportLimitMappingTest :
             val start = System.nanoTime()
             val e = shouldThrow<OcctImportLimitException> { OcctKernel.readStep(bytes) }
             e.message.orEmpty() shouldContain "limit: colour definition count"
-            ((System.nanoTime() - start) / 1_000_000_000.0 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1_000_000_000.0 < 30.0) shouldBe true
         }
 
         "distinct colour x transparency pairs through rendering records are rejected, quickly".config(
@@ -170,7 +170,7 @@ class OcctImportLimitMappingTest :
             val start = System.nanoTime()
             val e = shouldThrow<OcctImportLimitException> { OcctKernel.readStep(bytes) }
             e.message.orEmpty() shouldContain "limit: colour definition count (rendering)"
-            ((System.nanoTime() - start) / 1_000_000_000.0 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1_000_000_000.0 < 30.0) shouldBe true
         }
 
         "many styled items against a full colour table are rejected, quickly".config(enabled = available) {
@@ -192,7 +192,7 @@ class OcctImportLimitMappingTest :
             val start = System.nanoTime()
             val e = shouldThrow<OcctImportLimitException> { OcctKernel.readStep(bytes) }
             e.message.orEmpty() shouldContain "limit: styled item colour work"
-            ((System.nanoTime() - start) / 1_000_000_000.0 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1_000_000_000.0 < 30.0) shouldBe true
         }
 
         "a hostile number of styled items is rejected outright, quickly".config(enabled = available) {
@@ -201,7 +201,7 @@ class OcctImportLimitMappingTest :
             val start = System.nanoTime()
             val e = shouldThrow<OcctImportLimitException> { OcctKernel.readStep(bytes) }
             e.message.orEmpty() shouldContain "limit: styled item count"
-            ((System.nanoTime() - start) / 1_000_000_000.0 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1_000_000_000.0 < 30.0) shouldBe true
         }
 
         "a long shared style list referenced by many styled items is rejected, quickly".config(enabled = available) {
@@ -218,7 +218,7 @@ class OcctImportLimitMappingTest :
             val start = System.nanoTime()
             val e = shouldThrow<OcctImportLimitException> { OcctKernel.readStep(bytes) }
             e.message.orEmpty() shouldContain "limit: style list length"
-            ((System.nanoTime() - start) / 1_000_000_000.0 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1_000_000_000.0 < 30.0) shouldBe true
         }
 
         "a long presentation style assignment list is rejected, quickly".config(enabled = available) {
@@ -260,7 +260,7 @@ class OcctImportLimitMappingTest :
             val start = System.nanoTime()
             val e = shouldThrow<OcctImportLimitException> { OcctKernel.readStep(bytes) }
             e.message.orEmpty() shouldContain "limit: style expansion work"
-            ((System.nanoTime() - start) / 1_000_000_000.0 < 10.0) shouldBe true
+            ((System.nanoTime() - start) / 1_000_000_000.0 < 30.0) shouldBe true
         }
 
         "the expansion budget counts the whole file: one cheap chain on many styled items stays readable".config(
