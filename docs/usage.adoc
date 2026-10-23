@@ -1,0 +1,654 @@
+= Usage (current capability)
+
+Parsing an EXPRESS schema and generating Kotlin `data class`es from it
+works end-to-end today:
+
+[source,kotlin]
+----
+import dev.kstep.express.codegen.ExpressKotlinCodeGenerator
+import dev.kstep.express.semantic.ExpressSemanticModelBuilder
+
+val schema = """
+    SCHEMA example_schema;
+      ENTITY product;
+        id   : STRING;
+        name : STRING;
+      END_ENTITY;
+    END_SCHEMA;
+""".trimIndent()
+
+val model = ExpressSemanticModelBuilder.build(schema)
+val kotlinSource = ExpressKotlinCodeGenerator.generateFileSource(
+    model.schemas.single(),
+    "dev.kstep.generated.example",
+)
+println(kotlinSource)
+// package dev.kstep.generated.example
+//
+// public data class Product(
+//   public val id: String,
+//   public val name: String,
+// )
+----
+
+`ExpressParserFactory.parse` (used internally by
+`ExpressSemanticModelBuilder.build`) throws `ExpressSyntaxException` on
+the first syntax error instead of returning a partial tree.
+`ExpressSemanticModelBuilder` throws `SemanticModelException` for a
+named type that resolves to neither a known entity nor a known `TYPE`
+in the same schema. `ExpressKotlinCodeGenerator` throws
+`CodeGenException` for EXPRESS constructs it doesn't yet turn into
+Kotlin (see xref:status.adoc#status[Status]). None of this is wired into the
+CLI yet; the `generateExpressKotlin` Gradle task (see xref:building.adoc[Building])
+is the one place it is wired into a Gradle task today, scoped to the
+six V1 entities.
+
+Building a `kstep-core` DSL entity runs WHERE-rule validation and
+returns a structured result instead of throwing for a validation
+failure:
+
+[source,kotlin]
+----
+import dev.kstep.core.ValidationResult
+import dev.kstep.core.ap242.applicationContext
+import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productContext
+import dev.kstep.core.getOrThrow
+
+// product.frame_of_reference is a mandatory SET [1:?] OF product_context in the real
+// AP242 schema (M2 Welle 10 — see docs/adr/ADR-0004-core-on-generated-types.adoc);
+// kstep-core does not invent a placeholder context behind the caller's back.
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext {
+    name = "engineering"
+    frameOfReference = appCtx
+    disciplineType = "mechanical"
+}.getOrThrow()
+
+val result = product(id = "BRK-001") {
+    name = "Bracket"
+    description = "Mounting bracket"
+    frameOfReference = setOf(prodCtx)
+}
+when (result) {
+    is ValidationResult.Valid -> println(result.value)
+    is ValidationResult.Invalid -> println(result.violations)
+}
+
+// An empty id violates product's WHERE rule (kstep_wr1: SELF.id <> ''):
+val invalid = product(id = "") { name = "Bracket"; frameOfReference = setOf(prodCtx) }
+println((invalid as ValidationResult.Invalid).violations)
+// [DslViolation(code=KSTEP-W-001, entityName=product, ruleLabel=kstep_wr1,
+//   expressionText=SELF.id <> '', message=WHERE rule kstep_wr1 not satisfied: SELF.id <> '')]
+----
+
+`WhereRuleValidator.validate` — the lower-level API `kstep-core`'s
+builders call internally — re-parses WHERE-rule expression text and
+evaluates it against a `Map<String, WhereRuleValue>`:
+
+[source,kotlin]
+----
+import dev.kstep.express.validation.WhereRuleSpec
+import dev.kstep.express.validation.WhereRuleValidator
+import dev.kstep.express.validation.WhereRuleValue
+
+val violations = WhereRuleValidator.validate(
+    entityName = "approval",
+    rules = listOf(WhereRuleSpec(label = "wr1", expressionText = "SELF.level <> ''")),
+    attributeValues = mapOf("level" to WhereRuleValue.StringValue("")),
+)
+println(violations)
+// [WhereRuleViolation(entityName=approval, ruleLabel=wr1, expressionText=SELF.level <> '', sourceLine=0)]
+----
+
+A WHERE-rule expression using a construct outside the supported subset
+(`QUERY`, arithmetic, `SIZEOF()`/`USEDIN()` without the Semantic core
+Welle C opt-in, ...) throws
+`UnsupportedWhereExpressionException`; a genuine evaluation-time
+problem (a missing attribute, a non-boolean result, an
+incompatible-type comparison) throws `WhereRuleEvaluationException`.
+Neither is ever silently swallowed into an empty violation list.
+
+(M1 Welle 5) Exporting a `kstep-core` product structure to a STEP
+Part 21 physical file, then reading it back:
+
+[source,kotlin]
+----
+import dev.kstep.core.ap242.applicationContext
+import dev.kstep.core.ap242.product
+import dev.kstep.core.ap242.productContext
+import dev.kstep.core.ap242.productDefinition
+import dev.kstep.core.ap242.productDefinitionContext
+import dev.kstep.core.ap242.productDefinitionFormation
+import dev.kstep.core.getOrThrow
+import dev.kstep.step21.Part21Header
+import dev.kstep.step21.Part21Reader
+import dev.kstep.step21.Part21Writer
+
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext {
+    name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical"
+}.getOrThrow()
+val defCtx = productDefinitionContext {
+    name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design"
+}.getOrThrow()
+
+val bracket = product("BRK-001") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+val builtFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
+val definition = productDefinition("BRK-001-D") {
+    formation = builtFormation
+    frameOfReference = defCtx
+}.getOrThrow()
+
+val header = Part21Header(
+    fileName = "bracket.step",
+    timestamp = "2026-07-19T12:00:00",
+    schemaIdentifiers = listOf("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"),
+)
+val exported = Part21Writer.write(header, listOf(definition))
+println(exported)
+// ISO-10303-21;
+// HEADER;
+// FILE_DESCRIPTION((),'2;1');
+// FILE_NAME('bracket.step','2026-07-19T12:00:00',(),(),'','kSTEP','');
+// FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));
+// ENDSEC;
+// DATA;
+// #1=APPLICATION_CONTEXT('config control');
+// #2=PRODUCT_CONTEXT('engineering',#1,'mechanical');
+// #3=PRODUCT('BRK-001','Bracket',$,(#2));
+// #4=PRODUCT_DEFINITION_FORMATION('BRK-001-F',$,#3);
+// #5=PRODUCT_DEFINITION_CONTEXT('engineering',#1,'design');
+// #6=PRODUCT_DEFINITION('BRK-001-D',$,#4,#5);
+// ENDSEC;
+// END-ISO-10303-21;
+
+val result = Part21Reader.read(exported)
+println(result.isFullySuccessful) // true
+----
+
+`Part21Reader.read` throws `Part21SyntaxException`,
+`Part21EncodingException`, `Part21DanglingReferenceException`,
+`Part21CycleException`, or `Part21LimitExceededException` for
+structurally malformed input (see xref:status.adoc#status[Status]). A
+`WHERE`-rule failure while reconstructing a parsed instance is never
+thrown — it surfaces in `Part21ReadResult.violations`, with any
+dependent instance recorded in `Part21ReadResult.skipped` instead of
+attempted:
+
+[source,kotlin]
+----
+// A hand-edited file with an empty product id (violates product's kstep_wr1 WHERE rule):
+val handEdited = """
+    ISO-10303-21;
+    HEADER;
+    FILE_DESCRIPTION((),'2;1');
+    FILE_NAME('n','t',(),(),'','','');
+    FILE_SCHEMA(('S'));
+    ENDSEC;
+    DATA;
+    #1=APPLICATION_CONTEXT('cc');
+    #2=PRODUCT_CONTEXT('eng',#1,'mech');
+    #3=PRODUCT('','x','',(#2));
+    #4=PRODUCT_DEFINITION_FORMATION('PDF-001','',#3);
+    ENDSEC;
+    END-ISO-10303-21;
+""".trimIndent()
+
+val badResult = Part21Reader.read(handEdited)
+println(badResult.violations) // {3=[DslViolation(code=KSTEP-W-001, ...)]}
+println(badResult.skipped)    // {4=[3]}
+----
+
+`Part21Writer`/`Part21Reader` are called directly here as a library
+API; (M2 Welle 6) below, the `kstep export` CLI subcommand wraps this
+same pair via the `kstep-script` scripting DSL instead of hand-written
+Kotlin.
+
+(M2 Welle 1) Driving the `kstep-mcp` server end-to-end from an MCP
+client — the same tool-call sequence an LLM agent would make, here
+shown via the SDK's own in-memory `ChannelTransport` rather than a
+real stdio subprocess:
+
+[source,kotlin]
+----
+import dev.kstep.mcp.buildServer
+import io.modelcontextprotocol.kotlin.sdk.client.Client
+import io.modelcontextprotocol.kotlin.sdk.testing.ChannelTransport
+import io.modelcontextprotocol.kotlin.sdk.types.Implementation
+
+val server = buildServer() // registers all fifteen tools on a fresh EntityStore
+val (clientTransport, serverTransport) = ChannelTransport.createLinkedPair()
+server.createSession(serverTransport)
+
+val client = Client(clientInfo = Implementation(name = "example-client", version = "1.0"))
+client.connect(clientTransport)
+
+// product.frame_of_reference is mandatory (M2 Welle 10) — build a context first.
+client.callTool("build_application_context", mapOf("handle" to "AC", "application" to "cc"))
+client.callTool(
+    "build_product_context",
+    mapOf("handle" to "PC", "name" to "eng", "frame_of_reference_handle" to "AC", "discipline_type" to "mech"),
+)
+
+val built = client.callTool(
+    "build_product",
+    mapOf("id" to "BRK-001", "name" to "Bracket", "frame_of_reference_handles" to listOf("PC")),
+)
+println(built.structuredContent)
+// {"id":"BRK-001","name":"Bracket","description":null,"frame_of_reference_handles":["PC"],"entityType":"product"}
+
+// A validation failure comes back as structured content, not a protocol-level error.
+// Both the empty id (WHERE rule) and the never-set name (mandatory attribute, (M2 Welle 7))
+// are collected in the same response, not just the first one found:
+val invalid = client.callTool(
+    "build_product",
+    mapOf("id" to "", "frame_of_reference_handles" to listOf("PC")),
+)
+println(invalid.isError) // true
+println(invalid.structuredContent)
+// {"errorKind":"validation_failed","violations":[
+//   {"code":"KSTEP-W-001","entityName":"product", ...},
+//   {"code":"KSTEP-M-002","entityName":"product","message":"required attribute 'name' ..."}
+// ]}
+----
+
+To run the server for real, `kstep-cli` wraps this directly (M2 Welle 3):
+
+[source,shell]
+----
+kstep mcp
+----
+
+This blocks on stdin/stdout until the session closes, exactly like
+`runStdioServer()` above — `kstep mcp` is a one-line call to it, nothing
+more. In practice, expect the process to be terminated by its MCP host
+(SIGTERM/SIGKILL) rather than to exit on its own from a clean stdin
+close: an immediate stdin EOF does not reliably make `runStdioServer()`
+return in the underlying `kotlin-sdk-server:0.14.0` transport, a
+pre-existing SDK behavior out of scope for `kstep-cli` to work around
+(see xref:status.adoc#status[Status]). Once `runStdioServer()` does return —
+whichever way the session actually closes — the process exits on its own
+with code `0`; no explicit shutdown call is needed on that path.
+
+(M2 Welle 4) Evaluating a `DERIVE` initializer expression works exactly
+like `WhereRuleValidator.validate` above, via `DerivedAttributeEvaluator`:
+
+[source,kotlin]
+----
+import dev.kstep.express.validation.DerivedAttributeEvaluator
+import dev.kstep.express.validation.WhereRuleValue
+
+val value = DerivedAttributeEvaluator.evaluate(
+    expressionText = "SELF.id",
+    attributeValues = mapOf("id" to WhereRuleValue.StringValue("W-1")),
+)
+println(value) // StringValue(value=W-1)
+
+// The real AP242 product_definition.name DERIVE (get_name_value(SELF)) is a function
+// call, outside the supported subset — this throws, exactly like an equivalent WHERE
+// rule would:
+// DerivedAttributeEvaluator.evaluate("get_name_value(SELF)", emptyMap())
+// -> UnsupportedWhereExpressionException
+----
+
+(Semantic core Welle B) Within the supported subset, the code generator
+turns a `DERIVE` into a computed property instead (ADR-0021). For
+
+[source]
+----
+ENTITY shape_info;
+  count : INTEGER;
+  note  : OPTIONAL STRING;
+DERIVE
+  is_big   : BOOLEAN := count > 10;
+  has_note : BOOLEAN := EXISTS(note);
+END_ENTITY;
+----
+
+the generated class is
+
+[source,kotlin]
+----
+public data class ShapeInfo(
+  public val count: Int,
+  public val note: String? = null,
+) {
+  public val isBig: Boolean
+    get() = ((count).toDouble().compareTo((10).toDouble()) > 0)
+
+  public val hasNote: Boolean
+    get() = (note != null)
+}
+----
+
+The derived values are not constructor parameters and not part of
+`equals`/`hashCode`/`copy`/`toString`. `ExpressKotlinCodeGenerator.generateFileWithReport`
+additionally returns the DERIVEs it had to skip when
+`derivedAttributeMode = GENERATE_SUPPORTED_REPORT_UNSUPPORTED` is set.
+
+`build_next_assembly_usage_occurrence` now also enforces NAUO's real
+`UNIQUE UR1` rule — a second NAUO sharing an already-used
+`(reference_designator, relating_product_definition)` pair is rejected:
+
+[source,kotlin]
+----
+// after building NAUO-1 with reference_designator "RD-1" and
+// relating_product_definition_id "PD-A":
+val conflict = client.callTool(
+    "build_next_assembly_usage_occurrence",
+    mapOf(
+        "id" to "NAUO-2",
+        "relating_product_definition_id" to "PD-A",
+        "related_product_definition_id" to "PD-OTHER",
+        "reference_designator" to "RD-1",
+    ),
+)
+println(conflict.isError) // true
+println(conflict.structuredContent)
+// {"errorKind":"unique_constraint_violated","entityType":"next_assembly_usage_occurrence",
+//  "ruleLabel":"UR1","conflictingId":"NAUO-1","fields":[...]}
+----
+
+By contrast, `build_product_definition_formation` deliberately has **no**
+such `UNIQUE` check — and needs none. Its real `UR1` is `(id, of_product)`,
+and because the `EntityStore` already keys every formation by `id`, two
+formations can only share a composite key by sharing `id`, which is a
+re-build (overwrite), not a second instance. Two formations of the *same*
+product under *different* ids both succeed (a product legitimately has
+many formations); re-building under the same id overwrites. No
+`unique_constraint_violated` is reachable for this entity — verified by
+test, not just asserted:
+
+[source,kotlin]
+----
+// after building product "SHARED-PRODUCT":
+val first = client.callTool(
+    "build_product_definition_formation",
+    mapOf("id" to "PDF-A", "of_product_id" to "SHARED-PRODUCT"),
+)
+val second = client.callTool(
+    "build_product_definition_formation",
+    mapOf("id" to "PDF-B", "of_product_id" to "SHARED-PRODUCT"),
+)
+println(first.isError)  // null — different id, so (id, of_product) cannot collide
+println(second.isError) // null — same story, even though of_product is shared
+
+// rebuilding PDF-A under the SAME id overwrites, it does not conflict:
+val rebuilt = client.callTool(
+    "build_product_definition_formation",
+    mapOf("id" to "PDF-A", "of_product_id" to "SHARED-PRODUCT"),
+)
+println(rebuilt.isError) // null
+----
+
+(M2 Welle 6) Exporting a `*.kstep.kts` script directly to a STEP Part 21
+file via `kstep export`, no hand-written Kotlin caller needed. A script
+ends with `stepFile(fileName = "...") { ... }`; the sixteen `kstep-core`
+builders (twelve at M2 Welle 10, four more since ADR-0023), the generated `dev.kstep.generated.ap242v1.*`
+types, and `stepFile`/`root` are all available without any `import`
+(`KStepScriptCompilationConfiguration`'s `defaultImports`):
+
+[source,kotlin]
+----
+// bracket.kstep.kts
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext {
+    name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical"
+}.getOrThrow()
+val defCtx = productDefinitionContext {
+    name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design"
+}.getOrThrow()
+
+val bracket = product("BRK-001") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+val bracketFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
+val definition = productDefinition("BRK-001-D") {
+    formation = bracketFormation
+    frameOfReference = defCtx
+}.getOrThrow()
+
+stepFile(fileName = "bracket.step") {
+    root(definition)
+}
+----
+
+[source,shell]
+----
+kstep export bracket.kstep.kts
+# Exported 1 root(s) to bracket.step
+----
+
+`--validate` additionally runs the population-level model validation
+(`USEDIN`/`INVERSE`/`UNIQUE` rules and the acyclic usage check, ADR-0024)
+before anything is written. It is off by default. On findings the command
+exits with status 1 and writes no file; if no verdict can be reached (a
+limit is exceeded, a schema construct is unsupported) it fails closed with
+`KSTEP-S-005`. Only `root(...)` entities are validated, not `shape(...)`.
+
+*Geometry (ADR-0027).* A script that registers `shape(definition, occtShape)`
+(together with `root(...)` for the same product structure) is exported with its
+B-Rep geometry merged into the one Part 21 file, linked to the product
+definition via `PRODUCT_DEFINITION_SHAPE` and `SHAPE_DEFINITION_REPRESENTATION`.
+Several shapes are allowed (one per product definition, each reachable from the
+roots); this section describes the unplaced case (ADR-0027): without `place(...)` every
+part stays in its own coordinate system and parts overlap at the origin; placed assemblies are
+covered by ADR-0028 and the `place(...)` description above. `--require-geometry` fails with
+exit 1 and writes nothing unless geometry was merged (`KSTEP-S-006`: the script
+registers no shape; `KSTEP-S-007`: OCCT unavailable). A failed merge
+(`KSTEP-S-008`: unreachable or duplicate product definition, closed shape, OCCT
+error) is never downgraded silently to a structure-only file: exit 1, nothing
+written. A script that needs OCCT to build its shapes still fails during the
+script run when OCCT is missing (exit 1, `KSTEP-S-003`), as before. With
+geometry merged, `FILE_SCHEMA` carries OCCT's AP242 MIM identifier instead of the
+structure-only identifier. `--output json` gains a `geometry` object
+(`merged`, `shapeCount`, `occt`) only when shapes or the flag are involved;
+otherwise the output is byte-identical to before.
+Interop (2026-10-22): FreeCAD 1.1.4 reads the exported box as one valid `Solid`;
+for an assembly without placements it imported only the root product (historical, ADR-0027);
+since ADR-0028 FreeCAD shows the whole hierarchy with correct positions for placed assemblies.
+Example for a usage cycle (A uses B, B uses A):
+
+[source,shell]
+----
+kstep export cycle.kstep.kts --validate
+# Model validation failed: 2 instance(s) violate population-level constraints:
+#   [KSTEP-W-002] next_assembly_usage_occurrence (WR1): ... cycle path ...
+# Checked 9 instance(s); indeterminate: 0; suppressed: 0; assumptions applied: 0
+# Nothing was written.
+----
+
+With `--output json` the failure is `{"status":"error","errorKind":"model_validation_failed",
+"command":"export","instanceCount":...,"findings":[{"entityType":...,"violations":[{"code":...,
+"ruleLabel":...,"expressionText":...,"message":...}]}],...}`; an unavailable verdict is
+`"errorKind":"model_validation_unavailable"` with `"code":"KSTEP-S-005"` and a `reason`. A passing
+run adds a `validation` object (`performed`, `valid`, counts) to the success document. Without
+the flag the output is unchanged.
+
+`--out` overrides the derived output path; `--output json` renders the
+same information as a JSON document instead of human-readable text —
+useful for tool/LLM consumption (kSTEP-ADR-0001 acceptance criterion
+#3). The two `root(...)` forms differ in what happens to a validation
+failure: `root(entity)` takes an already-`getOrThrow()`-unwrapped
+entity, so an `Invalid` result aborts the script immediately; passing
+the raw `ValidationResult` to `root(...)` instead *aggregates* every
+violation across every registered root, which is what the second
+fixture below demonstrates:
+
+[source,kotlin]
+----
+// hello-invalid.kstep.kts — an empty product id violates product's kstep_wr1 WHERE rule
+// (frame_of_reference is set deliberately, so this is the only violation in the response)
+val prodCtx = productContext {
+    name = "engineering"
+    frameOfReference = applicationContext { application = "config control" }.getOrThrow()
+    disciplineType = "mechanical"
+}.getOrThrow()
+stepFile(fileName = "hello-invalid.step") {
+    root(product(id = "") { name = "Nameless"; frameOfReference = setOf(prodCtx) })
+}
+----
+
+[source,shell]
+----
+kstep export --output json hello-invalid.kstep.kts
+----
+
+[source,json]
+----
+{"status":"error","errorKind":"validation_failed","violations":[
+  {"code":"KSTEP-W-001","entityName":"product","ruleLabel":"wr1",
+   "expressionText":"SELF.id <> ''","message":"WHERE rule wr1 not satisfied: SELF.id <> ''"}
+]}
+----
+
+A Kotlin syntax error, an unresolved reference, a script whose last
+expression isn't a `KStepModel`, and a plain runtime exception all
+produce their own structured `KSTEP-S-xxx` error document the same way
+(`compilation_error`, `no_model_produced`, `runtime_error`) — see xref:status.adoc#status[Status] for the full `KStepScriptOutcome` breakdown — never a raw Kotlin
+stack trace on stdout/stderr. Both fixture scripts above are the actual
+`kstep-tests` test resources (`hello-assembly.kstep.kts` is the
+3-part-assembly variant of the first example), not just documentation prose —
+see the `kstep-tests` row in xref:modules.adoc[Modules].
+
+Rendering a headless SVG/PNG/text/glTF preview of a `*.kstep.kts` script
+via `kstep render` (see
+docs/adr/ADR-0011-headless-preview-rendering.adoc and, for `-f glb`,
+docs/adr/ADR-0016-gltf-glb-export.adoc) — no window, no display server.
+`shape(...)` (also available with no `import`, alongside `root(...)`)
+registers geometry for the preview independently of `root(...)`:
+
+[source,kotlin]
+----
+// hello-box.kstep.kts
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext {
+    name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical"
+}.getOrThrow()
+val defCtx = productDefinitionContext {
+    name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design"
+}.getOrThrow()
+
+val part = product("BOX-001") { name = "Box"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+val prodFormation = productDefinitionFormation("BOX-001-F") { ofProduct = part }.getOrThrow()
+val definition = productDefinition("BOX-001-D") {
+    formation = prodFormation
+    frameOfReference = defCtx
+}.getOrThrow()
+
+// OcctKernel/shape(...) need no import -- see defaultImports above.
+val box = OcctKernel.makeBox(10.0, 20.0, 30.0)
+
+stepFile(fileName = "hello-box.step") {
+    root(definition)
+    shape(definition, box)
+}
+----
+
+[source,shell]
+----
+kstep render hello-box.kstep.kts
+# Wrote hello-box.svg  -- an isometric render, since OCCT is available and the box triangulated
+
+kstep render hello-box.kstep.kts --format png -w 1200 --height 900 -o box.png
+kstep render hello-box.kstep.kts --format text --with-step
+
+kstep render hello-box.kstep.kts -f glb -o box.glb
+# Wrote box.glb -- a self-contained binary glTF 2.0 document (JSON + binary buffer in one
+# file); -w/--height are ignored for this format. "-f gltf" is accepted as an alias for
+# "glb" -- both write the same binary container, see ADR-0016 for why a separate plain-text
+# glTF format is not offered. Open it in any glTF viewer (e.g. https://gltf-viewer.donmccurdy.com/,
+# or a local `<model-viewer>` page) to inspect the model interactively.
+----
+
+A script with an assembly structure (`NEXT_ASSEMBLY_USAGE_OCCURRENCE` roots, with or without
+`place(usage, translation, rotation)`) renders every drawn instance at its composed place: SVG, PNG and GLB
+show the whole assembly, the GLB as one merged mesh (ADR-0035, `geometry.instanceCount` in `--output json`).
+A model with several shapes but no assembly usage connecting them still previews only the first shape, with a
+warning. The `kstep-viewer` does not load scripts, so it is not affected.
+
+On a machine without the native OCCT bridge (or if triangulation fails
+for any other reason), the SAME `hello-box.kstep.kts` script above still
+renders successfully — `content` falls back to a text card explaining
+why, painted into whatever container was requested (never a silently
+different file type), with the fixed OCCT-dev-packages `apt-get` command
+from xref:building.adoc[Building] included in the card. Pass `--require-geometry` to
+turn that silent fallback into a hard failure (exit 1) instead — e.g. for
+a CI step that must guarantee a real render happened. A script without
+any `shape(...)` call at all (like `bracket.kstep.kts` above) renders a
+product-structure summary card the same way, `content = summary`, exit 0
+— `kstep render` never requires geometry to succeed.
+
+(kstep-asciidoc wave, see docs/adr/ADR-0019-kstep-asciidoc.adoc)
+Pre-rendering `kstep` preview blocks in an AsciiDoc document — the
+DSL-file-per-block-macro equivalent of `kuml-dev/kUML`'s `kuml-asciidoc`
+pre-processor. Three interchangeable block forms; a document can mix all
+three:
+
+[source,asciidoc]
+-----
+// bracket-doc.adoc
+
+A markdown fence, no attributes:
+
+```kstep
+val appCtx = applicationContext { application = "config control" }.getOrThrow()
+val prodCtx = productContext { name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical" }.getOrThrow()
+val defCtx = productDefinitionContext { name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design" }.getOrThrow()
+val bracket = product("BRK-001") { name = "Bracket"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+val bracketFormation = productDefinitionFormation("BRK-001-F") { ofProduct = bracket }.getOrThrow()
+val definition = productDefinition("BRK-001-D") { formation = bracketFormation; frameOfReference = defCtx }.getOrThrow()
+stepFile(fileName = "bracket.step") { root(definition) }
+```
+
+An AsciiDoc-native delimited block, with attributes:
+
+[kstep,bracket,format=png,width=800,height=600,alt="Bracket assembly"]
+----
+... same script as above ...
+----
+
+A block macro pointing at an existing script file:
+
+kstep::bracket.kstep.kts[format=svg]
+-----
+
+[source,shell]
+----
+kstep asciidoc --input bracket-doc.adoc --output bracket-doc.rendered.adoc
+# Wrote bracket-doc.rendered.adoc (3 block(s))
+# -> bracket-doc.rendered.adoc now has three `image::...[]` lines, and the
+#    corresponding bracket-doc-1.svg/bracket.png/bracket-doc-3.svg files
+#    (named from the INPUT document's basename, and from the second
+#    block's explicit `target=bracket`) sit next to it (or under
+#    `:imagesdir:`, if the document sets one).
+
+kstep asciidoc --input-dir docs/src --output-dir docs/build --format png
+# Mirrors the whole tree: every .adoc is rewritten, every other file
+# (images, includes, ...) is copied unchanged. Symlinks are skipped and
+# reported, never followed.
+----
+
+Only `svg`/`png` are accepted as a block's image format (`auto`/`text`/`glb`
+are rejected outright — an embeddable image is the only sensible container
+here); `--format` sets the document-wide default, overridable per block via
+`format=`. The same Container-Regel/Pflicht-Fallback `kstep render` follows
+applies here too (via the shared `kstep-preview` module) — a script whose
+geometry cannot be rendered this run becomes a notice card in the requested
+image format, exit 0, unless `--require-geometry` is given. A script that
+fails to *compile/validate/run* is a different failure class entirely: by
+default it aborts the WHOLE document (`--on-error fail`, matching a
+compiler's own instinct to stop on a syntax error) — pass `--on-error card`
+to instead embed an error card for that one block and keep going, useful
+while iterating on a document's scripts. Under the default `fail` policy, a
+document with one good block and one broken block writes NEITHER the
+rewritten `.adoc` NOR any of its images — never a half-written result.
+
+Any OTHER AsciiDoc delimited block (`----`/`....`/`====`/`****`/`____`/
+`++++`/`////`) not opened by a recognized `[kstep]`/`[source,kstep]`
+attribute line passes through untouched — including one that happens to
+contain `kstep::path[]`-looking text, e.g. this project's own docs showing
+the syntax (see `docs/adr/ADR-0019-kstep-asciidoc.adoc`'s Stolperfalle 3).
+A two-line ("setext") section title underline (`Title\n-----------\n`) is
+never mistaken for such a delimiter opener, even though a `-----------` run
+alone is indistinguishable from one — the scanner checks the line above it
+first, matching Asciidoctor's own rule (Stolperfalle 12 in the ADR).

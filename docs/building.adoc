@@ -1,0 +1,290 @@
+= Building
+
+Requires JDK 21. The Gradle wrapper pins Gradle 9.6.1.
+
+[source,shell]
+----
+./gradlew clean check
+----
+
+`check` runs ktlint (now including `kstep-mcp`, `kstep-cli`, and
+`kstep-script`), `kstep-express`'s `generateExpressKotlin` task
+(regenerates the six V1 entities from real-schema ground truth — see
+xref:status.adoc#status[Status] — and fails the build if its success/skip counts ever
+drift from the documented boundary), and the Kotest test suite in
+`kstep-tests`: the EXPRESS parser smoke test, semantic-model tests,
+naming-convention tests, code-generation tests (including real-schema
+six-V1-entity regeneration), WHERE-rule expression-builder/evaluator/
+validator tests, `kstep-core` DSL builder tests, (M1 Welle 5)
+`kstep-step21` Part 21 writer/reader/roundtrip tests, (M2 Welle 1) the
+end-to-end `kstep-mcp` MCP server test suite (`KStepMcpServerTest`),
+(M2 Welle 3) `CliMainTest` for `kstep-cli`'s argument-dispatch logic,
+and (M2 Welle 6) `KStepScriptHostTest`/`KStepScriptExportTest` for
+`kstep-script`'s scripting host, plus `CliMainTest`'s new `export`
+argument-parsing cases. `kstep-mcp`, `kstep-cli`, and `kstep-script`
+themselves compile and are ktlint-checked as part of `check`; none of
+them has tests of its own — their tests live in `kstep-tests`, matching
+every other module's pattern (the two `*.kstep.kts` test fixtures are
+resources under `kstep-tests/src/test/resources`, loaded via
+`getResourceAsStream` — not under `kstep-script` itself, for the same
+reason).
+
+== Building — continuous integration
+
+Tagged releases are built by a separate workflow, see xref:releasing.adoc[Releasing].
+
+`.github/workflows/ci.yml` runs two jobs on every push to `master`, every
+pull request, and on demand (`workflow_dispatch`):
+
+|===
+| Job | Runner | Native deps installed | Gradle invocation | What it proves
+
+| `build`
+| `ubuntu-latest` (GA, Ubuntu 24.04 as of 09/2026)
+| Eigen, Boost, Skiko runtime libs — deliberately *not* OCCT
+| `./gradlew clean check -Pkstep.planegcs.require=true`
+| The stable gate: compilation, ktlint, `generateExpressKotlin`, the full
+  Kotest suite, real PlaneGCS coverage, and — because OCCT is absent —
+  the graceful-degradation path (`OcctAvailability.Unavailable`) that no
+  other job exercises.
+
+| `build-native`
+| `ubuntu-26.04` (public preview as of 09/2026)
+| OCCT (4 packages) + Eigen + Boost + Skiko runtime libs
+| `./gradlew clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true`
+| Real, end-to-end OCCT coverage: `OcctBridgeSmokeTest`,
+  `OcctFeatureOperationsTest`, the AP242 shape-export roundtrip, headless
+  render, and CLI render integration.
+|===
+
+The two-job split exists because there is no GitHub-hosted GA runner
+image with an OCCT new enough for this project: `ubuntu-latest`
+(Ubuntu 24.04) ships OCCT 7.6.3, whose STEP toolkits are still named
+`TKSTEP`/`TKSTEPBase`/`TKSTEPAttr` — `libTKDESTEP.so` (OCCT 7.8+, what
+`kstep-geometry/build.gradle.kts` links against via `-lTKDESTEP`) does
+not exist there. Installing the OCCT dev packages on that runner would
+make `compileOcctBridge` run (headers present) and then fail at link
+time — worse than not installing them, where the task is skipped and the
+documented graceful-degradation path runs instead. `ubuntu-26.04` is the
+only GitHub-hosted image whose OCCT (7.9.2) provides `libTKDESTEP.so`,
+matching this project's own development environment; it is in public
+preview as of this writing, so `build` on the GA label stays the gate
+that never depends on a preview image. If the preview label ever becomes
+unreliable (capacity, image regressions), the documented fallback is
+`runs-on: ubuntu-latest` with `container: ubuntu:26.04`.
+
+== Building — optional OCCT geometry bridge
+
+`kstep-geometry` (Geometrie Welle 1, extended by Geometrie Welle 5a for
+extrude/fillet — see docs/adr/ADR-0005-occt-jni-bridge.adoc and
+docs/adr/ADR-0008-occt-feature-operations.adoc) links against a
+system-installed OpenCASCADE Technology (OCCT) library. This is entirely
+optional: `./gradlew clean check` stays green with or without it, and no
+OCCT binary/header/source is vendored in this repository. To get real
+end-to-end geometry coverage (as opposed to only the graceful-degradation
+path), install the OCCT dev packages first — on Ubuntu/Debian:
+
+[source,shell]
+----
+sudo apt-get install --no-install-recommends \
+  libocct-foundation-dev libocct-modeling-data-dev \
+  libocct-modeling-algorithms-dev libocct-data-exchange-dev
+./gradlew clean check -Pkstep.occt.require=true
+----
+
+Without those packages installed, `kstep-geometry`'s `compileOcctBridge`
+Gradle task is skipped (not failed), and
+`dev.kstep.geometry.OcctKernel.availability()` reports
+`OcctAvailability.Unavailable` at runtime with a human-readable reason;
+`OcctBridgeSmokeTest`/`OcctFeatureOperationsTest`'s OCCT-dependent cases
+then skip cleanly instead of failing. `-Pkstep.occt.require=true` turns
+that into a hard test failure instead — pass it only on a machine where
+OCCT is expected to actually be present. Supported: linux-x86-64 and macOS
+arm64 (see "Building (macOS arm64, Homebrew)" below); Windows and Intel Macs
+are not supported.
+`BRepFilletAPI_MakeFillet` (Geometrie Welle 5a) lives in `TKFillet`, from
+the same `libocct-modeling-algorithms-dev` package as `TKPrim`/`TKTopAlgo`
+above — no additional `apt-get` package is required beyond the four already
+listed. `BRepMesh_IncrementalMesh` (Viewer-Welle 1, `kstep-viewer`'s
+triangulation) lives in `TKMesh`, from the same
+`libocct-modeling-algorithms-dev` package too — still no additional
+`apt-get` package required. The boolean operations (Welle J,
+`BRepAlgoAPI_Fuse`/`Cut`/`Common`) live in `TKBO`, again from
+`libocct-modeling-algorithms-dev` (Homebrew's `opencascade` contains it too),
+and are an additional runtime dependency of the native bridge.
+Reading STEP files back (Welle K, `kstep import`, ADR-0030) additionally links the
+OCAF/XDE toolkits `TKXCAF`, `TKLCAF`, `TKCAF`, `TKCDF` and `TKDE`. They are runtime
+dependencies of `TKDESTEP` already; on Ubuntu/Debian the dev headers come with
+`libocct-ocaf-dev` (listed explicitly in the CI job that requires OCCT, in case the
+data-exchange package does not pull it in), Homebrew's `opencascade` contains them.
+
+== Building (macOS arm64, Homebrew)
+
+Both native bridges (OCCT and PlaneGCS) also build on Apple Silicon, using Homebrew:
+
+[source,bash]
+----
+brew install opencascade eigen boost
+./gradlew clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true
+----
+
+Defaults assume the Homebrew prefix `/opt/homebrew`; override it with `-Pkstep.brew.prefix=...` (or
+the `HOMEBREW_PREFIX` environment variable) or set the individual `-Pkstep.occt.includeDir`,
+`-Pkstep.occt.libDir`, `-Pkstep.eigen.includeDir` and `-Pkstep.boost.includeDir` properties. Limits:
+this is for development and self-builds only. Nothing native is bundled in a release artifact, the
+built dylib is unsigned, and Intel Macs and Windows are unsupported (the bridges then report
+`Unavailable`). Do not run release builds on a Mac that has Homebrew OCCT installed (the dylibs would
+be embedded into the jars and rejected by `scripts/release/verify-dist.sh`). Details: ADR-0026.
+
+== Building — headless preview rendering (`kstep render`)
+
+`kstep-render` (headless-preview-rendering wave — see
+docs/adr/ADR-0011-headless-preview-rendering.adoc) depends only on
+`kstep-geometry` — no Compose, no `google()` repository entry, no extra
+setup beyond the optional OCCT bridge above (and `kstep render` still
+renders a clean product-structure/fallback preview without it — see
+xref:usage.adoc[Usage]). `kstep-cli`'s `render` subcommand depends on `kstep-render`
+directly, deliberately NOT on `kstep-viewer` — verify that stays true
+after any dependency change with
+`./gradlew :kstep-cli:dependencies --configuration runtimeClasspath |
+grep -iE "skiko|compose|androidx"` (must be empty).
+
+== Building — Asciidoctor pre-processing (`kstep asciidoc`)
+
+`kstep-preview` (the shared pipeline `kstep render`/`kstep asciidoc` both
+call) and `kstep-docs:kstep-asciidoc` (the scanner/rewriter/processor) need
+no extra setup beyond `kstep-render`'s own — no Compose, no OCCT-specific
+build step. `:kstep-docs` itself carries no `build.gradle.kts`; it is a pure
+Gradle namespace directory grouping `:kstep-docs:kstep-asciidoc`, mirroring
+`kuml-dev/kUML`'s own `kuml-docs/` layout. See
+docs/adr/ADR-0019-kstep-asciidoc.adoc.
+
+== Building — glTF/GLB validation (optional)
+
+`kstep render -f glb`'s output (`dev.kstep.render.gltf.GlbWriter`, see
+docs/adr/ADR-0016-gltf-glb-export.adoc) needs no extra setup to BUILD or
+TEST at the byte level — `GlbWriterTest` (`kstep-render`) covers the
+writer's JSON/binary layout with no OCCT and no Node.js at all, and is
+part of the normal `./gradlew clean check`. Cross-checking a real `.glb`
+against the official Khronos `gltf-validator` is a genuinely optional,
+manual step, kept OUT of the Gradle build entirely (this repository has
+no established pattern of build-time network access — see that ADR's
+Security section):
+
+[source,shell]
+----
+cd scripts && npm ci
+node validate-gltf.mjs ../path/to/your.glb
+# or, cross-checking against a known triangle/vertex count:
+node validate-gltf.mjs ../path/to/your.glb --expect-triangles 12 --expect-vertices 36
+----
+
+Exits 0 only if the validator reports zero errors AND zero warnings (and,
+when given, the `--expect-*` counts match exactly). `GltfValidationExportTest`
+(`kstep-tests`, OCCT-gated) writes real `.glb` fixtures unconditionally
+under `kstep-tests/build/gltf-validation/`, and additionally RUNS this
+same validator itself, as a real Node subprocess, when both OCCT is
+available AND `-Pkstep.gltf.validate=true` is passed — that flag
+HARD-FAILS (never silently skips) if `node`/`scripts/node_modules` are
+missing, mirroring `-Pkstep.occt.require`/`-Pkstep.planegcs.require`'s own
+"a gate that can silently no-op is not a gate" rule:
+
+[source,shell]
+----
+cd scripts && npm ci && cd ..
+./gradlew clean check -Pkstep.occt.require=true -Pkstep.gltf.validate=true
+----
+
+== Building — optional desktop viewer
+
+`kstep-viewer` (Viewer-Welle 1 — see
+docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc) depends on both the
+optional OCCT bridge above and Compose Multiplatform. Resolving Compose's
+dependencies requires a `google()` Maven repository entry (scoped to
+`androidx.*` coordinates only — see `settings.gradle.kts` and that ADR's
+Context section for why `mavenCentral()` alone fails), already wired into
+this repository; no extra setup is needed beyond a normal
+`./gradlew clean check`. Without the OCCT dev packages installed, opening
+the real viewer window shows an explanatory `UnavailableNotice` (with the
+exact `apt-get install` command above) instead of a blank canvas or a
+crash.
+
+`./gradlew :kstep-viewer:run` opens a real, on-screen window showing a
+static isometric box — never wired into `check`, and requires an actual
+display (or `Xvfb`) to run; every test in this module stays headless
+(`java.awt.headless=true`).
+
+== Building — optional PlaneGCS constraint solver
+
+`kstep-constraints` (Geometrie Welle 6, pulled forward, plus C-Welle 2 --
+see docs/adr/ADR-0006-planegcs-constraint-bridge.adoc and
+docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc) compiles a
+vendored copy
+of the PlaneGCS 2D geometric constraint solver (unlike `kstep-geometry`'s
+OCCT, which links a *system-installed* package — PlaneGCS ships no
+distribution package at all, so its sources are vendored directly into
+this repository at a pinned commit; see NOTICE and
+`kstep-constraints/src/main/cpp/third_party/planegcs/PROVENANCE.adoc`).
+This is entirely optional: `./gradlew clean check` stays green with or
+without the required dev headers installed. To get real end-to-end
+constraint-solving coverage, install the Eigen and Boost dev packages
+first — on Ubuntu/Debian:
+
+[source,shell]
+----
+sudo apt-get install --no-install-recommends libeigen3-dev libboost-dev
+./gradlew clean check -Pkstep.planegcs.require=true
+----
+
+Without those packages installed, `kstep-constraints`'s
+`compilePlaneGcsBridge` Gradle task is skipped (not failed), and
+`dev.kstep.constraints.PlaneGcsSolver.availability()` reports
+`PlaneGcsAvailability.Unavailable` at runtime with a human-readable reason;
+`PlaneGcsBridgeSmokeTest`'s PlaneGCS-dependent cases then skip cleanly
+instead of failing. `-Pkstep.planegcs.require=true` turns that into a hard
+test failure instead — pass it only on a machine where the bridge is
+expected to actually be present. Same platforms as `kstep-geometry`
+(linux-x86-64 and macOS arm64). Unlike the OCCT bridge, no `-L`/`-l`/`-rpath`
+linker flags are needed at all — Eigen and Boost are both used here in a
+strictly header-only capacity, so nothing links against an external shared
+library.
+
+kSTEP logs through kotlin-logging
+(`io.github.oshai:kotlin-logging-jvm`), an idiomatic Kotlin wrapper
+over SLF4J. `kstep-mcp`'s server lifecycle and tool-call outcomes are
+the first real usage of it (M2 Welle 2); `kstep-core`, `kstep-express`,
+and `kstep-step21` remain untouched, since their existing structured-
+exception/`ValidationResult` error model already covers their
+diagnostic needs. (M2 Welle 6) `kstep-script`'s `KStepScriptHost` is the
+second real usage: it logs a warning if `host.eval(...)` itself throws
+before producing a scripting result at all (the one case its own
+`KStepScriptOutcome` mapping can't attribute to the script source) —
+every *expected* outcome (compile error, validation failure, runtime
+exception) is structured data, not a log line. The SLF4J backend is
+`slf4j-simple` (MIT-licensed, zero-config, prints to stderr) —
+`kstep-mcp` depends on it at `runtimeOnly`, and `kstep-tests` carries a
+matching `testImplementation`, so `./gradlew clean check` now shows real
+log output instead of SLF4J's "No SLF4J providers were found ...
+Defaulting to no-operation (NOP) logger" warning.
+`Ap242V1CodeGen`'s `generateExpressKotlin` console report and
+`kstep-cli`'s `main()` — including its `USAGE_TEXT` help output (M2
+Welle 3) and (M2 Welle 6) `kstep export`'s own success/error rendering,
+text or JSON — remain plain `println` deliberately: that is
+Gradle-task/CLI stdout output, not diagnostic logging, and stays outside
+kotlin-logging's scope.
+
+`generateExpressKotlin` can also be run on its own:
+
+[source,shell]
+----
+./gradlew :kstep-express:generateExpressKotlin
+----
+
+It writes generated Kotlin source under
+`kstep-express/build/generated/expressKotlin/main`. That output is a
+build artifact only, not added to any module's `sourceSet` — two of
+the five entities it successfully generates (`Product`,
+`ProductDefinition`) reference support entity types
+(`ProductContext`, `ProductDefinitionContext`) that themselves cannot
+be code-generated in V1 (see xref:status.adoc#status[Status]), so wiring the output into
+an actual compilation would break it.

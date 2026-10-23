@@ -1,0 +1,352 @@
+[#roadmap]
+= Roadmap (V1 scope)
+
+Per the project's scope-reduction decision (kSTEP-ADR-0001, analogous to
+kUML-ADR-0004), V1 deliberately excludes B-rep geometry and PMI (a geometry layer
+was added afterwards, see Welle H to L below), and
+focuses on a semantic core that a type-safe DSL benefits from most:
+
+. EXPRESS parser (done) + EXPRESS-to-Kotlin code generation (done, see
+  above — semantic model and KotlinPoet-based generator, verified
+  end-to-end against the six-entity AP242-subset fixture, and, as of
+  M1 Welle 4, against the real, official AP242 schema and its six V1
+  entities — see xref:status.adoc#status[Status] and xref:building.adoc[Building]).
+  Supertype/subtype attribute inheritance (needed for
+  `next_assembly_usage_occurrence` and most real AP242 entities, and
+  for the two support entities `product_context`/
+  `product_definition_context` that `product`/`product_definition`
+  reference) is now done too — see the SUBTYPE OF
+  inheritance-flattening entry in xref:status.adoc#status[Status]
+  (`dev.kstep.express.semantic.InheritanceResolver`). Still pending:
+  `INVERSE`/`UNIQUE` clause codegen (still not started). `DERIVE`
+  codegen is done for the supported expression subset (Semantic core
+  Welle B, ADR-0021) and, since Welle D (ADR-0023), for the six real V1
+  DERIVEs.
+  Transitive `TYPE`-alias chains (cycle- and depth-guarded), explicit
+  `ENUMERATION OF (...)` types (emitted as Kotlin `enum class`es;
+  `EXTENSIBLE`/`BASED_ON` enumerations stay unsupported) and closed
+  `SELECT` types (emitted as Kotlin `sealed interface`s, see ADR-0020;
+  `EXTENSIBLE`/`BASED_ON`/`GENERIC_ENTITY` `SELECT`s stay unsupported)
+  are now resolved by codegen. The real AP242 excerpt still contains no
+  `SELECT`; since Semantic core Welle D (ADR-0023) it contains four.
+  `DERIVE`/`UNIQUE`
+  *evaluation* (as opposed to codegen) is now partially done — capture
+  was M1 Welle 6, and M2 Welle 4 added evaluation for the WHERE-rule-
+  supported expression subset (`DerivedAttributeEvaluator`) plus
+  `next_assembly_usage_occurrence`'s `UNIQUE UR1` enforcement in
+  `kstep-mcp` — see xref:status.adoc#status[Status]. `INVERSE` evaluation and
+  `SIZEOF(USEDIN(...))` are done on population level (Semantic core
+  Welle C, ADR-0022; since Welle D, ADR-0023, the attribute entities are
+  modelled, so the `USEDIN` rules are real, and NAUO's `UNIQUE UR2` and
+  the acyclic usage check are evaluated).
+. A semantic AP242 core: product structure and metadata, without
+  B-rep geometry and without PMI (PMI references geometry shape
+  aspects and moves with the geometry milestone). The Kotlin type
+  layer for its twelve core AP242 entities (sixteen since Welle D, ADR-0023;
+  the original six V1 entities —
+  `PRODUCT`, `PRODUCT_DEFINITION` + revision,
+  `PRODUCT_DEFINITION_FORMATION`, `NEXT_ASSEMBLY_USAGE_OCCURRENCE`,
+  `APPROVAL`, `PERSON_AND_ORGANIZATION` — plus six support entities
+  their generated shapes require: `APPLICATION_CONTEXT`,
+  `PRODUCT_CONTEXT`, `PRODUCT_DEFINITION_CONTEXT`, `APPROVAL_STATUS`,
+  `PERSON`, `ORGANIZATION`) now generates correctly from the fixture
+  and from the real AP242 schema (see xref:status.adoc#status[Status]), and
+  **(M2 Welle 10)** `kstep-core` now builds its runtime construction/
+  validation API — one validating builder function per entity in
+  `dev.kstep.core.ap242` — directly *on top of* those generated types,
+  rather than hand-authoring independent equivalents of them. This
+  resolves the fork M2 Welle 9 left open (extend the hand-authored
+  layer with `LIST`/`EXISTS()` support, vs. rebuild it on the generated
+  types): eleven of the thirteen M2 Welle 8 divergence-table entries
+  (below, kept for historical reference) are resolved outright — the
+  codegen-generated shape *is* the real shape, by construction — and
+  the remaining two (`approval.status`/`person_and_organization.
+  the_person`+`the_organization` simplified to `String`, and the
+  invented `approval.authorized_by`) are resolved the same way: those
+  attributes are now correctly entity-typed, and `authorized_by` —
+  never part of the real entity — is removed, not replaced. Full
+  rationale, consequences (a real ergonomic regression on `product`/
+  `productDefinition`, which now need an explicit context built first;
+  Part-21/MCP breaking changes; the new `KSTEP-A-001` violation code;
+  `EXISTS()` WHERE-rule support), and the alternatives considered are
+  in `docs/adr/ADR-0004-core-on-generated-types.adoc`.
++
+--
+The M2 Welle 8 divergence inventory, for historical reference — every
+row below is now resolved (see ADR-0004), not an open gap:
+
+[cols="2,3,3", options="header"]
+|===
+| Entity | Divergence (as of M2 Welle 8) | M2 Welle 10 resolution
+
+| `approval`
+| `status` is entity-typed (`approval_status`) in the real schema; `String` in `kstep-core`
+| resolved — `status` is now `dev.kstep.generated.ap242v1.ApprovalStatus`
+
+| `approval`
+| `authorized_by` does not exist on the real entity at all — a kSTEP-invented convenience linkage
+| resolved — removed entirely, no replacement
+
+| `approval`
+| real entity has no WHERE rule; `kstep-core`'s `wr1` is synthesized
+| unchanged — kept, relabeled `kstep_wr1` (never a real rule to align to)
+
+| `person_and_organization`
+| `the_person`/`the_organization` are entity-typed (`person`/`organization`) in the real schema; `String` in `kstep-core`
+| resolved — both now correctly entity-typed and mandatory
+
+| `person_and_organization`
+| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))`; `kstep-core`'s rule was synthesized
+| resolved differently — dropped entirely, not relabeled: both attributes are now mandatory entity references, so "at least one set" is no longer a meaningful approximation
+
+| `product`
+| real entity has a mandatory `frame_of_reference : SET [1:?] OF product_context`; `kstep-core` omitted it
+| resolved — mandatory and non-empty, enforced via `KSTEP-M-001`/`KSTEP-A-001`
+
+| `product`
+| the vendored schema declares **no** WHERE rule on `product` (earlier notes claiming a `SIZEOF(USEDIN(...))` `WR1` were wrong); `kstep-core`'s rule is synthesized
+| unchanged — kept, relabeled `kstep_wr1` (no real rule exists to align to)
+
+| `product_definition`
+| real entity has a mandatory `frame_of_reference : product_definition_context`; `kstep-core` omitted it
+| resolved — mandatory, enforced via `KSTEP-M-001`
+
+| `product_definition`
+| real `WR1` uses `SIZEOF(USEDIN(...))`; `kstep-core`'s rule is synthesized
+| `kstep_wr1` unchanged in the builder; the real `WR1` is now evaluated on model level by `Ap242ModelValidator` (ADR-0022), always satisfied under the unmodelled-entity assumption
+
+| `application_context`
+| real `WR1`/`WR2` use `SIZEOF(USEDIN(...))`; real `INVERSE context_elements : SET [1:?]`
+| evaluated on model level by `Ap242ModelValidator` (ADR-0022): the `INVERSE` bound can fail (`KSTEP-I-001`), the two WHERE rules are satisfied by construction
+
+| `product`, `product_definition`, `product_definition_formation`
+| real `OPTIONAL text description`; `kstep-core` modeled it as non-null `String` defaulting to `""`
+| resolved — genuinely nullable `String?` now, matching the generated type
+
+| `product_definition_formation`
+| real `UNIQUE UR1: id, of_product` not enforced anywhere in `kstep-core`
+| unchanged — still resolved by construction (`EntityStore` id-keying), see `KStepMcpServerTest`
+
+| `next_assembly_usage_occurrence`
+| real flattened shape inherits an `OPTIONAL text description` (`product_definition_relationship`); `kstep-core` omitted it
+| resolved — `description` is now a genuine `String?`
+
+| `next_assembly_usage_occurrence`
+| real inherited `reference_designator` (`assembly_component_usage`) is `OPTIONAL identifier`; `kstep-core` narrowed it to non-null `String` defaulting to `""`
+| resolved — genuinely `String?` now; the over-constraining synthesized WHERE rule that used to force it non-blank is removed, not relabeled
+
+| `next_assembly_usage_occurrence`
+| real `WR1` is `acyclic_product_definition_relationship(...)` (unsupported); `kstep-core`'s rule is synthesized
+| unchanged — no synthesized rule remains for this entity (the old one was the now-removed reference_designator over-constraint above)
+|===
+
+Deliberately still open (named limitations, not silently dropped --
+the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
+xref:status.adoc#status[Status] for `KSTEP-M-002`'s scope):
+
+* Model-level validation (`Ap242ModelValidator`: `USEDIN`/`INVERSE`/`UNIQUE`
+  rules and the acyclic usage check) is opt-in via `kstep export --validate`
+  (ADR-0024); by default, and in `KStepScriptHost` itself, it is not run, and
+  `kstep render` / `kstep asciidoc` have no such flag yet. A cyclic structure
+  built through the DSL can therefore still be exported without the flag; the
+  MCP server refuses to build it (`acyclic_relationship_violated`).
+* `product_definition_occurrence` is an excerpt: `quantity`
+  (`measure_with_unit`), the DERIVE `descendant_occurrences`, the INVERSE
+  `child_occurrences` and the WHERE rules `WR1`/`WR3` are not vendored (the
+  text of the two rules could not be verified against a local copy of the
+  schema, so none was invented); its `WR2` is kept and, because
+  `configuration_design` is not modelled, requires a `definition`. Part 21
+  keeps the real arity: `quantity` is always written as `$`, anything else is
+  rejected (STRICT) or kept opaque (TOLERANT).
+* The four vendored `SELECT` types list only the modelled members
+  (`generic_product_definition_reference` and most `*_attribute_select`
+  members are missing); `configuration_design` is not modelled (its `USEDIN`
+  is the empty set, reported as an assumption).
+* The inherited `product_definition_usage.UR1` is enforced on population level
+  only (it cannot fire in MCP, where usage ids are unique per store).
+* `QUERY` and general EXPRESS functions are unsupported -- only the four fixed
+  schema-function intrinsics exist; there is no generic Part 21 writer (the
+  hand-mapped V1 writer does not emit `*` for derived positions); `RENAMED`
+  redeclarations and EXPRESS three-valued logic are not modelled.
+* The acyclic walk is bounded (ancestor depth 256, 100 000 visited
+  definitions); a larger structure is a `limit_exceeded` in MCP and an
+  exception in the validator, never a verdict.
+--
+. Validation: EXPRESS `WHERE` rules surfaced as structured errors.
+  Done for the supported expression subset (comparisons, `SELF.attribute`
+  references, `AND`/`OR`/`NOT`, string/integer/real literals) — see
+  xref:status.adoc#status[Status]. Constructs outside that subset (other function
+  calls -- the fixed AP242 schema functions are opt-in, ADR-0023 --,
+  `SIZEOF(USEDIN(...))` without the population-level opt-in,
+  aggregate/set operations, `QUERY`,
+  arithmetic operators, the tri-state `LOGICAL` type) are not evaluated
+  and raise a structured exception instead. Note that WHERE-rule
+  evaluation is not the same thing as EXPRESS mandatory-attribute-
+  presence enforcement (the `$`-token / non-OPTIONAL mechanism) —
+  **(M2 Welle 7)** this is now enforced for non-OPTIONAL *primitive*
+  attributes too, not only entity-typed references: `kstep-core`'s
+  builders model such an attribute as a nullable presence sentinel
+  (mirroring the existing entity-reference pattern) and emit a
+  structured `KSTEP-M-002` (missing mandatory attribute) when one is
+  left unset, alongside `KSTEP-M-001` for references. In the six V1
+  entities this closes the two real instances — `product.name` and
+  `next_assembly_usage_occurrence.name` — both non-OPTIONAL `label`
+  attributes that previously carried no WHERE rule and so silently
+  accepted an unset value as an empty string. Enforcement is
+  *presence*, not non-emptiness: an explicitly assigned empty string is
+  a legal value for a non-OPTIONAL STRING that no WHERE rule
+  constrains, and stays `Valid`. **Still deliberately out of scope:**
+  non-OPTIONAL attributes on the three hand-authored entities whose
+  Kotlin shape currently diverges from the real schema
+  (`approval.status`, `person_and_organization.the_person`/
+  `the_organization` are hand-modeled as strings where the real schema
+  has entity-typed references; reconciling those with generated output
+  is the entity-typed-reconciliation item explicitly deferred in the
+  "codegen reconciliation" roadmap entry above), and the
+  general model-driven form (auto-deriving presence checks from
+  `ResolvedEntity`/`ExpressAttribute.isOptional` instead of a per-
+  builder null-check) which awaits that reconciliation. No non-STRING
+  (INTEGER/REAL) primitive presence case exists among the six V1
+  entities, so that reasoning is not yet needed either.
+. STEP Part 21 export/import. (M1 Welle 5) Done for the
+  kSTEP-own-format half: `Part21Writer`/`Part21Reader` in
+  `kstep-step21` losslessly roundtrip the six V1 entities through
+  ISO 10303-21 physical file text
+  (`Part21Reader.read(Part21Writer.write(header, model)) == model`,
+  verified in `Part21RoundtripTest`) — see xref:status.adoc#status[Status] and
+  xref:usage.adoc[Usage]. **Still open, and not to be conflated with the above**:
+  kSTEP-ADR-0001's actual acceptance bar is a lossless roundtrip
+  through an *external* CAD/PLM tool (e.g. FreeCAD), which has not
+  been attempted — no such tool is available in this development
+  environment. A self-roundtrip proves internal consistency (the
+  writer and reader agree with each other); it does not prove kSTEP's
+  Part 21 output is actually interoperable with real-world STEP
+  tooling, nor that this reader can parse real-world Part 21 files
+  beyond the six V1 entity shapes it targets. Closing that gap is
+  future work, not assumed by this wave. **(M2 Welle 6, done)** CLI
+  wiring now exists: `kstep export <script.kstep.kts>` (via the new
+  `kstep-script` module's `*.kstep.kts` scripting DSL and
+  `KStepScriptHost`) compiles and runs a script and writes its
+  `Part21Writer` output to disk — see xref:status.adoc#status[Status] and xref:usage.adoc[Usage]. The external-CAD/PLM-tool roundtrip gap above is only narrowed by
+  this: on 2026-10-22 FreeCAD 1.x (OCCT 7.8) read `kstep export`'s product-structure
+  output without error or warning but yielded 0 objects (no geometry is
+  written), and a typed OpenCascade 7.9.3 reader (`scripts/interop/`)
+  resolved the product structure with a clean model check. That is
+  product-structure read interop with one external implementation;
+  geometry interop was added by ADR-0027 for a single box with OCCT-based readers
+  (FreeCAD 1.1.4 and the OCCT reader); assembly geometry is not transferred by
+  FreeCAD and a lossless write-back round trip is unproven, so
+  acceptance criterion #2 is only partly met.
+. An MCP server and an LLM benchmark comparing raw STEP, CadQuery, and
+  the kSTEP DSL as generation targets. **(M2 Welle 1) Split into two
+  halves, only the first of which is done**: the MCP server itself
+  (`kstep-mcp` — twenty tools over stdio wrapping the sixteen AP242
+  builders and Part-21 export, a bounded session-scoped `EntityStore`, structured
+  tool-call errors, tested end-to-end via the SDK's in-memory
+  transport — see xref:status.adoc#status[Status] and xref:usage.adoc[Usage]) is complete and
+  gives an LLM agent the same "compiler/validator as oracle" structured
+  feedback loop a Kotlin caller already gets, just over MCP tool calls
+  instead of a Kotlin compiler error. The LLM benchmark half — actually
+  calling an LLM API and comparing raw STEP, CadQuery, and the kSTEP
+  DSL (via `kstep-mcp`) as generation targets — is real API cost and
+  experiment-design work, deliberately **not started**, and deferred to
+  an explicit discussion with the project owner rather than assumed by
+  this wave. **(M2 Welle 3, done)** `kstep-cli` now wraps the MCP server
+  behind a `kstep mcp` subcommand — see xref:status.adoc#status[Status] and xref:usage.adoc[Usage]. **(M2 Welle 4, done)** `build_next_assembly_usage_occurrence`
+  now enforces NAUO's real `UNIQUE UR1` rule against the `EntityStore`'s
+  current entries — see xref:status.adoc#status[Status] and xref:usage.adoc[Usage].
+. Geometry via an OpenCascade (OCCT) bridge. **(Geometrie Welle 1,
+  started)** `kstep-geometry` now exists: box construction, real B-Rep
+  topology/volume readback, and AP242/AP203/AP214IS STEP export, all
+  through a hand-written JNI shim against a system-installed OCCT — see
+  the `kstep-geometry` row in xref:modules.adoc[Modules] and
+  `docs/adr/ADR-0005-occt-jni-bridge.adoc` for the full binding-choice
+  rationale, license findings, and the named follow-up waves (further
+  primitives and boolean ops, STEP *import*, a `.kstep.kts` geometry DSL,
+  merging OCCT shape data with kSTEP's own AP242 product-structure Part 21
+  output, a feature/parametric-history model, multi-platform support, a
+  desktop viewer). **(Geometrie Welle 5a, done)** `OcctKernel` now also
+  offers `extrudeProfile(...)` (2D-profile-to-solid extrusion) and
+  `fillet(...)` (edge rounding), both composable with `makeBox` and with
+  each other — see the `kstep-geometry` row in xref:modules.adoc[Modules] and
+  `docs/adr/ADR-0008-occt-feature-operations.adoc` for the DoS-guard
+  measurements and the parametric-history half (Geometrie Welle 5b) this
+  wave deliberately leaves open. **(Geometrie Welle 5b, Teil 1, done)** A new
+  `dev.kstep.geometry.feature` subpackage (`Feature`/`FeatureSequence`/
+  `FeatureRebuilder.rebuild(...)`) replays a value-only sequence of
+  `OcctKernel` calls, proving the "change one parameter, rebuild, get a new
+  measured result" claim on top of `OcctKernel` exactly as it already is —
+  see the `kstep-geometry` row in xref:modules.adoc[Modules] and
+  `docs/adr/ADR-0015-parametric-feature-history-foundation.adoc` for the
+  scope boundary (still no stable geometric edge identity, undo/redo,
+  feature-tree UI, or serialization — all remain open follow-ups).
+  **(Welle J, done)** Booleans, cylinder, hole, revolve, chamfer and rigid
+  transforms on the OCCT bridge — see ADR-0029; open: multi-body results,
+  cone/sphere, arbitrary revolve axes, sweep/loft. **(Welle P, done)** Mirror and
+  uniform scale as shape operations, bodies combined with `OcctKernel.compound` — see ADR-0036.
+  **(Welle Q, done)** Face and vertex selection, `nearest(point)` and shell — see ADR-0037; open: pocket or hole from
+  a face, draft, thickening (Welle Q2).
+  **(Geometrie Welle 6, pulled forward, done)**
+  `kstep-constraints` now exists: a PlaneGCS 2D geometric constraint-solver
+  bridge, initially solving point systems under distance constraints — see
+  the `kstep-constraints` row in xref:modules.adoc[Modules] and
+  `docs/adr/ADR-0006-planegcs-constraint-bridge.adoc` for the full
+  license analysis and the named follow-up waves. **(C-Welle 2, partial,
+  done)** Coincidence, horizontal/vertical, and point-on-line constraints
+  added on the same points-only API — see
+  `docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc` for what
+  shipped and that wave's reduced-scope DoS measurement, continued as
+  C-Welle 2b. **(C-Welle 2c, done)** Parallel and perpendicular
+  constraints added on the same points-only API — see the
+  `kstep-constraints` row in xref:modules.adoc[Modules] and
+  `docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc`. Still
+  remaining: `L2LAngle`/`P2PAngle` (angle-between-line/point-pairs) and
+  `CoordinateX`/`CoordinateY`, deferred to C-Welle 3 alongside sketch
+  entities. Sketch entities, an incremental/interactive solver,
+  PlaneGCS's own diagnosis API, AP242 mapping of sketches,
+  multi-platform support beyond Linux x86-64 and macOS arm64, and a WASM path remain later items
+  (the `kstep-sketch` module itself arrived with Welle L). Additional
+  STEP Application Protocols beyond AP242 remain a separate, not-yet-started
+  later item. **(Geometrie Welle 4, done)** A new `kstep-shape` module now
+  merges a validated `kstep-core` AP242 product structure with an OCCT B-Rep
+  solid into one ISO 10303-21 file (`Ap242ShapeExporter.export`), discarding
+  the placeholder product structure OCCT's own writer emits and replacing it
+  with kSTEP's own — see the `kstep-shape` row in xref:modules.adoc[Modules] and
+  `docs/adr/ADR-0009-ap242-shape-assignment.adoc` for the full design
+  rationale and the named follow-up waves (assembly geometry, a DSL/CLI/MCP
+  surface, codegen-typed bridge entities, STEP import, raised DoS limits,
+  non-ASCII escapes). This wave also grew `kstep-step21` itself: the full
+  ISO 10303-21 value grammar (integers/reals, enumerations, the `*`
+  DERIVE-token, typed parameters, complex instances) and a new
+  `Part21ReadMode.TOLERANT` that keeps unrecognized entities as opaque
+  instances instead of throwing — without which OCCT's own STEP output
+  could not be read back through `kstep-step21` at all. `Part21ReadMode.STRICT`
+  remains the default and is behaviorally unchanged from before this wave.
+  **(Viewer-Welle 1, done)** The "a desktop viewer" follow-up ADR-0005 named
+  above is also done: `kstep-viewer` opens a real Compose Desktop window
+  showing a triangulated OCCT shape — see the `kstep-viewer` row in xref:modules.adoc[Modules] and
+  `docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc`. **(viewer-camera-
+  interaction wave, done)** The initial static isometric snapshot now
+  supports drag-to-orbit, scroll-to-zoom, and a reset — see
+  `docs/adr/ADR-0012-viewer-camera-interaction.adoc`. **(multi-shape-
+  composition-and-fill-light wave, done)** The demo scene composes several
+  placed shapes into one mesh under a second, additive fill light — see
+  `docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc`.
+  **(headless-preview-rendering wave, done)** The same projection/rasterizer
+  code also renders headlessly (no window, no display server) via `kstep
+  render` in SVG/PNG/text — see `docs/adr/ADR-0011-headless-preview-
+  rendering.adoc`. **(gltf-glb-export wave, done)** `kstep render -f glb`
+  additionally exports a self-contained, Khronos-validator-clean binary
+  glTF 2.0 document — see `docs/adr/ADR-0016-gltf-glb-export.adoc`. Still
+  **(Welle L, done)** The constraint-sketch DSL (`kstep-sketch`: `sketch { }`,
+  degrees-of-freedom analysis, extrude/revolve of regions with holes) and
+  geometric edge selection with edge tracking through OCCT's history for
+  `fillet`/`chamfer` -- see ADR-0031 and the "Sketches and edge selection"
+  usage section. Honest scope: circle/arc radii are fixed measures (no
+  tangency, equal-radius or angle constraints yet), a sketch is solved once
+  and is not a re-solving history feature, tracked edges follow only
+  operations that report a history (no revolve/extrude source, no generated
+  edges), and the selection is stable only while its geometric predicate
+  stays true. Still open: undo/redo, those sketch follow-ups, and
+  multi-platform distribution of the viewer/CLI beyond linux-x86-64 and
+  macOS arm64.

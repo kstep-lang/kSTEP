@@ -4,8 +4,8 @@
 transfer) and prints the product structure it found: `PRODUCT`, `PRODUCT_DEFINITION`,
 `NEXT_ASSEMBLY_USAGE_OCCURRENCE` (with relating/related ends), `APPROVAL`, the entity-type
 histogram, the number of undefined entities and the OCCT model check (fails/warnings). It is an
-independent reader for the product-structure half of the external-interop bar described in the
-README; it does not prove geometry interop.
+independent reader for the product-structure half of the external-interop bar described in
+link:../../docs/roadmap.adoc[docs/roadmap.adoc]; it does not prove geometry interop.
 
 == Build and run
 
@@ -21,7 +21,7 @@ c++ -std=c++17 -I"$P/include/opencascade" -L"$P/lib" -Wl,-rpath,"$P/lib" \
 ./read_step_structure out.step
 ----
 
-Linux (Debian/Ubuntu, see the README 'Building' section for the OCCT packages): same command with
+Linux (Debian/Ubuntu, see link:../../docs/building.adoc[docs/building.adoc] for the OCCT packages): same command with
 `-I/usr/include/opencascade` and `-L/usr/lib/x86_64-linux-gnu`.
 
 Produce a file with `kstep export script.kstep.kts --out out.step`.

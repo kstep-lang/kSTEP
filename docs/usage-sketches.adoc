@@ -1,0 +1,35 @@
+= Usage: sketches and edge selection
+
+[[sketch-usage]]
+== Sketches and edge selection (Welle L)
+
+[source,kotlin]
+----
+// export-sketch-plate-with-hole.kstep.kts (excerpt): 40 x 20 plate, hole d = 6, 20 / 10 from the corner
+val solved =
+    sketch {
+        val frame = rectangle(0.0, 0.0, 40.0, 20.0)          // corner fixed, H/V and both dimensions
+        val centre = point(20.0, 10.0)                       // start value: where the solver begins
+        offset(frame.bottomLeft, centre, dx = 20.0, dy = 10.0)
+        circle(centre, radius = 3.0)
+    }.solve()                                                // fully constrained, or a structured error
+val shape = solved.extrude(10.0)                             // volume 8000 - 90*pi = 7717.257, 7 faces
+
+// export-box-fillet-z-edges.kstep.kts (excerpt): edges by geometry, not by index
+val rounded = OcctKernel.fillet(blank, Edges.parallelTo(Direction3.Z), 2.0, expected = 4)
+val chamfered = OcctKernel.chamfer(blank, Edges.ofFace(Faces.atMax(Direction3.Z)), 1.0, expected = 4)
+----
+
+Start values matter: the solver converges to the solution nearest the coordinates a point was created with, so
+the side of a dimension comes from those coordinates (`distance` and `length` are unsigned). `solve()` fails with
+`UNDER_CONSTRAINED` (naming the points that can still move), `OVER_CONSTRAINED` (naming the redundant
+constraints) or `SOLVER_FAILED`; pass `requireFullyConstrained = false` to accept free degrees of freedom. A
+selector never guesses: an empty result, or a count different from `expected`, is an error listing the
+candidate edges (`KSTEP-S-011`). A selector that matches several look-alike edges after a later operation (a
+pocket doubles the vertical edges) is resolved with `TrackedEdges(sourceIndex, selector)` in a `FeatureSequence`:
+it selects on the original shape and follows the edges through OCCT's history
+(`export-pocket-tracked-fillet.kstep.kts`: volume 14965.664, 14 faces). Seam edges of cylinders are never
+matched except by `Edges.seams()`. Without the PlaneGCS bridge (for example the release zip) `solve()` fails with
+`KSTEP-S-009` and a hint; everything that does not solve a sketch is unaffected.
+`scripts/interop/verify-sketch-selection.sh` re-checks all four example exports with OCCT and FreeCAD. See
+docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc.

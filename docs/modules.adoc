@@ -1,0 +1,551 @@
+= Modules
+
+|===
+| Module | Purpose | Current state
+
+| `kstep-core`
+| Core DSL types (`dev.kstep.core.ValidationResult`/`DslViolation`) and
+  — as of M2 Welle 10 — the codegen-generated `dev.kstep.generated.
+  ap242v1.*` entity `data class`es themselves (compiled directly into
+  this module, `internal` constructors), plus one validating
+  named-parameter builder function per entity under `dev.kstep.core.ap242`
+| Working: `applicationContext`/`productContext`/
+  `productDefinitionContext`/`approvalStatus`/`person`/`organization`/
+  `product`/`personAndOrganization`/`approval`/
+  `productDefinitionFormation`/`productDefinition`/
+  `nextAssemblyUsageOccurrence` builder functions (twelve at M2 Welle 10;
+  sixteen with `productDefinitionOccurrence`, `nameAttribute`,
+  `descriptionAttribute`, `idAttribute` since ADR-0023), each
+  running WHERE-rule, mandatory-reference (`KSTEP-M-001`),
+  aggregation-bound (`KSTEP-A-001`), and — (M2 Welle 7)
+  `product.name`/`next_assembly_usage_occurrence.name` — mandatory-
+  primitive-attribute (`KSTEP-M-002`) validation and returning a
+  `ValidationResult`. Depends on `kstep-express` via `api` (not
+  `implementation`): both the generated types it compiles and
+  `dev.kstep.express.validation`'s `WhereRuleSpec`/`WhereRuleValue`
+  appear in this module's own public builder signatures.
+
+| `kstep-express`
+| ANTLR4-generated EXPRESS parser (`dev.kstep.express.ExpressParserFactory`),
+  semantic model (`dev.kstep.express.semantic`), Kotlin code
+  generator (`dev.kstep.express.codegen.ExpressKotlinCodeGenerator`,
+  built on KotlinPoet), real-schema six-V1-entity regeneration
+  (`dev.kstep.express.codegen.Ap242V1CodeGen`), and WHERE-rule
+  validation (`dev.kstep.express.validation`)
+| Working: parses EXPRESS source into an ANTLR parse tree (verified
+  against a real-schema excerpt, not just the AP242-subset fixture);
+  walks it into a semantic AST; generates Kotlin
+  `data class`es from that AST, including transitive `TYPE`-alias,
+  `ENUMERATION` and closed `SELECT` resolution; evaluates the supported WHERE-rule expression subset
+  against instance attribute values. (M2 Welle 4) Also evaluates `DERIVE`
+  initializer expressions within that same supported subset, via
+  `DerivedAttributeEvaluator` and the new `WhereRuleEvaluator.evaluateToValue`
+  entry point — reusing the WHERE-rule builder/evaluator, not a second
+  parser. (Semantic core Welle B) Supported `DERIVE`s are generated as
+  computed getter properties (`DerivedAttributeCodeGen`, ADR-0021); since
+  ADR-0023 the six real V1 DERIVEs are generated too (five scope-taking
+  functions, one SELECT-cast getter). The `generateExpressKotlin` Gradle task
+  regenerates the sixteen V1 entities from a real-schema extraction as a build artifact (wired into
+  `check`, not into this or any other module's own compile classpath —
+  see xref:building.adoc[Building]).
+
+| `kstep-step21`
+| STEP Part 21 (ISO 10303-21 physical file exchange format)
+  reader/writer for the sixteen AP242 entities (`dev.kstep.step21`)
+| Working: `Part21Writer.write`/`Part21Reader.read`, a hand-rolled
+  scanner and two-pass graph resolver (independent of the ANTLR
+  EXPRESS grammar — Part 21 is a different sub-format). Verified via a
+  self-roundtrip test suite in `kstep-tests`; external interop is
+  limited to syntactic acceptance by FreeCAD 1.x (0 objects, no geometry written) and a typed
+  OpenCascade read of the product structure (`scripts/interop/`, 2026-10-22) — see xref:status.adoc#status[Status]. (M2 Welle 6)
+  Now wired into the CLI via `kstep-script`/`kstep export` — see the
+  `kstep-script`/`kstep-cli` rows below. (Geometrie Welle 4) The value
+  grammar and instance model now also cover real, foreign-produced AP242
+  output (integers/reals, enumerations, `*`, typed parameters, complex
+  instances) behind `Part21ReadMode.TOLERANT` — `STRICT` (the default)
+  is unchanged: an unknown entity name is still a hard
+  `Part21SyntaxException` there. See the `kstep-shape` row below and
+  `docs/adr/ADR-0009-ap242-shape-assignment.adoc`.
+
+| `kstep-script`
+| Kotlin-scripting DSL surface for `*.kstep.kts` scripts
+  (`dev.kstep.script`)
+| Working (M2 Welle 6): `KStepScript`/`KStepScriptCompilationConfiguration`
+  (the `@KotlinScript` template + `defaultImports`), `stepFile { }` /
+  `KStepModel` / `KStepModelBuilder` (the DSL entry point a script ends
+  with), and `KStepScriptHost.eval` (`File` or inline `String`), which
+  maps every compile/runtime outcome into a structured
+  `KStepScriptOutcome` — never a thrown exception. See xref:status.adoc#status[Status] for
+  the full breakdown. Deliberately unsandboxed (trusted in-process path
+  only, `wholeClasspath = true`) — see xref:status.adoc#status[Status] and
+  `KStepScriptHost`'s KDoc. Depends on `kstep-core` and `kstep-step21`
+  only (both `api`, so their types resolve inside scripts).
+
+| `kstep-cli`
+| Command-line entry point (`dev.kstep.cli.MainKt`)
+| Working (M2 Welle 3): `kstep mcp` starts the MCP server (`kstep-mcp`'s
+  `runStdioServer()`); no-args, `help`, and `--help` all print a short
+  usage message and exit `0`; an unknown subcommand exits `1`. (M2
+  Welle 6) `kstep export <script.kstep.kts> [--out <file.step>]
+  [--output json]` compiles and runs a `*.kstep.kts` script via
+  `kstep-script`'s `KStepScriptHost` and writes the resulting Part 21
+  file via `kstep-step21`'s `Part21Writer` — see xref:status.adoc#status[Status] and xref:usage.adoc[Usage]. Depends on `kstep-mcp` and `kstep-script`.
+
+| `kstep-mcp`
+| MCP server exposing the sixteen AP242 entity builders and Part-21
+  export as LLM tool-calling tools (`dev.kstep.mcp`), built on the
+  official `io.modelcontextprotocol:kotlin-sdk-server`
+| Working (M2 Welle 1, expanded M2 Welle 10 and Welle D): twenty tools —
+  `build_application_context`, `build_product_context`,
+  `build_product_definition_context`, `build_approval_status`,
+  `build_person`, `build_organization`, `build_product`,
+  `build_person_and_organization`, `build_product_definition_formation`,
+  `build_product_definition`, `build_next_assembly_usage_occurrence`,
+  `build_approval`, `export_part21`, `list_entities`, `get_entity` —
+  over stdio transport, with a session-scoped in-memory `EntityStore`
+  (bounded, thread-safe) resolving entity-typed references by
+  caller-supplied id/handle. No HTTP/SSE transport.
+  Depends on `kstep-core` and `kstep-step21` only. (M2 Welle 2) Server
+  lifecycle and every tool call's outcome are logged via kotlin-logging
+  over an explicit `slf4j-simple` backend. (M2 Welle 3) `kstep-cli` now
+  wraps `runStdioServer()` behind a `kstep mcp` subcommand — see the
+  `kstep-cli` row above. (M2 Welle 4) `build_next_assembly_usage_occurrence`
+  now also enforces NAUO's real `UNIQUE UR1` rule against the
+  `EntityStore`'s current entries, returning a new
+  `unique_constraint_violated` structured error on conflict (tool count
+  stays at nine — no new tool added).
+
+| `kstep-geometry`
+| OCCT (Open CASCADE Technology) JNI bridge -- the start of the geometry
+  milestone (`dev.kstep.geometry`, native/JNI internals in
+  `dev.kstep.geometry.occt`)
+| Working (Geometrie Welle 1): `OcctKernel.makeBox(dx, dy, dz)` builds a
+  real OCCT box; the resulting `OcctShape` exposes its unique B-Rep
+  topology (`ShapeTopology`: solids/shells/faces/edges/vertices, via
+  `TopExp::MapShapes`, not `TopExp_Explorer`) and volume, and
+  `writeStepFile(...)` exports a real AP242 (or AP203/AP214IS) STEP file
+  through OCCT's own `STEPControl_Writer`. (Geometrie Welle 5a)
+  `OcctKernel.extrudeProfile(profile, height)` extrudes a closed 2D
+  `ProfilePoint` polygon in the XY plane into a solid
+  (`BRepBuilderAPI_MakePolygon` -> `BRepBuilderAPI_MakeFace` ->
+  `BRepPrimAPI_MakePrism`), and `OcctKernel.fillet(shape, edgeIndices,
+  radius)` rounds one or more edges of an existing shape
+  (`BRepFilletAPI_MakeFillet`), returning a brand-new, independently
+  closeable `OcctShape` -- the input shape is left untouched. Both
+  operations compose with `makeBox` and with each other (a fillet result
+  can itself be filleted again); see
+  docs/adr/ADR-0008-occt-feature-operations.adoc for the DoS-guard
+  measurements, edge-addressing caveats, and the native-side deadlock trap
+  its own implementation had to avoid. (multi-shape-composition-and-
+  fill-light wave) `Placement` (translation + `rotationX`/`Y`/`Z`, no
+  scaling, no arbitrary matrix -- rotation-block determinant `+1` by
+  construction, no runtime guard needed) and `MeshComposition.merge(parts:
+  List<PlacedMesh>): TriangleMesh` flatten several placed meshes into one
+  world-space mesh, guarded against `OcctKernel.MAX_TRIANGLES` before
+  allocating; `kstep-viewer`'s demo scene is the first real caller. See
+  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc. Depends
+  on nothing but `kotlin-logging-jvm` -- deliberately not on `kstep-core`
+  yet (see docs/adr/ADR-0005-occt-jni-bridge.adoc), and deliberately not
+  on `kstep-render` either (`PlacementPackageBoundaryTest` enforces this
+  -- `Placement`'s vector/matrix arithmetic is its own, not a reuse of
+  `kstep-render`'s internal `Vec3`). The native shim
+  (`src/main/cpp/kstep_occt_bridge.cpp`) is compiled by Gradle against a
+  *system-installed* OCCT (linux-x86-64 and macOS arm64) and skipped
+  entirely -- not failed -- when the OCCT dev headers are absent, in which
+  case `OcctKernel.availability()` reports `OcctAvailability.Unavailable`
+  at runtime with a human-readable reason. No OCCT binary/header/source is
+  vendored in this repository; see NOTICE and the ADRs for the full license
+  and provenance discussion, and xref:building.adoc[Building] for the required
+  `apt-get install`. (Geometrie Welle 5b, Teil 1) A new
+  `dev.kstep.geometry.feature` subpackage adds a parametric-history
+  foundation on top of the above, unmodified: `Feature` (sealed --
+  `BoxFeature`/`ExtrudeFeature`/`FilletFeature`), `FeatureSequence`, and
+  `FeatureRebuilder.rebuild(sequence)` replay a sequence of `OcctKernel`
+  calls and return a `FeatureRebuildResult` (all built shapes, not just the
+  final one, all `AutoCloseable` together) -- letting a caller change one
+  `Feature`'s value (e.g. a `FilletFeature.radius` via `.copy(...)`) and
+  rebuild to get a new, independently measurable result. Still opaque,
+  construction-order-dependent fillet edge indices (unchanged from
+  Geometrie Welle 5a; since Welle L, `SelectedFilletFeature` and
+  `TrackedEdges` choose edges geometrically, see ADR-0031, and since Welle N
+  `GeneratedEdges` names edges by what generated them and `FeatureHistory` adds undo/redo, see ADR-0033, and since
+  Welle N2 the edges of fillets, chamfers, booleans and holes can be named too, see ADR-0034); still no
+  feature-tree UI or serialization -- see
+  docs/adr/ADR-0015-parametric-feature-history-foundation.adoc for the full
+  scope boundary and what remains for Geometrie Welle 5b's continuation.
+  (Welle J) `OcctKernel` also offers `makeCylinder`, `translate`/`transformed`
+  (rigid placement of a copy), `union`/`cut`/`common`/`boolean` (single-solid
+  results, `OcctEmptyResultException` for empty ones), `hole` (cylinder cut),
+  `revolveProfile` (about X or Y) and `chamfer`; the feature history gained
+  `CylinderFeature`, `RevolveFeature`, `TranslateFeature`, `BooleanFeature`,
+  `HoleFeature`, `ChamferFeature` and the `DerivedFeature` interface. See
+  docs/adr/ADR-0029-geometry-operations.adoc for the measured limits, the
+  single-solid rule and the exception mapping.
+  (Welle L, ADR-0031) Edges are chosen by geometry instead of index: `Edges.parallelTo(...)`/`atMax`/`atMin`/
+  `ofType`/`ofFace`/`longest`/`shortest` combined with `and`/`or`/`minus`, resolved by `OcctKernel.selectEdges`
+  and accepted by `fillet`/`chamfer`; `OcctShape.edges`/`faces` expose the geometry; `TrackedEdges` follows edges
+  through later operations by OCCT's own edge history; `extrudeRegion`/`revolveRegion` accept arcs, circles and
+  holes (`ProfileRegion`).
+  (Welle P, ADR-0036) `OcctKernel.mirror` / `scale` (and `mirrorWithHistory` / `scaleWithHistory`) return a mirrored or
+  uniformly scaled COPY; `MirrorFeature` / `ScaleFeature` bring both into the feature history, and a persistent edge
+  name set before the step is followed through it. `OcctKernel.compound` combines separate bodies for one product
+  definition. A placement (`place`) stays rigid.
+  (Welle Q, ADR-0037) `Edges.nearest(point)`, `Faces.nearest`, `Vertices.*` and `Faces.all()` select by geometric
+  distance and on faces and vertices; `OcctKernel.shell` / `shell(...)` hollow a solid through chosen faces
+  (`ShellDirection.INWARD` / `OUTWARD`); `ShellFeature` brings it into the feature history.
+
+| `kstep-constraints`
+| PlaneGCS 2D geometric constraint-solver bridge -- Geometrie Welle 6,
+  pulled forward, plus C-Welle 2/2c (`dev.kstep.constraints`, native/JNI
+  internals in `dev.kstep.constraints.planegcs`)
+| Working: `PlaneGcsSolver.solve(points, constraints)` solves a 2D point
+  system under a mixed set of `SketchConstraint`s -- `DistanceConstraint`,
+  `CoincidenceConstraint`, `HorizontalConstraint`, `VerticalConstraint`,
+  `PointOnLineConstraint` (C-Welle 2, see
+  docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc),
+  `ParallelConstraint`, `PerpendicularConstraint` (C-Welle 2c, see
+  docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc) -- through a
+  real, vendored PlaneGCS solver core, returning each point's solved
+  position and a `SolveStatus` (`SUCCESS`/`CONVERGED`/`FAILED`/
+  `SUCCESSFUL_SOLUTION_INVALID`). `PlaneGcsSolver.solveDistances(...)`
+  remains as a convenience overload for the distance-only case, delegating
+  to `solve(...)`. A single stateless native call per solve -- no
+  persistent handle, no `close()` -- see
+  docs/adr/ADR-0006-planegcs-constraint-bridge.adoc for why. Depends on
+  nothing but `kotlin-logging-jvm`, same as `kstep-geometry`. The PlaneGCS
+  solver sources are vendored (unlike `kstep-geometry`'s OCCT, which links
+  a system package -- PlaneGCS ships no distribution package at all) under
+  `src/main/cpp/third_party/planegcs/` at a pinned upstream commit; see
+  that directory's `PROVENANCE.adoc`, NOTICE, and ADR-0006/-0007/-0014 for
+  the full LGPL-2.0-or-later license analysis. The native shim
+  (`src/main/cpp/kstep_planegcs_bridge.cpp`) is compiled by Gradle
+  (linux-x86-64 and macOS arm64) and skipped entirely -- not failed -- when the
+  Eigen/Boost dev headers are absent, in which case
+  `PlaneGcsSolver.availability()` reports `PlaneGcsAvailability.Unavailable`
+  at runtime with a human-readable reason. See xref:building.adoc[Building] for the
+  required `apt-get install`.
+
+| `kstep-sketch`
+| Constraint-sketch DSL -- Welle L (`dev.kstep.sketch`)
+| Working: `sketch { ... }` builds points, lines, arcs and circles with `horizontal`/`vertical`/`distance`/
+  `length`/`coincident`/`pointOnLine`/`parallel`/`perpendicular`, plus the sugar `rectangle(...)` and `offset(...)`;
+  `Sketch.solve()` runs a degrees-of-freedom analysis in plain Kotlin (redundant or contradictory constraints are
+  named before the solver is called), solves through `kstep-constraints` (PlaneGCS), checks the result against every
+  constraint and reports the remaining freedom; `SolvedSketch.toRegion()/extrude(h)/revolve(angle, axis)/
+  extrudeFeature(h)` turn the profile (outer loop plus holes) into geometry. Failures are `SketchException`s with a
+  `SketchErrorKind` (`KSTEP-S-010` in scripts); a missing PlaneGCS bridge is `SketchSolverUnavailableException`
+  (`KSTEP-S-009`). Since ADR-0032 a circle or arc can be created with `fixedRadius = false`, which makes its radius a solver
+  unknown set by `radius`/`diameter`/`equalRadius`/`tangent`; `angle(l1, l2, degrees)` fixes the angle between two
+  lines; `sketchFeature(parameters, SketchOperation.Extrude(h)) { p -> ... }` makes the sketch a re-solving step of a
+  feature history; several separate outer contours extrude to several bodies in one shape. Needs the PlaneGCS bridge to solve and the OCCT bridge to extrude; contains no
+  native code itself, so the release zip carries it without native resources. See
+  docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc.
+
+| `kstep-shape`
+| AP242 shape assignment -- Geometrie Welle 4, merges `kstep-core` product
+  structure with `kstep-geometry` B-Rep solids (`dev.kstep.shape`)
+| Working: since ADR-0027 also `Ap242ShapeExporter.export(header, roots,
+  assignments)` (all roots, several shapes, one per product definition; used by
+  `kstep export`). `Ap242ShapeExporter.export(header, ShapeAssignment(productDefinition,
+  occtShape))` writes the shape to a real temp STEP file, extracts its
+  geometry subgraph (discarding OCCT's own placeholder product structure --
+  see `Ap242GeometryExtraction`), and merges it with kSTEP's own validated
+  product structure into one ISO 10303-21 file via
+  `PRODUCT_DEFINITION_SHAPE`/`SHAPE_DEFINITION_REPRESENTATION`. Since ADR-0028
+  `export(header, roots, assignments, placements)` also writes the placement chain
+  (`CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`) of every geometric assembly usage; in
+  a script: `place(nauo, translation = vec(30.0, 5.0, 10.0), rotation = Rotation.about(Vec3.Z, 90.0))`
+  (see `kstep-tests/src/test/resources/export-placed-assembly.kstep.kts`). Deliberately
+  1:1 (one `ProductDefinition`, one `OcctShape`) this wave; no DSL/CLI/MCP
+  surface yet. Depends on `kstep-core`, `kstep-step21`, and `kstep-geometry`
+  (all `api`, since they appear in this module's own public signatures) --
+  see docs/adr/ADR-0009-ap242-shape-assignment.adoc for the full design,
+  the Part-21-level-merge-vs-XCAF decision, and the injection/DoS security
+  analysis.
+
+| `kstep-render`
+| Headless, Compose-free mesh projection + SVG/PNG/text-card rendering --
+  headless-preview-rendering wave (`dev.kstep.render.mesh`/`.image`/`.svg`/
+  `.text`)
+| Working: `dev.kstep.render.mesh.MeshProjection` (moved here from
+  `kstep-viewer`, package renamed to match; itself renamed from
+  `IsometricProjection` in the viewer-camera-interaction wave once the
+  camera stopped being fixed-isometric-only, see
+  docs/adr/ADR-0012-viewer-camera-interaction.adoc) turns a `TriangleMesh`
+  and a `Camera` (azimuth/elevation orbit pose, defaulting to
+  `Camera.ISOMETRIC` for source- and behavior-compatibility with every
+  pre-ADR-0012 call site) into a
+  backface-culled, flat-shaded, painter's-algorithm-sorted, canvas-fit
+  `List<ProjectedTriangle>` -- consumed identically by
+  `dev.kstep.render.image.TriangleRasterizer` (plain AWT, promoted from a
+  `kstep-viewer` test-only class), the new
+  `dev.kstep.render.svg.TriangleSvgWriter` (a deterministic, byte-
+  reproducible vector render -- same coordinates rounded to 2 decimals,
+  input order preserved, never re-sorted; unaffected by the
+  multi-shape-composition-and-fill-light wave -- see below), and the new
+  `dev.kstep.render.text.TextCardRenderer` (renders a plain
+  `List<String>` as an SVG or `BufferedImage` "text card" -- the ONE
+  renderer both a no-geometry and a not-renderable-this-run `kstep
+  render` result share). `dev.kstep.render.svg.SvgEscaping` escapes every
+  interpolated string these writers emit. `RenderLimits` centralizes the
+  size/DoS bounds both this module's writers and `kstep-cli`'s `render`
+  command validate against. Zero Compose dependency (enforced by the same
+  automated package-boundary test `kstep-viewer` used to carry, now
+  covering this whole module) -- this is the entire reason the module
+  exists separately from `kstep-viewer`: `kstep-cli` depends on it
+  directly, and `KStepScriptCompilationConfiguration`'s
+  `wholeClasspath = true` would otherwise forward Compose/Skiko into
+  every `*.kstep.kts` script's own compile step. See
+  docs/adr/ADR-0011-headless-preview-rendering.adoc. (multi-shape-
+  composition-and-fill-light wave) `MeshProjection`'s shading formula
+  gains a second, additive fill light on top of the existing `AMBIENT`
+  floor + key light -- `shade = (AMBIENT + KEY_WEIGHT * key_term +
+  FILL_WEIGHT * fill_term).coerceIn(0.0, 1.0)`, `AMBIENT`/`KEY_WEIGHT`
+  unchanged in value, the fill light dimmer than and deliberately not
+  antiparallel to the key light, decomposed/recombined per camera pose
+  exactly like the key light already was (ADR-0012). See
+  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc.
+  (gltf-glb-export wave) `dev.kstep.render.gltf.GlbWriter` turns a
+  `TriangleMesh` into a self-contained, deterministic binary glTF 2.0
+  (`.glb`) document -- non-indexed, flat shaded, one PBR
+  metallic-roughness material, no textures, a Z-up-to-Y-up node rotation
+  rather than a baked-in transform. Verified against the real Khronos
+  `gltf-validator` (see `scripts/`, and xref:building.adoc[Building]). This wave adds
+  the module's one new external dependency, `kotlinx-serialization-json`
+  (already on `kstep-cli`'s runtime classpath transitively before this
+  wave; now also declared directly here) -- used to build the writer's
+  JSON document, deliberately not a handwritten escaper (correct JSON
+  escaping of script-supplied `asset.extras` text is a security property,
+  not a style choice). See docs/adr/ADR-0016-gltf-glb-export.adoc.
+
+| `kstep-preview`
+| Shared headless-preview pipeline extracted from `kstep-cli`'s former
+  `RenderCommand.kt` -- kstep-asciidoc wave (`dev.kstep.preview`)
+| Working: `PreviewRenderer.render(PreviewRequest): PreviewOutcome` is the ONE
+  implementation of ADR-0011's Container-Regel and Pflicht-Fallback -- evaluate
+  a `*.kstep.kts` script (from a file or inline source text), detect geometry,
+  resolve the SVG/PNG/text/GLB container, render bytes, close every shape it
+  triangulated, all with no file I/O, no `exitProcess`, no `println`. `kstep
+  render` (`kstep-cli`) and `kstep asciidoc` (`kstep-docs/kstep-asciidoc`)
+  both call it instead of each carrying their own copy -- see
+  `RenderExtractionParityTest` (`kstep-tests`), which pins the two callers'
+  output as byte-identical. `PreviewWriter` is the small, separate piece that
+  actually writes a `Rendered` outcome's bytes to disk (only `kstep-cli`
+  calls it -- `kstep asciidoc` writes its own image tree via
+  `kstep-docs/kstep-asciidoc`'s `AsciidocProcessor` instead). `RenderFormat`/
+  `PreviewSummary`/`RenderFallbackReasons` moved here unchanged (only their
+  package changed, `dev.kstep.cli` -> `dev.kstep.preview`) from `kstep-cli`.
+  See docs/adr/ADR-0019-kstep-asciidoc.adoc for why this module exists
+  separately from `kstep-render` (so `kstep-viewer` never gains a
+  `kotlin-compiler-embeddable` dependency through it).
+
+| `kstep-docs:kstep-asciidoc`
+| Pre-processing Asciidoctor integration -- `kstep asciidoc` -- kstep-asciidoc
+  wave (`dev.kstep.asciidoc`)
+| Working: `kstep asciidoc --input <f.adoc> --output <f.adoc>` (or
+  `--input-dir`/`--output-dir` for a whole tree) pre-renders `kstep` preview
+  blocks into `image::` references, exactly the way `kuml-dev/kUML`'s own
+  `kuml-asciidoc` pre-processes `[kuml]` blocks for Antora (a JVM Asciidoctor
+  extension cannot run inside Antora's Node.js/Asciidoctor.js pipeline -- see
+  the ADR's Context section). Recognizes three block forms carrying identical
+  semantics -- a `` ```kstep ``` `` markdown fence, an AsciiDoc
+  `[kstep,target,format]`/`[source,kstep]` delimited block, and a
+  `kstep::path.kstep.kts[]` block macro -- via `AsciidocScanner`, a pure,
+  I/O-free, script-free line scanner that leaves any OTHER AsciiDoc delimited/
+  comment block untouched (including this project's own documentation, which
+  demonstrates the syntax). `AsciidocRewriter` renders each recognized block
+  through `kstep-preview`'s `PreviewRenderer` and reassembles the document;
+  `AsciidocProcessor` is the file-tree layer (symlinks skipped and reported,
+  never followed or copied; `--output-dir` may not nest inside `--input-dir`
+  or vice versa). Every macro/attribute path is checked against its
+  containment root through two independent layers -- lexical
+  (`normalize().startsWith(root)`) and physical (`toRealPath()`, which also
+  catches a symlink pointing outside the tree) -- see `AsciidocPaths` and the
+  ADR's Security section. Two failure classes, two behaviors: an
+  environment-side failure (OCCT unavailable, a shape that would not
+  triangulate) degrades to a notice card in the same container, exit 0 (exit
+  1 with `--require-geometry`) -- identical to `kstep render`'s own
+  Pflicht-Fallback; an author-side failure (a script that fails to compile/
+  validate/run) aborts the whole document by default (`--on-error fail`), or
+  renders an error card and continues (`--on-error card`). Depends only on
+  `kstep-preview` -- never on `kstep-cli` (`kstep-cli` depends on THIS
+  module to expose the subcommand; the reverse edge would be a build cycle,
+  enforced by `AsciidocModuleBoundaryTest`). See
+  docs/adr/ADR-0019-kstep-asciidoc.adoc.
+
+| `kstep-viewer`
+| Interactive OCCT shape viewer -- Viewer-Welle 1
+  (`dev.kstep.viewer.ui`, mesh code now in `kstep-render`), camera
+  orbit/zoom/reset added in the viewer-camera-interaction wave
+  (`dev.kstep.viewer.camera`)
+| Working: a real Compose Desktop window (`ShapeCanvas`, opened via
+  `./gradlew :kstep-viewer:run`, never part of `check`) consumes
+  `dev.kstep.render.mesh.MeshProjection.project(...)` from `kstep-render`
+  (see that module's row above -- this code lived here until the
+  headless-preview-rendering wave moved it out so `kstep-cli` could reuse
+  it without a Compose dependency). No longer a single static isometric
+  snapshot: drag to orbit, scroll to zoom, double-click or `R` to reset,
+  a bottom-centered hint label shown only at the untouched home pose.
+  `dev.kstep.viewer.camera.ViewerCameraState`/`CameraInteraction` hold
+  the pure (Compose-free) orbit/zoom math the pointer/keyboard handlers
+  call into; `ShapeCanvas`'s `state` parameter is externally hoistable
+  (defaults to an internal `remember`), so a future toolbar can drive the
+  camera without a `ShapeCanvas` API change. See
+  docs/adr/ADR-0010-occt-triangulation-and-viewer.adoc for the DoS
+  measurements behind `OcctKernel.MAX_TRIANGLES`, the two classic OCCT
+  triangulation pitfalls (`REVERSED`-face winding, `TopLoc_Location`
+  transforms) this wave's own regression tests exist to catch, and why a
+  camera-aligned light makes flat shading invisible on an axis-aligned
+  box; see docs/adr/ADR-0012-viewer-camera-interaction.adoc for the
+  camera interaction design (zoom bounds, non-finite-input handling, the
+  camera-state-read-only-in-the-draw-phase recomposition design).
+  (multi-shape-composition-and-fill-light wave) The demo window now shows
+  a three-part assembly -- a base plate, a pillar, and a single-edge-
+  filleted block -- merged into one world mesh via
+  `dev.kstep.geometry.MeshComposition.merge` before the first
+  composition (`ShapeCanvas` itself needed no change: it still consumes
+  exactly one `TriangleMesh`). See
+  docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc. Depends
+  on `kstep-geometry`, `kstep-render`, and Compose Multiplatform
+  (`org.jetbrains.compose` 1.11.1) -- see xref:building.adoc[Building] for the scoped
+  `google()` repository this pulls in.
+
+| `kstep-tests`
+| Cross-module integration tests (Kotest)
+| Smoke test for the EXPRESS parser; semantic-model, naming-convention,
+  and code-generation tests; WHERE-rule expression-builder, evaluator,
+  and validator tests (unit-level and an end-to-end fixture
+  integration test); `kstep-core` DSL builder tests; real-schema
+  six-V1-entity codegen tests; (M1 Welle 5) Part 21 writer, reader,
+  and roundtrip tests (`Part21WriterTest`, `Part21ReaderTest`,
+  `Part21RoundtripTest`); (M2 Welle 1) an end-to-end `kstep-mcp`
+  test suite (`KStepMcpServerTest`) driving a real MCP `Server` through
+  the SDK's own in-memory `ChannelTransport`; (M2 Welle 2)
+  `McpLoggingTest`, which captures `System.err` around one MCP tool
+  call and asserts the configured `slf4j-simple` backend actually
+  emitted the tool-outcome log line; (M2 Welle 3) `CliMainTest`,
+  unit-testing `kstep-cli`'s pure `resolveCommand` argument-dispatch
+  function and its `USAGE_TEXT` (not `main()` itself, which calls
+  `exitProcess` on its error path); and (M2 Welle 4)
+  `DerivedAttributeEvaluatorTest` (DERIVE-expression evaluation,
+  including all three real `ap242-v1-entities.exp` DERIVE clauses and a
+  synthetic supported-subset positive case) plus new
+  `KStepMcpServerTest` cases for NAUO's `UNIQUE UR1` enforcement (conflict,
+  non-conflict, self-overwrite, and the `product_definition_formation`
+  redundancy proof) — all exercised against either the hand-written
+  AP242-subset fixture or the real-schema excerpt; (Semantic core Welle B)
+  `DerivedAttributeCodeGenTest` (strict/report modes, cycles, limits,
+  injection) and `DerivedAttributeRuntimeParityTest` (generated DERIVE
+  properties compiled from `derive-codegen-fixture.exp` against
+  `DerivedAttributeEvaluator`, including `-0.0`, `NaN` and unset
+  optionals); (M2 Welle 6)
+  `KStepScriptHostTest` (every `KStepScriptOutcome` case: a valid
+  multi-part-assembly script, the aggregating `root(ValidationResult)`
+  form, a structural `KSTEP-M-001` violation, a `getOrThrow()` abort, a
+  Kotlin syntax error, an unresolved reference, a wrong-last-expression-
+  type script, a plain runtime exception, and empty/whitespace-only
+  scripts — none of them ever throw out of the host), `KStepScriptExportTest`
+  (the `hello-assembly.kstep.kts`/`hello-invalid.kstep.kts` fixtures
+  driven end-to-end through `KStepScriptHost` + `Part21Writer`, with a
+  self-roundtrip via `Part21Reader`), and new `CliMainTest` cases for
+  `resolveCommand`'s `export` argument parsing (`--out`, `--output json`,
+  every malformed-flag combination, and `USAGE_TEXT`'s new `kstep export`
+  entry); (Geometrie Welle 1) `OcctBridgeSmokeTest` (the full
+  `kstep-geometry` acceptance chain: OCCT version reporting, box topology
+  and volume, AP242/AP203 STEP export, closed-shape rejection, cleanup
+  idempotency, an unknown-native-handle rejection that doesn't crash the
+  JVM, and dimension validation -- every OCCT-dependent case skips cleanly
+  when `OcctKernel.availability()` reports `Unavailable`, except the
+  suite's own first case, which instead hard-fails under
+  `-Pkstep.occt.require=true`) and `OcctBoxValidationExportTest`
+  (analogous to `FreeCadValidationExportTest`, but writing a real
+  `MANIFOLD_SOLID_BREP`-bearing STEP file for manual STEP-viewer import);
+  (Geometrie Welle 5a) `OcctFeatureOperationsTest` (extrude/fillet
+  acceptance chain: rectangular and L-shaped profile extrusion including
+  negative height, single- and multi-edge fillet with exact measured
+  volumes, chained fillet-of-a-fillet, composition with a `makeBox`-built
+  shape, STEP export of a filleted solid, source-shape independence after
+  `fillet`, radius-too-large and unsuitable-edge `OcctGeometryException`
+  cases, out-of-range-index and closed-shape rejection, the
+  `IllegalArgumentException`-vs-`OcctGeometryException` exception-mapping
+  regression case, degenerate-profile rejection, ungated Kotlin-side
+  validation, `!available`-gated `OcctUnavailableException` cases, raw
+  native-method null/length hardening, the `MAX_FILLET_INPUT_FACES` guard,
+  a use-after-free concurrency stress case, and edge-index-ordering
+  determinism across rebuilds) and `OcctFeatureValidationExportTest`
+  (analogous to `OcctBoxValidationExportTest`, writing a real
+  extruded-then-filleted STEP file for manual STEP-viewer import);
+  (Welle J) `OcctGeometryOperationsValidationTest` (ungated Kotlin-side
+  validation), `OcctBooleanOperationsTest` (closed-form volumes and face counts
+  for cylinder, hole, union/cut/common, empty and multi-body results, a race
+  case), `OcctRevolveChamferTest`, `OcctGeometryOperationsNativeHostileInputTest`
+  (reflection against every new native function) and
+  `CliExportGeometryOperationsIntegrationTest` (`kstep export`/`render` of the
+  new example scripts, a GLB structure check, no stray artefacts in
+  `src/test/resources`), plus new cases in `FeatureRebuildTest`;
+  (Geometrie Welle 5b, Teil 1) `FeatureRebuildTest` (a `FeatureSequence`
+  replayed through `FeatureRebuilder.rebuild(...)`, regression-pinned
+  against `OcctFeatureOperationsTest`'s own already-measured single- and
+  chained-fillet volumes; the core "change a fillet radius and rebuild"
+  proof that an untouched earlier feature's result stays bit-for-bit
+  identical while the changed one's result differs; a too-large and a
+  structurally invalid radius each wrapped into a `FeatureRebuildException`
+  naming the correct failing position and cause type; four ungated
+  structural-validation cases — empty sequence, over-length sequence, a
+  fillet referencing its own or a later position; and
+  `FeatureRebuildResult.close()` closing every shape it built, not just the
+  final one);
+  (Geometrie Welle 6, pulled forward) `PlaneGcsBridgeSmokeTest` (the full
+  `kstep-constraints` distance-only acceptance chain: a real two-point
+  distance solve, a real 3-4-5 right-triangle solve, a deliberately
+  conflicting system failing cleanly without corrupting a later solve, an
+  already-satisfied constraint staying stable, two concurrency stress
+  cases, both raw native-method JNI-robustness cases (null arrays;
+  malformed lengths, out-of-range indices, unknown constraint kinds, and
+  native hardening for `pointCount == 0`/all-fixed systems), and full
+  Kotlin-side input validation -- every PlaneGCS-dependent case skips
+  cleanly when `PlaneGcsSolver.availability()` reports `Unavailable`,
+  except the suite's own first case, which instead hard-fails under
+  `-Pkstep.planegcs.require=true`); (C-Welle 2)
+  `PlaneGcsConstraintTypesSmokeTest` (coincidence, horizontal/vertical, and
+  point-on-line solved individually and combined -- including an
+  axis-aligned rectangle built purely from horizontal/vertical/distance
+  constraints, a point pinned onto an infinite line together with a
+  distance constraint, two verified-`FAILED` contradictory systems, an
+  8-thread mixed-constraint-type concurrency stress case, a `solve(...)`
+  vs. `solveDistances(...)` equivalence regression guard, full Kotlin-side
+  validation for the new constraint types, and two dense-graph DoS
+  regression guards at `MAX_POINTS`/`MAX_CONSTRAINTS` (coincidence-only and
+  point-on-line-only) -- see
+  docs/adr/ADR-0007-planegcs-additional-constraint-types.adoc for the
+  measurements behind those bounds and this wave's reduced DoS-measurement
+  scope; (C-Welle 2c) the same suite continues with Parallel/Perpendicular
+  solved individually (including the direction-agnostic cross/dot-product
+  idiom and a shared-endpoint rectangle-corner regression guard), a rotated
+  (non-axis-aligned) rectangle built purely from Perpendicular/Distance --
+  no Horizontal/Vertical -- a Parallel+Perpendicular contradiction that
+  resolves by collapsing a leg rather than reporting `FAILED`, both new
+  kinds layered onto the existing combined system without disturbing it,
+  an extended 8-thread concurrency case, full Kotlin-side validation, and
+  three further dense-graph DoS regression guards (Parallel-only,
+  Perpendicular-only, and both blended into the existing worst-case
+  inconsistent-distance topology) -- see
+  docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc for the
+  measurements and the `GCS::Line` lifetime verification behind them);
+  (Geometrie Welle 4) `Part21TolerantReaderTest` (the full value
+  grammar under `Part21ReadMode.TOLERANT` -- numeric-lexeme verbatim
+  round-tripping, enumerations, `*`, typed parameters, complex instances,
+  opaque-vs-typed-constructed known/unknown entities, a dangling reference
+  and a reference cycle each reached through the new value forms, and a
+  regression guard against mistaking a `#` inside a string literal for a
+  reference), `Part21DocumentMergeTest` (`Part21Document.renumbered`
+  shifting references at every nesting level including complex-instance
+  parts, `Part21Document.concat`'s duplicate-id rejection, and
+  `Part21Renderer`'s injection-guard rejections for a malformed `Num`
+  lexeme, an embedded backslash, and an invalid entity name), and
+  `Ap242ShapeExportRoundtripTest` (end-to-end, OCCT-gated: a real 20x30x40mm
+  box merged with a real validated product structure, re-imported, and
+  checked for the actual `SHAPE_DEFINITION_REPRESENTATION` ->
+  `PRODUCT_DEFINITION_SHAPE` -> `ProductDefinition` identity link and
+  matching B-Rep element counts, not just that both halves are present)
+|===

@@ -1,0 +1,43 @@
+= Releasing
+
+A release is a `vX.Y.Z` tag. Pushing it runs `.github/workflows/release.yml`
+(see link:adr/ADR-0025-release-pipeline.adoc[ADR-0025]).
+
+. Bump `version` in the `allprojects` block of `build.gradle.kts`.
+. Rename the `== Unreleased` heading in `CHANGELOG.adoc` to `== X.Y.Z — YYYY-MM-DD` and add a
+  fresh, empty `== Unreleased` above it.
+. Run `./gradlew clean check` and `./gradlew clean :kstep-cli:distZip` locally.
+. Squash-merge the feature branch into `master` and push `master`.
+. Create an annotated tag: `git tag -a vX.Y.Z -m "kSTEP X.Y.Z"`.
+. Push the tag explicitly: `git push origin refs/tags/vX.Y.Z`. (`git push --follow-tags` only
+  transfers annotated tags.)
+
+The workflow has two jobs with separated rights:
+
+|===
+| Job | Permissions | What it does
+
+| `build`
+| `contents: read`
+| Validates the tag, checks that it is on `master` and that its version equals `version` in
+  `build.gradle.kts`, runs `./gradlew clean check :kstep-cli:distZip` with the native bridges
+  switched off, verifies the zip (layout, no native libraries, `--help`, an `export` smoke test),
+  and writes the SHA-256 checksum and the release notes (from `CHANGELOG.adoc`).
+| `publish`
+| `contents: write`
+| Re-validates the tag, checks the checksum, then creates or updates the GitHub release with the
+  `gh` CLI. It checks out and runs no repository code.
+|===
+
+Assets: `kstep-cli-X.Y.Z.zip` and `kstep-cli-X.Y.Z.zip.sha256`. Verify a download with
+`sha256sum -c kstep-cli-X.Y.Z.zip.sha256`. The launcher inside the zip is `bin/kstep-cli`
+(the usage text calls the command `kstep`). Releases of a `0.x` version are marked as pre-release
+automatically. Only plain `vX.Y.Z` tags are accepted, no suffixes.
+
+A manual run (`workflow_dispatch`) takes an existing `tag` and `dry_run`, which defaults to `true`:
+it builds and verifies but publishes nothing. Re-running a release is idempotent: an existing
+release is edited and its assets are replaced.
+
+The zip contains *no* native bridges: OCCT and PlaneGCS functions fall back to their documented
+unavailable path. Not part of the pipeline yet: Maven Central, a Homebrew tap, signatures and
+provenance (follow-up waves).

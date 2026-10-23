@@ -1,0 +1,77 @@
+= Usage: mirror, scale, face and vertex selection, shell
+
+== Mirror and scale (Welle P)
+
+`mirror` and `scale` are shape operations: they return a modified COPY and never touch the argument. A placement
+(`place(usage, ...)`) stays rigid, because STEP would need a `CARTESIAN_TRANSFORMATION_OPERATOR_3D` for a reflection or
+a scaling, which OCCT and FreeCAD read wrongly (ADR-0036).
+
+[source,kotlin]
+----
+val half = OcctKernel.extrudeProfile(lProfile, 20.0)
+val bracket = OcctKernel.union(half, mirror(half, MirrorPlane.YZ))      // symmetric part, reflected in x = 0
+val big = scale(OcctKernel.makeBox(10.0, 20.0, 30.0), 2.0)              // about the origin
+val small = scale(OcctKernel.makeBox(10.0, 20.0, 30.0), 0.5, Point3(5.0, 10.0, 15.0))
+val twoBodies = OcctKernel.compound(listOf(box, mirror(box, MirrorPlane.x(-5.0))))   // one part, two solids
+----
+
+* `mirror(shape, MirrorPlane)` reflects in a plane (`MirrorPlane.YZ`, `.XZ`, `.XY`, `.x(offset)`, `.y(...)`, `.z(...)`
+  or any origin and normal). `scale(shape, factor, about)` scales uniformly; the factor must be within
+  [1e-6, 1e6], zero and negative factors are rejected (a negative one with the hint to use `mirror`).
+* Both accept a solid or a compound of solids (for example the result of a sketch with several islands) and check
+  every solid of the result. The result must stay within +/-1e7 (a scaled box also within the dimension limits).
+* In a feature history use `MirrorFeature(baseIndex, origin..., normal...)` (default plane x = 0) and
+  `ScaleFeature(baseIndex, factor, about...)`. Name an edge at its generator (`GeneratedEdges(featureIndex = <generator>)`)
+  before the step; the name is followed through the mirror or scale. Naming the mirror step itself as generator is
+  refused with that hint.
+* `OcctKernel.compound(listOf(a, b))` puts separate bodies into one shape for ONE product definition (one
+  `SHAPE_REPRESENTATION` with several `MANIFOLD_SOLID_BREP`s). Touching bodies are rejected, use `union` for those.
+  Several `shape(...)` assignments on the same product definition remain refused, now with a pointer to `compound`.
+* Not covered: non-uniform scaling, mirror or scale as a placement, nested compounds. See ADR-0036.
+
+`scripts/interop/verify-mirror-scale.sh` re-checks the six example exports with OCCT and FreeCAD (`--spike` also runs
+the standalone history spike).
+
+== Face and vertex selection, `nearest`, shell (Welle Q)
+
+Selectors now also pick faces and vertices, and any of them can ask for "the one nearest to this point". The distance is
+the GEOMETRIC distance from the point to the edge (a curve), the bounded face or the vertex, not the distance to its
+midpoint; ties within the linear tolerance are all returned, so `expected = 1` turns a tie into an error that lists the
+candidates.
+
+[source,kotlin]
+----
+val box = OcctKernel.makeBox(10.0, 20.0, 30.0)
+// The two vertical edges at x = 10 are 90.55 from (100, 10, 15); the horizontal ones are 91.24 away.
+val rounded = OcctKernel.fillet(box, Edges.nearest(100.0, 10.0, 15.0), 2.0, expected = 2)
+
+// Hollow a 40 x 30 x 20 box through its top face; the wall grows into the material (ShellDirection.INWARD, the default).
+val tray = shell(OcctKernel.makeBox(40.0, 30.0, 20.0), Faces.atMax(Direction3.Z), 2.0)
+val coat = shell(OcctKernel.makeBox(40.0, 30.0, 20.0), Faces.atMax(Direction3.Z), 2.0, ShellDirection.OUTWARD)
+
+val corner = OcctKernel.selectVertices(box, Vertices.nearest(100.0, 0.0, 0.0), expected = 1)
+val edgesThere = OcctKernel.selectEdges(box, Edges.atVertex(Vertices.nearest(100.0, 0.0, 0.0)))   // 3 edges
+----
+
+* `Edges.nearest(point, within)`, `Faces.nearest(point, within)`, `Vertices.nearest(point, within)`. `within` limits the
+  candidates BEFORE the minimum is taken; `nearest(p) and X` intersects AFTER it and is a different, usually empty, result.
+* `Faces.all()` and `and` / `or` / `minus` on faces; `Vertices.all()`, `atMax`, `atMin`, `ofEdge(...)` and the same
+  combinators on vertices; `OcctKernel.selectFaces` / `selectVertices` resolve them (indices as in `OcctShape.faces` /
+  `OcctShape.vertices`). No operation consumes a vertex directly yet; `Edges.atVertex(vertexSelector)` turns a corner
+  selection into the edges at it.
+* `shell(shape, faces, thickness, direction)` removes the selected faces and grows a wall of `thickness` (> 0). The wall
+  must be thinner than half the smallest extent of the shape, the input one solid with at most 200 faces. An invalid
+  result (for example an outward wall that closes a narrow hole) is an `OcctGeometryException`.
+* In a feature history use `ShellFeature(baseIndex, SelectFaces(Faces.atMax(Direction3.Z), expected = 1), thickness)`
+  (or `FaceIndices(listOf(5))`). A name set before an INWARD shell (`TrackedEdges`, `GeneratedEdges`) is followed through
+  it to the edge of the OUTER skin; tracking through an OUTWARD shell is refused, because the original edges become the
+  inner edges of the cavity.
+* Errors: an empty or wrongly sized face, edge or vertex selection is `KSTEP-S-011` with the candidates
+  (`hello-face-selection-empty.kstep.kts`, `hello-nearest-ambiguous.kstep.kts`); a wall that is too thick is
+  `KSTEP-S-003` (`hello-shell-invalid.kstep.kts`).
+* Not covered: a pocket or hole from a face, draft and thickening (planned), names for the inner wall of a shell. See
+  ADR-0037.
+
+`scripts/interop/verify-face-ops.sh` re-checks the five example exports with OCCT and FreeCAD (`--spike` also runs the
+standalone shell spike). This wave adds the OCCT toolkit `TKOffset` (`libocct-modeling-algorithms-dev` on Ubuntu, part of
+Homebrew's `opencascade`).

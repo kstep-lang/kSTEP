@@ -1,0 +1,24 @@
+= Usage: reading a STEP file back
+
+[[import-usage]]
+== Reading a STEP file back (`kstep import`)
+
+[source,shell]
+----
+kstep export kstep-tests/src/test/resources/export-placed-assembly.kstep.kts --out build/placed.step
+kstep import build/placed.step                      # text report
+kstep import build/placed.step --output json        # one JSON document on stdout
+kstep import build/placed.step --validate           # also check the AP242 V1 entities (exit 1 on findings)
+kstep import build/placed.step --render build/placed.svg   # also render (svg, png or glb)
+----
+
+The text report lists the product structure, each part's exact volume, face count and bounding box, the
+placed occurrences (the assembly is expanded, a part used twice is two occurrences) and totals, in
+millimetres. For `export-placed-assembly.kstep.kts` that is 4 occurrences, volume 17384 mm3 and bounding box
+`[0,0,0]..[40,40,22]`. Warnings (unknown entity types, ignored colours/layers/PMI) go to stderr.
+
+`kstep import` is read-only: it writes nothing unless `--render` names a file. It refuses symbolic links,
+non-regular files, files above 50 MB and files that reference other files (`DOCUMENT_FILE` and friends); the
+limits are in ADR-0030. Errors are `KSTEP-I-001`..`KSTEP-I-012` (`--output json` carries `errorKind`, `code`
+and `message`). It needs the OCCT bridge; without it the command reports `geometry_unavailable`.
+See docs/adr/ADR-0030-read-geometry.adoc for what is and is not covered.

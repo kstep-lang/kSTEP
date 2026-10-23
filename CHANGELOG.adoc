@@ -97,6 +97,8 @@ minor versions may contain breaking changes.
 
 * `kstep import` no longer fails for a part with more than 1024 solids: the per-body summary is omitted with a
   warning. Computing it for up to 1024 solids adds noticeable import time.
+* Documentation: the README was split into focused documents under `docs/` (status, modules, building, releasing,
+  usage, roadmap); the README itself is now a short entry point.
 
 === Fixed
 
@@ -263,7 +265,7 @@ First tagged release. It is a *pre-release*: no artifacts are published (Maven C
 the native geometry bridges need system libraries (OpenCascade for the OCCT modules, Eigen headers
 for PlaneGCS) and are only verified on Linux x86-64. CI runs on Linux only; the semantic core was
 additionally built and tested locally on macOS (geometry tests skipped there). Build from source,
-see the README.
+see link:docs/building.adoc[Building].
 
 === Semantic core (ISO 10303 AP242)
 
