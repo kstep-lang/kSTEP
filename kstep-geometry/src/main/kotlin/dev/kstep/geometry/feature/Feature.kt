@@ -197,6 +197,12 @@ data class TrackedEdges(
  * without an image, a deleted or lost edge, a wrong [expected] count or a generator that cannot name edges
  * ends in an [dev.kstep.geometry.select.EdgeNamingException] listing candidates -- never a guess.
  *
+ * Since Welle N2 (ADR-0034) [featureIndex] may also point to a DERIVED generator: a fillet or chamfer (sources
+ * `BlendedEdges`, `OperandEdges`, role `BOUNDARY`), a boolean (`BooleanSection`, `OperandFaces`, role `SECTION`) or a hole
+ * (additionally `HoleWall` with the roles `SECTION`, `RIM_ENTRY`, `RIM_EXIT`). The combination of generator, sources and
+ * role is checked before any native call. The signature is unchanged, so `SelectEdges`, `TrackedEdges` and the index
+ * API keep working.
+ *
  * [featureIndex] may equal the consuming feature's `baseIndex` (no step in between); otherwise exactly one
  * operation path must lead from it to `baseIndex`. [within], if set, additionally restricts the result with
  * a geometric selector on the base shape.

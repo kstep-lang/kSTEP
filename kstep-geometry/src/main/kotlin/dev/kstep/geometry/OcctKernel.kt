@@ -2,8 +2,13 @@ package dev.kstep.geometry
 
 import dev.kstep.geometry.occt.OcctBridge
 import dev.kstep.geometry.occt.OcctNativeLibrary
+import dev.kstep.geometry.select.Direction3
+import dev.kstep.geometry.select.EdgeNamingException
 import dev.kstep.geometry.select.EdgeSelection
+import dev.kstep.geometry.select.EdgeSelectionException
 import dev.kstep.geometry.select.EdgeSelector
+import dev.kstep.geometry.select.FaceKind
+import dev.kstep.geometry.select.Point3
 import dev.kstep.geometry.select.SelectionTolerance
 import kotlin.math.abs
 
@@ -1144,6 +1149,389 @@ object OcctKernel {
         role: GeneratedRole = GeneratedRole.SIDE,
         expected: Int? = null,
     ): OcctShape = chamfer(named.shape, generatedEdges(named, sources, role, expected), distance)
+
+    // ---------------------------------------------------------------------------------------------
+    // Welle N2 (ADR-0034): naming of the edges that fillet, chamfer, boolean and hole generate.
+    // ---------------------------------------------------------------------------------------------
+
+    /** Upper bound on the `Generated()` queries of one derived naming request, enforced in Kotlin and natively. */
+    const val MAX_DERIVED_QUERIES: Int = 4096
+
+    /**
+     * [fillet] that also returns the [EdgeHistory] and a [GenerationMap] for [sources] ([BlendedEdges], [OperandEdges]
+     * with role BOUNDARY), both read from the same OCCT maker. The edge indices equal the ones [fillet] returns.
+     *
+     * @throws IllegalArgumentException as [filletWithHistory], and for foreign, duplicate, mismatching or more than
+     *   [MAX_NAMING_SOURCES] sources.
+     * @throws dev.kstep.geometry.select.EdgeNamingException if an [OperandEdges] selector matches nothing.
+     */
+    fun filletNamed(
+        shape: OcctShape,
+        edgeIndices: Collection<Int>,
+        radius: Double,
+        sources: List<GenerationSource>,
+    ): DerivedNamedShape {
+        requireFilletArguments(edgeIndices, radius)
+        requireSingleSolidOperand(shape, "fillet")
+        requireDerivedSources(sources, DerivedOperation.BLEND)
+        requireAvailable()
+        val queries = blendQueries(shape, edgeIndices, sources)
+        val history = arrayOfNulls<IntArray>(1)
+        val map = arrayOfNulls<IntArray>(1)
+        val indices = edgeIndices.toIntArray()
+        val handle =
+            shape.withHandle { h ->
+                nativeSweep("fillet ${edgeIndices.size} edge(s) at radius $radius") {
+                    OcctBridge.nativeFilletEdgesNamed(h, indices, radius, queries.triples, history, map)
+                }
+            }
+        return derivedResult(handle, history, map, listOf(shape), queries, sources, DerivedOperation.BLEND, null)
+    }
+
+    /** [chamfer] with history and generation map; see [filletNamed]. */
+    fun chamferNamed(
+        shape: OcctShape,
+        edgeIndices: Collection<Int>,
+        distance: Double,
+        sources: List<GenerationSource>,
+    ): DerivedNamedShape {
+        requireChamferArguments(edgeIndices, distance)
+        requireSingleSolidOperand(shape, "chamfer")
+        requireDerivedSources(sources, DerivedOperation.BLEND)
+        requireAvailable()
+        val queries = blendQueries(shape, edgeIndices, sources)
+        val history = arrayOfNulls<IntArray>(1)
+        val map = arrayOfNulls<IntArray>(1)
+        val indices = edgeIndices.toIntArray()
+        val handle =
+            shape.withHandle { h ->
+                nativeSweep("chamfer ${edgeIndices.size} edge(s) at distance $distance") {
+                    OcctBridge.nativeChamferEdgesNamed(h, indices, distance, queries.triples, history, map)
+                }
+            }
+        return derivedResult(handle, history, map, listOf(shape), queries, sources, DerivedOperation.BLEND, null)
+    }
+
+    /**
+     * [boolean] that also returns the [EdgeHistory] and a [GenerationMap] for [sources] ([BooleanSection],
+     * [OperandFaces] with role SECTION). The edges are those where the faces named by a source were cut by the other
+     * body, measured after the coplanar faces were merged.
+     */
+    fun booleanNamed(
+        op: BooleanOperation,
+        a: OcctShape,
+        b: OcctShape,
+        sources: List<GenerationSource>,
+    ): DerivedNamedShape {
+        requireDerivedSources(sources, DerivedOperation.BOOLEAN)
+        requireAvailable()
+        return booleanNamedImpl(op, a, b, sources, DerivedOperation.BOOLEAN, null)
+    }
+
+    /**
+     * [hole] with history and generation map. Besides the boolean sources, [HoleWall] is available with the roles
+     * SECTION, RIM_ENTRY (the ring nearest to the start point `(x, y, z)` along the drill direction) and RIM_EXIT
+     * (the farthest ring; empty for a blind hole). RIM_ENTRY and RIM_EXIT raise an [EdgeNamingException] when the
+     * drill breaks out through a side face or the rings are ambiguous; SECTION stays usable as the fallback. Operand 1 of [OperandFaces] is the drill cylinder.
+     */
+    fun holeNamed(
+        shape: OcctShape,
+        diameter: Double,
+        depth: Double,
+        x: Double,
+        y: Double,
+        z: Double,
+        dirX: Double = 0.0,
+        dirY: Double = 0.0,
+        dirZ: Double = -1.0,
+        sources: List<GenerationSource>,
+    ): DerivedNamedShape {
+        validateDimension("diameter", diameter)
+        validateDimension("depth", depth)
+        requireDerivedSources(sources, DerivedOperation.HOLE)
+        return makeCylinder(diameter / 2.0, depth, x, y, z, dirX, dirY, dirZ).use { tool ->
+            val geometry = HoleGeometry(Point3(x, y, z), unitDirection(dirX, dirY, dirZ), diameter)
+            booleanNamedImpl(BooleanOperation.CUT, shape, tool, sources, DerivedOperation.HOLE, geometry)
+        }
+    }
+
+    /**
+     * The edge indices (into `named.shape.edges`) generated from [sources] with [role], sorted and distinct. Strict:
+     * every source must have at least one image.
+     *
+     * @param expected if set, the number of resulting edges must equal it.
+     * @throws EdgeNamingException if a source has no image (a blind hole has no RIM_EXIT), or the count differs.
+     * @throws IllegalArgumentException for a source that was not requested or a role that does not fit it.
+     */
+    fun generatedEdges(
+        named: DerivedNamedShape,
+        sources: List<GenerationSource>,
+        role: GeneratedRole,
+        expected: Int? = null,
+    ): List<Int> = resolveGeneratedImages(named.generation, sources, role, expected, named.shape, null)
+
+    private class HoleGeometry(
+        val start: Point3,
+        val direction: Direction3,
+        val diameter: Double,
+    )
+
+    private fun booleanNamedImpl(
+        op: BooleanOperation,
+        a: OcctShape,
+        b: OcctShape,
+        sources: List<GenerationSource>,
+        operation: DerivedOperation,
+        hole: HoleGeometry?,
+    ): DerivedNamedShape {
+        val queries = booleanQueries(a, b, sources)
+        val history = arrayOfNulls<IntArray>(1)
+        val map = arrayOfNulls<IntArray>(1)
+        val handle =
+            a.withHandle { ha ->
+                b.withHandle { hb ->
+                    try {
+                        OcctBridge.nativeBooleanOpNamed(op.nativeCode, ha, hb, queries.triples, history, map)
+                    } catch (e: IllegalArgumentException) {
+                        throw e
+                    } catch (e: OcctEmptyResultException) {
+                        throw e
+                    } catch (e: RuntimeException) {
+                        throw OcctGeometryException("OCCT failed to compute boolean $op: ${e.message}", e)
+                    }
+                }
+            }
+        return derivedResult(handle, history, map, listOf(a, b), queries, sources, operation, hole)
+    }
+
+    private fun requireDerivedSources(
+        sources: List<GenerationSource>,
+        operation: DerivedOperation,
+    ) {
+        require(sources.isNotEmpty()) { "at least one generation source is required" }
+        require(sources.size <= MAX_NAMING_SOURCES) {
+            "at most $MAX_NAMING_SOURCES generation sources are allowed, got ${sources.size}"
+        }
+        // Selector trees first and iteratively: hashing, comparing or describing a hostile deep tree recurses.
+        sources.forEach { if (it is OperandEdges) EdgeSelection.validateTree(it.selector) }
+        require(sources.toSet().size == sources.size) { "duplicate generation source" }
+        sources.forEach { source ->
+            require(source is DerivedGenerationSource) {
+                "${source.describe()} is a profile source; a ${operationName(operation)} takes only " +
+                    "BlendedEdges, OperandEdges, OperandFaces, BooleanSection or HoleWall"
+            }
+            val fits =
+                when (source) {
+                    BlendedEdges -> operation == DerivedOperation.BLEND
+                    is OperandEdges -> operation == DerivedOperation.BLEND && source.operand == 0
+                    is OperandFaces -> operation != DerivedOperation.BLEND && source.operand in 0..1
+                    BooleanSection -> operation != DerivedOperation.BLEND
+                    HoleWall -> operation == DerivedOperation.HOLE
+                }
+            require(fits) { "${source.describe()} does not fit a ${operationName(operation)}" }
+        }
+    }
+
+    private fun operationName(operation: DerivedOperation) =
+        when (operation) {
+            DerivedOperation.BLEND -> "fillet or chamfer"
+            DerivedOperation.BOOLEAN -> "boolean"
+            DerivedOperation.HOLE -> "hole"
+        }
+
+    private fun blendQueries(
+        shape: OcctShape,
+        edgeIndices: Collection<Int>,
+        sources: List<GenerationSource>,
+    ): DerivedQueries {
+        val b = DerivedQueryBuilder()
+        sources.forEachIndexed { i, source ->
+            val edges =
+                when (source) {
+                    BlendedEdges -> edgeIndices.toList()
+                    is OperandEdges -> resolveOperandEdges(shape, source)
+                    else -> error("unreachable: ${source.describe()} was validated")
+                }
+            edges.forEach { b.add(i, 0, DERIVED_KIND_EDGE, it) }
+        }
+        // Everything the operation acted on: the "created faces" that BOUNDARY is measured against.
+        edgeIndices.forEach { b.add(DerivedQueries.EXTRA_OWNER, 0, DERIVED_KIND_EDGE, it) }
+        return b.build()
+    }
+
+    private fun booleanQueries(
+        a: OcctShape,
+        b: OcctShape,
+        sources: List<GenerationSource>,
+    ): DerivedQueries {
+        val builder = DerivedQueryBuilder()
+        val operands = listOf(a, b)
+        sources.forEachIndexed { i, source ->
+            when (source) {
+                BooleanSection ->
+                    operands.forEachIndexed { slot, operand ->
+                        repeat(operand.topology.faces) { builder.add(i, slot, DERIVED_KIND_FACE, it) }
+                    }
+                is OperandFaces ->
+                    resolveOperandFaces(operands[source.operand], source).forEach {
+                        builder.add(i, source.operand, DERIVED_KIND_FACE, it)
+                    }
+                HoleWall -> {
+                    val wall = b.faces.filter { it.kind == FaceKind.CYLINDER }
+                    check(wall.size == 1) { "the drill has ${wall.size} cylindrical faces, expected exactly one" }
+                    builder.add(i, 1, DERIVED_KIND_FACE, wall[0].index)
+                }
+                else -> error("unreachable: ${source.describe()} was validated")
+            }
+        }
+        return builder.build()
+    }
+
+    private fun resolveOperandEdges(
+        shape: OcctShape,
+        source: OperandEdges,
+    ): List<Int> =
+        try {
+            EdgeSelection.resolve(shape.edges, shape.faces, source.selector)
+        } catch (e: EdgeSelectionException) {
+            throw EdgeNamingException(
+                "${source.describe()} matched no edge on the operand\n" + e.message,
+                null,
+                listOf(source),
+                emptyList(),
+                emptyMap(),
+                e.candidates,
+            )
+        }
+
+    private fun resolveOperandFaces(
+        shape: OcctShape,
+        source: OperandFaces,
+    ): List<Int> {
+        val faces = EdgeSelection.resolveFaces(shape.edges, shape.faces, source.selector)
+        if (faces.isEmpty()) {
+            throw EdgeNamingException(
+                "${source.describe()} matched no face on operand ${source.operand}. Candidate faces:\n" +
+                    describeFaces(shape.faces),
+                null,
+                listOf(source),
+                emptyList(),
+                emptyMap(),
+                shape.edges.filter { !it.seam && !it.degenerated },
+            )
+        }
+        return faces
+    }
+
+    private fun derivedResult(
+        handle: Long,
+        historyHolder: Array<IntArray?>,
+        mapHolder: Array<IntArray?>,
+        operands: List<OcctShape>,
+        queries: DerivedQueries,
+        sources: List<GenerationSource>,
+        operation: DerivedOperation,
+        hole: HoleGeometry?,
+    ): DerivedNamedShape {
+        val shape = OcctShape(handle)
+        try {
+            val rawHistory = checkNotNull(historyHolder[0]) { "native bridge returned no edge history" }
+            val rawMap = checkNotNull(mapHolder[0]) { "native bridge returned no derived generation map" }
+            val topology = shape.topology
+            val history = decodeEdgeHistory(rawHistory, operands.map { it.topology.edges }, topology.edges)
+            val images = decodeDerivedGeneration(rawMap, queries.count, topology.edges, topology.faces)
+            val (derived, roleErrors) = derivedMap(sources, queries, images, shape, operation, hole)
+            return DerivedNamedShape(shape, history, GenerationMap(emptyMap(), derived, roleErrors))
+        } catch (e: Throwable) {
+            shape.close()
+            throw e
+        }
+    }
+
+    private fun derivedMap(
+        sources: List<GenerationSource>,
+        queries: DerivedQueries,
+        images: List<DerivedImages>,
+        shape: OcctShape,
+        operation: DerivedOperation,
+        hole: HoleGeometry?,
+    ): Pair<
+        Map<GenerationSource, Map<GeneratedRole, List<Int>>>,
+        Map<GenerationSource, Map<GeneratedRole, EdgeNamingException>>,
+    > {
+        val roleErrors = LinkedHashMap<GenerationSource, Map<GeneratedRole, EdgeNamingException>>()
+        val edgesBy = List(sources.size) { java.util.TreeSet<Int>() }
+        val facesBy = List(sources.size) { java.util.TreeSet<Int>() }
+        val allBlendFaces = java.util.TreeSet<Int>()
+        images.forEachIndexed { q, image ->
+            val owner = queries.owner[q]
+            if (owner == DerivedQueries.EXTRA_OWNER) {
+                allBlendFaces.addAll(image.faces)
+            } else {
+                edgesBy[owner].addAll(image.edges)
+                facesBy[owner].addAll(image.faces)
+            }
+        }
+        val edgeInfos = shape.edges
+        val out = LinkedHashMap<GenerationSource, Map<GeneratedRole, List<Int>>>()
+        sources.forEachIndexed { i, source ->
+            out[source] =
+                when (operation) {
+                    DerivedOperation.BLEND ->
+                        mapOf(
+                            GeneratedRole.BOUNDARY to boundaryEdges(facesBy[i], allBlendFaces, shape.faces, edgeInfos),
+                        )
+                    DerivedOperation.BOOLEAN, DerivedOperation.HOLE -> {
+                        val section = edgesBy[i].filter { !edgeInfos[it].seam && !edgeInfos[it].degenerated }
+                        if (source == HoleWall) {
+                            var rimRings: List<List<Int>> = emptyList()
+                            val geometry = checkNotNull(hole) { "a hole wall needs the hole geometry" }
+                            // Only the rim roles fail when the rims cannot be told apart; SECTION stays usable.
+                            val rimError: EdgeNamingException? =
+                                try {
+                                    val infos = section.map { edgeInfos[it] }
+                                    val rings =
+                                        classifyRims(
+                                            infos,
+                                            geometry.start,
+                                            geometry.direction,
+                                            1e-6,
+                                            geometry.diameter,
+                                            shape.faces,
+                                            geometry.diameter / 2.0,
+                                        )
+                                    rimRings = rings
+                                    null
+                                } catch (e: EdgeNamingException) {
+                                    e
+                                } catch (e: IllegalArgumentException) {
+                                    EdgeNamingException(
+                                        "hole rim classification failed: ${e.message}",
+                                        null,
+                                        listOf(HoleWall),
+                                        emptyList(),
+                                        mapOf("HoleWall" to section),
+                                        section.map { edgeInfos[it] },
+                                    )
+                                }
+                            if (rimError != null) {
+                                roleErrors[source] =
+                                    mapOf(GeneratedRole.RIM_ENTRY to rimError, GeneratedRole.RIM_EXIT to rimError)
+                            }
+                            val rings = if (rimError == null) rimRings else emptyList()
+                            mapOf(
+                                GeneratedRole.SECTION to section,
+                                GeneratedRole.RIM_ENTRY to (rings.firstOrNull() ?: emptyList()),
+                                GeneratedRole.RIM_EXIT to (if (rings.size >= 2) rings.last() else emptyList()),
+                            )
+                        } else {
+                            mapOf(GeneratedRole.SECTION to section)
+                        }
+                    }
+                }
+        }
+        return out to roleErrors
+    }
 
     private fun nativeSweep(
         what: String,

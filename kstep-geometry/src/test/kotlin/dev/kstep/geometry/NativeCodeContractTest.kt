@@ -16,4 +16,19 @@ class NativeCodeContractTest :
             RevolveAxis.X.nativeCode shouldBe 0
             RevolveAxis.Y.nativeCode shouldBe 1
         }
+
+        "derived naming constants match the native bridge source" {
+            val cpp = java.io.File("src/main/cpp/kstep_occt_bridge.cpp").readText()
+
+            fun constant(name: String) =
+                Regex("""constexpr\s+\w+\s+$name\s*=\s*(\d+)""").find(cpp)!!.groupValues[1].toInt()
+            constant("kMaxDerivedQueries") shouldBe OcctKernel.MAX_DERIVED_QUERIES
+            constant("kDerivedKindEdge") shouldBe DERIVED_KIND_EDGE
+            constant("kDerivedKindFace") shouldBe DERIVED_KIND_FACE
+            DERIVED_KIND_EDGE shouldBe 0
+            DERIVED_KIND_FACE shouldBe 1
+            constant("kMaxHistoryInts") shouldBe OcctKernel.MAX_HISTORY_INTS
+            OcctKernel.MAX_DERIVED_QUERIES shouldBe 4096
+            OcctKernel.MAX_NAMING_SOURCES shouldBe 1024
+        }
     })

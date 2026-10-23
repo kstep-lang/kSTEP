@@ -98,7 +98,19 @@ object EdgeSelection {
         return matched
     }
 
-    private fun validateTree(root: EdgeSelector) {
+    /**
+     * Resolves a face [selector] against [faces] and returns the matching face indices, ascending (Welle N2,
+     * ADR-0034). Strict like [resolve]: nothing matched is an [EdgeNamingException]-free empty result handled by
+     * the caller, which lists the candidates.
+     */
+    internal fun resolveFaces(
+        edges: List<EdgeInfo>,
+        faces: List<FaceInfo>,
+        selector: FaceSelector,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): List<Int> = Evaluator(edges, faces, tolerance).faceSet(selector).sorted()
+
+    internal fun validateTree(root: EdgeSelector) {
         var nodes = 0
         val stack = ArrayDeque<Pair<EdgeSelector, Int>>()
         stack.addLast(root to 1)
@@ -171,7 +183,7 @@ object EdgeSelection {
             is MinusSelector -> "(${describe(s.left)} minus ${describe(s.right)})"
         }
 
-    private fun describe(s: FaceSelector): String =
+    internal fun describe(s: FaceSelector): String =
         when (s) {
             is FaceNormalSelector -> "normal(${num(s.direction.x)}, ${num(s.direction.y)}, ${num(s.direction.z)})"
             is FaceExtremeSelector ->

@@ -1,5 +1,6 @@
 package dev.kstep.geometry.feature
 
+import dev.kstep.geometry.DerivedNamedShape
 import dev.kstep.geometry.EdgeFate
 import dev.kstep.geometry.EdgeHistory
 import dev.kstep.geometry.GenerationMap
@@ -86,7 +87,14 @@ object FeatureRebuilder {
             val shape =
                 try {
                     val generated = plan.namingByGenerator[index]
-                    if (generated != null) {
+                    if (generated != null && isDerivedGenerator(feature)) {
+                        // A derived generator delivers history AND generation map from one maker (ADR-0034).
+                        val derived =
+                            buildDerivedNamed(index, sequence.features, built, histories, plan, namings, generated)
+                        namings[index] = derived.generation
+                        histories[index] = derived.history
+                        derived.shape
+                    } else if (generated != null) {
                         val named = buildNamed(index, sequence.features[index], generated)
                         namings[index] = named.generation
                         named.shape
@@ -267,6 +275,71 @@ object FeatureRebuilder {
                 OcctKernel.revolveRegionNamed(feature.region, feature.angleDegrees, feature.axis, list)
             is ExternalRootFeature -> guardExternal(feature) { feature.buildNamedShape(list) }
             else -> error("feature[$index] (${feature::class.simpleName}) cannot be built with a generation map")
+        }
+    }
+
+    private fun isDerivedGenerator(feature: Feature): Boolean =
+        feature is FilletFeature ||
+            feature is ChamferFeature ||
+            feature is SelectedFilletFeature ||
+            feature is SelectedChamferFeature ||
+            feature is BooleanFeature ||
+            feature is HoleFeature
+
+    /** Builds a derived generator with edge history and the generation map of the sources its consumers name. */
+    private fun buildDerivedNamed(
+        index: Int,
+        features: List<Feature>,
+        built: List<OcctShape>,
+        histories: Map<Int, EdgeHistory>,
+        plan: TrackingPlan,
+        namings: Map<Int, GenerationMap>,
+        sources: Set<GenerationSource>,
+    ): DerivedNamedShape {
+        val list = sources.toList()
+        return when (val feature = features[index]) {
+            is FilletFeature ->
+                OcctKernel.filletNamed(
+                    built[feature.baseIndex],
+                    feature.edgeIndices,
+                    feature.radius,
+                    list,
+                )
+            is ChamferFeature ->
+                OcctKernel.chamferNamed(built[feature.baseIndex], feature.edgeIndices, feature.distance, list)
+            is SelectedFilletFeature ->
+                OcctKernel.filletNamed(
+                    built[feature.baseIndex],
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features, namings),
+                    feature.radius,
+                    list,
+                )
+            is SelectedChamferFeature ->
+                OcctKernel.chamferNamed(
+                    built[feature.baseIndex],
+                    resolveEdges(index, feature.edges, feature.baseIndex, built, histories, plan, features, namings),
+                    feature.distance,
+                    list,
+                )
+            is BooleanFeature ->
+                OcctKernel.booleanNamed(feature.operation, built[feature.leftIndex], built[feature.rightIndex], list)
+            is HoleFeature ->
+                OcctKernel.holeNamed(
+                    built[feature.baseIndex],
+                    feature.diameter,
+                    feature.depth,
+                    feature.x,
+                    feature.y,
+                    feature.z,
+                    feature.dirX,
+                    feature.dirY,
+                    feature.dirZ,
+                    list,
+                )
+            else ->
+                error(
+                    "feature[$index] (${feature::class.simpleName}) cannot be built with a derived generation map",
+                )
         }
     }
 

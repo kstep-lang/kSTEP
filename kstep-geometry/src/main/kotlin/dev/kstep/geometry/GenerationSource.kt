@@ -65,12 +65,33 @@ interface ExternalGenerationSource : GenerationSource {
 }
 
 /**
- * Which image of a source is meant. A vertex source ([ProfileVertex], [RegionVertex], [PointAt]) has
+ * Which image of a source is meant. For the sweep sources of ADR-0033: A vertex source ([ProfileVertex], [RegionVertex], [PointAt]) has
  * [SIDE] images (the edge swept from the vertex); an edge source ([ProfileEdge], [RegionEdge], [SegmentAt])
  * has [START] and [END] images (its copies at the beginning and the end of the sweep; for an extrusion with
  * negative height START stays at z = 0).
  */
-enum class GeneratedRole { SIDE, START, END }
+enum class GeneratedRole {
+    /** Sweep, vertex source: the edge swept from the vertex. */
+    SIDE,
+
+    /** Sweep, edge source: the copy at the beginning of the sweep. */
+    START,
+
+    /** Sweep, edge source: the copy at the end of the sweep. */
+    END,
+
+    /** Derived (ADR-0034): the edges where a boolean or hole cut the faces named by the source. */
+    SECTION,
+
+    /** Derived: the edges of a blend (fillet / chamfer) face that border a face the operation did not create. */
+    BOUNDARY,
+
+    /** Derived: the ring at which a hole's drill enters, measured along the drill direction from its start. */
+    RIM_ENTRY,
+
+    /** Derived: the ring at which a hole's drill leaves; empty (a naming error) for a blind hole. */
+    RIM_EXIT,
+}
 
 /** Convenience builders for lists of [GenerationSource]s. */
 object GenerationSources {
@@ -104,4 +125,15 @@ internal fun GenerationSource.describe(): String =
         is PointAt -> "PointAt($x, $y)"
         is SegmentAt -> "SegmentAt($startX, $startY -> $endX, $endY)"
         is ExternalGenerationSource -> description
+        is OperandEdges ->
+            "OperandEdges($operand, ${dev.kstep.geometry.select.EdgeSelection.describe(
+                selector,
+            )})".take(64)
+        is OperandFaces ->
+            "OperandFaces($operand, ${dev.kstep.geometry.select.EdgeSelection.describe(
+                selector,
+            )})".take(64)
+        BlendedEdges -> "BlendedEdges"
+        BooleanSection -> "BooleanSection"
+        HoleWall -> "HoleWall"
     }

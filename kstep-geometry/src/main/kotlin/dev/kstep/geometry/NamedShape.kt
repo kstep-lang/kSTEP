@@ -1,5 +1,7 @@
 package dev.kstep.geometry
 
+import dev.kstep.geometry.select.EdgeNamingException
+
 /** The images of one [GenerationSource] in a sweep result: indices into the result's `OcctShape.edges`. */
 class GeneratedImages internal constructor(
     /** True for a vertex source (images are in [side]), false for an edge source ([start] / [end]). */
@@ -15,25 +17,39 @@ class GeneratedImages internal constructor(
  */
 class GenerationMap internal constructor(
     private val bySource: Map<GenerationSource, GeneratedImages>,
+    /** Derived sources (ADR-0034): role to result edge indices; a role that is allowed but empty maps to an empty list. */
+    private val derived: Map<GenerationSource, Map<GeneratedRole, List<Int>>> = emptyMap(),
+    /** Roles of derived sources that could not be named unambiguously; asking for them throws, other roles still work. */
+    private val roleErrors: Map<GenerationSource, Map<GeneratedRole, EdgeNamingException>> = emptyMap(),
 ) {
     /** All sources this map was built for. */
-    val sources: Set<GenerationSource> get() = bySource.keys
+    val sources: Set<GenerationSource> get() = bySource.keys + derived.keys
 
     /**
      * The edges of [role] generated from [source], possibly empty (for example a vertex on the axis of a full
-     * revolve has no usable image).
+     * revolve has no usable image, or a blind hole has no RIM_EXIT).
      *
      * @throws IllegalArgumentException if [source] was not requested, or [role] does not fit the source (a
-     *   vertex source has SIDE images, an edge source START and END images).
+     *   vertex source has SIDE images, an edge source START and END images, a derived source the roles of its
+     *   operation).
      */
     fun images(
         source: GenerationSource,
         role: GeneratedRole,
     ): List<Int> {
+        derived[source]?.let { byRole ->
+            roleErrors[source]?.get(role)?.let { throw it }
+            return requireNotNull(byRole[role]) {
+                "role $role does not fit source ${source.describe()}: its images have the roles ${byRole.keys}"
+            }
+        }
         val images =
             requireNotNull(bySource[source]) {
                 "source ${source.describe()} was not requested when the shape was built"
             }
+        require(role == GeneratedRole.SIDE || role == GeneratedRole.START || role == GeneratedRole.END) {
+            "role $role does not fit source ${source.describe()}: a profile source has SIDE, START or END images"
+        }
         require(images.vertexLike == (role == GeneratedRole.SIDE)) {
             "role $role does not fit source ${source.describe()}: " +
                 if (images.vertexLike) "a vertex source has SIDE images" else "an edge source has START and END images"
@@ -41,7 +57,7 @@ class GenerationMap internal constructor(
         return when (role) {
             GeneratedRole.SIDE -> images.side
             GeneratedRole.START -> images.start
-            GeneratedRole.END -> images.end
+            else -> images.end
         }
     }
 
@@ -55,7 +71,16 @@ class GenerationMap internal constructor(
                 "two sources map to the same replacement ${replacement.describe()}"
             }
         }
-        return GenerationMap(out)
+        val outDerived = LinkedHashMap<GenerationSource, Map<GeneratedRole, List<Int>>>()
+        derived.forEach { (source, byRole) ->
+            val replacement =
+                requireNotNull(mapping[source]) { "no replacement for source ${source.describe()}" }
+            require(out[replacement] == null && outDerived.put(replacement, byRole) == null) {
+                "two sources map to the same replacement ${replacement.describe()}"
+            }
+        }
+        val outErrors = roleErrors.entries.associate { (source, errors) -> mapping.getValue(source) to errors }
+        return GenerationMap(out, outDerived, outErrors)
     }
 }
 
@@ -191,4 +216,74 @@ internal fun decodeGenerationMap(
     }
     check(pos == raw.size) { "malformed generation map: ${raw.size - pos} trailing ints" }
     return GenerationMap(out)
+}
+
+/**
+ * A freshly built derived-feature result (fillet, chamfer, boolean, hole) with the [EdgeHistory] AND the
+ * [GenerationMap] of the sources asked for (ADR-0034), both read from the same OCCT maker. [AutoCloseable] like
+ * [OcctShape]; closing releases [shape].
+ */
+class DerivedNamedShape internal constructor(
+    val shape: OcctShape,
+    val history: EdgeHistory,
+    val generation: GenerationMap,
+) : AutoCloseable {
+    override fun close() = shape.close()
+}
+
+/** What `Generated()` produced for one query: the result edges and faces it points to. */
+internal class DerivedImages(
+    val edges: List<Int>,
+    val faces: List<Int>,
+)
+
+/**
+ * Decodes the native derived generation payload `[queryCount, (nEdges, idx..., nFaces, idx...)*]`. Pure and
+ * OCCT-free; every length, count and index is validated before use.
+ *
+ * @throws IllegalStateException on any inconsistency.
+ */
+internal fun decodeDerivedGeneration(
+    raw: IntArray,
+    queryCount: Int,
+    resultEdgeCount: Int,
+    resultFaceCount: Int,
+): List<DerivedImages> {
+    check(raw.isNotEmpty()) { "native derived generation map must carry a query count" }
+    check(raw.size <= OcctKernel.MAX_HISTORY_INTS) {
+        "native derived generation map of ${raw.size} ints exceeds ${OcctKernel.MAX_HISTORY_INTS}"
+    }
+    var pos = 0
+
+    fun next(what: String): Int {
+        check(pos < raw.size) { "malformed derived generation map: truncated while reading $what" }
+        return raw[pos++]
+    }
+
+    fun readList(
+        what: String,
+        limit: Int,
+    ): List<Int> {
+        val count = next("$what count")
+        check(count in 0..limit) { "malformed derived generation map: $what count $count out of range" }
+        val list = ArrayList<Int>(count)
+        repeat(count) {
+            val index = next(what)
+            check(index in 0 until limit) {
+                "malformed derived generation map: $what index $index outside [0, $limit)"
+            }
+            list.add(index)
+        }
+        return list
+    }
+    val count = next("query count")
+    check(count == queryCount) { "derived generation map has $count queries, expected $queryCount" }
+    val out = ArrayList<DerivedImages>(queryCount)
+    repeat(queryCount) {
+        val edges = readList("edge image", resultEdgeCount)
+        val faces = readList("face image", resultFaceCount)
+        out.add(DerivedImages(edges, faces))
+    }
+    check(pos == raw.size) { "malformed derived generation map: ${raw.size - pos} trailing ints" }
+    return out
 }

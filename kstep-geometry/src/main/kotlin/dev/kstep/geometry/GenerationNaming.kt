@@ -26,6 +26,7 @@ internal fun resolveProfileSources(
             is RegionVertex, is RegionEdge ->
                 throw IllegalArgumentException("${source.describe()} names a region; use a region sweep")
             is ExternalGenerationSource -> throw externalNotSupported(source)
+            is DerivedGenerationSource -> throw derivedNotSupported(source)
         }
     }
     return b.build()
@@ -84,10 +85,16 @@ internal fun resolveRegionSources(
             is ProfileVertex, is ProfileEdge ->
                 throw IllegalArgumentException("${source.describe()} names a polygon profile; use a profile sweep")
             is ExternalGenerationSource -> throw externalNotSupported(source)
+            is DerivedGenerationSource -> throw derivedNotSupported(source)
         }
     }
     return b.build()
 }
+
+private fun derivedNotSupported(source: GenerationSource) =
+    IllegalArgumentException(
+        "${source.describe()} names a derived feature; use it on a fillet, chamfer, boolean or hole generator",
+    )
 
 private fun addPoint(
     b: NamingQueryBuilder,

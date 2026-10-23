@@ -290,6 +290,41 @@ object OcctBridge {
         outHistory: Array<IntArray?>,
     ): Long
 
+    /**
+     * Same as [nativeFilletEdgesTracked]; additionally stores the derived generation map (ADR-0034) in `outMap[0]`:
+     * for every `(slot, kind, index)` triple of [queries] (slot 0 = the filleted shape, kind 0 = edge / 1 = face), the
+     * edges and faces of the result that `Generated()` reports, `[queryCount, (nEdges, idx..., nFaces, idx...)*]`.
+     * History and map come from the same maker.
+     */
+    external fun nativeFilletEdgesNamed(
+        handle: Long,
+        edgeIndices: IntArray,
+        radius: Double,
+        queries: IntArray,
+        outHistory: Array<IntArray?>,
+        outMap: Array<IntArray?>,
+    ): Long
+
+    /** Same as [nativeFilletEdgesNamed] for a chamfer. */
+    external fun nativeChamferEdgesNamed(
+        handle: Long,
+        edgeIndices: IntArray,
+        distance: Double,
+        queries: IntArray,
+        outHistory: Array<IntArray?>,
+        outMap: Array<IntArray?>,
+    ): Long
+
+    /** Same as [nativeBooleanOpTracked] plus the derived generation map; slot 0 = left, slot 1 = right. */
+    external fun nativeBooleanOpNamed(
+        op: Int,
+        left: Long,
+        right: Long,
+        queries: IntArray,
+        outHistory: Array<IntArray?>,
+        outMap: Array<IntArray?>,
+    ): Long
+
     /** Same as [nativeTransformShape] plus the encoded edge history in `outHistory[0]`. */
     external fun nativeTransformShapeTracked(
         handle: Long,

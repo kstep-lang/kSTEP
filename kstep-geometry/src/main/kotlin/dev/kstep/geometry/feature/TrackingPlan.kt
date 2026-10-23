@@ -1,7 +1,16 @@
 package dev.kstep.geometry.feature
 
+import dev.kstep.geometry.BlendedEdges
+import dev.kstep.geometry.BooleanSection
+import dev.kstep.geometry.DerivedGenerationSource
+import dev.kstep.geometry.GeneratedRole
 import dev.kstep.geometry.GenerationSource
+import dev.kstep.geometry.HoleWall
 import dev.kstep.geometry.OcctKernel
+import dev.kstep.geometry.OperandEdges
+import dev.kstep.geometry.OperandFaces
+import dev.kstep.geometry.describe
+import dev.kstep.geometry.select.EdgeSelection
 
 /** One operation on the path from a tracked edge's source feature to its consumer: feature [nodeIndex], reading the path through its operand [operandSlot]. */
 internal class TrackStep(
@@ -64,27 +73,25 @@ internal object TrackingPlanner {
             "feature[$consumer] GeneratedEdges may name at most ${OcctKernel.MAX_NAMING_SOURCES} sources, " +
                 "got ${reference.sources.size}"
         }
+        // Selector trees first and iteratively: hashing, comparing or describing a hostile deep tree recurses.
+        reference.sources.forEach { if (it is OperandEdges) EdgeSelection.validateTree(it.selector) }
         require(reference.sources.toSet().size == reference.sources.size) {
             "feature[$consumer] GeneratedEdges contains duplicate sources"
         }
         val source = features[generator]
-        val supported =
-            when (source) {
-                is ExtrudeFeature, is RevolveFeature, is ExtrudeRegionFeature, is RevolveRegionFeature -> true
-                is ExternalRootFeature -> source.supportsGeneratedNaming
-                else -> false
-            }
-        require(supported) {
+        val kind = generatorKind(source)
+        require(kind != GeneratorKind.NONE) {
             val name = source::class.simpleName
             val why =
                 if (source is ExtrudeRegionsFeature || source is RevolveRegionsFeature) {
                     "multi-body regions cannot name generated edges yet (ADR-0033)"
                 } else {
-                    "it generates no named profile edges (only extrude/revolve of a profile or region, and external " +
-                        "features that support naming, can be generators)"
+                    "it generates no named edges (only extrude/revolve of a profile or region, external features " +
+                        "that support naming, fillet, chamfer, boolean and hole can be generators)"
                 }
             "feature[$consumer] GeneratedEdges.featureIndex $generator ($name) cannot be a generator: $why"
         }
+        requireSourcesFit(consumer, generator, source, kind, reference)
         naming.getOrPut(generator) { LinkedHashSet() }.addAll(reference.sources)
         if (generator < base) {
             val path = findPath(features, consumer, generator, base, "GeneratedEdges.featureIndex")
@@ -92,6 +99,88 @@ internal object TrackingPlanner {
             path.forEach { needsHistory.add(it.nodeIndex) }
         } else {
             steps[consumer] = emptyList()
+        }
+    }
+
+    /** What a generator feature produces names for (ADR-0033 sweeps, ADR-0034 derived features). */
+    private enum class GeneratorKind { SWEEP, BLEND, BOOLEAN, HOLE, NONE }
+
+    private fun generatorKind(feature: Feature): GeneratorKind =
+        when (feature) {
+            is ExtrudeFeature, is RevolveFeature, is ExtrudeRegionFeature, is RevolveRegionFeature ->
+                GeneratorKind.SWEEP
+            is ExternalRootFeature ->
+                if (feature.supportsGeneratedNaming) GeneratorKind.SWEEP else GeneratorKind.NONE
+            is FilletFeature, is ChamferFeature, is SelectedFilletFeature, is SelectedChamferFeature ->
+                GeneratorKind.BLEND
+            is BooleanFeature -> GeneratorKind.BOOLEAN
+            is HoleFeature -> GeneratorKind.HOLE
+            else -> GeneratorKind.NONE
+        }
+
+    /**
+     * Structural check of the source/role/generator matrix of ADR-0034, before any native call:
+     * SIDE/START/END only on sweeps with profile sources; BOUNDARY on fillet/chamfer with [BlendedEdges] /
+     * [OperandEdges]; SECTION on booleans and holes with [OperandFaces] / [BooleanSection] / [HoleWall] (the
+     * latter on holes only); RIM_ENTRY / RIM_EXIT on holes with exactly [HoleWall].
+     */
+    private fun requireSourcesFit(
+        consumer: Int,
+        generator: Int,
+        generatorFeature: Feature,
+        kind: GeneratorKind,
+        reference: GeneratedEdges,
+    ) {
+        val where = "feature[$consumer] GeneratedEdges.featureIndex $generator (${generatorFeature::class.simpleName})"
+        val role = reference.role
+        if (kind == GeneratorKind.SWEEP) {
+            require(reference.sources.none { it is DerivedGenerationSource }) {
+                "$where generates profile edges; its sources must be profile sources, not derived ones"
+            }
+            require(role == GeneratedRole.SIDE || role == GeneratedRole.START || role == GeneratedRole.END) {
+                "$where is a sweep: role $role only fits derived features (sweeps have SIDE, START and END images)"
+            }
+            return
+        }
+        require(reference.sources.all { it is DerivedGenerationSource }) {
+            "$where is a derived feature: its sources must be BlendedEdges, OperandEdges, OperandFaces, " +
+                "BooleanSection or HoleWall, not profile sources"
+        }
+        reference.sources.forEach { source ->
+            val fits =
+                when (kind) {
+                    GeneratorKind.BLEND -> source == BlendedEdges || (source is OperandEdges && source.operand == 0)
+                    GeneratorKind.BOOLEAN ->
+                        source == BooleanSection ||
+                            (source is OperandFaces && source.operand in 0..1)
+                    GeneratorKind.HOLE ->
+                        source == BooleanSection ||
+                            source == HoleWall ||
+                            (source is OperandFaces && source.operand in 0..1)
+                    else -> false
+                }
+            require(fits) { "$where cannot be named by ${source.describe()}" }
+        }
+        val roleFits =
+            when (kind) {
+                GeneratorKind.BLEND -> role == GeneratedRole.BOUNDARY
+                GeneratorKind.BOOLEAN -> role == GeneratedRole.SECTION
+                GeneratorKind.HOLE ->
+                    role == GeneratedRole.SECTION ||
+                        (
+                            (role == GeneratedRole.RIM_ENTRY || role == GeneratedRole.RIM_EXIT) &&
+                                reference.sources == listOf<GenerationSource>(HoleWall)
+                        )
+                else -> false
+            }
+        require(roleFits) {
+            val expected =
+                when (kind) {
+                    GeneratorKind.BLEND -> "BOUNDARY"
+                    GeneratorKind.BOOLEAN -> "SECTION"
+                    else -> "SECTION, or RIM_ENTRY / RIM_EXIT with exactly the source HoleWall"
+                }
+            "$where does not support role $role; expected $expected"
         }
     }
 

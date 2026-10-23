@@ -696,6 +696,128 @@ bool checkHistoryHolder(JNIEnv* env, jobjectArray outHistory, const char* fnName
     return true;
 }
 
+// ------------------------------------------------------------------------------------------
+// Welle N2 (derived-edge naming, ADR-0034). Hand-synchronized with
+// dev.kstep.geometry.OcctKernel.MAX_DERIVED_QUERIES.
+// ------------------------------------------------------------------------------------------
+constexpr int kMaxDerivedQueries = 4096;
+constexpr int kDerivedKindEdge = 0;
+constexpr int kDerivedKindFace = 1;
+
+/** One sub-shape of an operand whose generated successors are requested: (operand slot, kind, 0-based index). */
+struct DerivedQuery {
+    int slot;
+    int kind;
+    int index;
+};
+
+/**
+ * Reads and validates the `(slot, kind, index)` triples of a derived-naming entry point. `operandCount` is 1 for
+ * fillet/chamfer and 2 for booleans. Returns false with a pending Java exception. Must run before the lock.
+ */
+bool readDerivedQueries(
+    JNIEnv* env, jintArray queries, int operandCount, const char* fnName, std::vector<DerivedQuery>& out) {
+    const std::string fn(fnName);
+    if (queries == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", fn + ": queries must not be null");
+        return false;
+    }
+    const jsize len = env->GetArrayLength(queries);
+    if (len < 3 || len % 3 != 0 || len / 3 > kMaxDerivedQueries) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            fn + ": queries must hold between 1 and " + std::to_string(kMaxDerivedQueries) + " (slot, kind, index) triples");
+        return false;
+    }
+    std::vector<jint> raw(static_cast<size_t>(len));
+    env->GetIntArrayRegion(queries, 0, len, raw.data());
+    if (env->ExceptionCheck()) return false;
+    out.clear();
+    out.reserve(static_cast<size_t>(len / 3));
+    for (jsize i = 0; i < len; i += 3) {
+        const jint slot = raw[i];
+        const jint kind = raw[i + 1];
+        const jint index = raw[i + 2];
+        if (slot < 0 || slot >= operandCount || (kind != kDerivedKindEdge && kind != kDerivedKindFace) || index < 0) {
+            throwJava(env, "java/lang/IllegalArgumentException", fn + ": malformed derived query #" + std::to_string(i / 3));
+            return false;
+        }
+        out.push_back(DerivedQuery{slot, kind, index});
+    }
+    return true;
+}
+
+/**
+ * Returns the ordinal of the first query whose index lies outside its operand, or -1. Reads the operands, so it
+ * MUST run while g_mutex is held, and before the modelling algorithm runs.
+ */
+int firstBadDerivedQuery(const std::vector<DerivedQuery>& queries, const std::vector<const TopoDS_Shape*>& operands) {
+    std::vector<int> edgeCount(operands.size()), faceCount(operands.size());
+    for (size_t k = 0; k < operands.size(); ++k) {
+        TopTools_IndexedMapOfShape edges, faces;
+        TopExp::MapShapes(*operands[k], TopAbs_EDGE, edges);
+        TopExp::MapShapes(*operands[k], TopAbs_FACE, faces);
+        edgeCount[k] = edges.Extent();
+        faceCount[k] = faces.Extent();
+    }
+    for (size_t q = 0; q < queries.size(); ++q) {
+        const DerivedQuery& d = queries[q];
+        const int extent = d.kind == kDerivedKindEdge ? edgeCount[d.slot] : faceCount[d.slot];
+        if (d.index >= extent) return static_cast<int>(q);
+    }
+    return -1;
+}
+
+/**
+ * Encodes, per query, what `maker.Generated(sub-shape)` produced, as 0-based indices into the edge and face maps of
+ * `result`. Layout: `[queryCount, (edgeCount, edgeIdx..., faceCount, faceIdx...)*]`. Vertices and everything that is
+ * not part of the result are ignored. MUST run while g_mutex is held (operands and result share TShapes with
+ * registry shapes), after the queries were range-checked by firstBadDerivedQuery(). Returns false if the encoding
+ * would exceed kMaxHistoryInts. Never throws a Java exception.
+ */
+bool encodeDerivedGeneration(
+    BRepBuilderAPI_MakeShape& maker, const std::vector<const TopoDS_Shape*>& operands, const TopoDS_Shape& result,
+    const std::vector<DerivedQuery>& queries, std::vector<jint>& out) {
+    TopTools_IndexedMapOfShape resultEdges, resultFaces;
+    TopExp::MapShapes(result, TopAbs_EDGE, resultEdges);
+    TopExp::MapShapes(result, TopAbs_FACE, resultFaces);
+    std::vector<TopTools_IndexedMapOfShape> operandEdges(operands.size()), operandFaces(operands.size());
+    for (size_t k = 0; k < operands.size(); ++k) {
+        TopExp::MapShapes(*operands[k], TopAbs_EDGE, operandEdges[k]);
+        TopExp::MapShapes(*operands[k], TopAbs_FACE, operandFaces[k]);
+    }
+    out.clear();
+    out.push_back(static_cast<jint>(queries.size()));
+    for (const DerivedQuery& d : queries) {
+        const TopoDS_Shape& sub = d.kind == kDerivedKindEdge ? operandEdges[d.slot](d.index + 1) : operandFaces[d.slot](d.index + 1);
+        std::vector<jint> edgeImages, faceImages;
+        const TopTools_ListOfShape& generated = maker.Generated(sub);
+        for (TopTools_ListIteratorOfListOfShape it(generated); it.More(); it.Next()) {
+            const TopoDS_Shape& g = it.Value();
+            std::vector<jint>* target = nullptr;
+            int idx = 0;
+            if (g.ShapeType() == TopAbs_EDGE) {
+                idx = resultEdges.FindIndex(g);
+                target = &edgeImages;
+            } else if (g.ShapeType() == TopAbs_FACE) {
+                idx = resultFaces.FindIndex(g);
+                target = &faceImages;
+            }
+            if (target == nullptr || idx <= 0) continue;
+            const jint image = static_cast<jint>(idx - 1);
+            bool seen = false;
+            for (jint known : *target) seen = seen || known == image;
+            if (!seen) target->push_back(image);
+        }
+        out.push_back(static_cast<jint>(edgeImages.size()));
+        for (jint image : edgeImages) out.push_back(image);
+        out.push_back(static_cast<jint>(faceImages.size()));
+        for (jint image : faceImages) out.push_back(image);
+        if (out.size() > kMaxHistoryInts) return false;
+    }
+    return true;
+}
+
 /** One parsed sketch-region loop; samples are a polygon approximation used for orientation/axis checks. */
 struct RegionLoop {
     TopoDS_Wire wire;
@@ -1789,7 +1911,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeExtrudeProfileNamed(
 }
 
 static jlong filletEdgesImpl(
-    JNIEnv* env, jlong handle, jintArray edgeIndices, jdouble radius, jobjectArray outHistory) {
+    JNIEnv* env, jlong handle, jintArray edgeIndices, jdouble radius, jobjectArray outHistory,
+    const std::vector<DerivedQuery>* queries = nullptr, jobjectArray outMap = nullptr) {
     if (edgeIndices == nullptr) {
         throwJava(env, "java/lang/NullPointerException", "nativeFilletEdges: edgeIndices must not be null");
         return 0;
@@ -1828,7 +1951,9 @@ static jlong filletEdgesImpl(
         bool built = false;
         SolidCheckResult check;
         std::vector<jint> history;
+        std::vector<jint> map;
         bool historyTooLarge = false;
+        bool badQuery = false;
         // Result lives here, on the stack, as a plain local -- deliberately NOT registered while
         // g_mutex is held. registerShape() itself takes g_mutex (see its definition above), and
         // g_mutex is a plain, non-recursive std::mutex: calling registerShape() from inside the
@@ -1864,7 +1989,10 @@ static jlong filletEdgesImpl(
                             offendingIndex = idx;
                         }
                     }
-                    if (!badIndex) {
+                    if (!badIndex && queries != nullptr) {
+                        badQuery = firstBadDerivedQuery(*queries, {shape}) >= 0;
+                    }
+                    if (!badIndex && !badQuery) {
                         BRepFilletAPI_MakeFillet filletMaker(*shape);
                         for (jsize i = 0; i < indexCount; ++i) {
                             // 0-based (Kotlin/caller-facing) -> OCCT's 1-based
@@ -1879,6 +2007,10 @@ static jlong filletEdgesImpl(
                             check = runSolidChecks(result);
                             if (outHistory != nullptr) {
                                 historyTooLarge = !encodeEdgeHistory(filletMaker, {shape}, result, history);
+                            }
+                            // Named: the generation map comes from the SAME maker as the history, under the lock.
+                            if (queries != nullptr && !historyTooLarge) {
+                                historyTooLarge = !encodeDerivedGeneration(filletMaker, {shape}, result, *queries, map);
                             }
                         }
                     }
@@ -1911,6 +2043,12 @@ static jlong filletEdgesImpl(
                     std::to_string(edgeCount) + " edges");
             return 0;
         }
+        if (badQuery) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeFilletEdges: a derived query refers to a sub-shape that does not exist in the operand");
+            return 0;
+        }
         if (!built) {
             throwJava(
                 env,
@@ -1936,6 +2074,9 @@ static jlong filletEdgesImpl(
             return 0;
         }
         if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
+            return 0;
+        }
+        if (outMap != nullptr && !publishHistory(env, outMap, map)) {
             return 0;
         }
 
@@ -1964,6 +2105,21 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdgesTracked(
         return 0;
     }
     return filletEdgesImpl(env, handle, edgeIndices, radius, outHistory);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeFilletEdgesNamed(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble radius, jintArray queries,
+    jobjectArray outHistory, jobjectArray outMap) {
+    if (!checkHistoryHolder(env, outHistory, "nativeFilletEdgesNamed") ||
+        !checkHistoryHolder(env, outMap, "nativeFilletEdgesNamed")) {
+        return 0;
+    }
+    std::vector<DerivedQuery> parsed;
+    if (!readDerivedQueries(env, queries, 1, "nativeFilletEdgesNamed", parsed)) {
+        return 0;
+    }
+    return filletEdgesImpl(env, handle, edgeIndices, radius, outHistory, &parsed, outMap);
 }
 
 // ------------------------------------------------------------------------------------------
@@ -2148,7 +2304,9 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeMakeCylinder(
     return 0;
 }
 
-static jlong booleanOpImpl(JNIEnv* env, jint op, jlong left, jlong right, jobjectArray outHistory) {
+static jlong booleanOpImpl(
+    JNIEnv* env, jint op, jlong left, jlong right, jobjectArray outHistory,
+    const std::vector<DerivedQuery>* queries = nullptr, jobjectArray outMap = nullptr) {
     if (op < 0 || op > 2) {
         throwJava(
             env, "java/lang/IllegalArgumentException",
@@ -2168,7 +2326,9 @@ static jlong booleanOpImpl(JNIEnv* env, jint op, jlong left, jlong right, jobjec
         double volume = 0.0;
         SolidCheckResult check;
         std::vector<jint> history;
+        std::vector<jint> map;
         bool historyTooLarge = false;
+        bool badQuery = false;
         TopoDS_Shape result;
         {
             // BOTH lookups and the whole boolean run in ONE critical section (left == right is
@@ -2192,7 +2352,10 @@ static jlong booleanOpImpl(JNIEnv* env, jint op, jlong left, jlong right, jobjec
                         noSolid = true;
                     }
                 }
-                if (!tooManyFaces && !noSolid) {
+                if (!tooManyFaces && !noSolid && queries != nullptr) {
+                    badQuery = firstBadDerivedQuery(*queries, {a, b}) >= 0;
+                }
+                if (!tooManyFaces && !noSolid && !badQuery) {
                     std::unique_ptr<BRepAlgoAPI_BooleanOperation> algo;
                     if (op == 0) {
                         algo.reset(new BRepAlgoAPI_Fuse());
@@ -2233,6 +2396,10 @@ static jlong booleanOpImpl(JNIEnv* env, jint op, jlong left, jlong right, jobjec
                                 if (outHistory != nullptr) {
                                     historyTooLarge = !encodeEdgeHistory(*algo, {a, b}, result, history);
                                 }
+                                // After SimplifyResult() and unwrapping: Generated() reflects the merged history (ADR-0034).
+                                if (queries != nullptr && !historyTooLarge) {
+                                    historyTooLarge = !encodeDerivedGeneration(*algo, {a, b}, result, *queries, map);
+                                }
                             }
                         }
                     }
@@ -2253,6 +2420,12 @@ static jlong booleanOpImpl(JNIEnv* env, jint op, jlong left, jlong right, jobjec
         }
         if (noSolid) {
             throwJava(env, "java/lang/IllegalArgumentException", "nativeBooleanOp: every operand must contain a solid");
+            return 0;
+        }
+        if (badQuery) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeBooleanOp: a derived query refers to a sub-shape that does not exist in its operand");
             return 0;
         }
         if (opFailed) {
@@ -2296,6 +2469,9 @@ static jlong booleanOpImpl(JNIEnv* env, jint op, jlong left, jlong right, jobjec
         if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
             return 0;
         }
+        if (outMap != nullptr && !publishHistory(env, outMap, map)) {
+            return 0;
+        }
         return registerShape(std::move(result));
     } catch (const Standard_Failure& e) {
         throwJava(
@@ -2320,6 +2496,21 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOpTracked(
         return 0;
     }
     return booleanOpImpl(env, op, left, right, outHistory);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeBooleanOpNamed(
+    JNIEnv* env, jobject /*self*/, jint op, jlong left, jlong right, jintArray queries, jobjectArray outHistory,
+    jobjectArray outMap) {
+    if (!checkHistoryHolder(env, outHistory, "nativeBooleanOpNamed") ||
+        !checkHistoryHolder(env, outMap, "nativeBooleanOpNamed")) {
+        return 0;
+    }
+    std::vector<DerivedQuery> parsed;
+    if (!readDerivedQueries(env, queries, 2, "nativeBooleanOpNamed", parsed)) {
+        return 0;
+    }
+    return booleanOpImpl(env, op, left, right, outHistory, &parsed, outMap);
 }
 
 static jlong revolveProfileImpl(
@@ -2410,7 +2601,8 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeRevolveProfileNamed(
 }
 
 static jlong chamferEdgesImpl(
-    JNIEnv* env, jlong handle, jintArray edgeIndices, jdouble distance, jobjectArray outHistory) {
+    JNIEnv* env, jlong handle, jintArray edgeIndices, jdouble distance, jobjectArray outHistory,
+    const std::vector<DerivedQuery>* queries = nullptr, jobjectArray outMap = nullptr) {
     if (edgeIndices == nullptr) {
         throwJava(env, "java/lang/NullPointerException", "nativeChamferEdges: edgeIndices must not be null");
         return 0;
@@ -2446,7 +2638,9 @@ static jlong chamferEdgesImpl(
         bool built = false;
         SolidCheckResult check;
         std::vector<jint> history;
+        std::vector<jint> map;
         bool historyTooLarge = false;
+        bool badQuery = false;
         TopoDS_Shape result;
         {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -2468,7 +2662,10 @@ static jlong chamferEdgesImpl(
                             offendingIndex = indices[i];
                         }
                     }
-                    if (!badIndex) {
+                    if (!badIndex && queries != nullptr) {
+                        badQuery = firstBadDerivedQuery(*queries, {shape}) >= 0;
+                    }
+                    if (!badIndex && !badQuery) {
                         BRepFilletAPI_MakeChamfer chamferMaker(*shape);
                         for (jsize i = 0; i < indexCount; ++i) {
                             chamferMaker.Add(distance, TopoDS::Edge(edges(indices[i] + 1)));
@@ -2481,6 +2678,9 @@ static jlong chamferEdgesImpl(
                             check = runSolidChecks(result);
                             if (outHistory != nullptr) {
                                 historyTooLarge = !encodeEdgeHistory(chamferMaker, {shape}, result, history);
+                            }
+                            if (queries != nullptr && !historyTooLarge) {
+                                historyTooLarge = !encodeDerivedGeneration(chamferMaker, {shape}, result, *queries, map);
                             }
                         }
                     }
@@ -2506,6 +2706,12 @@ static jlong chamferEdgesImpl(
                     std::to_string(edgeCount) + " edges");
             return 0;
         }
+        if (badQuery) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeChamferEdges: a derived query refers to a sub-shape that does not exist in the operand");
+            return 0;
+        }
         if (!built) {
             throwJava(
                 env, "java/lang/IllegalStateException",
@@ -2527,6 +2733,9 @@ static jlong chamferEdgesImpl(
             return 0;
         }
         if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
+            return 0;
+        }
+        if (outMap != nullptr && !publishHistory(env, outMap, map)) {
             return 0;
         }
         return registerShape(std::move(result));
@@ -2554,6 +2763,21 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdgesTracked(
         return 0;
     }
     return chamferEdgesImpl(env, handle, edgeIndices, distance, outHistory);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdgesNamed(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray edgeIndices, jdouble distance, jintArray queries,
+    jobjectArray outHistory, jobjectArray outMap) {
+    if (!checkHistoryHolder(env, outHistory, "nativeChamferEdgesNamed") ||
+        !checkHistoryHolder(env, outMap, "nativeChamferEdgesNamed")) {
+        return 0;
+    }
+    std::vector<DerivedQuery> parsed;
+    if (!readDerivedQueries(env, queries, 1, "nativeChamferEdgesNamed", parsed)) {
+        return 0;
+    }
+    return chamferEdgesImpl(env, handle, edgeIndices, distance, outHistory, &parsed, outMap);
 }
 
 // ------------------------------------------------------------------------------------------
