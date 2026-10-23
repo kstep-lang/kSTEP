@@ -190,6 +190,24 @@ object FeatureRebuilder {
                 )
             is RevolveFeature -> OcctKernel.revolveProfile(feature.profile, feature.angleDegrees, feature.axis)
             is TranslateFeature -> OcctKernel.translate(built[feature.baseIndex], feature.dx, feature.dy, feature.dz)
+            is MirrorFeature ->
+                OcctKernel.mirror(
+                    built[feature.baseIndex],
+                    feature.originX,
+                    feature.originY,
+                    feature.originZ,
+                    feature.normalX,
+                    feature.normalY,
+                    feature.normalZ,
+                )
+            is ScaleFeature ->
+                OcctKernel.scale(
+                    built[feature.baseIndex],
+                    feature.factor,
+                    feature.aboutX,
+                    feature.aboutY,
+                    feature.aboutZ,
+                )
             is BooleanFeature ->
                 OcctKernel.boolean(
                     feature.operation,
@@ -371,6 +389,24 @@ object FeatureRebuilder {
                     feature.dx,
                     feature.dy,
                     feature.dz,
+                )
+            is MirrorFeature ->
+                OcctKernel.mirrorWithHistory(
+                    built[feature.baseIndex],
+                    feature.originX,
+                    feature.originY,
+                    feature.originZ,
+                    feature.normalX,
+                    feature.normalY,
+                    feature.normalZ,
+                )
+            is ScaleFeature ->
+                OcctKernel.scaleWithHistory(
+                    built[feature.baseIndex],
+                    feature.factor,
+                    feature.aboutX,
+                    feature.aboutY,
+                    feature.aboutZ,
                 )
             is BooleanFeature ->
                 OcctKernel.booleanWithHistory(feature.operation, built[feature.leftIndex], built[feature.rightIndex])

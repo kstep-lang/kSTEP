@@ -16,7 +16,7 @@ import dev.kstep.geometry.select.SelectionTolerance
  * Two kinds of case: root features that build a shape from scalars ([BoxFeature],
  * [ExtrudeFeature], [CylinderFeature], [RevolveFeature]) and [DerivedFeature]s that consume one or
  * more EARLIER shapes of the same sequence, referenced by index ([FilletFeature],
- * [ChamferFeature], [TranslateFeature], [BooleanFeature], [HoleFeature]). The split exists so
+ * [ChamferFeature], [TranslateFeature], [MirrorFeature], [ScaleFeature], [BooleanFeature], [HoleFeature]). The split exists so
  * [FeatureRebuilder] can validate every referenced index generically (ADR-0015 anticipated it once
  * a second `baseIndex`-carrying feature existed; ADR-0029 introduced it).
  *
@@ -94,6 +94,37 @@ data class TranslateFeature(
     val dx: Double,
     val dy: Double,
     val dz: Double,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/**
+ * Replays [dev.kstep.geometry.OcctKernel.mirror] (Welle P, ADR-0036): a mirrored COPY of feature [baseIndex],
+ * reflected in the plane through ([originX], [originY], [originZ]) with the normal ([normalX], [normalY], [normalZ]).
+ * The defaults describe the plane x = 0 (normal +X), so `MirrorFeature(0)` mirrors in the YZ plane.
+ */
+data class MirrorFeature(
+    val baseIndex: Int,
+    val originX: Double = 0.0,
+    val originY: Double = 0.0,
+    val originZ: Double = 0.0,
+    val normalX: Double = 1.0,
+    val normalY: Double = 0.0,
+    val normalZ: Double = 0.0,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/**
+ * Replays [dev.kstep.geometry.OcctKernel.scale] (Welle P, ADR-0036): a COPY of feature [baseIndex] uniformly scaled
+ * by [factor] about ([aboutX], [aboutY], [aboutZ]) (default: the origin).
+ */
+data class ScaleFeature(
+    val baseIndex: Int,
+    val factor: Double,
+    val aboutX: Double = 0.0,
+    val aboutY: Double = 0.0,
+    val aboutZ: Double = 0.0,
 ) : DerivedFeature {
     override val baseIndices: List<Int> get() = listOf(baseIndex)
 }

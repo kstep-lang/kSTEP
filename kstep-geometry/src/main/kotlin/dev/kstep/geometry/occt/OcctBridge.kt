@@ -74,7 +74,8 @@ object OcctBridge {
      * Returns a rigidly transformed COPY of the shape (`BRepBuilderAPI_Transform`, copy=true).
      *
      * @param matrix row-major 3x4 `[r00 r01 r02 tx, r10 r11 r12 ty, r20 r21 r22 tz]`; the rotation
-     *   block must be orthonormal with determinant > 0 (no scaling, shear or reflection).
+     *   block must be orthonormal with determinant > 0 (no scaling, shear or reflection; use [nativeMirrorShape] /
+     *   [nativeScaleShape] for those).
      * @throws NullPointerException if `matrix` is null.
      * @throws IllegalArgumentException if `matrix` does not have 12 finite entries, the translation
      *   exceeds [dev.kstep.geometry.OcctKernel.MAX_ABS_COORDINATE], or the rotation block is not a
@@ -323,6 +324,62 @@ object OcctBridge {
         queries: IntArray,
         outHistory: Array<IntArray?>,
         outMap: Array<IntArray?>,
+    ): Long
+
+    /**
+     * Returns a COPY of the shape reflected in the plane through `(px, py, pz)` with normal `(nx, ny, nz)`
+     * (Welle P, ADR-0036). A shape operation, never a placement: [nativeTransformShape] still rejects reflections.
+     *
+     * @throws IllegalArgumentException if a value is not finite, the origin is beyond
+     *   [dev.kstep.geometry.OcctKernel.MAX_ABS_COORDINATE], the normal is (near) zero, the shape has more than
+     *   [dev.kstep.geometry.OcctKernel.MAX_SHAPE_OPERATION_INPUT_FACES] faces or the result leaves the coordinate bound.
+     * @throws IllegalStateException if `handle` is unknown, the shape holds no solid or the result is invalid.
+     */
+    external fun nativeMirrorShape(
+        handle: Long,
+        px: Double,
+        py: Double,
+        pz: Double,
+        nx: Double,
+        ny: Double,
+        nz: Double,
+    ): Long
+
+    /** Same as [nativeMirrorShape] plus the encoded edge history in `outHistory[0]`. */
+    external fun nativeMirrorShapeTracked(
+        handle: Long,
+        px: Double,
+        py: Double,
+        pz: Double,
+        nx: Double,
+        ny: Double,
+        nz: Double,
+        outHistory: Array<IntArray?>,
+    ): Long
+
+    /**
+     * Returns a COPY of the shape uniformly scaled by `factor` about `(ax, ay, az)` (Welle P, ADR-0036).
+     *
+     * @throws IllegalArgumentException if `factor` is not finite or outside
+     *   `[MIN_SCALE_FACTOR, MAX_SCALE_FACTOR]`, the centre is invalid, or the result leaves the coordinate bound.
+     * @throws IllegalStateException if `handle` is unknown, the shape holds no solid or the result is invalid.
+     */
+    external fun nativeScaleShape(
+        handle: Long,
+        ax: Double,
+        ay: Double,
+        az: Double,
+        factor: Double,
+    ): Long
+
+    /** Same as [nativeScaleShape] plus the encoded edge history in `outHistory[0]`. */
+    external fun nativeScaleShapeTracked(
+        handle: Long,
+        ax: Double,
+        ay: Double,
+        az: Double,
+        factor: Double,
+        outHistory: Array<IntArray?>,
     ): Long
 
     /** Same as [nativeTransformShape] plus the encoded edge history in `outHistory[0]`. */

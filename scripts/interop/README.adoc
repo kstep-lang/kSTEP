@@ -136,6 +136,13 @@ arm64): every volume, face count and bounding box agrees between hand calculatio
 dump; the placed assembly agrees with FreeCAD's `Part.read` (4 solids, volume 17384, same bounding box); the
 FreeCAD box reads back as volume 6000 with 6 faces.
 
+`verify-mirror-scale.sh` (Welle P, ADR-0036) exports the six mirror/scale example scripts, reads each file with OCCT's typed
+reader and FreeCAD and compares volume, face count, solid count and bounding box with the hand-computed values (6000,
+24000, 48000, 750, 5974.2478 and 12000 with two solids); a deviation exits 1. `verify-mirror-scale.sh --spike` also builds
+and runs `spike_mirror_scale_history.cpp`, which prints what `BRepBuilderAPI_Transform` reports for a mirror and a scale
+(Modified/Generated/IsDeleted per edge, volume sign, STEP round trip, handedness of the mirrored surfaces; table in the
+ADR). Both write only below `build/interop/mirror-scale/`.
+
 `verify-derived-naming.sh` exports the three Welle-N2 example scripts (hole rim fillet at plate widths 40 and 60, union
 section fillet), reads each file with OCCT's typed reader and FreeCAD and compares the volume and face count with the
 hand-computed values 15491.650 / 8, 23491.650 / 8 and 7017.168 / 12. `verify-derived-naming.sh --spike` instead builds and

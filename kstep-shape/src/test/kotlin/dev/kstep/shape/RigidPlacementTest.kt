@@ -4,6 +4,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.doubles.plusOrMinus
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import kotlin.math.abs
 import kotlin.random.Random
 
@@ -82,6 +83,28 @@ class RigidPlacementTest :
                 // rotation about the origin keeps the norm
                 abs(placement.rotation.apply(a).norm() - a.norm()) shouldBe (0.0 plusOrMinus 1e-7)
             }
+        }
+
+        "a non-unit axis is refused with the unit-length text and a pointer to scale(...)" {
+            val e = shouldThrow<IllegalArgumentException> { Rotation.fromAxes(Vec3(0.0, 0.0, 2.0), Vec3.X) }
+            e.message!! shouldContain "unit length"
+            e.message!! shouldContain "scale("
+            val f = shouldThrow<IllegalArgumentException> { Rotation.fromAxes(Vec3.Z, Vec3(2.0, 0.0, 0.0)) }
+            f.message!! shouldContain "unit length"
+            f.message!! shouldContain "scale("
+        }
+
+        "every rotation has determinant +1: a reflection cannot be expressed as a placement" {
+            val random = Random(36)
+            repeat(200) {
+                val axis = Vec3(random.nextDouble(-1.0, 1.0), random.nextDouble(-1.0, 1.0), random.nextDouble(0.1, 1.0))
+                val r = Rotation.about(axis, random.nextDouble(-720.0, 720.0))
+                val det = (r.refDirection cross r.yDirection) dot r.axis
+                det shouldBe (1.0 plusOrMinus 1e-9)
+            }
+            // The third axis is derived (axis x refDirection), so no argument pair yields a left-handed frame.
+            val r = Rotation.fromAxes(Vec3.Z, Vec3.X)
+            (r.refDirection cross r.yDirection) dot r.axis shouldBe (1.0 plusOrMinus 1e-12)
         }
 
         "fromAxes accepts an orthonormal pair and rejects everything else" {

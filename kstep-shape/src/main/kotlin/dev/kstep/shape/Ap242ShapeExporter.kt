@@ -88,7 +88,8 @@ object Ap242ShapeExporter {
             if (seen.put(a.productDefinition, true) != null) {
                 throw ShapeExportException(
                     "more than one shape is bound to product definition '${a.productDefinition.id}'; " +
-                        "exactly one shape per product definition is supported",
+                        "exactly one shape per product definition is supported -- combine several bodies with " +
+                        "OcctKernel.compound(...) (ADR-0036)",
                 )
             }
         }

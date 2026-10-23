@@ -4,6 +4,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.doubles.plusOrMinus
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 
 /** OCCT-free coverage of [Placement.fromRowMajor3x4]/[Placement.rowMajor3x4] and [BoundingBox]. */
 class PlacementRowMajorTest :
@@ -25,12 +26,16 @@ class PlacementRowMajorTest :
 
         "scaling is rejected" {
             val scaled = identity.copyOf().also { it[0] = 2.0 }
-            shouldThrow<IllegalArgumentException> { Placement.fromRowMajor3x4(scaled) }
+            val e = shouldThrow<IllegalArgumentException> { Placement.fromRowMajor3x4(scaled) }
+            e.message!! shouldContain "orthonormal"
+            e.message!! shouldContain "scale("
         }
 
         "reflection is rejected" {
             val mirrored = identity.copyOf().also { it[10] = -1.0 }
-            shouldThrow<IllegalArgumentException> { Placement.fromRowMajor3x4(mirrored) }
+            val e = shouldThrow<IllegalArgumentException> { Placement.fromRowMajor3x4(mirrored) }
+            e.message!! shouldContain "positive determinant"
+            e.message!! shouldContain "mirror("
         }
 
         "NaN, infinity and wrong length are rejected" {

@@ -927,6 +927,10 @@ See <<roadmap,Roadmap>> for what's planned next.
   and accepted by `fillet`/`chamfer`; `OcctShape.edges`/`faces` expose the geometry; `TrackedEdges` follows edges
   through later operations by OCCT's own edge history; `extrudeRegion`/`revolveRegion` accept arcs, circles and
   holes (`ProfileRegion`).
+  (Welle P, ADR-0036) `OcctKernel.mirror` / `scale` (and `mirrorWithHistory` / `scaleWithHistory`) return a mirrored or
+  uniformly scaled COPY; `MirrorFeature` / `ScaleFeature` bring both into the feature history, and a persistent edge
+  name set before the step is followed through it. `OcctKernel.compound` combines separate bodies for one product
+  definition. A placement (`place`) stays rigid.
 
 | `kstep-constraints`
 | PlaneGCS 2D geometric constraint-solver bridge -- Geometrie Welle 6,
@@ -2404,6 +2408,38 @@ not offered for booleans because OCCT reports vertices, not edges, for the edges
 ADR-0034). Corner blends, persistent history across a change of the source topology and multi-body generators are
 not covered. `scripts/interop/verify-derived-naming.sh` re-checks the example exports with OCCT and FreeCAD.
 
+=== Mirror and scale (Welle P)
+
+`mirror` and `scale` are shape operations: they return a modified COPY and never touch the argument. A placement
+(`place(usage, ...)`) stays rigid, because STEP would need a `CARTESIAN_TRANSFORMATION_OPERATOR_3D` for a reflection or
+a scaling, which OCCT and FreeCAD read wrongly (ADR-0036).
+
+[source,kotlin]
+----
+val half = OcctKernel.extrudeProfile(lProfile, 20.0)
+val bracket = OcctKernel.union(half, mirror(half, MirrorPlane.YZ))      // symmetric part, reflected in x = 0
+val big = scale(OcctKernel.makeBox(10.0, 20.0, 30.0), 2.0)              // about the origin
+val small = scale(OcctKernel.makeBox(10.0, 20.0, 30.0), 0.5, Point3(5.0, 10.0, 15.0))
+val twoBodies = OcctKernel.compound(listOf(box, mirror(box, MirrorPlane.x(-5.0))))   // one part, two solids
+----
+
+* `mirror(shape, MirrorPlane)` reflects in a plane (`MirrorPlane.YZ`, `.XZ`, `.XY`, `.x(offset)`, `.y(...)`, `.z(...)`
+  or any origin and normal). `scale(shape, factor, about)` scales uniformly; the factor must be within
+  [1e-6, 1e6], zero and negative factors are rejected (a negative one with the hint to use `mirror`).
+* Both accept a solid or a compound of solids (for example the result of a sketch with several islands) and check
+  every solid of the result. The result must stay within +/-1e7 (a scaled box also within the dimension limits).
+* In a feature history use `MirrorFeature(baseIndex, origin..., normal...)` (default plane x = 0) and
+  `ScaleFeature(baseIndex, factor, about...)`. Name an edge at its generator (`GeneratedEdges(featureIndex = <generator>)`)
+  before the step; the name is followed through the mirror or scale. Naming the mirror step itself as generator is
+  refused with that hint.
+* `OcctKernel.compound(listOf(a, b))` puts separate bodies into one shape for ONE product definition (one
+  `SHAPE_REPRESENTATION` with several `MANIFOLD_SOLID_BREP`s). Touching bodies are rejected, use `union` for those.
+  Several `shape(...)` assignments on the same product definition remain refused, now with a pointer to `compound`.
+* Not covered: non-uniform scaling, mirror or scale as a placement, nested compounds. See ADR-0036.
+
+`scripts/interop/verify-mirror-scale.sh` re-checks the six example exports with OCCT and FreeCAD (`--spike` also runs
+the standalone history spike).
+
 === Reading a STEP file back (`kstep import`)
 
 [source,shell]
@@ -2712,7 +2748,8 @@ the state after Semantic core Welle D, ADR-0023; see ADR-0004 and
   feature-tree UI, or serialization — all remain open follow-ups).
   **(Welle J, done)** Booleans, cylinder, hole, revolve, chamfer and rigid
   transforms on the OCCT bridge — see ADR-0029; open: multi-body results,
-  cone/sphere, arbitrary revolve axes, sweep/loft.
+  cone/sphere, arbitrary revolve axes, sweep/loft. **(Welle P, done)** Mirror and
+  uniform scale as shape operations, bodies combined with `OcctKernel.compound` — see ADR-0036.
   **(Geometrie Welle 6, pulled forward, done)**
   `kstep-constraints` now exists: a PlaneGCS 2D geometric constraint-solver
   bridge, initially solving point systems under distance constraints — see

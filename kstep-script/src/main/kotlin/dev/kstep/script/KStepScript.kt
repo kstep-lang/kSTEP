@@ -89,6 +89,8 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
         // import. Welle J (ADR-0029) adds BooleanOperation, RevolveAxis, Placement and
         // OcctEmptyResultException to that set; none collides with another default import
         // (checked by grep, and no new vector type is introduced -- dev.kstep.shape owns Vec3).
+        // Welle P (ADR-0036) adds MirrorPlane and the top-level mirror(...)/scale(...) shape operations;
+        // no `fun mirror` / `fun scale` exists elsewhere in src/main and Kotlin's default imports have none.
         "dev.kstep.geometry.*",
         // Welle L (ADR-0031): Edges, Faces, Direction3, Point3, EdgeKind, FaceKind, EdgeSelector,
         // SelectionTolerance, EdgeSelectionException -- geometric edge selection for fillet/chamfer.

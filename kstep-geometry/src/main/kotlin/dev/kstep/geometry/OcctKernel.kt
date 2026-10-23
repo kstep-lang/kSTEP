@@ -172,6 +172,18 @@ object OcctKernel {
     /** Welle L: upper bound on the faces of a queryable shape ([OcctShape.faces]); mirrors `kMaxQueryFaces`. */
     const val MAX_QUERY_FACES: Int = 10_000
 
+    /** Welle P (ADR-0036): smallest accepted [scale] factor; mirrors `kMinScaleFactor` in `kstep_occt_bridge.cpp`. */
+    const val MIN_SCALE_FACTOR: Double = 1e-6
+
+    /** Welle P: largest accepted [scale] factor; mirrors `kMaxScaleFactor`. */
+    const val MAX_SCALE_FACTOR: Double = 1e6
+
+    /** Welle P: upper bound on the faces of a shape [mirror]/[scale] accept; mirrors `kMaxShapeOperationInputFaces`. */
+    const val MAX_SHAPE_OPERATION_INPUT_FACES: Int = 10_000
+
+    /** Welle P: upper bound on the parts of one [compound]; mirrors `kMaxCompoundParts`. */
+    const val MAX_COMPOUND_PARTS: Int = 32
+
     /** Welle L: upper bound on the size of a native edge-history payload; mirrors `kMaxHistoryInts`. */
     const val MAX_HISTORY_INTS: Int = 2_000_000
 
@@ -408,8 +420,8 @@ object OcctKernel {
 
     /**
      * Returns a COPY of [shape] moved by the rigid transform [placement] (rotation + translation,
-     * no scaling or reflection by construction of [Placement]). [shape] is neither modified nor
-     * consumed.
+     * no scaling or reflection by construction of [Placement]; for those see [mirror] and [scale]).
+     * [shape] is neither modified nor consumed.
      *
      * @throws IllegalArgumentException if the translation is not finite or beyond
      *   [MAX_ABS_COORDINATE].
@@ -440,6 +452,280 @@ object OcctKernel {
                 }
             }
         return OcctShape(handle)
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Welle P (ADR-0036): mirror, scale and compound as SHAPE operations. A placement stays rigid.
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Returns a mirrored COPY of [shape], reflected in the plane through ([originX], [originY], [originZ]) with
+     * the normal ([normalX], [normalY], [normalZ]) (any length >= [MIN_DIRECTION_LENGTH]). [shape] is neither
+     * modified nor consumed. Works on a solid or a compound of solids; every solid of the result is checked.
+     *
+     * @throws IllegalArgumentException if a value is not finite, the origin is beyond [MAX_ABS_COORDINATE], the
+     *   normal is too short, the shape has more than [MAX_SHAPE_OPERATION_INPUT_FACES] faces, or the mirrored shape
+     *   would leave +/-[MAX_ABS_COORDINATE].
+     * @throws IllegalStateException if [shape] is closed or holds no solid.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT fails.
+     */
+    fun mirror(
+        shape: OcctShape,
+        originX: Double,
+        originY: Double,
+        originZ: Double,
+        normalX: Double,
+        normalY: Double,
+        normalZ: Double,
+    ): OcctShape {
+        validateMirror(originX, originY, originZ, normalX, normalY, normalZ)
+        requireAvailable()
+        requireMirroredBoundsInRange(shape, originX, originY, originZ, normalX, normalY, normalZ)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeMirrorShape(h, originX, originY, originZ, normalX, normalY, normalZ)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: IllegalStateException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to mirror shape", e)
+                }
+            }
+        return OcctShape(handle)
+    }
+
+    /** [mirror] in [plane]. */
+    fun mirror(
+        shape: OcctShape,
+        plane: MirrorPlane,
+    ): OcctShape =
+        mirror(
+            shape,
+            plane.origin.x,
+            plane.origin.y,
+            plane.origin.z,
+            plane.normal.x,
+            plane.normal.y,
+            plane.normal.z,
+        )
+
+    /** [mirror] that also returns the [EdgeHistory] (every edge is `Modified` to exactly one mirrored edge). */
+    fun mirrorWithHistory(
+        shape: OcctShape,
+        originX: Double,
+        originY: Double,
+        originZ: Double,
+        normalX: Double,
+        normalY: Double,
+        normalZ: Double,
+    ): TrackedShape {
+        validateMirror(originX, originY, originZ, normalX, normalY, normalZ)
+        requireAvailable()
+        requireMirroredBoundsInRange(shape, originX, originY, originZ, normalX, normalY, normalZ)
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeMirrorShapeTracked(h, originX, originY, originZ, normalX, normalY, normalZ, holder)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: IllegalStateException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to mirror shape", e)
+                }
+            }
+        return trackedResult(handle, holder, listOf(shape))
+    }
+
+    /**
+     * Returns a COPY of [shape] uniformly scaled by [factor] about ([aboutX], [aboutY], [aboutZ]); [shape] is
+     * neither modified nor consumed. [factor] must be finite and within [[MIN_SCALE_FACTOR], [MAX_SCALE_FACTOR]];
+     * zero and negative factors are rejected (use [mirror] for a reflection). The scaled bounding box must stay within
+     * +/-[MAX_ABS_COORDINATE], its largest extent within [MAX_DIMENSION] and its smallest above [MIN_DIMENSION].
+     *
+     * @throws IllegalArgumentException for an invalid factor/centre or a result beyond the limits above.
+     * @throws IllegalStateException if [shape] is closed or holds no solid.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT fails.
+     */
+    fun scale(
+        shape: OcctShape,
+        factor: Double,
+        aboutX: Double = 0.0,
+        aboutY: Double = 0.0,
+        aboutZ: Double = 0.0,
+    ): OcctShape {
+        validateScale(factor, aboutX, aboutY, aboutZ)
+        requireAvailable()
+        requireScaledBoundsInRange(shape, factor, aboutX, aboutY, aboutZ)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeScaleShape(h, aboutX, aboutY, aboutZ, factor)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: IllegalStateException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to scale shape", e)
+                }
+            }
+        return OcctShape(handle)
+    }
+
+    /** [scale] that also returns the [EdgeHistory] (every edge is `Modified` to exactly one scaled edge). */
+    fun scaleWithHistory(
+        shape: OcctShape,
+        factor: Double,
+        aboutX: Double = 0.0,
+        aboutY: Double = 0.0,
+        aboutZ: Double = 0.0,
+    ): TrackedShape {
+        validateScale(factor, aboutX, aboutY, aboutZ)
+        requireAvailable()
+        requireScaledBoundsInRange(shape, factor, aboutX, aboutY, aboutZ)
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeScaleShapeTracked(h, aboutX, aboutY, aboutZ, factor, holder)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: IllegalStateException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to scale shape", e)
+                }
+            }
+        return trackedResult(handle, holder, listOf(shape))
+    }
+
+    /**
+     * Combines several separate bodies into ONE shape (a compound) that can be assigned to a single product
+     * definition: the STEP export writes one shape representation with one `MANIFOLD_SOLID_BREP` per body.
+     * Every part must be exactly one solid and the parts must be pairwise separated (touching or overlapping bodies
+     * are rejected -- use [boolean] with `UNION` for those). The parts are copied, not consumed; the caller owns and
+     * must close the result.
+     *
+     * @throws IllegalArgumentException if [shapes] is empty or has more than [MAX_COMPOUND_PARTS] entries, or a part
+     *   is not exactly one solid, or two parts touch or overlap.
+     * @throws IllegalStateException if a part is closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT fails.
+     */
+    fun compound(shapes: List<OcctShape>): OcctShape {
+        require(shapes.isNotEmpty()) { "compound needs at least one shape" }
+        require(shapes.size <= MAX_COMPOUND_PARTS) {
+            "compound accepts at most $MAX_COMPOUND_PARTS shapes, got ${shapes.size}"
+        }
+        requireAvailable()
+        val handles = LongArray(shapes.size)
+        shapes.forEachIndexed { i, part -> part.withHandle { handles[i] = it } }
+        val handle =
+            try {
+                OcctBridge.nativeMakeCompound(handles)
+            } catch (e: IllegalArgumentException) {
+                throw e
+            } catch (e: RuntimeException) {
+                throw OcctGeometryException("OCCT failed to combine ${shapes.size} bodies", e)
+            }
+        return OcctShape(handle)
+    }
+
+    private fun validateMirror(
+        originX: Double,
+        originY: Double,
+        originZ: Double,
+        normalX: Double,
+        normalY: Double,
+        normalZ: Double,
+    ) {
+        requireCoordinate("originX", originX)
+        requireCoordinate("originY", originY)
+        requireCoordinate("originZ", originZ)
+        requireDirection(normalX, normalY, normalZ)
+    }
+
+    private fun validateScale(
+        factor: Double,
+        aboutX: Double,
+        aboutY: Double,
+        aboutZ: Double,
+    ) {
+        require(!factor.isNaN()) { "scale factor must be a number, got NaN" }
+        require(!factor.isInfinite()) { "scale factor must be finite, got $factor" }
+        require(factor != 0.0) { "scale factor must not be 0 (a scaling to a point is not a solid)" }
+        require(factor > 0.0) { "scale factor must be positive, got $factor -- use mirror(...) for a reflection" }
+        require(factor in MIN_SCALE_FACTOR..MAX_SCALE_FACTOR) {
+            "scale factor must be within [$MIN_SCALE_FACTOR, $MAX_SCALE_FACTOR], got $factor"
+        }
+        requireCoordinate("aboutX", aboutX)
+        requireCoordinate("aboutY", aboutY)
+        requireCoordinate("aboutZ", aboutZ)
+    }
+
+    /** The mirrored box must stay inside +/-[MAX_ABS_COORDINATE]; the native side re-checks as defence in depth. */
+    private fun requireMirroredBoundsInRange(
+        shape: OcctShape,
+        originX: Double,
+        originY: Double,
+        originZ: Double,
+        normalX: Double,
+        normalY: Double,
+        normalZ: Double,
+    ) {
+        val box = shape.boundingBox ?: return
+        val len = kotlin.math.sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ)
+        val nx = normalX / len
+        val ny = normalY / len
+        val nz = normalZ / len
+        for (x in doubleArrayOf(box.minX, box.maxX)) {
+            for (y in doubleArrayOf(box.minY, box.maxY)) {
+                for (z in doubleArrayOf(box.minZ, box.maxZ)) {
+                    val d = (x - originX) * nx + (y - originY) * ny + (z - originZ) * nz
+                    val mx = x - 2.0 * d * nx
+                    val my = y - 2.0 * d * ny
+                    val mz = z - 2.0 * d * nz
+                    val inRange = maxOf(abs(mx), abs(my), abs(mz)) <= MAX_ABS_COORDINATE
+                    require(inRange) {
+                        "mirrored shape would leave +/-$MAX_ABS_COORDINATE (corner ($x, $y, $z) maps to ($mx, $my, $mz))"
+                    }
+                }
+            }
+        }
+    }
+
+    private fun requireScaledBoundsInRange(
+        shape: OcctShape,
+        factor: Double,
+        aboutX: Double,
+        aboutY: Double,
+        aboutZ: Double,
+    ) {
+        val box = shape.boundingBox ?: return
+        val lows = doubleArrayOf(box.minX, box.minY, box.minZ)
+        val highs = doubleArrayOf(box.maxX, box.maxY, box.maxZ)
+        val about = doubleArrayOf(aboutX, aboutY, aboutZ)
+        var largest = 0.0
+        var smallest = Double.MAX_VALUE
+        for (axis in 0 until 3) {
+            val lo = about[axis] + factor * (lows[axis] - about[axis])
+            val hi = about[axis] + factor * (highs[axis] - about[axis])
+            require(abs(lo) <= MAX_ABS_COORDINATE && abs(hi) <= MAX_ABS_COORDINATE) {
+                "scaled shape would leave +/-$MAX_ABS_COORDINATE (factor $factor)"
+            }
+            val extent = hi - lo
+            largest = maxOf(largest, extent)
+            smallest = minOf(smallest, extent)
+        }
+        require(largest <= MAX_DIMENSION) { "scaled shape would be larger than $MAX_DIMENSION (factor $factor)" }
+        require(smallest >= MIN_DIMENSION) {
+            "scaled shape would be thinner than $MIN_DIMENSION in one direction (factor $factor)"
+        }
     }
 
     /**

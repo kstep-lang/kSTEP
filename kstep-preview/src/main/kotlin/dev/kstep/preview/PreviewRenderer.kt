@@ -303,7 +303,8 @@ object PreviewRenderer {
             if (shapeOf.put(assignment.productDefinition, assignment) != null) {
                 throw ShapeExportException(
                     "more than one shape is bound to product definition '${assignment.productDefinition.id}'; " +
-                        "exactly one shape per product definition is supported",
+                        "exactly one shape per product definition is supported -- combine several bodies with " +
+                        "OcctKernel.compound(...) (ADR-0036)",
                 )
             }
         }

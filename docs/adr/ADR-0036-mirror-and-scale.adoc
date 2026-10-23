@@ -1,0 +1,146 @@
+= ADR-0036: Mirror and scale as shape operations (Welle P)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle P). Builds on ADR-0029 (rigid transforms), ADR-0028 (placements), ADR-0032
+(compounds of separate bodies) and ADR-0033/0034 (persistent edge naming).
+
+== Context
+
+A placement in kSTEP is rigid by construction: `Rotation` stores the images of Z and X and derives Y as their cross
+product, so its determinant is always +1 (a reflection cannot even be expressed), and `Placement.fromRowMajor3x4` and
+the native `nativeTransformShape` refuse anything that is not orthonormal with a positive determinant. A mirrored or a
+scaled part therefore had no way into a model. Expressing it as a placement would need a
+`CARTESIAN_TRANSFORMATION_OPERATOR_3D` in the assembly structure, which OCCT and FreeCAD do not read faithfully.
+
+== Decisions
+
+D1:: *Shape operation, not placement.* `OcctKernel.mirror` and `OcctKernel.scale` build a new shape with
+`BRepBuilderAPI_Transform` (Copy = true). The transform never goes through `nativeTransformShape`, which stays strict;
+that is the structural guarantee that a reflection or scaling cannot leak into `place()` or `transformed()`.
+
+D2:: *API.* `mirror(shape, plane)` / `mirror(shape, origin, normal)` (reflection in the plane through the origin with the
+given normal, any length from `MIN_DIRECTION_LENGTH`), `scale(shape, factor, about)` (uniform), and the
+`mirrorWithHistory` / `scaleWithHistory` variants that return the `EdgeHistory`. Results are COPIES: the argument is not
+modified or consumed. `MirrorPlane` (`YZ`, `XZ`, `XY`, `x(o)`, `y(o)`, `z(o)`) reuses `Point3` / `Direction3`. In scripts
+the top-level `mirror(shape, plane)` and `scale(shape, factor, about)` come with the default import
+`dev.kstep.geometry.*`; a grep over `src/main` found no other `mirror` or `scale` function and Kotlin has no default
+import with that name.
+
+D3:: *Inputs.* A solid or a compound of solids (for example the result of `extrudeRegions`). Every solid of the result is
+checked (positive volume, `BRepCheck_Analyzer`, solid count unchanged). Anything without a solid is refused.
+
+D4:: *Feature history.* `MirrorFeature(baseIndex, origin, normal)` (default plane x = 0) and
+`ScaleFeature(baseIndex, factor, about)` are `DerivedFeature`s of plain doubles, so value equality (undo/redo, `copy`)
+works. `FeatureIndexRemap`, `FeatureRebuilder` and `TrackingPlan.supportsHistory` handle both; `FeatureHistory` needed no
+change. They copy edges one to one and generate none, so `GeneratorKind.NONE`: a name is set at the generator BEFORE the
+step (`GeneratedEdges(featureIndex = <generator>)`) and followed through the step by the history; naming the mirror or
+scale step itself as generator is refused with exactly that hint.
+
+D5:: *`place()` stays rigid.* A reflection is impossible by construction (see Context); a scaling reaches `Rotation.fromAxes`
+as a non-unit axis. Their messages now name the way out; the old texts are kept as prefix (`unit length`, `orthonormal`,
+`positive determinant`), so existing assertions hold. The exporter and the preview refuse two shapes on one product
+definition with a pointer to `OcctKernel.compound`.
+
+D6:: *Several bodies in one product definition: the supported subset.* `OcctKernel.compound(shapes)` (at most 32 parts) wraps
+the existing native `nativeMakeCompound` (ADR-0032): each part is exactly one solid, parts are pairwise separated,
+inputs are copied. Export writes one `SHAPE_REPRESENTATION` with one `MANIFOLD_SOLID_BREP` per body, `kstep import`
+reports `bodies`, render and preview triangulate compounds already.
+
+== Measurements (OCCT 7.9.3, macOS arm64, `scripts/interop/spike_mirror_scale_history.cpp`)
+
+[cols="3,5"]
+|===
+| Question | Result
+
+| `gp_Trsf::SetMirror(gp_Ax2)`
+| `IsNegative() == true`
+
+| `Modified()` per edge, box mirrored and scaled (12 edges), cylinder mirrored (3 edges)
+| exactly one image per edge, all of them found in the result's edge map (`IsSame`, orientation ignored)
+
+| `Generated()`, `IsDeleted()`
+| empty / false for every edge
+
+| Volume sign after the mirror
+| +6000 for the box, +942.478 for the cylinder, `BRepCheck_Analyzer` valid; no re-orientation (`OrientClosedSolid`,
+  `ShapeFix_Solid`) is needed, so neither is in the code
+
+| Surface handedness after the mirror
+| all 6 planes of the box and all 3 faces of the cylinder get an indirect `gp_Ax3`; `BRepBuilderAPI_Transform` turns
+  face orientations instead of the solid inside out
+
+| STEP round trip (OCCT writer, then reader)
+| volume +6000 / +942.478 / +48000, valid
+
+| FreeCAD 1.1.4 (`Part.read` of the exported example files)
+| valid Solids with positive volume 6000, 24000, 48000, 750, 5974.2478 and a Compound of two solids, 12000
+
+| Scale factors 1e-6, 1e-3, 0.5, 1e3, 1e6 of a 10 x 20 x 30 box
+| valid, volume = 6000 f^3 to display precision
+
+| L-profile bracket (area 600, h 20) mirrored in x = 0 and fused
+| volume 24000, one solid, 10 faces (the two coplanar halves are merged; not the 14 of a plain sum)
+|===
+
+The fallback chain planned for a negative volume (re-orient, then `ShapeFix_Solid`, otherwise fail) was not needed.
+The mesh winding was checked too: the signed volume of the triangulation of a mirrored box is +6000
+(`OcctMirrorScaleTest`).
+
+== Limits and DoS
+
+* Scale factor: finite, within [1e-6, 1e6] (`MIN_SCALE_FACTOR` / `MAX_SCALE_FACTOR`, hand-synchronised with the native
+  constants). Zero and negative factors are rejected before any native call; the messages name 0, negative (with the
+  hint to use `mirror`), NaN, infinity and out of range.
+* Result bounds: Kotlin computes the result box beforehand (scale: `a + f (b - a)`; mirror: the eight reflected corners)
+  and requires +/-`MAX_ABS_COORDINATE`; for scale also largest extent <= `MAX_DIMENSION` and smallest >= `MIN_DIMENSION`.
+  The native side re-checks the bounding box of the result as defence in depth.
+* Input: at most `MAX_SHAPE_OPERATION_INPUT_FACES` (10000) faces; edge history bounded by the existing
+  `kMaxHistoryInts`; `FeatureSequence` length by `MAX_SEQUENCE_LENGTH`; `compound` at most 32 parts.
+
+== Security review notes
+
+[cols="2,5"]
+|===
+| Item | Handling
+
+| Mutex discipline
+| lookup, face/solid counts, the transform, the history encoding and every result check run inside one `g_mutex` critical
+  section; `throwJava` and `registerShape` only after it
+
+| Resource leaks
+| nothing is registered on any failure path; the tracked variants close the shape when decoding the history fails
+  (`trackedResult`); a leak test repeats 100 rounds of hostile calls and compares `nativeLiveShapeCount` with slack
+
+| Logging
+| messages carry only the scalar parameters, no geometry data
+
+| SSRF, cryptography
+| not affected (no network, no keys)
+
+| Licence
+| OCCT 7.9 only, no new dependency
+|===
+
+== Not in this wave
+
+* Non-uniform scaling (one factor only; no `gp_GTrsf` path).
+* Mirror or scale as a placement or as `CARTESIAN_TRANSFORMATION_OPERATOR_3D`.
+* Several `ShapeAssignment`s or several shape representations for one product definition (still refused, with a better
+  message).
+* Touching or overlapping bodies in one compound (use `union`), nested compounds, and a `CompoundFeature` in the history
+  (a compound copy has no edge history).
+* A "symmetric part" convenience (mirror and union in one step): two features do it today.
+* A shape without any solid cannot be produced through the public API, so the native "no solid" refusal is covered by
+  inspection only.
+
+== Verification
+
+Hand calculations: box 10 x 20 x 30 (V 6000) mirrored in x = 0: x in [-10, 0]; in the plane through the origin with
+normal (1, 1, 0): (x, y, z) -> (-y, -x, z), x in [-20, 0], y in [-10, 0]; scaled by 2 about the origin: V 48000, box
+[0, 20] x [0, 40] x [0, 60]; about (10, 20, 30): [-10, 10] x [-20, 20] x [-30, 30]; by 0.5 about (5, 10, 15): V 750,
+[2.5, 7.5] x [5, 15] x [7.5, 22.5]. Mirrored L bracket: 12000 + 12000, x in [-40, 40]. Mirrored corner fillet:
+6000 - (4 - pi) 30 = 5974.2478. Tests: `MirrorScaleValidationTest`, `PlacementRowMajorTest`, `RigidPlacementTest` (no OCCT),
+`OcctMirrorScaleTest`, `OcctMirrorScaleFeatureTest`, `CliExportOcctMirrorScaleIntegrationTest` (including FreeCAD),
+`scripts/interop/verify-mirror-scale.sh`.

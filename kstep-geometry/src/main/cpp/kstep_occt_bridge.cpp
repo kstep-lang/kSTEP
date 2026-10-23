@@ -2182,7 +2182,8 @@ static jlong transformShapeImpl(JNIEnv* env, jlong handle, jdoubleArray matrix12
             if (std::abs(dot - expected) > kOrthonormalTolerance) {
                 throwJava(
                     env, "java/lang/IllegalArgumentException",
-                    "nativeTransformShape: rotation block must be orthonormal (no scaling or shear)");
+                    "nativeTransformShape: rotation block must be orthonormal (no scaling or shear); place()/transformed() carry "
+                    "rigid placements only -- use mirror(...)/scale(...) as a shape operation");
                 return 0;
             }
         }
@@ -2192,7 +2193,8 @@ static jlong transformShapeImpl(JNIEnv* env, jlong handle, jdoubleArray matrix12
     if (!(det > 0.0)) {
         throwJava(
             env, "java/lang/IllegalArgumentException",
-            "nativeTransformShape: rotation block must have a positive determinant (no reflection)");
+            "nativeTransformShape: rotation block must have a positive determinant (no reflection) -- use mirror(...) as a "
+            "shape operation");
         return 0;
     }
 
@@ -2251,6 +2253,231 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeTransformShapeTracked(
         return 0;
     }
     return transformShapeImpl(env, handle, matrix12, outHistory);
+}
+
+// ------------------------------------------------------------------------------------------
+// Welle P: mirror() and scale() as SHAPE operations (ADR-0036). They deliberately do NOT go through
+// transformShapeImpl above, which stays strict (rigid placements only): a reflection or a scaling can
+// therefore never leak into place()/transformed(). Hand-synchronized with dev.kstep.geometry.OcctKernel's
+// MIN_SCALE_FACTOR / MAX_SCALE_FACTOR / MAX_SHAPE_OPERATION_INPUT_FACES.
+// ------------------------------------------------------------------------------------------
+constexpr double kMinScaleFactor = 1e-6;
+constexpr double kMaxScaleFactor = 1e6;
+constexpr int kMaxShapeOperationInputFaces = 10000;
+
+/**
+ * Shared body of mirror and scale: copies `shape` through `trsf` (Copy=true, so the result shares nothing with the
+ * registered operand) and validates the result. Lookup, every OCCT call and every check run inside ONE g_mutex
+ * critical section; throwJava()/registerShape() only after it; nothing is registered on any failure path.
+ */
+static jlong shapeOperationImpl(
+    JNIEnv* env, jlong handle, const gp_Trsf& trsf, const char* fn, jobjectArray outHistory) {
+    const std::string name(fn);
+    enum Failure { kOk, kUnknownHandle, kTooManyFaces, kNoSolid, kInvalid, kNonPositive, kSolidCount, kBounds, kHistory };
+    try {
+        Failure failure = kOk;
+        std::vector<jint> history;
+        TopoDS_Shape result;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape == nullptr) {
+                failure = kUnknownHandle;
+            } else {
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+                const int solidsBefore = countSolids(*shape);
+                if (faces.Extent() > kMaxShapeOperationInputFaces) {
+                    failure = kTooManyFaces;
+                } else if (solidsBefore < 1) {
+                    failure = kNoSolid;
+                } else {
+                    BRepBuilderAPI_Transform transformer(*shape, trsf, Standard_True, Standard_False);
+                    result = TopoDS_Shape(transformer.Shape());
+                    if (outHistory != nullptr && !encodeEdgeHistory(transformer, {shape}, result, history)) {
+                        failure = kHistory;
+                    }
+                    if (failure == kOk) {
+                        BRepCheck_Analyzer analyzer(result);
+                        if (!analyzer.IsValid()) {
+                            failure = kInvalid;
+                        } else if (countSolids(result) != solidsBefore) {
+                            failure = kSolidCount;
+                        } else {
+                            for (TopExp_Explorer ex(result, TopAbs_SOLID); ex.More(); ex.Next()) {
+                                GProp_GProps props;
+                                BRepGProp::VolumeProperties(ex.Current(), props);
+                                if (!(props.Mass() > 0.0)) {
+                                    failure = kNonPositive;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (failure == kOk) {
+                        Bnd_Box box;
+                        BRepBndLib::AddOptimal(result, box, Standard_False, Standard_False);
+                        if (box.IsVoid()) {
+                            failure = kBounds;
+                        } else {
+                            double x0, y0, z0, x1, y1, z1;
+                            box.Get(x0, y0, z0, x1, y1, z1);
+                            for (double c : {x0, y0, z0, x1, y1, z1}) {
+                                if (!std::isfinite(c) || std::abs(c) > kMaxAbsCoordinate) failure = kBounds;
+                            }
+                        }
+                    }
+                }
+            }
+        }  // g_mutex released here
+        switch (failure) {
+            case kOk:
+                break;
+            case kUnknownHandle:
+                throwUnknownHandle(env, handle);
+                return 0;
+            case kTooManyFaces:
+                throwJava(
+                    env, "java/lang/IllegalArgumentException",
+                    name + ": shape has more than " + std::to_string(kMaxShapeOperationInputFaces) + " faces");
+                return 0;
+            case kNoSolid:
+                throwJava(
+                    env, "java/lang/IllegalStateException",
+                    name + ": mirror/scale need a solid or a compound of solids");
+                return 0;
+            case kHistory:
+                throwJava(env, "java/lang/IllegalArgumentException", name + ": edge history exceeds the size limit");
+                return 0;
+            case kInvalid:
+                throwJava(env, "java/lang/IllegalStateException", name + ": result failed OCCT's own validity check");
+                return 0;
+            case kNonPositive:
+                throwJava(
+                    env, "java/lang/IllegalStateException", name + ": result has a solid with non-positive volume");
+                return 0;
+            case kSolidCount:
+                throwJava(env, "java/lang/IllegalStateException", name + ": unexpected solid count in the result");
+                return 0;
+            case kBounds:
+                throwJava(
+                    env, "java/lang/IllegalArgumentException",
+                    name + ": result must stay within +/-" + std::to_string(kMaxAbsCoordinate));
+                return 0;
+        }
+        if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": OCCT error: " + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": native error: " + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": unknown native error");
+    }
+    return 0;
+}
+
+static jlong mirrorShapeImpl(
+    JNIEnv* env, jlong handle, double px, double py, double pz, double nx, double ny, double nz, const char* fn,
+    jobjectArray outHistory) {
+    const std::string name(fn);
+    for (double v : {px, py, pz, nx, ny, nz}) {
+        if (!std::isfinite(v)) {
+            throwJava(env, "java/lang/IllegalArgumentException", name + ": plane origin and normal must be finite");
+            return 0;
+        }
+    }
+    if (std::abs(px) > kMaxAbsCoordinate || std::abs(py) > kMaxAbsCoordinate || std::abs(pz) > kMaxAbsCoordinate) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            name + ": plane origin must be within +/-" + std::to_string(kMaxAbsCoordinate));
+        return 0;
+    }
+    if (std::sqrt(nx * nx + ny * ny + nz * nz) < 1e-9) {
+        throwJava(env, "java/lang/IllegalArgumentException", name + ": plane normal must not be (near) zero");
+        return 0;
+    }
+    try {
+        gp_Trsf trsf;
+        // Reflection in the plane through p with normal n (gp_Ax2 main direction = the plane normal).
+        trsf.SetMirror(gp_Ax2(gp_Pnt(px, py, pz), gp_Dir(nx, ny, nz)));
+        return shapeOperationImpl(env, handle, trsf, fn, outHistory);
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": OCCT error: " + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": native error: " + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": unknown native error");
+    }
+    return 0;
+}
+
+static jlong scaleShapeImpl(
+    JNIEnv* env, jlong handle, double ax, double ay, double az, double factor, const char* fn,
+    jobjectArray outHistory) {
+    const std::string name(fn);
+    if (!std::isfinite(factor) || factor < kMinScaleFactor || factor > kMaxScaleFactor) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            name + ": scale factor must be finite and within [" + std::to_string(kMinScaleFactor) + ", " +
+                std::to_string(kMaxScaleFactor) + "]");
+        return 0;
+    }
+    for (double v : {ax, ay, az}) {
+        if (!std::isfinite(v) || std::abs(v) > kMaxAbsCoordinate) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                name + ": scale centre must be finite and within +/-" + std::to_string(kMaxAbsCoordinate));
+            return 0;
+        }
+    }
+    try {
+        gp_Trsf trsf;
+        trsf.SetScale(gp_Pnt(ax, ay, az), factor);
+        return shapeOperationImpl(env, handle, trsf, fn, outHistory);
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": OCCT error: " + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": native error: " + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": unknown native error");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeMirrorShape(
+    JNIEnv* env, jobject /*self*/, jlong handle, jdouble px, jdouble py, jdouble pz, jdouble nx, jdouble ny,
+    jdouble nz) {
+    return mirrorShapeImpl(env, handle, px, py, pz, nx, ny, nz, "nativeMirrorShape", nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeMirrorShapeTracked(
+    JNIEnv* env, jobject /*self*/, jlong handle, jdouble px, jdouble py, jdouble pz, jdouble nx, jdouble ny,
+    jdouble nz, jobjectArray outHistory) {
+    if (!checkHistoryHolder(env, outHistory, "nativeMirrorShapeTracked")) {
+        return 0;
+    }
+    return mirrorShapeImpl(env, handle, px, py, pz, nx, ny, nz, "nativeMirrorShapeTracked", outHistory);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeScaleShape(
+    JNIEnv* env, jobject /*self*/, jlong handle, jdouble ax, jdouble ay, jdouble az, jdouble factor) {
+    return scaleShapeImpl(env, handle, ax, ay, az, factor, "nativeScaleShape", nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeScaleShapeTracked(
+    JNIEnv* env, jobject /*self*/, jlong handle, jdouble ax, jdouble ay, jdouble az, jdouble factor,
+    jobjectArray outHistory) {
+    if (!checkHistoryHolder(env, outHistory, "nativeScaleShapeTracked")) {
+        return 0;
+    }
+    return scaleShapeImpl(env, handle, ax, ay, az, factor, "nativeScaleShapeTracked", outHistory);
 }
 
 JNIEXPORT jlong JNICALL

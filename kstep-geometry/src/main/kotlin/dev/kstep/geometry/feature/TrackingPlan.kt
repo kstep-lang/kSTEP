@@ -85,6 +85,9 @@ internal object TrackingPlanner {
             val why =
                 if (source is ExtrudeRegionsFeature || source is RevolveRegionsFeature) {
                     "multi-body regions cannot name generated edges yet (ADR-0033)"
+                } else if (source is MirrorFeature || source is ScaleFeature) {
+                    "mirror/scale copy edges but generate none; name the edge at its generator before the step -- " +
+                        "GeneratedEdges(featureIndex = <generator>) is followed through the mirror/scale step"
                 } else {
                     "it generates no named edges (only extrude/revolve of a profile or region, external features " +
                         "that support naming, fillet, chamfer, boolean and hole can be generators)"
@@ -115,6 +118,8 @@ internal object TrackingPlanner {
                 GeneratorKind.BLEND
             is BooleanFeature -> GeneratorKind.BOOLEAN
             is HoleFeature -> GeneratorKind.HOLE
+            // Mirror/scale copy every edge one-to-one and generate none (ADR-0036).
+            is MirrorFeature, is ScaleFeature -> GeneratorKind.NONE
             else -> GeneratorKind.NONE
         }
 
@@ -231,6 +236,8 @@ internal object TrackingPlanner {
             is SelectedFilletFeature,
             is SelectedChamferFeature,
             is TranslateFeature,
+            is MirrorFeature,
+            is ScaleFeature,
             is BooleanFeature,
             is HoleFeature,
             -> true

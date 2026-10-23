@@ -124,7 +124,8 @@ class Placement private constructor(
                     for (k in 0 until 3) dot += matrix[4 * k + i] * matrix[4 * k + j]
                     val expected = if (i == j) 1.0 else 0.0
                     require(kotlin.math.abs(dot - expected) <= tolerance) {
-                        "rotation block must be orthonormal (no scaling or shear)"
+                        "rotation block must be orthonormal (no scaling or shear) -- a placement is rigid; " +
+                            "use scale(...) as a shape operation"
                     }
                 }
             }
@@ -132,7 +133,9 @@ class Placement private constructor(
                 matrix[0] * (matrix[5] * matrix[10] - matrix[6] * matrix[9]) -
                     matrix[1] * (matrix[4] * matrix[10] - matrix[6] * matrix[8]) +
                     matrix[2] * (matrix[4] * matrix[9] - matrix[5] * matrix[8])
-            require(det > 0.0) { "rotation block must have a positive determinant (no reflection)" }
+            require(det > 0.0) {
+                "rotation block must have a positive determinant (no reflection) -- use mirror(...) as a shape operation"
+            }
             return Placement(
                 doubleArrayOf(
                     matrix[0],

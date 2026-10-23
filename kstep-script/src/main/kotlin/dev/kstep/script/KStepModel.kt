@@ -110,6 +110,9 @@ class KStepModelBuilder internal constructor() {
      * geometry is merged, and the usage must be registered via `root(...)` and have a child that
      * carries geometry -- otherwise the export fails closed. A usage without `place(...)` whose
      * child has geometry is placed at the identity.
+     *
+     * A placement is rigid: no mirroring and no scaling (see ADR-0036). To mirror or scale a body use
+     * `mirror(...)` / `scale(...)` on the shape instead.
      */
     fun place(
         usage: NextAssemblyUsageOccurrence,

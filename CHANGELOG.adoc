@@ -9,6 +9,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Mirror and scale as shape operations (ADR-0036, Welle P). `OcctKernel.mirror(shape, plane)` and `scale(shape,
+  factor, about)` return a mirrored or uniformly scaled COPY (also `mirrorWithHistory` / `scaleWithHistory`), new
+  `MirrorPlane`, script-level `mirror(...)` / `scale(...)`, `MirrorFeature` / `ScaleFeature` in the feature history
+  (persistent edge names set before the step are followed through it). Scale factor within [1e-6, 1e6]; solid or
+  compound of solids as input, every result solid checked. Four new native entry points (`nativeMirrorShape`,
+  `nativeScaleShape` and their `Tracked` variants), no new OCCT toolkit. `OcctKernel.compound(shapes)` combines
+  separate bodies into one shape for one product definition (at most 32). Six example scripts plus
+  `hello-scale-invalid`, and `scripts/interop/verify-mirror-scale.sh` (with `--spike`).
 * Placement-aware render, preview and GLB (ADR-0035, Welle O). `kstep render`, `kstep asciidoc` and the preview
   pipeline now draw every instance of a placed assembly at its composed place (SVG, PNG and GLB; the GLB is one
   merged mesh). New public `AssemblyInstanceExpander` and `RigidPlacement.toGeometryPlacement()` in `kstep-shape`
@@ -53,6 +61,9 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* The messages of `Placement.fromRowMajor3x4`, `Rotation.fromAxes`, the native `nativeTransformShape` and the
+  exporter/preview refusal of two shapes on one product definition now name the way out (`mirror(...)`, `scale(...)`,
+  `OcctKernel.compound(...)`); the old wording is kept as a prefix. A placement stays rigid.
 * BREAKING (source): `GeneratedRole` gained the values `SECTION`, `BOUNDARY`, `RIM_ENTRY` and `RIM_EXIT`; an exhaustive
   `when` over `GeneratedRole` or `GenerationSource` in third-party code no longer compiles and needs the new
   branches. `GenerationMap` can carry images of derived sources (`images()` answers them by role).

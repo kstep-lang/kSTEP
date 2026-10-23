@@ -49,7 +49,8 @@ fun vec(
  * A rigid-body rotation (orthonormal, right-handed, determinant +1) stored the STEP-native way as
  * the images of the local Z axis ([axis]) and the local X axis ([refDirection]) in the parent
  * frame -- exactly `AXIS2_PLACEMENT_3D.axis` and `.ref_direction`. Scaling and mirroring are
- * unrepresentable: the third axis is always `axis x refDirection`.
+ * unrepresentable: the third axis is always `axis x refDirection`. To mirror or scale a body use the shape
+ * operations `mirror(...)` / `scale(...)` (ADR-0036), never a placement.
  */
 class Rotation private constructor(
     /** Local Z axis expressed in the parent frame (unit length). */
@@ -122,10 +123,12 @@ class Rotation private constructor(
         ): Rotation {
             require(axis.isFinite() && refDirection.isFinite()) { "axis and refDirection must be finite" }
             require(abs(axis.norm() - 1.0) <= TOLERANCE) {
-                "axis must have unit length (|axis| = ${axis.norm()}); normalise it explicitly"
+                "axis must have unit length (|axis| = ${axis.norm()}); normalise it explicitly -- " +
+                    "place() carries only rigid placements; for scaling use scale(...) on the shape"
             }
             require(abs(refDirection.norm() - 1.0) <= TOLERANCE) {
-                "refDirection must have unit length (|refDirection| = ${refDirection.norm()}); normalise it explicitly"
+                "refDirection must have unit length (|refDirection| = ${refDirection.norm()}); " +
+                    "normalise it explicitly -- place() carries only rigid placements; for scaling use scale(...) on the shape"
             }
             require(abs(axis dot refDirection) <= TOLERANCE) {
                 "axis and refDirection must be orthogonal (dot = ${axis dot refDirection})"
