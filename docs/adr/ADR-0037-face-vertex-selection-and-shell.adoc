@@ -1,0 +1,246 @@
+= ADR-0037: Face and vertex selection, `nearest(point)` and shell (Welle Q)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle Q). Builds on ADR-0031 (geometric edge selection), ADR-0033/0034 (persistent edge
+naming, history) and ADR-0036 (shape operations).
+
+== Context
+
+Edge selectors (ADR-0031) pick edges by direction, extremes, kind, length and the faces they bound. Three things were
+missing: there was no way to say "the edge nearest to this point", faces and vertices could not be selected on their own,
+and no operation took a face as its argument. The first useful face operation is the shell (hollowing a solid): the
+user names the face to open and the wall thickness.
+
+== Decisions
+
+D1:: *`nearest(point)` is geometric.* `Edges.nearest(point, within)`, `Faces.nearest(point, within)` and
+`Vertices.nearest(point, within)` measure the smallest distance from the point to the sub-shape: point to curve, point to
+the bounded face (zero on the face), euclidean for a vertex. Edges and faces are measured natively with one
+`BRepExtrema_DistShapeShape` per sub-shape inside one `g_mutex` section (`nativeShapeDistances`); a vertex needs no
+native call. It is NOT a midpoint distance: a long edge whose middle is far away can still be the nearest. Ties within
+`SelectionTolerance.linear` are ALL returned, never guessed; `expected = 1` turns a tie into an error that lists the
+candidates. Seam and degenerated edges are never candidates. `within` limits the candidates BEFORE the minimum is taken
+("the nearest edge among these"); `nearest(p) and X` intersects AFTER it, which is a different and usually empty result.
+The reference point must be finite and within +/-1e7, checked when the selector is built.
+
+D2:: *Face and vertex selectors.* `FaceSelector` gained `Faces.all()`, `Faces.nearest` and `and` / `or` / `minus`;
+the new `VertexSelector` has `Vertices.all()`, `atMax(direction)`, `atMin(direction)`, `nearest`, `ofEdge(edgeSelector)`
+and `and` / `or` / `minus`. `OcctKernel.selectFaces` and `selectVertices` resolve them strictly. `OcctShape.vertices`
+(`VertexInfo(index, point, edgeIndices)`, `TopExp::MapShapes(TopAbs_VERTEX)` order) is computed lazily and separately,
+so `edges` and `faces` do not pay for it. The three hierarchies share one evaluator (`SelectorEvaluator`) and one
+tree validator (`SelectorTree`): depth 32 and 256 nodes are counted over the WHOLE cross-nested tree (`ofFace`,
+`atVertex`, `ofEdge`, `within`). The validator is iterative and runs before anything hashes or compares a selector
+(`TrackingPlanner`, `FeatureRebuilder.planStructure`, `OcctKernel` naming), because `equals`, `hashCode` and `toString`
+of a ten-thousand-level data class recurse.
+
+D3:: *Faces and vertices as arguments.* A face selection is a `FaceReference` in the feature history: `SelectFaces`
+(selector, `expected`, tolerance, re-resolved on every rebuild) or `FaceIndices` (face indices of the base shape, NOT
+feature indices, never remapped). No operation consumes a vertex directly yet; a vertex selection steers edge
+operations through `Edges.atVertex(vertexSelector)` (every regular edge ending in one of the vertices), so a corner
+selection can drive fillet, chamfer and shell today.
+
+D4:: *One failure family.* `FaceSelectionException` and `VertexSelectionException` join `EdgeSelectionException` under
+the new base class `TopologySelectionException` (an `IllegalArgumentException`, so existing handlers keep working).
+Scripts report all three as `KSTEP-S-011`. The constant keeps its name `EDGE_SELECTION_FAILED`; its documentation now
+says "edge, face or vertex". No new code was introduced. An OCCT failure while hollowing is an `OcctGeometryException`
+(`KSTEP-S-003`) with a clear message, like fillet.
+
+D5:: *Shell.* `OcctKernel.shell(shape, openFaces, thickness, direction)` (index list or face selector), script function
+`shell(shape, faces, thickness, direction)`, `shellWithHistory`. The thickness is always POSITIVE; the direction is the
+enum `ShellDirection.INWARD` (the original surface stays the outside, the default) or `OUTWARD` (the original surface
+becomes the inside of the cavity). The mapping to OCCT's signed offset (`INWARD` -> `-t`, `OUTWARD` -> `+t`) lives only in
+the native code. OCCT call: `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin(S, closingFaces, offset,
+Precision::Confusion(), BRepOffset_Skin, Intersection = true, SelfInter = false, GeomAbs_Intersection, RemoveIntEdges =
+false)`. Rules, all checked in Kotlin before the native call and again natively under the lock: exactly one solid, at most
+200 faces, 1 to 64 distinct open face indices, at least one face stays closed, `0 < t < half the smallest bounding-box
+extent` in BOTH directions (a conservative kSTEP rule, see the measurements: OCCT itself accepts more). The result must be
+one valid solid with positive volume. The SIGN IS NEVER TRUSTED: the result's bounding box is compared with the request
+(`INWARD`: inside the input box and a smaller volume; `OUTWARD`: contains the input box, tolerance
+`1e-6 * max(1, size)`); a mismatch is an error "OCCT offset the wrong way", not a wrong body.
+
+D6:: *Feature integration and history.* `ShellFeature(baseIndex, openFaces: FaceReference, thickness, direction)` is a
+`DerivedFeature`; `FeatureIndexRemap`, `FeatureRebuilder` (plain and tracked) and `TrackingPlan` handle it with no `else`
+branch (the `generatorKind` `else` was replaced by an explicit list so a new feature type forces a decision). Measured:
+`MakeThickSolid` reports no `Modified()` and no `IsDeleted()` for any edge of the input and keeps all of them by identity
+in the result, so the existing `encodeEdgeHistory` gives `Kept` one to one. For an INWARD shell these are the edges of the
+outer skin, which is what `TrackedEdges` / `GeneratedEdges` named before the shell mean; history is supported. For an
+OUTWARD shell the same identity edges are the INNER edges of the cavity, which is rarely meant, so tracking through an
+outward shell is refused with that explanation (`supportsHistory` is `direction == INWARD`; `shellWithHistory` rejects
+`OUTWARD`). A shell is NOT a generator: the new inner wall has no persistent names yet (`GeneratorKind.NONE`, with a hint
+to name edges at their generator before the shell).
+
+D7:: *One new OCCT toolkit: TKOffset.* `BRepOffsetAPI_MakeThickSolid` lives in `libTKOffset` (verified with `nm -gU
+libTKOffset.dylib | grep MakeThickSolidByJoin` on macOS; `nm -D --defined-only` on Linux). `BRepExtrema_DistShapeShape`
+and `TopExp::MapShapesAndAncestors` are in toolkits that were already linked. On Ubuntu `libTKOffset.so` is expected in
+`libocct-modeling-algorithms-dev` (the package that already provides TKFillet and TKBO); that is NOT verified on this
+machine and is proven only by the CI Linux job (`-Wl,--no-undefined` fails the build otherwise). The CI jobs gained an
+explicit "TKOffset present" check next to the existing TKDESTEP one. TKOffset is part of OCCT, LGPL like the toolkits
+already used; no new third-party dependency.
+
+== Resolved questions
+
+* Q1, hand calculation: for the box [0,10] x [0,20] x [0,30] and the point (100, 10, 15) only TWO edges tie (the vertical
+  edges at x = 10, distance sqrt(90^2 + 10^2) = 90.554); the horizontal ones at x = 10 are 91.241 away and the four
+  corners at x = 10 are all sqrt(8425) = 91.788 away. A four-way edge tie is shown with the box centre (5, 10, 15): the
+  four vertical edges are sqrt(125) = 11.180 away, the edges in y sqrt(250), the edges in x sqrt(325). The four-way tie
+  at (100, 10, 15) is a property of the corners, i.e. of `Vertices.nearest`.
+* Q2: no feature consumes a vertex directly; vertices are usable through `Edges.atVertex` and `OcctKernel.selectVertices`.
+* Q3: `KSTEP-S-011` for selection failures on faces and vertices; `KSTEP-S-003` for OCCT shell failures; no new code.
+* Q4: the shell is implemented. A pocket or hole from a face and draft / thickening are NOT, see "Not in this wave".
+* Q5: the half-extent rule applies to both directions.
+
+== Measurements (OCCT 7.9.3, macOS arm64, `scripts/interop/spike_shell_history.cpp`)
+
+[cols="3,5"]
+|===
+| Question | Result
+
+| Signature in 7.9.3
+| `MakeThickSolidByJoin(S, ClosingFaces, Offset, Tol, Mode, Intersection, SelfInter, Join, RemoveIntEdges, Range)`, then
+  `Build()`; `IsDone()` decides
+
+| Box 40 x 30 x 20, top open, `GeomAbs_Intersection`, offset -2
+| V = 7152, bounding box unchanged [0,40] x [0,30] x [0,20], 1 solid, 11 faces, 24 edges, 16 vertices, valid
+
+| The same, offset +2
+| V = 8912, bounding box [-2,42] x [-2,32] x [-2,20], 11 faces, 24 edges, 16 vertices, valid
+
+| `GeomAbs_Arc`, offset -2 / +2
+| inward identical to Intersection (11 faces, 7152); outward 23 faces and V = 8707.9055 (rounded outer corners). Intersection
+  is the choice: it gives the exact box offset and the same topology in both directions
+
+| `Intersection` flag true / false (Intersection join)
+| identical results for the box (offset +2: 8912 both)
+
+| Cylinder r = 10, h = 20, top cap open, t = 1 inward
+| V = 1448.274213 = 461 pi, 5 faces (outer mantle, outer bottom, inner mantle, inner bottom, rim ring), 6 edges, 4 vertices
+
+| `Modified()` per input edge (box, cylinder, 12-prism; inward and outward)
+| empty for ALL edges; `IsDeleted()` false for all. (An earlier reading of "1 modified image" was an aliasing artefact: the
+  list returned by `Modified()` is a reference that `Generated()` overwrites.)
+
+| Identity survival of the input edges
+| 12 of 12 (box), 3 of 3 including the seam (cylinder), 36 of 36 (12-prism), in both directions
+
+| `Generated()` per input edge
+| one new edge each (the inner wall); not used
+
+| Faces
+| the opened face is `Modified` to the rim face; the five others survive by identity and each `Generated` one inner face
+
+| Tolerance `Tol` = `Precision::Confusion()`, 1e-6, 1e-4
+| identical results
+
+| Bounding-box noise
+| the result of a filleted shell has minima of -2e-16 to -2e-15 where the input has 0: the orientation guard needs a
+  tolerance (`1e-6 * max(1, size)`)
+
+| Offset 0
+| `IsDone() == false`
+
+| All six faces open
+| OCCT silently returns the UNCHANGED solid (V = 24000, 6 faces): refused by kSTEP
+
+| No face open (empty closing list)
+| OCCT returns the smaller offset solid (V = 14976), not a hollow body: refused by kSTEP
+
+| Compound of two boxes
+| `IsDone() == false`: refused by kSTEP (exactly one solid)
+
+| Box with the four vertical edges filleted r = 1, 3, 8, inward t = 2 .. 9.9
+| always valid; where t > r the inner round vanishes (19 -> 15 faces). The planned "fillet r = 1, t = 2" failure does
+  NOT occur
+
+| Inward t = 9.9 / 10 / 12 on the 40 x 30 x 20 box
+| OCCT accepts all three (V = 21918.996 / 22000 / 23232); the half-extent rule is a kSTEP choice, not an OCCT limit
+
+| Plate 60 x 60 x 40 with a through hole r = 6, outward offset 8 / 12 / 19
+| 8 valid; 12 and 19 close the hole: `BRepCheck_Analyzer` invalid, 15 faces. This is the real failure that the validity
+  check turns into an `OcctGeometryException` (`OcctShellTest`)
+
+| L-shaped prism (concave corner), offset -2 / 2 / -4.9 / 4.9
+| all valid, 15 faces
+
+| Shell time, n-gon prism with 50 / 98 / 198 / 398 side faces (52 / 100 / 200 / 400 faces)
+| 51.5 / 153.8 / 540.5 / 1983 ms
+
+| Point-to-edge `BRepExtrema_DistShapeShape`, 150 / 294 / 594 / 1194 edges
+| 0.5 / 0.9-1.0 / 1.9 / 3.8 ms in total
+
+| Point-to-face, 52 / 100 / 200 / 400 faces
+| 0.6 / 1.1 / 2.1-2.2 / 4.2-4.3 ms in total
+
+| Grid compound of 4872 faces, 9744 edges
+| 9744 edge queries 28.7-29.1 ms, 4872 face queries 30.8 ms
+|===
+
+== Limits and DoS
+
+* `MAX_SHELL_INPUT_FACES = 200` (shell time grows faster than linearly: 0.54 s at 200 faces, 2.0 s at 400),
+  `MAX_SHELL_OPEN_FACES = 64`, `MAX_NEAREST_CANDIDATES = 20000` (a query takes about 3 ms per thousand sub-shapes; the
+  existing query limits of 20000 edges and 10000 faces already bound it), `MAX_QUERY_VERTICES = 20000`. Each constant is
+  repeated in the native source and pinned by `NativeCodeContractTest`.
+* Selector trees: depth 32 and 256 nodes over all hierarchies (D2). The distance query is cached per (kind, point) with at
+  most 16 entries; one native call per query and kind, never one per candidate.
+* The native distance query rechecks kind, point (finite, +/-1e7) and count. A sub-shape OCCT cannot measure aborts the
+  query with an error instead of a guessed distance.
+* Messages list at most 32 candidates and name no paths or handles.
+
+== Security review notes
+
+[cols="2,5"]
+|===
+| Item | Handling
+
+| Mutex discipline
+| lookup, counts, the OCCT call, the validity and orientation checks, the history encoding and the distance sweep run
+  inside one `g_mutex` section each; `throwJava` and `registerShape` only after it (the mutex is not recursive)
+
+| Resource leaks
+| nothing is registered on any failure path; the temporary probe vertex of the distance query is a local and never
+  registered; tracked variants close the shape when decoding fails; leak tests compare `nativeLiveShapeCount` with slack
+
+| Vertex order
+| indexed over the vertex map and looked up in the ancestor map by key (`FindFromKey`), because the key order of
+  `MapShapesAndAncestors` is not promised to equal the vertex map's
+
+| Input hardening
+| NaN and infinity are rejected in Kotlin and again natively (thickness, point, direction); indices are checked for range
+  and uniqueness natively; CSR payloads are validated in Kotlin before use
+
+| Recursion
+| no recursive evaluation on unvalidated trees (D2)
+
+| SSRF, cryptography
+| not affected (no network, no keys)
+
+| Licence
+| TKOffset is OCCT (LGPL with the Open CASCADE exception), as the toolkits already linked
+|===
+
+== Not in this wave (Welle Q2)
+
+* *Pocket or hole from a face.* Needs a local coordinate system on the planar face, a sketch placement on that face, a
+  direction "into the face" and a history for the CUT, and it raises its own naming question (the walls, as `HoleWall`
+  does for holes).
+* *Draft* (`BRepOffsetAPI_DraftAngle`): different failure characteristics, a neutral plane as parameter; check the toolkit
+  with `nm` first. *Thickening a single face* needs the face as its own shape.
+* `TrackedFaces` / `GeneratedFaces` (needs an `encodeFaceHistory`), naming of the inner wall of a shell, a hole at a
+  vertex, `Faces.ofEdge` / `Faces.ofVertex`.
+* `RemoveIntEdges` and the `Arc` join (rounded outward corners) are not exposed.
+
+== Verification
+
+Hand calculations: box 40 x 30 x 20 (V 24000), top open: inward t = 2 gives 36 x 26 x 18 cavity, V = 24000 - 16848 = 7152,
+11 faces; outward t = 2 gives 44 x 34 x 22 - 24000 = 8912, box [-2,42] x [-2,32] x [-2,20]; at height 30 the inward shell is
+40*30*30 - 36*26*28 = 9792. Cylinder r 10, h 20, t 1: pi (10^2 20 - 9^2 19) = 461 pi = 1448.2742, 5 faces. Two faces open
+(x normals), t = 2: 24000 - 40 x 26 x 16 = 7360. Box 10 x 20 x 30, the two vertical edges nearest (100, 10, 15) rounded
+r = 2: 6000 - 2 (4 - pi) 30 = 5948.4956, 8 faces. Tracked outer vertical edges rounded r = 1 after the shell:
+7152 - 4 (1 - pi/4) 20 = 7134.8319, 15 faces.
+
+Tests: `FaceVertexSelectorTest`, `ShellValidationTest`, `NativeCodeContractTest` (no OCCT); `OcctFaceVertexSelectionTest`,
+`OcctShellTest`, `OcctShellFeatureTest`, `CliExportOcctFaceOpsIntegrationTest` (including FreeCAD) and
+`scripts/interop/verify-face-ops.sh` (FreeCAD 1.1.4 reads all five example exports as valid solids with exactly these
+volumes, face counts and bounding boxes; `--spike` runs `spike_shell_history.cpp`).

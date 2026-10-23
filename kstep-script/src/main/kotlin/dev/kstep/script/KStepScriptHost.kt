@@ -2,7 +2,7 @@ package dev.kstep.script
 
 import dev.kstep.core.DslViolation
 import dev.kstep.geometry.select.EdgeNamingException
-import dev.kstep.geometry.select.EdgeSelectionException
+import dev.kstep.geometry.select.TopologySelectionException
 import dev.kstep.sketch.SketchException
 import dev.kstep.sketch.SketchSolverUnavailableException
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -167,9 +167,10 @@ object KStepScriptHost {
                                 "${current.kind}: ${current.message}" +
                                     current.details.take(MAX_DETAIL_LINES).joinToString("") { "\n  - $it" }
                             )
-                    is EdgeSelectionException ->
+                    // Edges, faces and vertices (Welle Q, ADR-0037) share one family and one code.
+                    is TopologySelectionException ->
                         KStepScriptOutcomeCodes.EDGE_SELECTION_FAILED to
-                            (current.message ?: "edge selection failed")
+                            (current.message ?: "selection failed")
                     // Welle N (ADR-0033): edges named by what generated them are the same user-facing family.
                     is EdgeNamingException ->
                         KStepScriptOutcomeCodes.EDGE_SELECTION_FAILED to

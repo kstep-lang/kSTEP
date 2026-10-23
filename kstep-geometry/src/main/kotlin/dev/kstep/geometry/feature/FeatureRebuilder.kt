@@ -9,11 +9,14 @@ import dev.kstep.geometry.NamedShape
 import dev.kstep.geometry.OcctGeometryException
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctShape
+import dev.kstep.geometry.OperandEdges
+import dev.kstep.geometry.OperandFaces
 import dev.kstep.geometry.TrackedShape
 import dev.kstep.geometry.describe
 import dev.kstep.geometry.resolveGeneratedImages
 import dev.kstep.geometry.select.EdgeNamingException
 import dev.kstep.geometry.select.EdgeSelectionException
+import dev.kstep.geometry.select.SelectorTree
 
 /**
  * Replays a [FeatureSequence] against the existing, unchanged [OcctKernel] API, producing a fresh
@@ -161,8 +164,38 @@ object FeatureRebuilder {
                 }
             }
         }
+        // Selector trees first and iteratively: planning hashes and compares them, which recurses on a hostile deep tree.
+        validateSelectorTrees(sequence.features)
         // Structural planning of TrackedEdges / GeneratedEdges (ancestor, unique-path, generator checks).
         return TrackingPlanner.plan(sequence.features)
+    }
+
+    /** Bounds every selector tree in [features] (all hierarchies, ADR-0037) before anything hashes or compares them. */
+    private fun validateSelectorTrees(features: List<Feature>) {
+        fun edges(reference: EdgeReference) {
+            when (reference) {
+                is SelectEdges -> SelectorTree.validate(reference.selector)
+                is TrackedEdges -> SelectorTree.validate(reference.selector)
+                is GeneratedEdges -> {
+                    reference.within?.let { SelectorTree.validate(it) }
+                    reference.sources.forEach {
+                        when (it) {
+                            is OperandEdges -> SelectorTree.validate(it.selector)
+                            is OperandFaces -> SelectorTree.validate(it.selector)
+                            else -> Unit
+                        }
+                    }
+                }
+            }
+        }
+        features.forEach { feature ->
+            when (feature) {
+                is SelectedFilletFeature -> edges(feature.edges)
+                is SelectedChamferFeature -> edges(feature.edges)
+                is ShellFeature -> (feature.openFaces as? SelectFaces)?.let { SelectorTree.validate(it.selector) }
+                else -> Unit
+            }
+        }
     }
 
     private fun buildPlain(
@@ -227,6 +260,13 @@ object FeatureRebuilder {
                     feature.dirZ,
                 )
             is ChamferFeature -> OcctKernel.chamfer(built[feature.baseIndex], feature.edgeIndices, feature.distance)
+            is ShellFeature ->
+                OcctKernel.shell(
+                    built[feature.baseIndex],
+                    resolveFaces(feature.openFaces, feature.baseIndex, built),
+                    feature.thickness,
+                    feature.direction,
+                )
             is ExtrudeRegionFeature -> OcctKernel.extrudeRegion(feature.region, feature.height)
             is RevolveRegionFeature -> OcctKernel.revolveRegion(feature.region, feature.angleDegrees, feature.axis)
             is ExtrudeRegionsFeature -> OcctKernel.extrudeRegions(feature.regions, feature.height)
@@ -408,6 +448,13 @@ object FeatureRebuilder {
                     feature.aboutY,
                     feature.aboutZ,
                 )
+            is ShellFeature ->
+                OcctKernel.shellWithHistory(
+                    built[feature.baseIndex],
+                    resolveFaces(feature.openFaces, feature.baseIndex, built),
+                    feature.thickness,
+                    feature.direction,
+                )
             is BooleanFeature ->
                 OcctKernel.booleanWithHistory(feature.operation, built[feature.leftIndex], built[feature.rightIndex])
             is HoleFeature ->
@@ -446,6 +493,18 @@ object FeatureRebuilder {
             is ExternalRootFeature,
             ->
                 error("feature[$index] (${feature::class.simpleName}) cannot be built with edge history")
+        }
+
+    /** Resolves the faces a [ShellFeature] opens against the shape of its own base feature, afresh on every rebuild. */
+    private fun resolveFaces(
+        reference: FaceReference,
+        baseIndex: Int,
+        built: List<OcctShape>,
+    ): List<Int> =
+        when (reference) {
+            is SelectFaces ->
+                OcctKernel.selectFaces(built[baseIndex], reference.selector, reference.expected, reference.tolerance)
+            is FaceIndices -> reference.indices
         }
 
     private fun resolveEdges(

@@ -75,6 +75,7 @@
 #include <BRepGProp.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -100,6 +101,7 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
@@ -4201,5 +4203,476 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeSolidSummaries(JNIEnv* env, jobjec
     env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
     return result;
 }
+
+// ------------------------------------------------------------------------------------------
+// Welle Q (ADR-0037): vertex and distance queries, shell (hollowing). Same invariants as the rest of this file:
+// every dereference of a registry shape inside ONE g_mutex critical section; throwJava()/NewXArray()/
+// registerShape() only OUTSIDE it; nothing is registered on a failure path. Vertex order =
+// TopExp::MapShapes(TopAbs_VERTEX). Hand-synchronized with dev.kstep.geometry.OcctKernel's MAX_QUERY_VERTICES /
+// MAX_NEAREST_CANDIDATES / MAX_SHELL_INPUT_FACES / MAX_SHELL_OPEN_FACES and with ShellDirection.
+// ------------------------------------------------------------------------------------------
+constexpr int kMaxQueryVertices = 20000;
+constexpr int kMaxNearestCandidates = 20000;  // 9 744 point-to-edge queries: 29 ms (OCCT 7.9.3, ADR-0037)
+constexpr int kMaxShellInputFaces = 200;      // shell of a 200-face prism: 0.54 s, of a 400-face prism 2.0 s
+constexpr int kMaxShellOpenFaces = 64;
+constexpr int kShellInward = 0;
+constexpr int kShellOutward = 1;
+constexpr int kDistanceKindEdge = 1;
+constexpr int kDistanceKindFace = 2;
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeVertexInfo(JNIEnv* env, jobject /*self*/, jlong handle) {
+    bool found = false;
+    bool tooMany = false;
+    std::vector<double> rec;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape != nullptr) {
+            found = true;
+            TopTools_IndexedMapOfShape vertices;
+            TopExp::MapShapes(*shape, TopAbs_VERTEX, vertices);
+            if (vertices.Extent() > kMaxQueryVertices) {
+                tooMany = true;
+            } else {
+                rec.reserve(static_cast<size_t>(vertices.Extent()) * 3);
+                for (int i = 1; i <= vertices.Extent(); ++i) {
+                    const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vertices(i)));
+                    rec.push_back(p.X());
+                    rec.push_back(p.Y());
+                    rec.push_back(p.Z());
+                }
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error reading vertex info: ") + e.GetMessageString());
+        return nullptr;
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error reading vertex info: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error reading vertex info");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    if (tooMany) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeShapeVertexInfo: shape has more than " + std::to_string(kMaxQueryVertices) + " vertices");
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(rec.size()));
+    if (result == nullptr) return nullptr;
+    if (!rec.empty()) env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(rec.size()), rec.data());
+    return result;
+}
+
+/**
+ * CSR layout: [vertexCount, offsets (vertexCount + 1)..., edge indices...]. The vertex order is the vertex map's, NOT
+ * the key order of the ancestor map (which TopExp::MapShapesAndAncestors does not promise to equal): each vertex is
+ * looked up in the ancestor map by key. Edge indices are ascending and free of duplicates.
+ */
+JNIEXPORT jintArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeVertexEdges(JNIEnv* env, jobject /*self*/, jlong handle) {
+    bool found = false;
+    bool tooMany = false;
+    std::vector<jint> csr;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape != nullptr) {
+            found = true;
+            TopTools_IndexedMapOfShape vertices;
+            TopExp::MapShapes(*shape, TopAbs_VERTEX, vertices);
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(*shape, TopAbs_EDGE, edges);
+            if (vertices.Extent() > kMaxQueryVertices || edges.Extent() > kMaxQueryEdges) {
+                tooMany = true;
+            } else {
+                TopTools_IndexedDataMapOfShapeListOfShape ancestors;
+                TopExp::MapShapesAndAncestors(*shape, TopAbs_VERTEX, TopAbs_EDGE, ancestors);
+                std::vector<jint> offsets;
+                std::vector<jint> indices;
+                offsets.push_back(0);
+                for (int v = 1; v <= vertices.Extent(); ++v) {
+                    std::vector<jint> local;
+                    if (ancestors.Contains(vertices(v))) {
+                        for (TopTools_ListIteratorOfListOfShape it(ancestors.FindFromKey(vertices(v))); it.More(); it.Next()) {
+                            const int idx = edges.FindIndex(it.Value());
+                            if (idx > 0) local.push_back(static_cast<jint>(idx - 1));
+                        }
+                    }
+                    std::sort(local.begin(), local.end());
+                    local.erase(std::unique(local.begin(), local.end()), local.end());
+                    indices.insert(indices.end(), local.begin(), local.end());
+                    offsets.push_back(static_cast<jint>(indices.size()));
+                }
+                csr.push_back(static_cast<jint>(vertices.Extent()));
+                csr.insert(csr.end(), offsets.begin(), offsets.end());
+                csr.insert(csr.end(), indices.begin(), indices.end());
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error reading vertex edges: ") + e.GetMessageString());
+        return nullptr;
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error reading vertex edges: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error reading vertex edges");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    if (tooMany) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeShapeVertexEdges: shape exceeds the query limits (" + std::to_string(kMaxQueryVertices) + " vertices / " +
+                std::to_string(kMaxQueryEdges) + " edges)");
+        return nullptr;
+    }
+    jintArray result = env->NewIntArray(static_cast<jsize>(csr.size()));
+    if (result == nullptr) return nullptr;
+    env->SetIntArrayRegion(result, 0, static_cast<jsize>(csr.size()), csr.data());
+    return result;
+}
+
+/**
+ * Geometric distance from the point to every edge (kind 1) or face (kind 2), in MapShapes order, via one
+ * BRepExtrema_DistShapeShape per sub-shape. The temporary vertex is a local, never registered. A sub-shape OCCT cannot
+ * measure (IsDone() == false, or a non-finite value) aborts the whole query: a distance is never guessed.
+ */
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeDistances(
+    JNIEnv* env, jobject /*self*/, jlong handle, jint kind, jdouble x, jdouble y, jdouble z) {
+    if (kind != kDistanceKindEdge && kind != kDistanceKindFace) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeShapeDistances: kind must be 1 (edge) or 2 (face), got " + std::to_string(kind));
+        return nullptr;
+    }
+    for (double c : {x, y, z}) {
+        if (!std::isfinite(c) || std::abs(c) > kMaxAbsCoordinate) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                "nativeShapeDistances: the point must be finite and within +/-" + std::to_string(kMaxAbsCoordinate));
+            return nullptr;
+        }
+    }
+    bool found = false;
+    bool tooMany = false;
+    int failedIndex = -1;
+    std::vector<double> out;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape != nullptr) {
+            found = true;
+            TopTools_IndexedMapOfShape subs;
+            TopExp::MapShapes(*shape, kind == kDistanceKindEdge ? TopAbs_EDGE : TopAbs_FACE, subs);
+            if (subs.Extent() > kMaxNearestCandidates) {
+                tooMany = true;
+            } else {
+                BRepBuilderAPI_MakeVertex maker(gp_Pnt(x, y, z));
+                const TopoDS_Vertex probe = maker.Vertex();
+                out.reserve(static_cast<size_t>(subs.Extent()));
+                for (int i = 1; i <= subs.Extent(); ++i) {
+                    BRepExtrema_DistShapeShape dist(probe, subs(i));
+                    if (!dist.IsDone() || dist.NbSolution() < 1 || !std::isfinite(dist.Value())) {
+                        failedIndex = i - 1;
+                        break;
+                    }
+                    out.push_back(std::max(0.0, dist.Value()));
+                }
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error measuring distances: ") + e.GetMessageString());
+        return nullptr;
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("Native error measuring distances: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error measuring distances");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    if (tooMany) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            "nativeShapeDistances: more than " + std::to_string(kMaxNearestCandidates) + " " +
+                (kind == kDistanceKindEdge ? "edges" : "faces") + " to measure to");
+        return nullptr;
+    }
+    if (failedIndex >= 0) {
+        throwJava(
+            env, "java/lang/IllegalStateException",
+            std::string("distance query failed for ") + (kind == kDistanceKindEdge ? "edge " : "face ") +
+                std::to_string(failedIndex));
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    if (!out.empty()) env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
+}
+
+/**
+ * Hollows a single solid. OCCT's MakeThickSolidByJoin takes a SIGNED offset: negative moves the new skin into the
+ * material (the original surface stays the outside), positive moves it outwards. kSTEP exposes a positive thickness plus
+ * a direction; the mapping to the OCCT sign lives only here (measured: -2 on a 40x30x20 box keeps the bounding box and
+ * gives V = 7152, +2 gives [-2,42]x[-2,32]x[-2,20] and V = 8912, ADR-0037). The sign is never trusted: the result's
+ * bounding box is checked against the requested direction and a mismatch is an error, not a wrong body.
+ * Lookup, every OCCT call and every check run inside ONE g_mutex critical section.
+ */
+static jlong shellShapeImpl(
+    JNIEnv* env, jlong handle, jintArray openFaces, jdouble thickness, jint direction, const char* fn,
+    jobjectArray outHistory) {
+    const std::string name(fn);
+    if (openFaces == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", name + ": openFaces must not be null");
+        return 0;
+    }
+    const jsize openCount = env->GetArrayLength(openFaces);
+    if (openCount < 1 || openCount > kMaxShellOpenFaces) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            name + ": openFaces must have between 1 and " + std::to_string(kMaxShellOpenFaces) + " entries, got " +
+                std::to_string(openCount));
+        return 0;
+    }
+    if (!std::isfinite(thickness) || thickness < kMinDimension || thickness > kMaxDimension) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            name + ": thickness must be finite and within [" + std::to_string(kMinDimension) + ", " +
+                std::to_string(kMaxDimension) + "], got " + std::to_string(thickness));
+        return 0;
+    }
+    if (direction != kShellInward && direction != kShellOutward) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException",
+            name + ": direction must be 0 (inward) or 1 (outward), got " + std::to_string(direction));
+        return 0;
+    }
+    std::vector<jint> open(static_cast<size_t>(openCount));
+    env->GetIntArrayRegion(openFaces, 0, openCount, open.data());
+    if (env->ExceptionCheck()) {
+        return 0;
+    }
+    enum Failure {
+        kOk, kUnknownHandle, kNotSingleSolid, kTooManyFaces, kBadFace, kTooThick, kFailed, kNotOneSolid, kInvalid,
+        kOrientation, kBounds, kHistory
+    };
+    try {
+        Failure failure = kOk;
+        int solids = 0;
+        int faceCount = 0;
+        jint badFace = 0;
+        double minExtent = 0.0;
+        std::vector<jint> history;
+        TopoDS_Shape result;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape == nullptr) {
+                failure = kUnknownHandle;
+            } else {
+                solids = countSolids(*shape);
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+                faceCount = faces.Extent();
+                if (solids != 1) {
+                    failure = kNotSingleSolid;
+                } else if (faceCount > kMaxShellInputFaces) {
+                    failure = kTooManyFaces;
+                } else {
+                    std::vector<jint> sorted(open);
+                    std::sort(sorted.begin(), sorted.end());
+                    for (size_t i = 0; i < sorted.size() && failure == kOk; ++i) {
+                        if (sorted[i] < 0 || sorted[i] >= faceCount || (i > 0 && sorted[i] == sorted[i - 1])) {
+                            failure = kBadFace;
+                            badFace = sorted[i];
+                        }
+                    }
+                    // Opening every face leaves nothing to hollow: OCCT then silently returns the solid unchanged.
+                    if (failure == kOk && static_cast<int>(sorted.size()) >= faceCount) {
+                        failure = kBadFace;
+                        badFace = -1;
+                    }
+                }
+                Bnd_Box before;
+                double bx0 = 0, by0 = 0, bz0 = 0, bx1 = 0, by1 = 0, bz1 = 0;
+                if (failure == kOk) {
+                    BRepBndLib::AddOptimal(*shape, before, Standard_False, Standard_False);
+                    if (before.IsVoid()) {
+                        failure = kBounds;
+                    } else {
+                        before.Get(bx0, by0, bz0, bx1, by1, bz1);
+                        minExtent = std::min({bx1 - bx0, by1 - by0, bz1 - bz0});
+                        if (!(thickness < minExtent / 2.0)) failure = kTooThick;
+                    }
+                }
+                double volumeBefore = 0.0;
+                if (failure == kOk) {
+                    GProp_GProps props;
+                    BRepGProp::VolumeProperties(*shape, props);
+                    volumeBefore = props.Mass();
+                    TopTools_ListOfShape closing;
+                    for (jint idx : open) closing.Append(faces(idx + 1));
+                    BRepOffsetAPI_MakeThickSolid maker;
+                    const double offset = (direction == kShellInward ? -1.0 : 1.0) * thickness;
+                    maker.MakeThickSolidByJoin(
+                        *shape, closing, offset, Precision::Confusion(), BRepOffset_Skin, Standard_True, Standard_False,
+                        GeomAbs_Intersection, Standard_False);
+                    maker.Build();
+                    if (!maker.IsDone()) {
+                        failure = kFailed;
+                    } else {
+                        TopoDS_Shape raw = maker.Shape();
+                        if (countSolids(raw) != 1) {
+                            failure = kNotOneSolid;
+                        } else {
+                            result = unwrapSingleSolid(raw);
+                            const SolidCheckResult check = runSolidChecks(result);
+                            if (!check.valid || !check.positiveVolume) {
+                                failure = kInvalid;
+                            } else {
+                                Bnd_Box after;
+                                BRepBndLib::AddOptimal(result, after, Standard_False, Standard_False);
+                                if (after.IsVoid()) {
+                                    failure = kBounds;
+                                } else {
+                                    double ax0, ay0, az0, ax1, ay1, az1;
+                                    after.Get(ax0, ay0, az0, ax1, ay1, az1);
+                                    for (double c : {ax0, ay0, az0, ax1, ay1, az1}) {
+                                        if (!std::isfinite(c) || std::abs(c) > kMaxAbsCoordinate) failure = kBounds;
+                                    }
+                                    if (failure == kOk) {
+                                        const double size = std::max({bx1 - bx0, by1 - by0, bz1 - bz0, 1.0});
+                                        const double eps = 1e-6 * size;
+                                        const bool inside =
+                                            ax0 >= bx0 - eps && ay0 >= by0 - eps && az0 >= bz0 - eps &&
+                                            ax1 <= bx1 + eps && ay1 <= by1 + eps && az1 <= bz1 + eps;
+                                        const bool contains =
+                                            ax0 <= bx0 + eps && ay0 <= by0 + eps && az0 <= bz0 + eps &&
+                                            ax1 >= bx1 - eps && ay1 >= by1 - eps && az1 >= bz1 - eps;
+                                        GProp_GProps after_props;
+                                        BRepGProp::VolumeProperties(result, after_props);
+                                        if (direction == kShellInward) {
+                                            if (!inside || !(after_props.Mass() < volumeBefore)) failure = kOrientation;
+                                        } else if (!contains) {
+                                            failure = kOrientation;
+                                        }
+                                    }
+                                    if (failure == kOk && outHistory != nullptr &&
+                                        !encodeEdgeHistory(maker, {shape}, result, history)) {
+                                        failure = kHistory;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }  // g_mutex released here
+        switch (failure) {
+            case kOk:
+                break;
+            case kUnknownHandle:
+                throwUnknownHandle(env, handle);
+                return 0;
+            case kNotSingleSolid:
+                throwJava(
+                    env, "java/lang/IllegalArgumentException",
+                    name + ": needs exactly one solid, got " + std::to_string(solids));
+                return 0;
+            case kTooManyFaces:
+                throwJava(
+                    env, "java/lang/IllegalArgumentException",
+                    name + ": shape has " + std::to_string(faceCount) + " faces, more than " +
+                        std::to_string(kMaxShellInputFaces));
+                return 0;
+            case kBadFace:
+                if (badFace == -1) {
+                    throwJava(
+                        env, "java/lang/IllegalArgumentException",
+                        name + ": at least one face must stay closed, but all " + std::to_string(faceCount) +
+                            " faces were opened");
+                } else {
+                    throwJava(
+                        env, "java/lang/IllegalArgumentException",
+                        name + ": open face index " + std::to_string(badFace) + " is out of range 0.." +
+                            std::to_string(faceCount - 1) + " or listed twice");
+                }
+                return 0;
+            case kTooThick:
+                throwJava(
+                    env, "java/lang/IllegalArgumentException",
+                    name + ": thickness " + std::to_string(thickness) + " must be less than half the smallest extent (" +
+                        std::to_string(minExtent / 2.0) + ")");
+                return 0;
+            case kFailed:
+                throwJava(env, "java/lang/IllegalStateException", name + ": OCCT could not build the shell (IsDone() is false)");
+                return 0;
+            case kNotOneSolid:
+                throwJava(env, "java/lang/IllegalStateException", name + ": OCCT did not return exactly one solid");
+                return 0;
+            case kInvalid:
+                throwJava(
+                    env, "java/lang/IllegalStateException",
+                    name + ": the shell failed OCCT's own validity check (the wall is probably too thick for the geometry)");
+                return 0;
+            case kOrientation:
+                throwJava(
+                    env, "java/lang/IllegalStateException",
+                    name + ": OCCT offset the wrong way (result bounding box contradicts the requested direction)");
+                return 0;
+            case kBounds:
+                throwJava(
+                    env, "java/lang/IllegalArgumentException",
+                    name + ": result must stay within +/-" + std::to_string(kMaxAbsCoordinate));
+                return 0;
+            case kHistory:
+                throwJava(env, "java/lang/IllegalArgumentException", name + ": edge history exceeds the size limit");
+                return 0;
+        }
+        if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": OCCT error: " + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": native error: " + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": unknown native error");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShellShape(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray openFaces, jdouble thickness, jint direction) {
+    return shellShapeImpl(env, handle, openFaces, thickness, direction, "nativeShellShape", nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShellShapeTracked(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray openFaces, jdouble thickness, jint direction,
+    jobjectArray outHistory) {
+    if (!checkHistoryHolder(env, outHistory, "nativeShellShapeTracked")) {
+        return 0;
+    }
+    return shellShapeImpl(env, handle, openFaces, thickness, direction, "nativeShellShapeTracked", outHistory);
+}
+
 
 }  // extern "C"

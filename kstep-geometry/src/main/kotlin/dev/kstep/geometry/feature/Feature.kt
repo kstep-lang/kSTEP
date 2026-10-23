@@ -6,7 +6,9 @@ import dev.kstep.geometry.GenerationSource
 import dev.kstep.geometry.ProfilePoint
 import dev.kstep.geometry.ProfileRegion
 import dev.kstep.geometry.RevolveAxis
+import dev.kstep.geometry.ShellDirection
 import dev.kstep.geometry.select.EdgeSelector
+import dev.kstep.geometry.select.FaceSelector
 import dev.kstep.geometry.select.SelectionTolerance
 
 /**
@@ -16,7 +18,8 @@ import dev.kstep.geometry.select.SelectionTolerance
  * Two kinds of case: root features that build a shape from scalars ([BoxFeature],
  * [ExtrudeFeature], [CylinderFeature], [RevolveFeature]) and [DerivedFeature]s that consume one or
  * more EARLIER shapes of the same sequence, referenced by index ([FilletFeature],
- * [ChamferFeature], [TranslateFeature], [MirrorFeature], [ScaleFeature], [BooleanFeature], [HoleFeature]). The split exists so
+ * [ChamferFeature], [TranslateFeature], [MirrorFeature], [ScaleFeature], [ShellFeature], [BooleanFeature],
+ * [HoleFeature]). The split exists so
  * [FeatureRebuilder] can validate every referenced index generically (ADR-0015 anticipated it once
  * a second `baseIndex`-carrying feature existed; ADR-0029 introduced it).
  *
@@ -261,6 +264,46 @@ data class SelectedChamferFeature(
     val baseIndex: Int,
     val edges: EdgeReference,
     val distance: Double,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/**
+ * Which faces a [ShellFeature] opens, described geometrically instead of by opaque index (Welle Q, ADR-0037).
+ */
+sealed interface FaceReference
+
+/**
+ * Resolve [selector] against the shape of the feature's own `baseIndex`, afresh on every rebuild. [expected], if
+ * set, must equal the number of matched faces; an empty or ambiguous match is an error listing the candidates.
+ */
+data class SelectFaces(
+    val selector: FaceSelector,
+    val expected: Int? = null,
+    val tolerance: SelectionTolerance = SelectionTolerance(),
+) : FaceReference
+
+/**
+ * Open exactly the faces with these 0-based FACE indices of the base shape (`MapShapes(TopAbs_FACE)` order, the
+ * order of `OcctShape.faces`) -- the index API's counterpart of [SelectFaces]. These are face indices of the base
+ * shape, NOT feature indices: [FeatureIndexRemap] never rewrites them.
+ */
+data class FaceIndices(
+    val indices: List<Int>,
+) : FaceReference
+
+/**
+ * Replays [dev.kstep.geometry.OcctKernel.shell] (Welle Q, ADR-0037): hollows the shape of feature [baseIndex], opening
+ * the faces [openFaces] and growing a wall of [thickness] (> 0) in [direction]. A tracked edge can be followed through
+ * an INWARD shell (the original edges stay the edges of the outer skin); an OUTWARD shell cannot be tracked through.
+ * A shell is not a generator: the new inner wall has no persistent names yet -- name edges at their generator
+ * before the shell.
+ */
+data class ShellFeature(
+    val baseIndex: Int,
+    val openFaces: FaceReference,
+    val thickness: Double,
+    val direction: ShellDirection = ShellDirection.INWARD,
 ) : DerivedFeature {
     override val baseIndices: List<Int> get() = listOf(baseIndex)
 }

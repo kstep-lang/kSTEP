@@ -8,8 +8,13 @@ import dev.kstep.geometry.select.EdgeSelection
 import dev.kstep.geometry.select.EdgeSelectionException
 import dev.kstep.geometry.select.EdgeSelector
 import dev.kstep.geometry.select.FaceKind
+import dev.kstep.geometry.select.FaceSelection
+import dev.kstep.geometry.select.FaceSelector
 import dev.kstep.geometry.select.Point3
 import dev.kstep.geometry.select.SelectionTolerance
+import dev.kstep.geometry.select.SelectorTree
+import dev.kstep.geometry.select.VertexSelection
+import dev.kstep.geometry.select.VertexSelector
 import kotlin.math.abs
 
 /**
@@ -171,6 +176,20 @@ object OcctKernel {
 
     /** Welle L: upper bound on the faces of a queryable shape ([OcctShape.faces]); mirrors `kMaxQueryFaces`. */
     const val MAX_QUERY_FACES: Int = 10_000
+
+    /** Welle Q (ADR-0037): upper bound on the vertices of a queryable shape ([OcctShape.vertices]); mirrors `kMaxQueryVertices`. */
+    const val MAX_QUERY_VERTICES: Int = 20_000
+
+    /** Welle Q: upper bound on the edges or faces one `nearest(...)` query measures to; mirrors `kMaxNearestCandidates`.
+     *  Measured: 9 744 point-to-edge queries take 29 ms (OCCT 7.9.3), so the bound leaves about 2x headroom. */
+    const val MAX_NEAREST_CANDIDATES: Int = 20_000
+
+    /** Welle Q: upper bound on the faces of a shape [shell] accepts; mirrors `kMaxShellInputFaces`. Measured: the
+     *  shell of a 200-face prism takes 0.54 s and of a 400-face prism 2.0 s (OCCT 7.9.3, ADR-0037). */
+    const val MAX_SHELL_INPUT_FACES: Int = 200
+
+    /** Welle Q: upper bound on the faces one [shell] opens; mirrors `kMaxShellOpenFaces`. */
+    const val MAX_SHELL_OPEN_FACES: Int = 64
 
     /** Welle P (ADR-0036): smallest accepted [scale] factor; mirrors `kMinScaleFactor` in `kstep_occt_bridge.cpp`. */
     const val MIN_SCALE_FACTOR: Double = 1e-6
@@ -974,7 +993,175 @@ object OcctKernel {
         tolerance: SelectionTolerance = SelectionTolerance(),
     ): List<Int> {
         requireAvailable()
-        return EdgeSelection.resolve(shape.edges, shape.faces, selector, expected, tolerance)
+        return EdgeSelection.resolve(shape.selectionContext(), selector, expected, tolerance)
+    }
+
+    /**
+     * Resolves a face [selector] against [shape] and returns the matching 0-based face indices (ascending), the
+     * indices [shell] accepts. Never guesses: an empty result, or a count different from [expected], throws
+     * [FaceSelectionException] listing the candidates (ADR-0037).
+     *
+     * @throws IllegalArgumentException for an invalid selector (depth/node limits), [expected] or tolerance.
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     */
+    fun selectFaces(
+        shape: OcctShape,
+        selector: FaceSelector,
+        expected: Int? = null,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): List<Int> {
+        requireAvailable()
+        return FaceSelection.resolve(shape.selectionContext(), selector, expected, tolerance)
+    }
+
+    /**
+     * Resolves a vertex [selector] against [shape] and returns the matching 0-based vertex indices (ascending, the
+     * order of [OcctShape.vertices]). Vertices steer edge operations through `Edges.atVertex`. Never guesses; see
+     * [selectFaces]. Throws [VertexSelectionException] for an empty or ambiguous result (ADR-0037).
+     */
+    fun selectVertices(
+        shape: OcctShape,
+        selector: VertexSelector,
+        expected: Int? = null,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): List<Int> {
+        requireAvailable()
+        return VertexSelection.resolve(shape.selectionContext(), selector, expected, tolerance)
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Welle Q (ADR-0037): shell (hollowing) of a solid.
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Hollows [shape] (OCCT: `BRepOffsetAPI_MakeThickSolid`): the faces [openFaceIndices] are removed and the remaining
+     * faces get a wall of [thickness] -- into the material for [ShellDirection.INWARD] (the original outer surface is
+     * kept), outwards for [ShellDirection.OUTWARD] (the original surface becomes the inside of the cavity). [shape] is
+     * neither modified nor consumed. The thickness is always positive; the direction is the enum.
+     *
+     * The wall must be thinner than half the smallest bounding-box extent, in BOTH directions (a conservative rule
+     * that keeps OCCT away from self-intersecting offsets). Indices are 0-based into the same face order as
+     * [OcctShape.faces] / [selectFaces].
+     *
+     * @throws IllegalArgumentException if [openFaceIndices] is empty, has more than [MAX_SHELL_OPEN_FACES] entries, a
+     *   negative or duplicate index, an index beyond the faces of [shape], or opens every face; if [thickness] is not
+     *   finite, outside `[[MIN_DIMENSION], [MAX_DIMENSION]]` or not less than half the smallest extent; if [shape] has
+     *   more than [MAX_SHELL_INPUT_FACES] faces or is not exactly one solid.
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT cannot build the shell or the result is invalid (for example a wall that
+     *   closes a narrow hole).
+     */
+    fun shell(
+        shape: OcctShape,
+        openFaceIndices: Collection<Int>,
+        thickness: Double,
+        direction: ShellDirection = ShellDirection.INWARD,
+    ): OcctShape {
+        requireShellArguments(openFaceIndices, thickness)
+        requireAvailable()
+        requireShellOperand(shape, thickness)
+        val indices = openFaceIndices.toIntArray()
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeShellShape(h, indices, thickness, direction.nativeCode)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to shell shape (thickness $thickness, $direction)", e)
+                }
+            }
+        return OcctShape(handle)
+    }
+
+    /**
+     * [shell] that opens the faces [openFaces] resolves to (see [selectFaces]). Never guesses: a selection that matches
+     * nothing, or a count different from [expected], throws [FaceSelectionException] listing the candidates.
+     */
+    fun shell(
+        shape: OcctShape,
+        openFaces: FaceSelector,
+        thickness: Double,
+        direction: ShellDirection = ShellDirection.INWARD,
+        expected: Int? = null,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): OcctShape = shell(shape, selectFaces(shape, openFaces, expected, tolerance), thickness, direction)
+
+    /**
+     * [shell] that also returns the [EdgeHistory]. Measured (ADR-0037): `MakeThickSolid` keeps every edge of the
+     * original solid by identity, so an INWARD shell tracks each original edge to the same edge of the outer skin. An
+     * OUTWARD shell keeps the original edges as the INNER edges of the cavity, which is rarely what a caller means, so
+     * history is only offered for [ShellDirection.INWARD].
+     *
+     * @throws IllegalArgumentException additionally if [direction] is [ShellDirection.OUTWARD].
+     */
+    fun shellWithHistory(
+        shape: OcctShape,
+        openFaceIndices: Collection<Int>,
+        thickness: Double,
+        direction: ShellDirection = ShellDirection.INWARD,
+    ): TrackedShape {
+        require(direction == ShellDirection.INWARD) {
+            "edges cannot be tracked through an OUTWARD shell: the original edges become the inner edges of the " +
+                "cavity (ADR-0037); use INWARD, or name the edges after the shell"
+        }
+        requireShellArguments(openFaceIndices, thickness)
+        requireAvailable()
+        requireShellOperand(shape, thickness)
+        val indices = openFaceIndices.toIntArray()
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeShellShapeTracked(h, indices, thickness, direction.nativeCode, holder)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to shell shape (thickness $thickness, $direction)", e)
+                }
+            }
+        return trackedResult(handle, holder, listOf(shape))
+    }
+
+    /** The scalar rules of [shell], checked before any native call. */
+    private fun requireShellArguments(
+        openFaceIndices: Collection<Int>,
+        thickness: Double,
+    ) {
+        require(thickness.isFinite()) { "shell thickness must be finite, got $thickness" }
+        require(thickness in MIN_DIMENSION..MAX_DIMENSION) {
+            "shell thickness must be within [$MIN_DIMENSION, $MAX_DIMENSION], got $thickness"
+        }
+        require(openFaceIndices.isNotEmpty()) { "shell needs at least one face to open" }
+        require(openFaceIndices.size <= MAX_SHELL_OPEN_FACES) {
+            "shell opens at most $MAX_SHELL_OPEN_FACES faces, got ${openFaceIndices.size}"
+        }
+        require(openFaceIndices.all { it >= 0 }) { "shell face indices must not be negative: $openFaceIndices" }
+        require(openFaceIndices.toSet().size == openFaceIndices.size) {
+            "shell face indices must be unique: $openFaceIndices"
+        }
+    }
+
+    /** The rules that need the shape itself; the native side re-derives all of them under its lock. */
+    private fun requireShellOperand(
+        shape: OcctShape,
+        thickness: Double,
+    ) {
+        requireSingleSolidOperand(shape, "shell")
+        require(shape.topology.solids == 1) { "shell needs exactly one solid, got ${shape.topology.solids}" }
+        val faces = shape.topology.faces
+        require(faces <= MAX_SHELL_INPUT_FACES) {
+            "shell input has $faces faces, more than the limit of $MAX_SHELL_INPUT_FACES"
+        }
+        val box = shape.boundingBox
+        if (box != null) {
+            val smallest = minOf(box.maxX - box.minX, box.maxY - box.minY, box.maxZ - box.minZ)
+            require(thickness < smallest / 2.0) {
+                "shell thickness $thickness must be less than half the smallest extent (${smallest / 2.0})"
+            }
+        }
     }
 
     /** [fillet] on the edges [selector] resolves to (see [selectEdges]). */
@@ -1599,7 +1786,7 @@ object OcctKernel {
             "at most $MAX_NAMING_SOURCES generation sources are allowed, got ${sources.size}"
         }
         // Selector trees first and iteratively: hashing, comparing or describing a hostile deep tree recurses.
-        sources.forEach { if (it is OperandEdges) EdgeSelection.validateTree(it.selector) }
+        sources.forEach { validateSourceSelector(it) }
         require(sources.toSet().size == sources.size) { "duplicate generation source" }
         sources.forEach { source ->
             require(source is DerivedGenerationSource) {
@@ -1615,6 +1802,14 @@ object OcctKernel {
                     HoleWall -> operation == DerivedOperation.HOLE
                 }
             require(fits) { "${source.describe()} does not fit a ${operationName(operation)}" }
+        }
+    }
+
+    private fun validateSourceSelector(source: GenerationSource) {
+        when (source) {
+            is OperandEdges -> SelectorTree.validate(source.selector)
+            is OperandFaces -> SelectorTree.validate(source.selector)
+            else -> Unit
         }
     }
 

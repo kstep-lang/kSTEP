@@ -1,8 +1,6 @@
 package dev.kstep.geometry.select
 
 import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.sin
 
 /**
  * Tolerances used when evaluating selectors against real geometry.
@@ -48,16 +46,18 @@ class EdgeSelectionException(
     val expected: Int?,
     val matched: List<Int>,
     val candidates: List<EdgeInfo>,
-) : IllegalArgumentException(message)
+) : TopologySelectionException(message)
 
 /** Resolves [EdgeSelector]s against edge/face geometry. Pure Kotlin, testable without OCCT. */
 object EdgeSelection {
-    const val MAX_SELECTOR_DEPTH: Int = 32
-    const val MAX_SELECTOR_NODES: Int = 256
+    const val MAX_SELECTOR_DEPTH: Int = SelectorTree.MAX_DEPTH
+    const val MAX_SELECTOR_NODES: Int = SelectorTree.MAX_NODES
     const val MAX_LISTED_CANDIDATES: Int = 32
 
     /**
      * Resolves [selector] against [edges]/[faces] and returns the matching edge indices, ascending.
+     * `Edges.nearest` and `Edges.atVertex` need a shape to measure/query and are therefore only available through
+     * [dev.kstep.geometry.OcctKernel.selectEdges]; here they fail with an [IllegalArgumentException].
      *
      * @param expected if non-null, the result must have exactly this many edges.
      * @throws IllegalArgumentException if the selector tree exceeds [MAX_SELECTOR_DEPTH] /
@@ -70,10 +70,28 @@ object EdgeSelection {
         selector: EdgeSelector,
         expected: Int? = null,
         tolerance: SelectionTolerance = SelectionTolerance(),
+    ): List<Int> = resolve(bareContext(edges, faces), selector, expected, tolerance)
+
+    private fun bareContext(
+        edges: List<EdgeInfo>,
+        faces: List<FaceInfo>,
+    ) = SelectionContext(
+        edges,
+        faces,
+        { throw IllegalArgumentException("vertex selectors need a shape; resolve through OcctKernel.selectEdges") },
+        null,
+    )
+
+    internal fun resolve(
+        ctx: SelectionContext,
+        selector: EdgeSelector,
+        expected: Int?,
+        tolerance: SelectionTolerance,
     ): List<Int> {
         validateTree(selector)
         require(expected == null || expected >= 1) { "expected must be at least 1, got $expected" }
-        val matched = Evaluator(edges, faces, tolerance).edgeSet(selector).sorted()
+        val edges = ctx.edges
+        val matched = SelectorEvaluator(ctx, tolerance).edgeSet(selector).sorted()
         if (matched.isEmpty()) {
             val regular = edges.filter { !it.seam && !it.degenerated }
             throw EdgeSelectionException(
@@ -100,60 +118,34 @@ object EdgeSelection {
 
     /**
      * Resolves a face [selector] against [faces] and returns the matching face indices, ascending (Welle N2,
-     * ADR-0034). Strict like [resolve]: nothing matched is an [EdgeNamingException]-free empty result handled by
-     * the caller, which lists the candidates.
+     * ADR-0034). NOT strict: an empty result is handled by the caller, which lists the candidates (strict resolution
+     * is [FaceSelection.resolve]).
      */
     internal fun resolveFaces(
         edges: List<EdgeInfo>,
         faces: List<FaceInfo>,
         selector: FaceSelector,
         tolerance: SelectionTolerance = SelectionTolerance(),
-    ): List<Int> = Evaluator(edges, faces, tolerance).faceSet(selector).sorted()
-
-    internal fun validateTree(root: EdgeSelector) {
-        var nodes = 0
-        val stack = ArrayDeque<Pair<EdgeSelector, Int>>()
-        stack.addLast(root to 1)
-        while (stack.isNotEmpty()) {
-            val (node, depth) = stack.removeLast()
-            nodes++
-            require(depth <= MAX_SELECTOR_DEPTH) { "selector nesting exceeds $MAX_SELECTOR_DEPTH levels" }
-            require(nodes <= MAX_SELECTOR_NODES) { "selector has more than $MAX_SELECTOR_NODES nodes" }
-            when (node) {
-                is AndSelector -> {
-                    stack.addLast(node.left to depth + 1)
-                    stack.addLast(node.right to depth + 1)
-                }
-                is OrSelector -> {
-                    stack.addLast(node.left to depth + 1)
-                    stack.addLast(node.right to depth + 1)
-                }
-                is MinusSelector -> {
-                    stack.addLast(node.left to depth + 1)
-                    stack.addLast(node.right to depth + 1)
-                }
-                is EdgesOfFaceSelector -> nodes++
-                else -> Unit
-            }
-        }
+    ): List<Int> {
+        validateTree(selector)
+        return SelectorEvaluator(bareContext(edges, faces), tolerance).faceSet(selector).sorted()
     }
+
+    /** Bounds a selector tree over all hierarchies; see [SelectorTree.validate]. */
+    internal fun validateTree(root: Any) = SelectorTree.validate(root)
 
     private fun candidateLines(list: List<EdgeInfo>): String {
         val shown = list.take(MAX_LISTED_CANDIDATES).joinToString("\n") { "  " + describe(it) }
         val more =
-            if (list.size >
-                MAX_LISTED_CANDIDATES
-            ) {
-                "\n  ... and ${list.size - MAX_LISTED_CANDIDATES} more"
-            } else {
-                ""
-            }
+            if (list.size > MAX_LISTED_CANDIDATES) "\n  ... and ${list.size - MAX_LISTED_CANDIDATES} more" else ""
         return shown + more
     }
 
     private fun num(v: Double) = String.format(Locale.ROOT, "%.4g", v)
 
     private fun pt(p: Point3) = "(${num(p.x)}, ${num(p.y)}, ${num(p.z)})"
+
+    private fun dir(d: Direction3) = "${num(d.x)}, ${num(d.y)}, ${num(d.z)}"
 
     private fun describe(e: EdgeInfo): String {
         val geometry =
@@ -169,15 +161,14 @@ object EdgeSelection {
     internal fun describe(s: EdgeSelector): String =
         when (s) {
             AllEdgesSelector -> "all()"
-            is ParallelToSelector -> "parallelTo(${num(s.direction.x)}, ${num(s.direction.y)}, ${num(s.direction.z)})"
+            is ParallelToSelector -> "parallelTo(${dir(s.direction)})"
             is EdgeTypeSelector -> "ofType(${s.kind}${s.radius?.let { ", radius=${num(it)}" } ?: ""})"
-            is EdgeExtremeSelector ->
-                "${if (s.max) "atMax" else "atMin"}(${num(
-                    s.direction.x,
-                )}, ${num(s.direction.y)}, ${num(s.direction.z)})"
+            is EdgeExtremeSelector -> "${if (s.max) "atMax" else "atMin"}(${dir(s.direction)})"
             is EdgesOfFaceSelector -> "ofFace(${describe(s.face)})"
             is EdgeLengthSelector -> if (s.longest) "longest()" else "shortest()"
             SeamEdgesSelector -> "seams()"
+            is NearestEdgeSelector -> "nearest(${pt(s.point)}${s.within?.let { ", within=${describe(it)}" } ?: ""})"
+            is EdgesAtVertexSelector -> "atVertex(${describe(s.vertex)})"
             is AndSelector -> "(${describe(s.left)} and ${describe(s.right)})"
             is OrSelector -> "(${describe(s.left)} or ${describe(s.right)})"
             is MinusSelector -> "(${describe(s.left)} minus ${describe(s.right)})"
@@ -185,134 +176,49 @@ object EdgeSelection {
 
     internal fun describe(s: FaceSelector): String =
         when (s) {
-            is FaceNormalSelector -> "normal(${num(s.direction.x)}, ${num(s.direction.y)}, ${num(s.direction.z)})"
-            is FaceExtremeSelector ->
-                "${if (s.max) "atMax" else "atMin"}(${num(
-                    s.direction.x,
-                )}, ${num(s.direction.y)}, ${num(s.direction.z)})"
+            is FaceNormalSelector -> "normal(${dir(s.direction)})"
+            is FaceExtremeSelector -> "${if (s.max) "atMax" else "atMin"}(${dir(s.direction)})"
             is FaceTypeSelector -> "ofType(${s.kind}${s.radius?.let { ", radius=${num(it)}" } ?: ""})"
+            AllFacesSelector -> "all()"
+            is NearestFaceSelector -> "nearest(${pt(s.point)}${s.within?.let { ", within=${describe(it)}" } ?: ""})"
+            is FaceAndSelector -> "(${describe(s.left)} and ${describe(s.right)})"
+            is FaceOrSelector -> "(${describe(s.left)} or ${describe(s.right)})"
+            is FaceMinusSelector -> "(${describe(s.left)} minus ${describe(s.right)})"
         }
 
-    private class Evaluator(
-        val edges: List<EdgeInfo>,
-        val faces: List<FaceInfo>,
-        val tol: SelectionTolerance,
-    ) {
-        private val regular: List<EdgeInfo> = edges.filter { !it.seam && !it.degenerated }
+    internal fun describe(s: VertexSelector): String =
+        when (s) {
+            AllVerticesSelector -> "all()"
+            is VertexExtremeSelector -> "${if (s.max) "atMax" else "atMin"}(${dir(s.direction)})"
+            is NearestVertexSelector -> "nearest(${pt(s.point)}${s.within?.let { ", within=${describe(it)}" } ?: ""})"
+            is VerticesOfEdgeSelector -> "ofEdge(${describe(s.edge)})"
+            is VertexAndSelector -> "(${describe(s.left)} and ${describe(s.right)})"
+            is VertexOrSelector -> "(${describe(s.left)} or ${describe(s.right)})"
+            is VertexMinusSelector -> "(${describe(s.left)} minus ${describe(s.right)})"
+        }
 
-        fun edgeSet(s: EdgeSelector): Set<Int> =
-            when (s) {
-                AllEdgesSelector -> regular.map { it.index }.toSet()
-                is ParallelToSelector -> {
-                    val d = s.direction.unit()
-                    regular
-                        .filter { e ->
-                            val ed = e.direction
-                            e.kind == EdgeKind.LINE &&
-                                ed != null &&
-                                crossMagnitude(d, ed.unit()) <= sin(tol.angularRadians)
-                        }.map { it.index }
-                        .toSet()
-                }
-                is EdgeTypeSelector ->
-                    regular
-                        .filter { e ->
-                            e.kind == s.kind &&
-                                (s.radius == null || (e.radius != null && abs(e.radius - s.radius) <= tol.linear))
-                        }.map { it.index }
-                        .toSet()
-                is EdgeExtremeSelector -> extremeEdges(s)
-                is EdgesOfFaceSelector -> {
-                    val matchedFaces = faceSet(s.face)
-                    val regularIndices = regular.map { it.index }.toSet()
-                    faces
-                        .filter { it.index in matchedFaces }
-                        .flatMap { it.edgeIndices }
-                        .filter { it in regularIndices }
-                        .toSet()
-                }
-                is EdgeLengthSelector -> {
-                    if (regular.isEmpty()) {
-                        emptySet()
-                    } else {
-                        val target = if (s.longest) regular.maxOf { it.length } else regular.minOf { it.length }
-                        regular.filter { abs(it.length - target) <= tol.linear }.map { it.index }.toSet()
-                    }
-                }
-                SeamEdgesSelector -> edges.filter { it.seam && !it.degenerated }.map { it.index }.toSet()
-                is AndSelector -> edgeSet(s.left).intersect(edgeSet(s.right))
-                is OrSelector -> edgeSet(s.left).union(edgeSet(s.right))
-                is MinusSelector -> edgeSet(s.left).subtract(edgeSet(s.right))
+    internal fun faceCandidateLines(faces: List<FaceInfo>): String {
+        val shown =
+            faces.take(MAX_LISTED_CANDIDATES).joinToString("\n") { f ->
+                val normal = f.normal?.let { " normal=(${dir(it)})" } ?: ""
+                "  #${f.index} ${f.kind} area=${num(f.area)} centroid=${pt(f.centroid)}$normal"
             }
+        val more =
+            if (faces.size > MAX_LISTED_CANDIDATES) "\n  ... and ${faces.size - MAX_LISTED_CANDIDATES} more" else ""
+        return shown + more
+    }
 
-        private fun extremeEdges(s: EdgeExtremeSelector): Set<Int> {
-            if (regular.isEmpty()) return emptySet()
-            val d = s.direction.unit()
-
-            // Per edge: the projection range of its three sampled points.
-            fun low(e: EdgeInfo) = minOf(proj(d, e.start), proj(d, e.mid), proj(d, e.end))
-
-            fun high(e: EdgeInfo) = maxOf(proj(d, e.start), proj(d, e.mid), proj(d, e.end))
-            return if (s.max) {
-                val m = regular.maxOf { high(it) }
-                regular.filter { low(it) >= m - tol.linear }.map { it.index }.toSet()
+    internal fun vertexCandidateLines(vertices: List<VertexInfo>): String {
+        val shown =
+            vertices.take(MAX_LISTED_CANDIDATES).joinToString("\n") { v ->
+                "  #${v.index} ${pt(v.point)} edges=${v.edgeIndices}"
+            }
+        val more =
+            if (vertices.size > MAX_LISTED_CANDIDATES) {
+                "\n  ... and ${vertices.size - MAX_LISTED_CANDIDATES} more"
             } else {
-                val m = regular.minOf { low(it) }
-                regular.filter { high(it) <= m + tol.linear }.map { it.index }.toSet()
+                ""
             }
-        }
-
-        fun faceSet(s: FaceSelector): Set<Int> =
-            when (s) {
-                is FaceNormalSelector -> {
-                    val d = s.direction.unit()
-                    faces
-                        .filter { f ->
-                            val n = f.normal?.unit()
-                            f.kind == FaceKind.PLANE &&
-                                n != null &&
-                                dot(d, n) > 0.0 &&
-                                crossMagnitude(d, n) <= sin(tol.angularRadians)
-                        }.map { it.index }
-                        .toSet()
-                }
-                is FaceExtremeSelector -> {
-                    if (faces.isEmpty()) {
-                        emptySet()
-                    } else {
-                        val d = s.direction.unit()
-                        val values = faces.map { proj(d, it.centroid) }
-                        val target = if (s.max) values.max() else values.min()
-                        faces.filter { abs(proj(d, it.centroid) - target) <= tol.linear }.map { it.index }.toSet()
-                    }
-                }
-                is FaceTypeSelector ->
-                    faces
-                        .filter { f ->
-                            f.kind == s.kind &&
-                                (s.radius == null || (f.radius != null && abs(f.radius - s.radius) <= tol.linear))
-                        }.map { it.index }
-                        .toSet()
-            }
-
-        private fun proj(
-            d: Direction3,
-            p: Point3,
-        ) = d.x * p.x + d.y * p.y + d.z * p.z
-
-        private fun dot(
-            a: Direction3,
-            b: Direction3,
-        ) = a.x * b.x + a.y * b.y + a.z * b.z
-
-        private fun crossMagnitude(
-            a: Direction3,
-            b: Direction3,
-        ): Double {
-            val cx = a.y * b.z - a.z * b.y
-            val cy = a.z * b.x - a.x * b.z
-            val cz = a.x * b.y - a.y * b.x
-            return kotlin.math.sqrt(cx * cx + cy * cy + cz * cz)
-        }
+        return shown + more
     }
 }

@@ -466,6 +466,61 @@ object OcctBridge {
         outMap: Array<IntArray?>,
     ): Long
 
+    // ---------------------------------------------------------------------------------------
+    // Welle Q (ADR-0037): vertex / distance queries and the shell operation
+    // ---------------------------------------------------------------------------------------
+
+    /** One record of 3 doubles (x, y, z) per vertex, in `TopExp::MapShapes(TopAbs_VERTEX)` order. */
+    external fun nativeShapeVertexInfo(handle: Long): DoubleArray
+
+    /**
+     * CSR vertex-to-edge adjacency: `[vertexCount, offsets (vertexCount + 1)..., edge indices...]`, edge indices into
+     * the `MapShapes(TopAbs_EDGE)` order; vertex `i` is the `i`-th vertex of [nativeShapeVertexInfo].
+     */
+    external fun nativeShapeVertexEdges(handle: Long): IntArray
+
+    /**
+     * The geometric distance (`BRepExtrema_DistShapeShape`) from the point `(x, y, z)` to every edge (`kind` 1) or
+     * every face (`kind` 2) of the shape, in index order. Seam and degenerated edges are measured like any other.
+     *
+     * @throws IllegalArgumentException for a bad `kind`, a non-finite point or one beyond
+     *   [dev.kstep.geometry.OcctKernel.MAX_ABS_COORDINATE], or more than
+     *   [dev.kstep.geometry.OcctKernel.MAX_NEAREST_CANDIDATES] sub-shapes.
+     * @throws IllegalStateException if `handle` is unknown or OCCT could not measure one of the sub-shapes.
+     */
+    external fun nativeShapeDistances(
+        handle: Long,
+        kind: Int,
+        x: Double,
+        y: Double,
+        z: Double,
+    ): DoubleArray
+
+    /**
+     * Hollows a single solid (`BRepOffsetAPI_MakeThickSolid`): the faces `openFaces` (0-based, `MapShapes(FACE)`
+     * order) are removed and the wall grows `thickness` (> 0) inward (`direction` 0) or outward (`direction` 1).
+     *
+     * @throws IllegalArgumentException for invalid arguments, or a shape beyond
+     *   [dev.kstep.geometry.OcctKernel.MAX_SHELL_INPUT_FACES], or a thickness of half the smallest extent or more.
+     * @throws IllegalStateException if `handle` is unknown, OCCT fails, or the result is invalid or does not match
+     *   the requested direction.
+     */
+    external fun nativeShellShape(
+        handle: Long,
+        openFaces: IntArray,
+        thickness: Double,
+        direction: Int,
+    ): Long
+
+    /** Same as [nativeShellShape] plus the encoded edge history in `outHistory[0]`. */
+    external fun nativeShellShapeTracked(
+        handle: Long,
+        openFaces: IntArray,
+        thickness: Double,
+        direction: Int,
+        outHistory: Array<IntArray?>,
+    ): Long
+
     /** Number of shapes currently registered in the native handle registry (test-only handle hygiene). */
     external fun nativeLiveShapeCount(): Int
 }

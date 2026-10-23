@@ -9,6 +9,22 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Face and vertex selection, `nearest(point)` and shell (ADR-0037, Welle Q). `Edges.nearest(point, within)`,
+  `Faces.nearest` and `Vertices.nearest` pick the sub-shape(s) with the smallest GEOMETRIC distance to a point
+  (`BRepExtrema_DistShapeShape`, ties are all returned); new `Faces.all()`, face `and`/`or`/`minus`, the
+  `VertexSelector` family (`Vertices.all/atMax/atMin/nearest/ofEdge`), `Edges.atVertex`, `OcctKernel.selectFaces` /
+  `selectVertices`, `OcctShape.vertices` (`VertexInfo`), `TopologySelectionException` as common base of the three
+  selection failures (`KSTEP-S-011` in scripts; the constant keeps its name). One selector-tree validator now bounds
+  depth 32 / 256 nodes over all cross-nested hierarchies, iteratively and before any hashing. `OcctKernel.shell` (face
+  indices or a face selector, a positive thickness and `ShellDirection.INWARD`/`OUTWARD`), `shellWithHistory`, the
+  script function `shell(...)` and `ShellFeature` with `SelectFaces` / `FaceIndices` in the feature history: an edge
+  named before an INWARD shell is followed through it, an OUTWARD shell cannot be tracked through (refused with the
+  reason). The wall must be thinner than half the smallest extent, the input at most 200 faces. Five new native entry
+  points (`nativeShapeVertexInfo`, `nativeShapeVertexEdges`, `nativeShapeDistances`, `nativeShellShape`,
+  `nativeShellShapeTracked`) and ONE new OCCT toolkit, `TKOffset` (the CI jobs check for it; on Ubuntu it is expected in
+  `libocct-modeling-algorithms-dev`, proven only by the CI Linux job). Eight example scripts and
+  `scripts/interop/verify-face-ops.sh` (with `--spike`). Not included: a pocket or hole from a face, draft and thickening
+  (planned as Welle Q2), naming of the inner wall of a shell, `TrackedFaces`; see ADR-0037.
 * Mirror and scale as shape operations (ADR-0036, Welle P). `OcctKernel.mirror(shape, plane)` and `scale(shape,
   factor, about)` return a mirrored or uniformly scaled COPY (also `mirrorWithHistory` / `scaleWithHistory`), new
   `MirrorPlane`, script-level `mirror(...)` / `scale(...)`, `MirrorFeature` / `ScaleFeature` in the feature history

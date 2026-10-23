@@ -31,4 +31,19 @@ class NativeCodeContractTest :
             OcctKernel.MAX_DERIVED_QUERIES shouldBe 4096
             OcctKernel.MAX_NAMING_SOURCES shouldBe 1024
         }
+
+        "shell and query constants match the native bridge source" {
+            val cpp = java.io.File("src/main/cpp/kstep_occt_bridge.cpp").readText()
+
+            fun constant(name: String) =
+                Regex("""constexpr\s+\w+\s+$name\s*=\s*(\d+)""").find(cpp)!!.groupValues[1].toInt()
+            constant("kShellInward") shouldBe ShellDirection.INWARD.nativeCode
+            constant("kShellOutward") shouldBe ShellDirection.OUTWARD.nativeCode
+            constant("kMaxShellInputFaces") shouldBe OcctKernel.MAX_SHELL_INPUT_FACES
+            constant("kMaxShellOpenFaces") shouldBe OcctKernel.MAX_SHELL_OPEN_FACES
+            constant("kMaxNearestCandidates") shouldBe OcctKernel.MAX_NEAREST_CANDIDATES
+            constant("kMaxQueryVertices") shouldBe OcctKernel.MAX_QUERY_VERTICES
+            constant("kDistanceKindEdge") shouldBe dev.kstep.geometry.select.SubShapeKind.EDGE.nativeCode
+            constant("kDistanceKindFace") shouldBe dev.kstep.geometry.select.SubShapeKind.FACE.nativeCode
+        }
     })

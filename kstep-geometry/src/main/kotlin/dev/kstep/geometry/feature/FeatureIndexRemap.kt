@@ -23,6 +23,8 @@ internal fun Feature.remapIndices(f: (Int) -> Int): Feature =
         is TranslateFeature -> copy(baseIndex = f(baseIndex))
         is MirrorFeature -> copy(baseIndex = f(baseIndex))
         is ScaleFeature -> copy(baseIndex = f(baseIndex))
+        // FaceReference carries FACE indices of the base shape, not feature indices: nothing to remap.
+        is ShellFeature -> copy(baseIndex = f(baseIndex))
         is HoleFeature -> copy(baseIndex = f(baseIndex))
         is BooleanFeature -> copy(leftIndex = f(leftIndex), rightIndex = f(rightIndex))
         is SelectedFilletFeature -> copy(baseIndex = f(baseIndex), edges = edges.remapIndices(f))

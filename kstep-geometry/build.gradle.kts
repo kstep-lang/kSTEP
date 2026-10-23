@@ -239,6 +239,13 @@ val compileOcctBridge =
                     // BRepBuilderAPI_MakeEdge/MakeWire and BRepGProp in TKTopAlgo -- all already linked above --
                     // verified by the unchanged link line linking cleanly (ld64 rejects undefined symbols;
                     // `-Wl,--no-undefined` does the same on Linux).
+                    // Welle Q (ADR-0037) adds ONE toolkit: BRepOffsetAPI_MakeThickSolid (the shell) lives in
+                    // TKOffset -- verified with `nm -gU libTKOffset.dylib | grep MakeThickSolidByJoin` on macOS
+                    // (`nm -D --defined-only libTKOffset.so` on Linux). BRepExtrema_DistShapeShape (nearest) is in
+                    // TKTopAlgo and TopExp::MapShapesAndAncestors / BRepBuilderAPI_MakeVertex in TKTopAlgo/TKBRep, all
+                    // already linked. TKOffset ships with TKFillet (libocct-modeling-algorithms-dev on Ubuntu);
+                    // `-Wl,--no-undefined` re-verifies the set at every Linux build.
+                    "-lTKOffset",
                     // Ubuntu's g++ defaults to --enable-new-dtags, which makes -Wl,-rpath below
                     // emit DT_RUNPATH instead of DT_RPATH. ld.so does NOT consult DT_RUNPATH when
                     // resolving a shared object's own *transitive* dependencies (only DT_NEEDED

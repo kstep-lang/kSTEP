@@ -11,6 +11,7 @@ internal class BoxFixture(
 ) {
     val edges: List<EdgeInfo>
     val faces: List<FaceInfo>
+    val vertices: List<VertexInfo>
 
     init {
         data class Raw(
@@ -77,7 +78,61 @@ internal class BoxFixture(
                 c[pl.axis] = pl.value
                 FaceInfo(f, FaceKind.PLANE, 1.0, Point3(c[0], c[1], c[2]), pl.normal, null, null, faceEdgeIndices[f])
             }
+        val corners =
+            listOf(0.0, dx).flatMap { x ->
+                listOf(0.0, dy).flatMap { y -> listOf(0.0, dz).map { z -> Point3(x, y, z) } }
+            }
+        vertices =
+            corners.mapIndexed { i, c ->
+                VertexInfo(i, c, edges.filter { it.start == c || it.end == c }.map { it.index })
+            }
     }
+
+    /** Analytic point-to-segment and point-to-rectangle distances: stands in for BRepExtrema in OCCT-free tests. */
+    val oracle: DistanceOracle =
+        DistanceOracle { kind, p ->
+            when (kind) {
+                SubShapeKind.EDGE -> DoubleArray(edges.size) { distanceToSegment(p, edges[it].start, edges[it].end) }
+                SubShapeKind.FACE -> DoubleArray(faces.size) { distanceToFace(p, faces[it]) }
+            }
+        }
+
+    fun context(withOracle: Boolean = true) =
+        SelectionContext(edges, faces, { vertices }, if (withOracle) oracle else null)
+
+    private fun distanceToSegment(
+        p: Point3,
+        a: Point3,
+        b: Point3,
+    ): Double {
+        val abx = b.x - a.x
+        val aby = b.y - a.y
+        val abz = b.z - a.z
+        val len2 = abx * abx + aby * aby + abz * abz
+        val t = (((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / len2).coerceIn(0.0, 1.0)
+        return dist(p, Point3(a.x + t * abx, a.y + t * aby, a.z + t * abz))
+    }
+
+    private fun distanceToFace(
+        p: Point3,
+        f: FaceInfo,
+    ): Double {
+        // Every face of the box is axis aligned: clamp the point into the face's rectangle.
+        val n = f.normal!!
+        val c = f.centroid
+        val q =
+            Point3(
+                if (n.x != 0.0) c.x else p.x.coerceIn(0.0, dx),
+                if (n.y != 0.0) c.y else p.y.coerceIn(0.0, dy),
+                if (n.z != 0.0) c.z else p.z.coerceIn(0.0, dz),
+            )
+        return dist(p, q)
+    }
+
+    private fun dist(
+        a: Point3,
+        b: Point3,
+    ) = sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z))
 
     fun zEdges() = edges.filter { abs(it.direction!!.z) > 0.5 }.map { it.index }
 }

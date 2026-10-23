@@ -48,6 +48,17 @@ data class FaceInfo(
     val edgeIndices: List<Int>,
 )
 
+/**
+ * One vertex of an `OcctShape`. [index] is the 0-based position in `TopExp::MapShapes(TopAbs_VERTEX)` order;
+ * [edgeIndices] are the edges (EDGE order, ascending) that end in this vertex.
+ */
+data class VertexInfo(
+    val index: Int,
+    val point: Point3,
+    val edgeIndices: List<Int>,
+)
+
+internal const val VERTEX_RECORD = 3
 internal const val EDGE_RECORD = 20
 internal const val FACE_RECORD = 12
 
@@ -219,5 +230,52 @@ internal fun decodeFaceInfo(
             radius = if (kind == FaceKind.CYLINDER) finiteAt(raw, base + 11) else null,
             edgeIndices = adjacency.edgesOfFace[i],
         )
+    }
+}
+
+/**
+ * Decodes `nativeShapeVertexInfo` (3 doubles per vertex) with the vertex-to-edge adjacency (`vertexEdges`, CSR:
+ * `[vertexCount, offsets (vertexCount + 1)..., edge indices...]`) into [VertexInfo]s. Pure and OCCT-free.
+ *
+ * @throws IllegalStateException on any inconsistency (length, count bound, non-finite number, offsets, index range).
+ */
+internal fun decodeVertexInfo(
+    raw: DoubleArray,
+    vertexEdges: IntArray,
+    edgeCount: Int,
+): List<VertexInfo> {
+    check(raw.size % VERTEX_RECORD == 0) {
+        "malformed vertex payload: size ${raw.size} is not a multiple of $VERTEX_RECORD"
+    }
+    val vertexCount = raw.size / VERTEX_RECORD
+    check(vertexCount <= OcctKernel.MAX_QUERY_VERTICES) {
+        "malformed vertex payload: $vertexCount vertices exceed ${OcctKernel.MAX_QUERY_VERTICES}"
+    }
+    check(vertexEdges.isNotEmpty()) { "native vertex-edge payload must carry a vertex count header" }
+    check(vertexEdges[0] == vertexCount) {
+        "malformed native payload: vertex info has $vertexCount vertices but adjacency has ${vertexEdges[0]}"
+    }
+    val offsetsEnd = 1 + vertexCount + 1
+    check(vertexEdges.size >= offsetsEnd) {
+        "malformed vertex-edge payload: size ${vertexEdges.size} too small for $vertexCount vertices"
+    }
+    val indexCount = vertexEdges.size - offsetsEnd
+    check(vertexEdges[1] == 0) { "malformed vertex-edge payload: first offset must be 0" }
+    check(vertexEdges[offsetsEnd - 1] == indexCount) {
+        "malformed vertex-edge payload: last offset ${vertexEdges[offsetsEnd - 1]} != index count $indexCount"
+    }
+    return List(vertexCount) { v ->
+        val from = vertexEdges[1 + v]
+        val to = vertexEdges[2 + v]
+        check(from in 0..to && to <= indexCount) { "malformed vertex-edge payload: bad offsets for vertex $v" }
+        val edges = ArrayList<Int>(to - from)
+        for (i in from until to) {
+            val e = vertexEdges[offsetsEnd + i]
+            check(e in 0 until edgeCount) {
+                "malformed vertex-edge payload: edge index $e out of range for $edgeCount edges"
+            }
+            edges.add(e)
+        }
+        VertexInfo(v, point(raw, v * VERTEX_RECORD), edges)
     }
 }

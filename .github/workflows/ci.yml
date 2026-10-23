@@ -276,6 +276,11 @@ jobs:
             echo "::error::No libTKXCAF.so (libocct-ocaf-dev); kstep-geometry links -lTKXCAF."
             exit 1
           fi
+          # Welle Q (ADR-0037) additionally links -lTKOffset (BRepOffsetAPI_MakeThickSolid).
+          if [ ! -f /usr/lib/x86_64-linux-gnu/libTKOffset.so ]; then
+            echo "::error::No libTKOffset.so (expected in libocct-modeling-algorithms-dev); kstep-geometry links -lTKOffset."
+            exit 1
+          fi
           grep -m1 'OCC_VERSION_COMPLETE  *"' /usr/include/opencascade/Standard_Version.hxx || true
         # Turns a future silent image change into one explicit line instead of an opaque
         # "cannot find -lTKDESTEP" deep inside a Gradle Exec task's output.
@@ -481,6 +486,11 @@ jobs:
           if [ ! -f "$P/lib/libTKDESTEP.dylib" ]; then
             echo "::error::This runner's OCCT predates 7.8 (no libTKDESTEP.dylib)."
             ls "$P"/lib/libTK*.dylib | head -50 || true
+            exit 1
+          fi
+          # Welle Q (ADR-0037) additionally links -lTKOffset (BRepOffsetAPI_MakeThickSolid).
+          if [ ! -f "$P/lib/libTKOffset.dylib" ]; then
+            echo "::error::No libTKOffset.dylib; kstep-geometry links -lTKOffset."
             exit 1
           fi
           grep -m1 'OCC_VERSION_COMPLETE  *"' "$P/include/opencascade/Standard_Version.hxx" || true

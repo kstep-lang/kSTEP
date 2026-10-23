@@ -1,10 +1,14 @@
 package dev.kstep.geometry
 
 import dev.kstep.geometry.occt.OcctBridge
+import dev.kstep.geometry.select.DistanceOracle
 import dev.kstep.geometry.select.EdgeInfo
 import dev.kstep.geometry.select.FaceInfo
+import dev.kstep.geometry.select.SelectionContext
+import dev.kstep.geometry.select.VertexInfo
 import dev.kstep.geometry.select.decodeEdgeInfo
 import dev.kstep.geometry.select.decodeFaceInfo
+import dev.kstep.geometry.select.decodeVertexInfo
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.lang.ref.Cleaner
 import java.lang.ref.Reference
@@ -140,6 +144,47 @@ class OcctShape internal constructor(
             // See topologyValue's KDoc above -- same use-after-free hazard, same fix.
             Reference.reachabilityFence(this)
         }
+    }
+
+    /**
+     * Every vertex with the edges that end in it, in `TopExp::MapShapes(TopAbs_VERTEX)` order (computed on first
+     * access, cached; kept separate from [edges]/[faces] so those do not pay for it). Welle Q, ADR-0037.
+     *
+     * @throws IllegalStateException if this shape is already [close]d.
+     * @throws IllegalArgumentException if the shape exceeds the query limits.
+     */
+    val vertices: List<VertexInfo>
+        get() {
+            checkOpen()
+            return verticesValue
+        }
+
+    private val verticesValue: List<VertexInfo> by lazy {
+        try {
+            val raw = OcctBridge.nativeShapeVertexInfo(handle)
+            val adjacency = OcctBridge.nativeShapeVertexEdges(handle)
+            decodeVertexInfo(raw, adjacency, topologyValue.edges)
+        } finally {
+            // See topologyValue's KDoc above -- same use-after-free hazard, same fix.
+            Reference.reachabilityFence(this)
+        }
+    }
+
+    /**
+     * What a selector needs to be evaluated against this shape: edges, faces, lazily the vertices, and the native
+     * distance query behind `nearest(...)`. `internal`: only [OcctKernel] resolves selectors.
+     */
+    internal fun selectionContext(): SelectionContext {
+        checkOpen()
+        return SelectionContext(
+            edges = edges,
+            faces = faces,
+            vertices = { vertices },
+            oracle =
+                DistanceOracle { kind, point ->
+                    withHandle { h -> OcctBridge.nativeShapeDistances(h, kind.nativeCode, point.x, point.y, point.z) }
+                },
+        )
     }
 
     /**

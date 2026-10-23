@@ -9,8 +9,9 @@ import dev.kstep.geometry.HoleWall
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OperandEdges
 import dev.kstep.geometry.OperandFaces
+import dev.kstep.geometry.ShellDirection
 import dev.kstep.geometry.describe
-import dev.kstep.geometry.select.EdgeSelection
+import dev.kstep.geometry.select.SelectorTree
 
 /** One operation on the path from a tracked edge's source feature to its consumer: feature [nodeIndex], reading the path through its operand [operandSlot]. */
 internal class TrackStep(
@@ -74,7 +75,13 @@ internal object TrackingPlanner {
                 "got ${reference.sources.size}"
         }
         // Selector trees first and iteratively: hashing, comparing or describing a hostile deep tree recurses.
-        reference.sources.forEach { if (it is OperandEdges) EdgeSelection.validateTree(it.selector) }
+        reference.sources.forEach {
+            when (it) {
+                is OperandEdges -> SelectorTree.validate(it.selector)
+                is OperandFaces -> SelectorTree.validate(it.selector)
+                else -> Unit
+            }
+        }
         require(reference.sources.toSet().size == reference.sources.size) {
             "feature[$consumer] GeneratedEdges contains duplicate sources"
         }
@@ -85,6 +92,10 @@ internal object TrackingPlanner {
             val why =
                 if (source is ExtrudeRegionsFeature || source is RevolveRegionsFeature) {
                     "multi-body regions cannot name generated edges yet (ADR-0033)"
+                } else if (source is ShellFeature) {
+                    "a shell generates inner walls but naming them is a follow-up (ADR-0037); name the edges at " +
+                        "their generator before the shell -- GeneratedEdges(featureIndex = <generator>) is " +
+                        "followed through an INWARD shell"
                 } else if (source is MirrorFeature || source is ScaleFeature) {
                     "mirror/scale copy edges but generate none; name the edge at its generator before the step -- " +
                         "GeneratedEdges(featureIndex = <generator>) is followed through the mirror/scale step"
@@ -118,9 +129,15 @@ internal object TrackingPlanner {
                 GeneratorKind.BLEND
             is BooleanFeature -> GeneratorKind.BOOLEAN
             is HoleFeature -> GeneratorKind.HOLE
-            // Mirror/scale copy every edge one-to-one and generate none (ADR-0036).
-            is MirrorFeature, is ScaleFeature -> GeneratorKind.NONE
-            else -> GeneratorKind.NONE
+            // Mirror/scale copy every edge one-to-one and generate none (ADR-0036). A shell generates inner walls, but
+            // naming them is a follow-up (ADR-0037); until then it is not a generator.
+            is MirrorFeature, is ScaleFeature, is ShellFeature -> GeneratorKind.NONE
+            is BoxFeature,
+            is CylinderFeature,
+            is TranslateFeature,
+            is ExtrudeRegionsFeature,
+            is RevolveRegionsFeature,
+            -> GeneratorKind.NONE
         }
 
     /**
@@ -204,7 +221,14 @@ internal object TrackingPlanner {
         paths[source] = 1
         for (i in source + 1..base) {
             val derived = features[i] as? DerivedFeature ?: continue
-            require(supportsHistory(derived)) { "feature[$i] (${derived::class.simpleName}) cannot be tracked through" }
+            require(supportsHistory(derived)) {
+                "feature[$i] (${derived::class.simpleName}) cannot be tracked through" +
+                    if (derived is ShellFeature) {
+                        ": an OUTWARD shell keeps the original edges as the inner edges of the cavity (ADR-0037)"
+                    } else {
+                        ""
+                    }
+            }
             var sum = 0
             derived.baseIndices.forEach { b -> if (b in source until i) sum = minOf(2, sum + paths[b]) }
             paths[i] = sum
@@ -241,5 +265,8 @@ internal object TrackingPlanner {
             is BooleanFeature,
             is HoleFeature,
             -> true
+            // MakeThickSolid keeps every original edge by identity (ADR-0037). INWARD that is the outer skin; OUTWARD it
+            // would silently follow the INNER cavity edges, so it is refused rather than guessed.
+            is ShellFeature -> feature.direction == ShellDirection.INWARD
         }
 }

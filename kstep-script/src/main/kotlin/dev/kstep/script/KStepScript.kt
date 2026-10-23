@@ -95,6 +95,9 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
         // Welle L (ADR-0031): Edges, Faces, Direction3, Point3, EdgeKind, FaceKind, EdgeSelector,
         // SelectionTolerance, EdgeSelectionException -- geometric edge selection for fillet/chamfer.
         // No name collides with the generated AP242 types, dev.kstep.geometry or kotlin.* (checked by grep).
+        // Welle Q (ADR-0037) adds Vertices, VertexSelector, FaceSelection/VertexSelection (+ exceptions), `nearest`
+        // and the script function shell(...), plus ShellDirection in dev.kstep.geometry. Checked by grep: no
+        // generated AP242 entity or other default import has a `Vertices`, `Vertex*Selector`, `shell` or `nearest`.
         "dev.kstep.geometry.select.*",
         // Welle L (ADR-0031): sketch { }, Sketch, SketchException and the sketch error types.
         "dev.kstep.sketch.*",
