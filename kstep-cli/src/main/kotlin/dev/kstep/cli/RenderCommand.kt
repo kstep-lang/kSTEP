@@ -180,6 +180,8 @@ private fun successJson(
             put("shapeCount", outcome.model?.shapeCount ?: 0)
             outcome.geometry?.let { geometry ->
                 put("previewedShapeIndex", geometry.previewedShapeIndex)
+                put("instanceCount", geometry.instanceCount)
+                put("distinctShapeCount", geometry.distinctShapeCount)
                 put("triangleCount", geometry.projectedTriangleCount)
                 put("meshTriangleCount", geometry.meshTriangleCount)
             }

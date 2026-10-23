@@ -16,6 +16,7 @@ object RenderFallbackReasons {
     const val OCCT_UNAVAILABLE = "occt_unavailable"
     const val TRIANGULATION_FAILED = "triangulation_failed"
     const val SHAPE_CLOSED_BY_SCRIPT = "shape_closed_by_script"
+    const val PLACEMENT_INVALID = "placement_invalid"
 }
 
 /**

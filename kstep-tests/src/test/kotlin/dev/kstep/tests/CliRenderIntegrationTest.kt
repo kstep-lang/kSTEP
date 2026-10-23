@@ -554,13 +554,12 @@ class CliRenderIntegrationTest :
         }
 
         // R21 -- regression test for kSTEP's multi-shape-composition-and-fill-light wave (see
-        // docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc): `kstep render`'s
-        // headless path still previews only the FIRST shape (R-3 stays blocked -- ShapeAssignment
-        // carries no placement transform), but the stderr warning text was precisified in this
-        // wave. Pins both the still-single-shape behavior AND the new wording, so a future
-        // regression to the old, vaguer "Folge-Welle" wording (or a silent behavior change) fails
-        // this test rather than going unnoticed.
-        "a model with three shapes still previews only shape 1, with the precisified R-3 warning".config(
+        // docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc), reworded by ADR-0035:
+        // a model whose shapes are NOT connected by any assembly usage still previews only the
+        // FIRST shape (no placement exists to combine them), and warns with the ADR-0035 wording.
+        // Pins both the still-single-shape behavior AND the wording, so a silent behavior change
+        // fails this test rather than going unnoticed.
+        "a model with three unplaced shapes still previews only shape 1, with the no-structure warning".config(
             enabled = available,
         ) {
             val script = File(workDir, "assembly-r21.kstep.kts")
@@ -597,14 +596,59 @@ class CliRenderIntegrationTest :
 
             result.exitCode shouldBe 0
             result.stderr.contains("Exception in thread") shouldBe false
-            result.stderr shouldContain "model carries 3 shape(s); previewing shape 1 of 3"
-            result.stderr shouldContain "ShapeAssignment carries no placement transform yet"
-            result.stderr shouldContain "ADR-0011-headless-preview-rendering.adoc, R-3"
+            result.stderr shouldContain "model carries 3 shape(s) but no assembly usage places them"
+            result.stderr shouldContain "previewing shape 1 of 3"
+            result.stderr shouldContain "ADR-0035-placement-aware-render.adoc"
 
             val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
             val geometry = json["geometry"]?.jsonObject
             geometry?.get("shapeCount")?.jsonPrimitive?.int shouldBe 3
             geometry?.get("previewedShapeIndex")?.jsonPrimitive?.int shouldBe 0
+            geometry?.get("instanceCount")?.jsonPrimitive?.int shouldBe 1
+        }
+
+        // ADR-0035 -- the placed assembly of `kstep export` (housing, bracket turned 90 degrees,
+        // one screw part used twice) renders as ONE merged GLB: 4 instances of 3 parts, and the
+        // accessor bounds equal the hand-calculated global bounding box [0,40] x [0,40] x [0,22].
+        "a placed assembly renders all instances at their places (GLB bounds equal the export bbox)".config(
+            enabled = available,
+        ) {
+            val script = copyFixture("export-placed-assembly.kstep.kts")
+
+            val result = runner.run("render", "--output", "json", script.name, "-f", "glb")
+
+            result.exitCode shouldBe 0
+            result.stderr shouldNotContain "previewing shape"
+            val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+            json["content"]?.jsonPrimitive?.content shouldBe "geometry"
+            val geometry = json["geometry"]?.jsonObject
+            geometry?.get("instanceCount")?.jsonPrimitive?.int shouldBe 4
+            geometry?.get("distinctShapeCount")?.jsonPrimitive?.int shouldBe 3
+            // 4 boxes x 12 triangles.
+            geometry?.get("meshTriangleCount")?.jsonPrimitive?.int shouldBe 48
+            json["glb"]
+                ?.jsonObject
+                ?.get("triangleCount")
+                ?.jsonPrimitive
+                ?.int shouldBe 48
+
+            val bytes = File(workDir, "export-placed-assembly.glb").readBytes()
+            val jsonLength =
+                java.nio.ByteBuffer
+                    .wrap(bytes)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    .getInt(12)
+            val document = String(bytes, 20, jsonLength, Charsets.UTF_8)
+            val accessors = document.substring(document.indexOf("\"accessors\""))
+
+            fun bounds(key: String) =
+                Regex("\"$key\":\\[([^\\]]*)]")
+                    .find(accessors)!!
+                    .groupValues[1]
+                    .split(",")
+                    .map { it.trim().toDouble() }
+            bounds("min") shouldBe listOf(0.0, 0.0, 0.0)
+            bounds("max") shouldBe listOf(40.0, 40.0, 22.0)
         }
 
         // R22 -- docs/adr/ADR-0016-gltf-glb-export.adoc: `-f glb` on a real OCCT box writes a

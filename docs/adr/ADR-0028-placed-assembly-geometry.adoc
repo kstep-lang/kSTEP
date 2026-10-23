@@ -73,6 +73,7 @@ which reads through XCAF as a CAD application does):
 * `Ap242PlacementReader` (public, diagnostic) reads placements back out of a Part 21 document.
 * Numbers are written through `stepReal` (always REAL lexemes, never `-0.0`).
 * *Out of scope (resolves F5).* `kstep render`, preview, viewer and GLB still ignore placements.
+  _Superseded for render, preview and GLB by ADR-0035; the viewer loads no scripts and is unchanged._
   MCP is unaffected: `kstep-mcp` has no geometry channel, so placement is not exposed there.
 
 == Consequences

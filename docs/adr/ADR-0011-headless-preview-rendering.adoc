@@ -418,6 +418,9 @@ cleanly on a machine without OCCT and still produce a `summary` (not a
   headless path has nothing to place a second/third shape AT besides the
   origin) -- only this entry's warning text was precisified, not its
   underlying blocker.
+  _Fulfilled by ADR-0035 for models with an assembly structure; only a
+  model whose shapes no assembly usage connects keeps the first-shape
+  preview with a warning._
 
 | R-4
 | Additional vector output formats (PDF, LaTeX/TikZ) built on

@@ -13,6 +13,10 @@ data class PreviewGeometryStats(
     val projectedTriangleCount: Int,
     /** Raw world-space mesh -- `kstep render --output json`'s `meshTriangleCount`. */
     val meshTriangleCount: Int,
+    /** Drawn instances: the placed-assembly instance count (ADR-0035), `1` for a single-shape preview. */
+    val instanceCount: Int = 1,
+    /** Distinct shaped parts among the drawn instances. */
+    val distinctShapeCount: Int = 1,
 )
 
 /**

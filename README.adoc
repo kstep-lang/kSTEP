@@ -455,7 +455,7 @@ this writing:
   rotation)` in a script) were checked on 2026-10-22 with the OCCT 7.9.3 XCAF reader
   and FreeCAD 1.1.4 (`Import.open`: an `App::Part` with the named components at
   the designed locations; `Part.read`: all solids); `kstep render`, preview and
-  GLB still ignore placements. Geometry can only be produced where a system OCCT bridge is built (Linux x86-64 or macOS arm64). This wave's acceptance test is a self-roundtrip only
+  GLB honour placements since ADR-0035. Geometry can only be produced where a system OCCT bridge is built (Linux x86-64 or macOS arm64). This wave's acceptance test is a self-roundtrip only
   (`Part21Reader.read(Part21Writer.write(header, model)) == model`,
   verified in `Part21RoundtripTest`). This closes the kSTEP-own-format
   half of the ADR-0001 bar, not the external-interop half; see
@@ -2181,6 +2181,12 @@ kstep render hello-box.kstep.kts -f glb -o box.glb
 # glTF format is not offered. Open it in any glTF viewer (e.g. https://gltf-viewer.donmccurdy.com/,
 # or a local `<model-viewer>` page) to inspect the model interactively.
 ----
+
+A script with an assembly structure (`NEXT_ASSEMBLY_USAGE_OCCURRENCE` roots, with or without
+`place(usage, translation, rotation)`) renders every drawn instance at its composed place: SVG, PNG and GLB
+show the whole assembly, the GLB as one merged mesh (ADR-0035, `geometry.instanceCount` in `--output json`).
+A model with several shapes but no assembly usage connecting them still previews only the first shape, with a
+warning. The `kstep-viewer` does not load scripts, so it is not affected.
 
 On a machine without the native OCCT bridge (or if triangulation fails
 for any other reason), the SAME `hello-box.kstep.kts` script above still

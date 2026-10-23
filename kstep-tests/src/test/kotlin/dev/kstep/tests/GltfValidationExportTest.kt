@@ -1,7 +1,10 @@
 package dev.kstep.tests
 
+import dev.kstep.geometry.MeshComposition
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctKernel
+import dev.kstep.geometry.PlacedMesh
+import dev.kstep.geometry.Placement
 import dev.kstep.render.gltf.GlbWriter
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.StringSpec
@@ -64,16 +67,10 @@ class GltfValidationExportTest :
             result.triangleCount shouldBe 0
         }
 
-        // Gated and self-contained (writes its OWN fixture rather than depending on the box-export
-        // test above having already run, so test declaration order is irrelevant). Hard-fails --
-        // never silently skips -- when kstep.gltf.validate=true but node/scripts/node_modules are
-        // missing: see this file's own KDoc and docs/adr/ADR-0016-gltf-glb-export.adoc's
-        // Stolperfalle 12 ("a gate that can silently skip is not a gate"). Runs the real Khronos
-        // validator against a real triangulated box via scripts/validate-gltf.mjs as a genuine
-        // Node subprocess -- the actual external-tool proof this wave's plan asked for, not just
-        // this repo's own reading of the glTF spec.
-        "a real OCCT box's .glb passes the Khronos gltf-validator with zero errors/warnings".config(
-            enabled = available && System.getProperty("kstep.gltf.validate") == "true",
+        fun validateWithKhronos(
+            glbFile: File,
+            expectTriangles: Int,
+            expectVertices: Int,
         ) {
             val scriptsDir = File("../scripts")
             val validatorScript = File(scriptsDir, "validate-gltf.mjs")
@@ -86,12 +83,6 @@ class GltfValidationExportTest :
                     "scripts/ first (see README's glTF/GLB validation section). This is a hard " +
                     "failure, not a skip: -Pkstep.gltf.validate=true means the validator MUST " +
                     "actually run."
-            }
-
-            val glbFile = File(outDir, "gate-box.glb")
-            OcctKernel.makeBox(20.0, 30.0, 40.0).use { box ->
-                val mesh = box.triangulate()
-                glbFile.writeBytes(GlbWriter.write(mesh).bytes)
             }
 
             // Output is redirected to a file rather than read from process.inputStream: reading a
@@ -109,9 +100,9 @@ class GltfValidationExportTest :
                         validatorScript.absolutePath,
                         glbFile.absolutePath,
                         "--expect-triangles",
-                        "12",
+                        expectTriangles.toString(),
                         "--expect-vertices",
-                        "36",
+                        expectVertices.toString(),
                     ).directory(scriptsDir)
                         .redirectErrorStream(true)
                         .redirectOutput(outputFile)
@@ -131,5 +122,36 @@ class GltfValidationExportTest :
                 process.destroyForcibly()
                 outputFile.delete()
             }
+        }
+
+        "a real OCCT box's .glb passes the Khronos gltf-validator with zero errors/warnings".config(
+            enabled = available && System.getProperty("kstep.gltf.validate") == "true",
+        ) {
+            val glbFile = File(outDir, "gate-box.glb")
+            OcctKernel.makeBox(20.0, 30.0, 40.0).use { box ->
+                val mesh = box.triangulate()
+                glbFile.writeBytes(GlbWriter.write(mesh).bytes)
+            }
+            validateWithKhronos(glbFile, expectTriangles = 12, expectVertices = 36)
+        }
+
+        // ADR-0035: a placed (translated and turned) two-part assembly merged into one mesh is
+        // still one valid glTF mesh; same gate, same hard-fail behaviour as the box case above.
+        "a placed two-box assembly's .glb passes the Khronos gltf-validator with zero errors/warnings".config(
+            enabled = available && System.getProperty("kstep.gltf.validate") == "true",
+        ) {
+            val glbFile = File(outDir, "gate-placed.glb")
+            OcctKernel.makeBox(10.0, 10.0, 10.0).use { box ->
+                val mesh = box.triangulate()
+                val placed =
+                    MeshComposition.merge(
+                        listOf(
+                            PlacedMesh(mesh),
+                            PlacedMesh(mesh, Placement.rotationZ(90.0).then(Placement.translation(30.0, 0.0, 0.0))),
+                        ),
+                    )
+                glbFile.writeBytes(GlbWriter.write(placed).bytes)
+            }
+            validateWithKhronos(glbFile, expectTriangles = 24, expectVertices = 72)
         }
     })

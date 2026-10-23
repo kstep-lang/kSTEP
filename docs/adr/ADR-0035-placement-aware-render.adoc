@@ -1,0 +1,66 @@
+= ADR-0035: Placement-aware render, preview and GLB (Welle O)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle O). Fulfils R-3 of ADR-0011 and F5 of ADR-0028 (render, preview and GLB
+ignored placements). Builds on ADR-0013 (merged world mesh) and ADR-0016 (GLB).
+
+== Context
+
+`kstep export` writes a placed assembly (ADR-0028), but `PreviewRenderer` previewed only `model.shapes.first()` and
+dropped the other shapes with a warning. Drawing every shape at the origin would have been wrong as well: the work
+is not "apply transforms to the existing mesh" but "build one mesh from the whole assembly tree".
+
+== Decisions
+
+D1:: *The expansion lives in `kstep-shape`*, as the public `AssemblyInstanceExpander.expand(roots, shaped,
+placements)`. It calls the existing internal `AssemblyGeometryGraph.plan`, so geometric closure, cycle rejection,
+placement validation and the 4096-usage limit are exactly those of the export path. The tree is walked iteratively
+(explicit stack), in deterministic pre-order; a placement is composed with `RigidPlacement.then`. A shaped
+definition is emitted as one `PlacedInstance` (also when it has children); a shape-less assembly emits nothing.
+Limits (fail closed with `ShapeExportException`): depth 64, 4096 instances and 16384 visited nodes. The visit
+counter is what stops a DAG with fan-out (a 30-level diamond has 2^30 paths) before anything is allocated.
+
+D2:: *Each distinct part is triangulated once* and placed once per instance. The running triangle total is checked
+after every triangulation, before `MeshComposition.merge` allocates, and reported as `triangulation_failed`.
+
+D3:: *`RigidPlacement.toGeometryPlacement()`* builds the mesh-side `Placement` with columns local X, Y, Z and the
+translation. The axes are re-orthonormalised first (Gram-Schmidt), so rounding residue of a long composition cannot
+make `Placement.fromRowMajor3x4` reject a valid placement.
+
+D4:: *Scope.* A model without any geometric usage keeps the old behaviour (first shape, bit-identical output); with
+several shapes the warning now says that no assembly usage places them. A model with a geometric usage draws the
+expansion; shapes outside the structure are not drawn and a warning counts them. An invalid placement, a cycle or a
+limit becomes a notice card with the new reason `placement_invalid` instead of a crash. Two shapes bound to one
+definition are rejected as in the exporter.
+
+D5:: *GLB is one pre-transformed, merged mesh* (one node, one mesh), as in the SVG/PNG path. `GlbWriter` takes one
+`TriangleMesh`, so byte determinism, the Khronos-validator contract and the accessor min/max (which then equal the
+real world bounding box) stay unchanged. The cost is duplicated vertex data for a part used several times.
+
+D6:: Colours stay neutral in the preview path.
+
+`PreviewGeometryStats` gains `instanceCount` and `distinctShapeCount` (defaults `1`, source compatible);
+`previewedShapeIndex` stays `0`. `--output json` prints both new fields.
+
+== Not changed
+
+The viewer builds a hard-coded demo scene and loads no scripts; it already merges `PlacedMesh`es, so nothing changes
+there. A headless camera test was not added because the camera is derived from the merged mesh inside `Main.kt`,
+which has no extractable function.
+
+== Consequences and follow-ups
+
+* A GLB node per instance with shared meshes (smaller files, instance structure visible downstream), colours per
+  instance, script loading in the viewer, selection and provenance (V-5b of ADR-0013), scale and mirror (not
+  expressible in `place`).
+
+== Verification
+
+* Hand calculation (script A): a 10 mm cube moved by (30, 0, 0) and turned 90 degrees about Z, `(x, y, z) -> (-y, x, z)`,
+  spans x 20..30, so the assembly spans x 0..30, y 0..10, z 0..10. The same part without the rotation reaches x 40
+  (control case). Nested (script B): the leaf cube 10x20x5 ends at x 80..100, y 5..15, z 0..5.
+* `AssemblyInstanceExpanderTest` (no OCCT), `PreviewPlacedAssemblyTest` (GLB accessor bounds, triangle counts, normals
+  of a part turned by 45 degrees, SVG/PNG, notice path), `CliRenderIntegrationTest` (the export fixture: 4 instances of
+  3 parts, bounds [0,40] x [0,40] x [0,22]) and a gated Khronos validator case.

@@ -9,6 +9,13 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Placement-aware render, preview and GLB (ADR-0035, Welle O). `kstep render`, `kstep asciidoc` and the preview
+  pipeline now draw every instance of a placed assembly at its composed place (SVG, PNG and GLB; the GLB is one
+  merged mesh). New public `AssemblyInstanceExpander` and `RigidPlacement.toGeometryPlacement()` in `kstep-shape`
+  (limits: 4096 instances, 16384 visited nodes, depth 64); each distinct part is triangulated once. The JSON output
+  gains `geometry.instanceCount` and `geometry.distinctShapeCount`, the text summary says `assembly: N instance(s)
+  of M part(s)`, and an invalid placement degrades into a `placement_invalid` notice card. A model with several
+  shapes but no assembly usage still previews shape 1 only, with a reworded warning.
 * Sketch extensions (ADR-0032, Welle M). Circle and arc radii can be solver unknowns (`fixedRadius = false`);
   new sketch constraints `radius`, `diameter`, `equalRadius`, `tangent(line, circle)`, `tangent(circle, circle,
   internal)` and `angle(l1, l2, degrees)`; `SolvedSketch.radius(ref)`. New PlaneGCS constraint kinds 7-12 and
@@ -172,8 +179,8 @@ x86-64, or macOS arm64 via Homebrew) to use them. Interoperability is verified w
 * The MCP server now reports the project version to clients (read from the jar manifest); it reported a
   hard-coded `0.1.0`, including in the 0.1.1 release.
 * Geometry exports with assembly usages now carry an identity placement for usages without
-  `place(...)`; the export text line gains `and K placed usage(s)`. Render, preview and GLB still
-  ignore placements.
+  `place(...)`; the export text line gains `and K placed usage(s)`. (Render, preview and GLB honour
+  placements since ADR-0035.)
 * `kstep export` no longer prints "geometry merging is not wired into 'export' yet". A merge failure
   (unreachable or duplicate product definition, closed shape, OCCT error) fails with exit 1 instead
   of writing a structure-only file; native shape handles are closed on every path.

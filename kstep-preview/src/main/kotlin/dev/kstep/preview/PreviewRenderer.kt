@@ -1,9 +1,12 @@
 package dev.kstep.preview
 
+import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.geometry.MeshComposition
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctGeometryException
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctUnavailableException
+import dev.kstep.geometry.PlacedMesh
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.RenderLimits
 import dev.kstep.render.gltf.GlbExtras
@@ -16,7 +19,13 @@ import dev.kstep.script.KStepModel
 import dev.kstep.script.KStepScriptHost
 import dev.kstep.script.KStepScriptOutcome
 import dev.kstep.script.KStepScriptOutcomeCodes
+import dev.kstep.shape.AssemblyInstanceExpander
+import dev.kstep.shape.PlacedInstance
+import dev.kstep.shape.ShapeAssignment
+import dev.kstep.shape.ShapeExportException
+import dev.kstep.shape.toGeometryPlacement
 import java.io.ByteArrayOutputStream
+import java.util.IdentityHashMap
 import javax.imageio.ImageIO
 
 /**
@@ -42,6 +51,9 @@ private sealed interface RenderContent {
         val triangles: List<ProjectedTriangle>,
         val shapeCount: Int,
         val previewedShapeIndex: Int,
+        /** Drawn instances of a placed assembly (ADR-0035); `null` for the single-shape preview. */
+        val instanceCount: Int? = null,
+        val distinctShapeCount: Int? = null,
     ) : RenderContent
 
     // Carries no lines of its own -- renderBytes computes the summary card's text fresh from
@@ -171,6 +183,8 @@ object PreviewRenderer {
                     previewedShapeIndex = content.previewedShapeIndex,
                     projectedTriangleCount = content.triangles.size,
                     meshTriangleCount = content.mesh.triangleCount,
+                    instanceCount = content.instanceCount ?: 1,
+                    distinctShapeCount = content.distinctShapeCount ?: 1,
                 )
             } else {
                 null
@@ -192,8 +206,8 @@ object PreviewRenderer {
     }
 
     /** @return the resolved content plus any non-fatal warnings the caller should print (the
-     *  multi-shape R-3 warning) -- kept out of this function's own I/O so this module stays
-     *  print-free (see this file's own top-level KDoc). */
+     *  no-structure multi-shape R-3 warning, shapes outside the assembly) -- kept out of this
+     *  function's own I/O so this module stays print-free (see this file's own top-level KDoc). */
     private fun resolveContent(
         model: KStepModel,
         occt: OcctAvailability,
@@ -204,48 +218,129 @@ object PreviewRenderer {
             return RenderContent.Summary to emptyList()
         }
         val warnings = mutableListOf<String>()
-        if (model.shapes.size > 1) {
+
+        fun notice(
+            message: String,
+            reason: String,
+        ) = RenderContent.Notice(PreviewSummary.noticeLines("(script)", message, occt, model), reason) to warnings
+
+        val expansion =
+            try {
+                AssemblyInstanceExpander.expand(
+                    model.roots,
+                    model.shapes.map { it.productDefinition },
+                    model.placements,
+                )
+            } catch (e: ShapeExportException) {
+                return notice(e.message ?: "invalid assembly placement", RenderFallbackReasons.PLACEMENT_INVALID)
+            }
+        val assembly = expansion.instances.isNotEmpty()
+        if (!assembly && model.shapes.size > 1) {
             warnings +=
-                "kstep render: model carries ${model.shapes.size} shape(s); previewing shape 1 of " +
-                "${model.shapes.size} -- ShapeAssignment carries no placement transform yet, so a " +
-                "combined preview would overlay all shapes at the origin (see " +
-                "docs/adr/ADR-0011-headless-preview-rendering.adoc, R-3)."
+                "kstep render: model carries ${model.shapes.size} shape(s) but no assembly usage places them; " +
+                "previewing shape 1 of ${model.shapes.size} -- without an assembly structure a combined " +
+                "preview would overlay all shapes at the origin (see " +
+                "docs/adr/ADR-0035-placement-aware-render.adoc; ADR-0011, R-3)."
         }
-        val assignment = model.shapes.first()
-        val mesh: TriangleMesh
-        try {
-            mesh = assignment.shape.triangulate()
-        } catch (e: OcctUnavailableException) {
-            return RenderContent.Notice(
-                PreviewSummary.noticeLines("(script)", e.message ?: "OCCT unavailable", occt, model),
-                RenderFallbackReasons.OCCT_UNAVAILABLE,
-            ) to warnings
-        } catch (e: IllegalStateException) {
-            return RenderContent.Notice(
-                PreviewSummary.noticeLines(
-                    "(script)",
+        val content =
+            try {
+                if (assembly) {
+                    val unplaced = model.shapes.size - identityCount(expansion.instances)
+                    if (unplaced > 0) {
+                        warnings +=
+                            "kstep render: $unplaced shape(s) are not part of the assembly structure and are " +
+                            "not drawn (see docs/adr/ADR-0035-placement-aware-render.adoc)."
+                    }
+                    assemblyGeometry(model, expansion.instances, width, height)
+                } else {
+                    val mesh =
+                        model.shapes
+                            .first()
+                            .shape
+                            .triangulate()
+                    val triangles = MeshProjection.project(mesh, width.toDouble(), height.toDouble())
+                    RenderContent.Geometry(mesh, triangles, model.shapes.size, previewedShapeIndex = 0)
+                }
+            } catch (e: OcctUnavailableException) {
+                return notice(e.message ?: "OCCT unavailable", RenderFallbackReasons.OCCT_UNAVAILABLE)
+            } catch (e: ShapeExportException) {
+                return notice(e.message ?: "invalid assembly placement", RenderFallbackReasons.PLACEMENT_INVALID)
+            } catch (e: IllegalStateException) {
+                return notice(
                     "shape already closed by the script before rendering: ${e.message}",
-                    occt,
-                    model,
-                ),
-                RenderFallbackReasons.SHAPE_CLOSED_BY_SCRIPT,
-            ) to warnings
-        } catch (e: OcctGeometryException) {
-            return RenderContent.Notice(
-                PreviewSummary.noticeLines("(script)", e.message ?: "triangulation failed", occt, model),
-                RenderFallbackReasons.TRIANGULATION_FAILED,
-            ) to warnings
-        } catch (e: IllegalArgumentException) {
-            // OcctShape.triangulate() also documents @throws IllegalArgumentException for the
-            // native MAX_TRIANGLES guard -- see the pre-extraction RenderCommand.kt's identical
-            // catch clause for the full reasoning; preserved verbatim here.
-            return RenderContent.Notice(
-                PreviewSummary.noticeLines("(script)", e.message ?: "triangulation failed", occt, model),
-                RenderFallbackReasons.TRIANGULATION_FAILED,
-            ) to warnings
+                    RenderFallbackReasons.SHAPE_CLOSED_BY_SCRIPT,
+                )
+            } catch (e: OcctGeometryException) {
+                return notice(e.message ?: "triangulation failed", RenderFallbackReasons.TRIANGULATION_FAILED)
+            } catch (e: IllegalArgumentException) {
+                // OcctShape.triangulate() also documents @throws IllegalArgumentException for the
+                // native MAX_TRIANGLES guard -- see the pre-extraction RenderCommand.kt's identical
+                // catch clause for the full reasoning; preserved verbatim here.
+                return notice(e.message ?: "triangulation failed", RenderFallbackReasons.TRIANGULATION_FAILED)
+            }
+        return content to warnings
+    }
+
+    private fun identityCount(instances: List<PlacedInstance>): Int {
+        val seen = IdentityHashMap<ProductDefinition, Boolean>()
+        for (i in instances) seen[i.productDefinition] = true
+        return seen.size
+    }
+
+    /**
+     * Builds the merged world-space geometry of a placed assembly (ADR-0035): every distinct shaped
+     * definition is triangulated exactly once, then placed once per instance. The running triangle
+     * total is checked after each triangulation, BEFORE [MeshComposition.merge] allocates anything.
+     */
+    private fun assemblyGeometry(
+        model: KStepModel,
+        instances: List<PlacedInstance>,
+        width: Int,
+        height: Int,
+    ): RenderContent.Geometry {
+        val shapeOf = IdentityHashMap<ProductDefinition, ShapeAssignment>()
+        for (assignment in model.shapes) {
+            if (shapeOf.put(assignment.productDefinition, assignment) != null) {
+                throw ShapeExportException(
+                    "more than one shape is bound to product definition '${assignment.productDefinition.id}'; " +
+                        "exactly one shape per product definition is supported",
+                )
+            }
         }
-        val triangles = MeshProjection.project(mesh, width.toDouble(), height.toDouble())
-        return RenderContent.Geometry(mesh, triangles, model.shapes.size, previewedShapeIndex = 0) to warnings
+        // First-appearance order, so triangulation (and any failure) is deterministic.
+        val instanceCountOf = IdentityHashMap<ProductDefinition, Int>()
+        val distinctInOrder = mutableListOf<ProductDefinition>()
+        for (instance in instances) {
+            val pd = instance.productDefinition
+            val previous = instanceCountOf.put(pd, (instanceCountOf[pd] ?: 0) + 1)
+            if (previous == null) distinctInOrder += pd
+        }
+        val meshOf = IdentityHashMap<ProductDefinition, TriangleMesh>()
+        var total = 0L
+        for (pd in distinctInOrder) {
+            val count = instanceCountOf.getValue(pd)
+            val mesh = shapeOf.getValue(pd).shape.triangulate()
+            meshOf[pd] = mesh
+            total += mesh.triangleCount.toLong() * count
+            require(total <= OcctKernel.MAX_TRIANGLES) {
+                "placed assembly exceeds the limit of ${OcctKernel.MAX_TRIANGLES} triangles " +
+                    "(at least $total over ${instances.size} instance(s))"
+            }
+        }
+        val parts =
+            instances.map { instance ->
+                PlacedMesh(meshOf.getValue(instance.productDefinition), instance.placement.toGeometryPlacement())
+            }
+        val merged = MeshComposition.merge(parts)
+        val triangles = MeshProjection.project(merged, width.toDouble(), height.toDouble())
+        return RenderContent.Geometry(
+            merged,
+            triangles,
+            model.shapes.size,
+            previewedShapeIndex = 0,
+            instanceCount = instances.size,
+            distinctShapeCount = instanceCountOf.size,
+        )
     }
 
     private fun resolveFormat(
@@ -281,7 +376,16 @@ object PreviewRenderer {
                         requireNotNull(model) { "RenderContent.Geometry always carries a real model" },
                         occt,
                         withStep,
-                        contentLines = listOf("Geometry", "  previewed shape index ${content.previewedShapeIndex}"),
+                        contentLines =
+                            listOf(
+                                "Geometry",
+                                if (content.instanceCount != null) {
+                                    "  assembly: ${content.instanceCount} instance(s) of " +
+                                        "${content.distinctShapeCount} part(s)"
+                                } else {
+                                    "  previewed shape index ${content.previewedShapeIndex}"
+                                },
+                            ),
                     )
                 is RenderContent.Summary ->
                     PreviewSummary.modelLines(
