@@ -3,7 +3,9 @@ package dev.kstep.shape.importer
 import dev.kstep.geometry.BoundingBox
 import dev.kstep.geometry.OcctShape
 import dev.kstep.geometry.Placement
+import dev.kstep.geometry.RgbColor
 import dev.kstep.geometry.ShapeTopology
+import dev.kstep.geometry.StepLengthUnitInfo
 import dev.kstep.geometry.StepReadStats
 import dev.kstep.geometry.XcafNodeKind
 
@@ -37,12 +39,42 @@ class ImportedPart(
     val boundingBox: BoundingBox?,
     /** Per-solid volume and face count when the part has more than one solid, else `null` (ADR-0032). */
     val bodies: List<ImportedBody>? = null,
+    /** Colour of the part (ADR-0038), or `null`. A part with a single coloured solid reports that colour. */
+    val color: RgbColor? = null,
+    /** Layer names of the part, sorted and without duplicates. */
+    val layers: List<String> = emptyList(),
+    /** Faces with their own colour or layer, sorted by [ImportedFaceStyle.faceIndex]. */
+    val faceStyles: List<ImportedFaceStyle> = emptyList(),
+    /** Count of faces per surface kind (`plane`, `cylinder`, `bsplineSurface`, ...), `null` if not computed. */
+    val surfaceTypes: Map<String, Int>? = null,
 )
 
 /** One body (solid) of a multi-body [ImportedPart]. */
 class ImportedBody(
     val volume: Double,
     val faces: Int,
+    val color: RgbColor? = null,
+    val layers: List<String> = emptyList(),
+)
+
+/**
+ * Colour and layers of one face. [faceIndex] is 0-based in OCCT's face enumeration of the part, i.e.
+ * `OcctShape.faces[faceIndex]`.
+ */
+class ImportedFaceStyle(
+    val faceIndex: Int,
+    val color: RgbColor?,
+    val layers: List<String>,
+)
+
+/** Totals of the colour and layer data of a file (ADR-0038). */
+class ImportPresentation(
+    val coloredTargets: Int,
+    val layerAssignments: Int,
+    val layerNames: List<String>,
+    val unattached: Int,
+    val instanceStylesIgnored: Int,
+    val truncated: Int,
 )
 
 /**
@@ -99,6 +131,9 @@ class ImportedStepModel(
     val occurrences: List<ImportedOccurrence>,
     val totals: ImportedTotals,
     val warnings: List<String>,
+    /** The length unit the file declares; the geometry itself is always in [lengthUnit]. */
+    val sourceLengthUnit: StepLengthUnitInfo? = null,
+    val presentation: ImportPresentation? = null,
 ) : AutoCloseable {
     override fun close() {
         parts.forEach { it.shape?.close() }

@@ -7,7 +7,63 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Fixed
+
+* Import: the new colour and layer mode made the OCCT transfer quadratic in the number of layer assignments and distinct
+  colours (80k layers took 41 s under the global OCCT lock). A pre-transfer typed count now rejects more than 4096 layer
+  assignments or 10000 colour definitions with `limit_exceeded` (`KSTEP-I-010`). The count also covers
+  `SURFACE_STYLE_TRANSPARENT` and `SURFACE_STYLE_RENDERING_WITH_PROPERTIES` (10000 each), because OCCT's colour table is keyed
+  by RGBA and distinct colour x transparency pairs were still quadratic (80k styled items took 67 s). These caps bound
+  only the size of the colour table, not the work, because every `STYLED_ITEM` scans that table once (a full table plus
+  300k styled items took 116 s). The count therefore also covers `STYLED_ITEM` / `OVER_RIDING_STYLED_ITEM` (at most
+  200000) and bounds styled items x (colour definitions + rendering records) to 100000000. The style lists of
+  `PRESENTATION_STYLE_ASSIGNMENT`, `SURFACE_SIDE_STYLE` and `STYLED_ITEM` are walked once per styled item too and could
+  repeat one reference cheaply (10k styled items x 200k entries took 53 s); lists longer than 64 entries are rejected.
+* Import: capped style lists still multiplied, because the colour reader walks styled item -> presentation style
+  assignment -> surface side style -> fill area style as nested loops (four lists of 64 = 16.7M steps per styled item;
+  100 such items in a 71 kB file took 15 s). The pre-transfer check now sums the weighted expansion cost of all styled
+  items (memoised per entity, linear in the file) and rejects more than 10000000 with `limit_exceeded` (`KSTEP-I-010`);
+  real files cost 1-3 per styled item. The fill styles of `FILL_AREA_STYLE` and the properties of
+  `SURFACE_STYLE_RENDERING_WITH_PROPERTIES` are capped at 64 as well. New constant
+  `StepImportLimits.MAX_STYLE_EXPANSION_WORK`.
+* Import: an assembly "diamond" (each level using the same sub-assembly twice) has a small depth but 2^levels
+  occurrences, and OCCT expanded it during the transfer before the Kotlin occurrence limit fired (28 levels, 56 kB: 69 s).
+  The pre-transfer structure check now also counts the part occurrences after expansion on the usage graph and rejects
+  more than 10000 (`StepImportLimits.MAX_EXPANDED_OCCURRENCES`, now also checked natively) with `limit_exceeded`
+  (`KSTEP-I-010`) in well under a second.
+* `kstep import` runs the import in a worker subprocess (ADR-0038). Four audit rounds kept finding new loops inside OCCT
+  (a self-overriding `OVER_RIDING_STYLED_ITEM`, deep override chains and `MAPPED_ITEM` chains or cycles ended the process
+  with exit 132 and no output at all; override chains, `MAPPED_ITEM` diamonds and shells repeating one face ran into or
+  past the 60 s bound). The command now starts a second JVM (same runtime and class path, `-Xmx2g`, no JVM crash banner)
+  and only supervises it: a regular end (exit 0 or 1 with one complete report) is passed through unchanged; a timeout
+  (60 s, can only be lowered via `-Dkstep.import.timeoutMillis` / `KSTEP_IMPORT_TIMEOUT_MILLIS`; the worker and its
+  children are killed), an OutOfMemoryError or an output overflow become `limit_exceeded` (`KSTEP-I-010`), a crash or an
+  incomplete report becomes `read_failed` (`KSTEP-I-009`), as text or `--output json`. With `--output json` stdout is
+  always exactly one JSON document. The previous in-process watchdog (`Runtime.halt`) printed a JVM fatal-error banner on
+  stdout when it ended a native call; it now only bounds an orphaned worker, silently. Cost: one extra JVM start per
+  import (about 0.08 s, see ADR-0038). A 100000-deep override chain still crashes OCCT's reader before any pre-scan
+  runs; it now ends as one `read_failed` document instead of a silent exit 132. Library callers of `StepImporter` / `OcctKernel.readStep` still run in-process without a time
+  or memory bound, and `kstep-mcp` has no import tool.
+* Import: three more pre-transfer checks give the known worst cases a structured error in under a second (the worker is
+  the guarantee, these are the fast path): `OVER_RIDING_STYLED_ITEM` chains deeper than 16 or cyclic, `MAPPED_ITEM`
+  nesting deeper than 32 or cyclic and more than 10000 mapped-item expansions, and more than 250000 face references
+  summed over all shells are rejected with `limit_exceeded` (`KSTEP-I-010`). New constants
+  `StepImportLimits.MAX_OVERRIDE_DEPTH` and `MAX_MAPPED_ITEM_EXPANSIONS`.
+
 === Added
+
+* Import of colours, layers and units (ADR-0038, Welle R). `kstep import` now reports the colour (sRGB, as written in the
+  file) and layers of each part, each body of a multi-solid part and each styled face (`colour`, `layers`, `faceStyles`),
+  the file's declared length unit (`sourceLengthUnit`: `declared`, `missing` or `mixed`, with the factor to mm) and a
+  `presentation` summary; face numbers are OCCT's 0-based face order. New error `KSTEP-I-013` (`unit_unresolved`) for a
+  length unit that cannot be resolved (for example a conversion factor of 0, for which OCCT otherwise returns a bounding
+  box of 1e100). A new pre-transfer check bounds the product-structure depth (32) and detects cycles on the typed
+  entities. `OcctKernel.surfaceTypeCounts` and the part key `surfaceTypes` count faces per surface kind (a B-spline face
+  stays `FaceKind.OTHER`). New JNI entry points `nativeImportColors`, `nativeImportLayerRefs`, `nativeImportLayerNames`,
+  `nativeImportStyleStats`, `nativeImportUnitInfo`, `nativeImportUnitNames`, `nativeShapeSurfaceTypeCounts`. Fixtures for
+  styled, multi-body, inch, centimetre, metre, unit-less, unresolved-unit, structure-only and a FreeCAD B-spline loft,
+  `scripts/interop/make_import_extras_fixtures.py` and `scripts/interop/verify-import-extras.sh`. Not included: instance
+  colours and layers, edge colours, imported colours in `--render`, colour export.
 
 * Face and vertex selection, `nearest(point)` and shell (ADR-0037, Welle Q). `Edges.nearest(point, within)`,
   `Faces.nearest` and `Vertices.nearest` pick the sub-shape(s) with the smallest GEOMETRIC distance to a point
@@ -77,6 +133,11 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* `kstep import` reads with OCCT's colour and layer modes on (measured: no import-time difference on the placed-assembly
+  fixture). The warning "ignored (not imported)" now names only `pmi`; `ignored.colours` and `ignored.layers` keep counting
+  occurrences in the file. `DIMENSIONAL_EXPONENTS` (a unit entity) is no longer counted as PMI. A representation without
+  any B-Rep is `no_content` (`KSTEP-I-011`) instead of a part with volume 0.
+
 * The messages of `Placement.fromRowMajor3x4`, `Rotation.fromAxes`, the native `nativeTransformShape` and the
   exporter/preview refusal of two shapes on one product definition now name the way out (`mirror(...)`, `scale(...)`,
   `OcctKernel.compound(...)`); the old wording is kept as a prefix. A placement stays rigid.
@@ -102,6 +163,9 @@ minor versions may contain breaking changes.
 
 === Fixed
 
+* `kstep import`: a product-structure chain of thousands of levels (a few hundred kilobytes) could exhaust OCCT's
+  recursive transfer and crash the JVM; depth and cycles are now checked on the typed entities before the transfer and end
+  in `limit_exceeded` (`KSTEP-I-010`). A length unit with conversion factor 0 no longer yields geometry of size 1e100.
 * Documentation: ADR-0031, ADR-0032 and ADR-0030 no longer claim OCCT 7.8 compatibility or a Linux CI on 7.8; the
   Linux CI uses 7.9.2 and 7.8 is not tested.
 

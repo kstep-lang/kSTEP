@@ -155,3 +155,12 @@ section fillet), reads each file with OCCT's typed reader and FreeCAD and compar
 hand-computed values 15491.650 / 8, 23491.650 / 8 and 7017.168 / 12. `verify-derived-naming.sh --spike` instead builds and
 runs `spike_derived_history.cpp`, a standalone OCCT program that prints what `Generated()`, `Modified()` and `IsDeleted()`
 report for fillet, chamfer and booleans (ADR-0034, table in the ADR). Both write only below `build/interop/derived-naming/`.
+
+== verify-import-extras.sh (ADR-0038, Welle R)
+
+Regenerates the import fixtures with `make_import_extras_fixtures.py` (run as `python3 -B`) and compares them byte for byte
+with the committed copies under `kstep-tests/src/test/resources/import/`. It cross-checks `kstep import` against OCCT's own
+XCAF reader (`dump_xcaf_tree styles|units`): colours (the sRGB value of the file, not OCCT's linear 0.214 for 0.5), layers,
+face indices, inch/centimetre/metre/unit-less bounding boxes, and the unresolved-unit and structure-only error codes.
+With FreeCAD installed it also writes a B-spline loft (`freecad_make_loft.py`) and imports it. It writes only below
+`build/interop/import-extras/` and finishes by checking that `git status --ignored scripts` is unchanged.

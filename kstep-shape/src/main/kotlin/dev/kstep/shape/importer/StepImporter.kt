@@ -1,6 +1,7 @@
 package dev.kstep.shape.importer
 
 import dev.kstep.geometry.BoundingBox
+import dev.kstep.geometry.LengthUnitState
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctExternalReferenceException
 import dev.kstep.geometry.OcctGeometryException
@@ -9,10 +10,13 @@ import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctShape
 import dev.kstep.geometry.OcctStepDocument
 import dev.kstep.geometry.OcctUnavailableException
+import dev.kstep.geometry.OcctUnitException
 import dev.kstep.geometry.Placement
+import dev.kstep.geometry.RgbColor
 import dev.kstep.geometry.StepImportLimits
 import dev.kstep.geometry.XcafNode
 import dev.kstep.geometry.XcafNodeKind
+import dev.kstep.geometry.XcafStyleTarget
 import dev.kstep.step21.Part21ReadMode
 import dev.kstep.step21.Part21Reader
 import dev.kstep.step21.Part21SimpleInstance
@@ -48,6 +52,8 @@ object StepImporter {
         partName: String,
         warnings: MutableList<String>,
         limit: Int = MAX_BODY_SUMMARIES,
+        colorsBySolid: Map<Int, RgbColor> = emptyMap(),
+        layersBySolid: Map<Int, List<String>> = emptyMap(),
     ): List<ImportedBody>? {
         val solids = shape.topology.solids
         if (solids <= 1) return null
@@ -55,7 +61,10 @@ object StepImporter {
             warnings.add("bodies omitted for part '$partName': $solids solids exceed $limit")
             return null
         }
-        return OcctKernel.solidSummaries(shape).map { ImportedBody(it.volume, it.faces) }
+        // solidSummaries enumerates solids in OCCT's MapShapes(SOLID) order, the same order as the style sub-indices.
+        return OcctKernel.solidSummaries(shape).mapIndexed { i, summary ->
+            ImportedBody(summary.volume, summary.faces, colorsBySolid[i], layersBySolid[i].orEmpty())
+        }
     }
 
     /** A Kotlin-side structural limit (assembly depth, expanded occurrence count) was exceeded. */
@@ -78,7 +87,15 @@ object StepImporter {
         }
 
     /** Imports STEP file [content] (the raw bytes). */
-    fun read(content: ByteArray): StepImportResult {
+    fun read(content: ByteArray): StepImportResult =
+        read(content, StepImportLimits.MAX_ASSEMBLY_DEPTH, StepImportLimits.MAX_EXPANDED_OCCURRENCES)
+
+    /** As [read], with explicit Kotlin-side expansion limits (tests use this to hit [LimitExceeded] cheaply). */
+    internal fun read(
+        content: ByteArray,
+        maxDepth: Int,
+        maxOccurrences: Int,
+    ): StepImportResult {
         val prescan =
             try {
                 StepInputValidation.prescan(content)
@@ -95,7 +112,7 @@ object StepImporter {
         }
         val owned = mutableListOf<OcctShape>()
         return try {
-            OcctKernel.readStep(content).use { doc -> build(content, prescan, doc, owned) }
+            OcctKernel.readStep(content).use { doc -> build(content, prescan, doc, owned, maxDepth, maxOccurrences) }
         } catch (e: LimitExceeded) {
             owned.forEach { it.close() }
             StepImportResult.Failure(StepImportErrorKind.LIMIT_EXCEEDED, e.message.orEmpty())
@@ -110,6 +127,17 @@ object StepImporter {
             StepImportResult.Failure(
                 StepImportErrorKind.EXTERNAL_REFERENCE_REJECTED,
                 "the file references external documents; external references are not followed",
+            )
+        } catch (e: OcctUnitException) {
+            owned.forEach { it.close() }
+            StepImportResult.Failure(
+                StepImportErrorKind.UNIT_UNRESOLVED,
+                StepInputValidation.sanitize(
+                    e.message
+                        .orEmpty()
+                        .removePrefix("unit:")
+                        .trim(),
+                ),
             )
         } catch (e: OcctUnavailableException) {
             owned.forEach { it.close() }
@@ -141,6 +169,8 @@ object StepImporter {
         prescan: StepPrescan,
         doc: OcctStepDocument,
         owned: MutableList<OcctShape>,
+        maxDepth: Int,
+        maxOccurrences: Int,
     ): StepImportResult {
         val nodes = doc.nodes
         val warnings = mutableListOf<String>()
@@ -155,6 +185,8 @@ object StepImporter {
         val denseIndex = denseIndices(nodes)
         val componentsByParent = nodes.filter { it.kind == XcafNodeKind.COMPONENT }.groupBy { it.parentIndex }
 
+        val colorsByNode = doc.colors.groupBy { it.nodeIndex }
+        val layersByNode = doc.layers.groupBy { it.nodeIndex }
         val parts = mutableListOf<ImportedPart>()
         for (node in nodes.filter { it.kind == XcafNodeKind.PART }) {
             var shape: OcctShape? = null
@@ -162,6 +194,34 @@ object StepImporter {
                 shape = doc.partShape(node.index)
                 owned.add(shape)
             }
+            val colors = colorsByNode[node.index].orEmpty()
+            val layers = layersByNode[node.index].orEmpty()
+            val solidColors =
+                colors.filter { it.target == XcafStyleTarget.SOLID }.associate { it.subIndex to it.color }
+            val solidLayers =
+                layers
+                    .filter { it.target == XcafStyleTarget.SOLID }
+                    .groupBy({ it.subIndex }, { it.layer })
+                    .mapValues { e -> e.value.distinct().sorted() }
+            val bodies = shape?.let { bodiesOf(it, node.name, warnings, MAX_BODY_SUMMARIES, solidColors, solidLayers) }
+            val partColor =
+                colors.firstOrNull { it.target == XcafStyleTarget.PART }?.color
+                    ?: if (shape != null && shape.topology.solids == 1) solidColors[0] else null
+            val partLayers =
+                (
+                    layers.filter { it.target == XcafStyleTarget.PART }.map { it.layer } +
+                        if (shape != null && shape.topology.solids == 1) solidLayers[0].orEmpty() else emptyList()
+                ).distinct().sorted()
+            val faceColors = colors.filter { it.target == XcafStyleTarget.FACE }.associate { it.subIndex to it.color }
+            val faceLayers =
+                layers
+                    .filter { it.target == XcafStyleTarget.FACE }
+                    .groupBy({ it.subIndex }, { it.layer })
+                    .mapValues { e -> e.value.distinct().sorted() }
+            val faceStyles =
+                (faceColors.keys + faceLayers.keys).sorted().map {
+                    ImportedFaceStyle(it, faceColors[it], faceLayers[it].orEmpty())
+                }
             parts.add(
                 ImportedPart(
                     index = parts.size,
@@ -171,7 +231,11 @@ object StepImporter {
                     volume = shape?.volume,
                     topology = shape?.topology,
                     boundingBox = shape?.boundingBox,
-                    bodies = shape?.let { bodiesOf(it, node.name, warnings) },
+                    bodies = bodies,
+                    color = partColor,
+                    layers = partLayers,
+                    faceStyles = faceStyles,
+                    surfaceTypes = shape?.let { OcctKernel.surfaceTypeCounts(it) },
                 ),
             )
         }
@@ -195,7 +259,12 @@ object StepImporter {
         val rootNodes = nodes.filter { it.freeRoot && it.kind != XcafNodeKind.COMPONENT }
         val roots = rootNodes.map { ImportedRoot(it.kind, denseIndex[it.index]) }
 
-        val expansion = expand(nodes) { partIndex, global -> globalBox(parts[partIndex].shape, global, owned) }
+        val expansion =
+            expand(
+                nodes,
+                maxDepth,
+                maxOccurrences,
+            ) { partIndex, global -> globalBox(parts[partIndex].shape, global, owned) }
         val occurrences = expansion.occurrences
         if (expansion.nonRigidSeen) {
             warnings.add(NON_RIGID_WARNING)
@@ -210,12 +279,43 @@ object StepImporter {
                     "${doc.stats.unknownEntityTypes.joinToString(", ")}, ignored",
             )
         }
-        if (prescan.ignoredCategories.isNotEmpty()) {
+        // Colours and layers are imported since ADR-0038; only categories still ignored are named here.
+        val notImported = prescan.ignoredCategories.filterKeys { it != "colours" && it != "layers" }
+        if (notImported.isNotEmpty()) {
             warnings.add(
-                "ignored (not imported): " +
-                    prescan.ignoredCategories.entries.joinToString(", ") { "${it.key} (${it.value})" },
+                "ignored (not imported): " + notImported.entries.joinToString(", ") { "${it.key} (${it.value})" },
             )
         }
+
+        val unit = doc.lengthUnitInfo
+        when (unit.state) {
+            LengthUnitState.MISSING -> warnings.add("the file declares no length unit; OCCT read it as millimetres")
+            LengthUnitState.MIXED ->
+                warnings.add(
+                    "the file uses different length units in different contexts (${unit.names.joinToString(", ")}); " +
+                        "each was converted to mm",
+                )
+            LengthUnitState.DECLARED -> Unit
+        }
+        val style = doc.styleStats
+        if (style.unattached > 0) {
+            warnings.add("${style.unattached} colour/layer assignments could not be attached to a part, body or face")
+        }
+        if (style.instanceStylesIgnored > 0) {
+            warnings.add(
+                "${style.instanceStylesIgnored} colour/layer assignments on assembly instances are not reported",
+            )
+        }
+        if (style.truncated > 0) warnings.add("presentation data truncated")
+        val presentation =
+            ImportPresentation(
+                coloredTargets = doc.colors.size,
+                layerAssignments = doc.layers.size,
+                layerNames = doc.layerNames.sorted(),
+                unattached = style.unattached,
+                instanceStylesIgnored = style.instanceStylesIgnored,
+                truncated = style.truncated,
+            )
 
         val model =
             ImportedStepModel(
@@ -229,6 +329,8 @@ object StepImporter {
                 occurrences = occurrences,
                 totals = ImportedTotals(occurrences.size, volume, totalBox),
                 warnings = warnings,
+                sourceLengthUnit = unit,
+                presentation = presentation,
             )
         return StepImportResult.Success(model)
     }

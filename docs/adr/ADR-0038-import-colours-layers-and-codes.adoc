@@ -1,0 +1,444 @@
+= ADR-0038: Import hardening (Welle R): colours, layers, units, depth check and the KSTEP-I codes
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle R). Extends ADR-0030 (the earlier statement there that colours and layers are
+ignored is superseded by this ADR). Builds on the import limits of ADR-0030 and the multi-body summary of ADR-0032.
+Amended by the worker wave: `kstep import` runs the import in a supervised worker subprocess (see "Worker subprocess of
+`kstep import`").
+
+== Context
+
+`kstep import` (ADR-0030) read structure and geometry but ignored colours and layers, trusted the file's length unit
+without ever looking at it, and bounded the product structure only AFTER OCCT had transferred it. Three gaps followed:
+
+. A file's colours and layers were counted (`ignored.colours`) and dropped.
+. A length unit whose conversion factor is zero made OCCT return a bounding box of 1e100 for a perfectly normal box
+  (measured, see D4), and a file without any length unit was read silently.
+. OCCT transfers `NEXT_ASSEMBLY_USAGE_OCCURRENCE` chains recursively. The Kotlin depth limit of 32 only ran after the
+  transfer, so a chain of several thousand levels (a few hundred kilobytes, below every size and entity limit) could
+  exhaust the native stack: a JVM crash instead of a structured error.
+
+Several `KSTEP-I-*` codes were also only partly covered by tests; some tests skipped silently when the operating system
+could not create the situation.
+
+== Decisions
+
+D1:: *Extract styles inside the XCAF session.* The XCAF document exists only inside `readXcafLocked`
+(`XcafDocumentGuard` closes it on return). Colours and layers are therefore copied into the `ImportSession` there, after
+the node walk, for every PART with a shape: the part label itself and its FACE, SOLID and SHELL sub-shape labels.
+`SetColorMode(true)` and `SetLayerMode(true)` are the only reader-mode changes; no new file access is opened. Tools are
+reached under the existing `g_mutex`. Six new JNI entry points return plain arrays (`nativeImportColors`,
+`nativeImportLayerRefs`, `nativeImportLayerNames`, `nativeImportStyleStats`, `nativeImportUnitInfo`,
+`nativeImportUnitNames`); the limits array keeps exactly six entries, new caps are native constants only.
+
+D2:: *Targets and what is not guessed.* A style attaches to `PART`, `SOLID` or `FACE`. A face index is the 0-based position
+in `TopExp::MapShapes(FACE)` of the part shape; because `nativeImportPartShape` copies the shape flat, it is the same
+index as `OcctShape.faces[i].index` on the Kotlin side (pinned by a test: the blue face of `styled-box.step` is index 5,
+area 600, normal +Z). The SOLID index is the `MapShapes(SOLID)` order, which is the order of `OcctKernel.solidSummaries`
+(pinned by a two-body fixture with bodies of different volume). A SHELL style goes to the one solid that contains the
+shell, otherwise it counts as unattached. Edges, vertices, curve colours and sub-shapes that are not in the part's maps
+(for example because they carry their own location) are counted as `unattached`, never attached by guessing. When the
+file styles the only solid of a part, OCCT puts the colour on the part label (measured); a part with exactly one solid
+therefore reports the solid's colour as its own. Colours and layers on assembly COMPONENT labels (instance styles) are
+counted (`instanceStylesIgnored`) and not reported.
+
+D3:: *The colour space is sRGB.* `Quantity_Color` stores LINEAR RGB since OCCT 7.5. Measured on `styled-box.step`
+(`COLOUR_RGB(1.,0.5,0.)`):
++
+[cols="2,3"]
+|===
+|Query |Green channel
+
+|`Values(..., Quantity_TOC_RGB)` (linear) |0.214041
+|`Values(..., Quantity_TOC_sRGB)` |0.500000
+|===
++
+The reference is the value in the file, so `kstep import` reports sRGB (tests allow 1e-4; the measured error is 4e-9).
+
+D4:: *Length units are checked, typed, before the transfer.* After the external-reference check, every
+`GLOBAL_UNIT_ASSIGNED_CONTEXT` (plain and the combined complex entity with the uncertainty context) is run through
+`STEPConstruct_UnitContext::ComputeFactors`. Measured with OCCT 7.9.3 (`SetLengthUnit(mm)` is set on the document before
+`Transfer`, so OCCT scales to millimetres):
++
+[cols="3,2,2,3"]
+|===
+|File |Unit factor from `ComputeFactors` |`FileUnits` name |Bounding box after `Transfer`
+
+|`box-20x30x40.step` (mm) |1 |millimetre |20 x 30 x 40
+|`inch-box.step` (`CONVERSION_BASED_UNIT 'INCH'`, 25.4) |25.4 |INCH |508 x 762 x 1016
+|`cm-box.step` (`SI_UNIT(.CENTI.,.METRE.)`) |10 |centimetre |200 x 300 x 400
+|`m-box.step` (`SI_UNIT($,.METRE.)`) |1000 |metre |20000 x 30000 x 40000
+|`no-unit-box.step` (no length unit in the context) |`LengthDone` false |(empty) |20 x 30 x 40 (read as mm)
+|`unresolved-unit-box.step` (conversion factor `0.`) |0 (`LengthDone` true, status 0) |BROKEN |+/-1e100 (garbage)
+|===
++
+The resulting policy: a context whose factor is zero, negative or not finite fails with `KSTEP-I-013`
+(`unit_unresolved`) before any geometry is transferred. A file without a length unit is NOT an error: the importer warns
+and reports `state: "missing"`. Contexts with different factors are `state: "mixed"` (a warning; OCCT converts each
+representation separately). A conversion unit whose base is not a length was not measured as a separate case: it is
+decided by the same status check. `read.step.unit` and `xstep.cascade.unit` are not involved. The mixed case is tested by
+adding a second context to the box fixture at test time.
+
+D5:: *Depth and cycles are checked before the transfer.* `checkStructureDepth` builds the graph of
+`StepRepr_ProductDefinitionUsage` entities (NAUO and its siblings) and runs an iterative DFS with white/grey/black marks
+and a post-order height. A cycle fails WITHOUT the `limit:` prefix and stays `KSTEP-I-009` (the existing test "cyclic NAUO
+pair is rejected as read_failed" is unchanged). A longest chain above 32 (`kMaxAssemblyDepth`, hand-synchronized with
+`StepImportLimits.MAX_ASSEMBLY_DEPTH`, like the pairs in ADR-0007 and ADR-0029) fails with `limit: assembly depth N
+exceeds 32`, i.e. `KSTEP-I-010`. The Kotlin expansion guard stays as the second line of defence. Chains of 2000 and
+20 000 levels now end in `limit_exceeded` with a normal exit code. `MAPPED_ITEM` / `REPRESENTATION_MAP` chains are not part
+of the graph yet (follow-up).
+
+D6:: *An empty compound is no geometry.* A representation that holds only an axis placement transfers as an EMPTY
+compound. That is now `hasShape = false` natively, which gives `KSTEP-I-011` instead of a part with volume 0. A file with
+product structure and no shape representation at all fails earlier in `Transfer` and is `KSTEP-I-009` (measured with the
+stripped variant of the box; `structure-only.step` is the axis-only variant).
+
+D7:: *The JSON contract only grows.* New top-level keys `sourceLengthUnit` (`state`, `names`, `factorToMm`) and
+`presentation` (`coloredTargets`, `layerAssignments`, `layers`, `unattached`, `instanceStylesIgnored`, `truncated`); new
+part keys `colour`, `layers`, `faceStyles` and, for freeform diagnosis, `surfaceTypes`; new body keys `colour` and
+`layers`. Nothing was renamed. `ignored.colours`, `ignored.layers` and `ignored.pmi` keep their meaning
+(OCCURRENCES IN THE FILE TEXT, not "what was dropped"); that the name `ignored` is now misleading for the first two is a
+known wart, accepted until the next major change of the schema. The key is spelled `colour` to match `ignored.colours`;
+the Kotlin type is `RgbColor` and `ImportedPart.color`. A new `ImportJsonSchemaTest` pins the key sets. The warning
+"ignored (not imported)" now names only `pmi`. Face indices in the report are 0-based. `--render` still uses its fixed
+palette, not the imported colours.
+
+D8:: *Surface kinds for freeform diagnosis.* `OcctKernel.surfaceTypeCounts` returns face counts per
+`GeomAbs_SurfaceType` (`plane`, `cylinder`, ..., `bsplineSurface`, `other`). `FaceKind` is NOT widened: a new enum entry
+would break exhaustive `when` expressions in consumers, and a B-spline face stays `FaceKind.OTHER`.
+
+D9:: *New code `KSTEP-I-013`, no renumbering.* `unit_unresolved` is added to `StepImportErrorKind`; no exhaustive `when`
+over this enum exists. `KSTEP-I-001` also names `DslViolationCodes.INVERSE_BOUND_VIOLATED` in kstep-core. The two never
+meet in one document (`kstep import --validate` prints counts, not codes), so the numbers were not changed; this ADR and
+`usage-import.adoc` record the overlap. New codes of the import family keep the `KSTEP-I-` prefix.
+
+== Costs
+
+Importing with `SetColorMode(true)` / `SetLayerMode(true)` was timed with `dump_xcaf_tree` (`units` mode reads without,
+`styles` mode with colour and layer mode) on `placed-assembly.step` (8 nodes, 45 kB), 30 runs each: 0.93 s to 0.95 s for
+both, i.e. no difference beyond process start-up. A large real-world file was not measured. A file with one million
+`CARTESIAN_POINT` entities (40 MB) is rejected by the entity limit in about 1.4 s and 880 MB resident, so `MAX_ENTITIES` is
+left as it is.
+
+Colour and layer mode make the transfer quadratic: OCCT's layer and colour readers search the existing labels linearly for
+every record. Measured with the CLI on `styled-box.step` plus N extra `PRESENTATION_LAYER_ASSIGNMENT` lines: 20k layers
+3.6 s, 40k 10.2 s, 80k 41.4 s; distinct `COLOUR_RGB` entities 5k/10k/20k 0.20/0.60/2.17 s. Because the read holds the
+process-global mutex, this would block every other OCCT call. Therefore the native reader counts by type, before
+`Transfer()`, the `PRESENTATION_LAYER_ASSIGNMENT` instances (cap 4096) and the colour definition entities (cap 10000;
+`StepVisual_ColourSpecification`) and fails with `limit:` (`KSTEP-I-010`) above the caps. The number of styled items is
+bounded separately, see below.
+
+The colour table is keyed by RGBA, not by `COLOUR_RGB`: `ReadColors` builds a colour from the `COLOUR_RGB` and the
+`SURFACE_STYLE_TRANSPARENT` of each `SURFACE_STYLE_RENDERING_WITH_PROPERTIES`, so distinct colour x transparency pairs
+also grow the table (measured: 2000 colours x varying transparency, 20k/40k/80k styled items 4.4/16.4/66.6 s, while 80k items
+with one shared colour and transparency take 1.2 s). The colour-definition cap alone therefore did not close the hole.
+The pre-transfer check also counts `StepVisual_SurfaceStyleTransparent` (cap 10000) and
+`StepVisual_SurfaceStyleRenderingWithProperties` (cap 10000). Opaque colours (from `COLOUR_RGB` through
+`SURFACE_STYLE_FILL_AREA`, up to 10000) and RGBA entries (from the rendering records, up to 10000) add up, so the table
+can hold about 20000 distinct entries. The caps bound only the table size, not the work: `ReadColors` calls
+`XCAFDoc_ColorTool::AddColor`, which scans the table linearly, once per `STYLED_ITEM`, so the total cost is
+(styled items) x (table size). Measured with a full table (about 20000 entries) and extra styled items that reference
+colours at the end of the table: 40k items 19.5 s, 100k 41.2 s, 300k 116.5 s (100k items referencing an early colour: 0.5 s).
+The pre-transfer check therefore also counts `StepVisual_StyledItem` (which covers `OVER_RIDING_STYLED_ITEM`) and applies
+two bounds: at most 200000 styled items, and styled items x (colour definitions + rendering records) at most 100000000
+(about 2 s of scan work). Above either bound the read fails with `limit:` (`KSTEP-I-010`).
+
+The scan work has a second factor: the colour reader also walks the whole style list of each styled item's
+`PRESENTATION_STYLE_ASSIGNMENT` / `SURFACE_SIDE_STYLE` once per styled item, and a list can repeat one reference at about
+6 bytes per entry, so the cost is (styled items) x (list length) even with a tiny colour table (measured: 1k items x 200k
+entries 5.6 s, 10k x 200k 53.4 s, 10k x 400k 113.7 s). The check therefore also rejects any `STYLED_ITEM`,
+`PRESENTATION_STYLE_ASSIGNMENT` or `SURFACE_SIDE_STYLE` whose style list is longer than 64 entries (real files use 1-3),
+which bounds the length of each list. Above it the read fails with `limit:` (`KSTEP-I-010`).
+
+=== Cost model of the pre-scan: weighted expansion instead of list caps
+
+A security audit of this wave showed that the per-list cap is not enough, because the lists nest. For every styled item the
+colour reader walks its presentation style assignments, their style selects, the elements of each `SURFACE_SIDE_STYLE`
+and the fill styles of each `FILL_AREA_STYLE` as nested loops. Four lists of 64 entries (each within the cap, and
+`FILL_AREA_STYLE` was not capped at all) multiply to 64^4 = 16.7 million steps per styled item: 100 such styled items in a
+71 kB file took 15 s, 1000 items more than 100 s, and the 200000 styled items allowed would have taken hours.
+
+The pre-scan therefore computes the work the colour reader will do, not only the length of each list. One styled item
+costs
+
+  sum over its PSAs ( sum over their style selects ( sum over the side-style elements ( max(1, n) ) ) ), at least 1,
+
+where `n` is the number of fill styles of a `FILL_AREA_STYLE` or the number of properties of a
+`SURFACE_STYLE_RENDERING_WITH_PROPERTIES`; any other select counts 1. The cost of a PSA and of a `SURFACE_SIDE_STYLE` is
+memoised per entity number, so the scan stays linear in the file even when every styled item shares one deep chain. The sum
+over all styled items is capped at 10000000 (`kMaxStyleExpansionWork`, hand-synchronized with
+`StepImportLimits.MAX_STYLE_EXPANSION_WORK`); above it the read fails with `limit: style expansion work exceeds 10000000`
+(`KSTEP-I-010`). The fill-style list of `FILL_AREA_STYLE` and the property list of a rendering are now capped at 64 as
+well, so every factor stays bounded and the sum cannot overflow.
+
+Choice of the budget. Real files cost 1 to 3 per styled item (one PSA, one surface style usage, a fill area and perhaps a
+rendering, one fill style each); at the cap of 200000 styled items that is at most about 600000. The budget allows 50 per
+styled item at that cap. Measured with the CLI and the cap temporarily lifted: the colour reader spends about 1 s per 100
+million units (64^4 x 6 styled items = 100M: 1.4 s for the whole CLI run; 167M: 2.0 to 2.1 s). Files right at the budget
+(56^4 x 1, 40^4 x 4, 16^4 x 153, 8^4 x 2441, 4^4 x 39062 styled items, i.e. 9.8 to 10.2 million) took 0.56 to 0.69 s for
+the whole CLI run, of which about 0.5 s is process start-up. The budget is deliberately far below the 2 s target, because
+the other caps (styled items x colour table, layers, colours) can add their own worst case in the same file. The
+measured representation lists (`MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION` with 400k items, layer
+assignments with 400k items) stayed harmless and are not part of the model.
+
+=== Diamond chains: path multiplicity
+
+The depth check bounds only the height of the usage graph. A chain whose levels each use the next assembly twice (two
+`NEXT_ASSEMBLY_USAGE_OCCURRENCE` entities on the same child) has height 29 for 28 levels, but 2^29 paths. OCCT expands
+the occurrences during `Transfer()` already, so such a file of 56 kB ran 69 s before the Kotlin expansion limit (10000
+part occurrences) fired. `checkStructureDepth` now counts, in the same post-order DFS (O(V+E)), the part occurrences below
+each node: 1 for a leaf, else the sum over its child EDGES (a duplicated usage counts twice), saturated just above the
+limit. The sum over the top-level assemblies is compared with 10000 (`kMaxExpandedOccurrences`, hand-synchronized with
+`StepImportLimits.MAX_EXPANDED_OCCURRENCES`) and fails with the message of the Kotlin check, `limit: more than 10000 part
+occurrences after expansion` (`KSTEP-I-010`). Measured: the 20-, 22-, 24- and 28-level diamonds (also with three usages
+per level) are now rejected in about 0.3 s (whole CLI run); a 10-level diamond (2048 occurrences) and a 3-level one are
+still imported. The count is an upper bound
+of the Kotlin count (an empty assembly counts 1 here and 0 there), so the native check never accepts what the Kotlin
+check rejects.
+
+=== Worker subprocess of `kstep import`
+
+The pre-scans bound the expensive paths that were found and measured, but four audit rounds each found a new one
+(the last: a self-overriding `OVER_RIDING_STYLED_ITEM`, override chains of 3000 and `MAPPED_ITEM` chains of 1000 or
+cycles ended the CLI with exit 132 and NO output at all; override chains of 2000 x 20000 items took 19 s; `MAPPED_ITEM`
+diamonds of 20 levels and shells repeating one face 150000 times ran into the 60 s bound). A native call cannot be
+interrupted, a crash inside OCCT takes the whole JVM with it, and the first version of the wall-clock bound (a watchdog
+thread calling `Runtime.halt` in the CLI process) printed a JVM fatal-error banner on stdout when it ended the process
+during a native call, so `--output json` was no longer one JSON document. Decision: a structural bound instead of a
+further pre-scan per finding.
+
+`kstep import` (the supervisor) validates its arguments and starts a second JVM, the import worker
+(`dev.kstep.cli.ImportWorker`, a separate main class: the `kstep-cli` launcher always starts `MainKt`, which never
+dispatches to it, and nothing in an input file can select it). The worker command is built from the running JVM, not
+from the launcher script: `${java.home}/bin/java` (`java.exe` on Windows), the same `java.class.path` (so it works
+identically for `installDist`, the release zip and the test class path; the native bridges are classpath resources
+of `kstep-geometry` / `kstep-constraints` and are found the same way), the arguments rebuilt from the validated command
+(never the raw command line) and these JVM options:
+
+* `-Xmx2g`: heap bound of the worker; `-XX:+ExitOnOutOfMemoryError` ends it on the first OutOfMemoryError in any thread
+  (exit 3, message "Terminating due to java.lang.OutOfMemoryError" on stdout), reported as `limit_exceeded`. Native
+  memory of OCCT is NOT covered by `-Xmx`; a native allocation failure is a crash (below).
+* `-XX:+SuppressFatalErrorMessage` (no fatal-error banner, no `hs_err_pid*.log` in the working directory, which the
+  audit runs had left behind) and `-XX:-CreateCoredumpOnCrash`.
+* `-XX:TieredStopAtLevel=1` like the CLI itself; `-Dstdout.encoding` / `-Dstderr.encoding` (and `file.encoding`) of the
+  supervisor, so the worker encodes its report exactly as the in-process command did (a pipe would otherwise get
+  `native.encoding`); the native-bridge override properties and `java.awt.headless` when set; the effective timeout.
+
+The supervisor reads the worker's stdout and stderr on two threads into memory, at most 64 MiB and 4 MiB (beyond that
+the worker is killed: `limit_exceeded`), waits at most the timeout (60 s, lowerable as before via
+`kstep.import.timeoutMillis` / `KSTEP_IMPORT_TIMEOUT_MILLIS`) and then kills the worker and all its descendants
+(`destroyForcibly`) and waits for its end. A shutdown hook kills the worker when the supervisor itself is ended
+(Ctrl-C, SIGTERM). The judgement (`judgeWorkerOutcome`):
+
+* *Regular end*, passed through byte for byte (stdout, stderr, exit code): exit 0 or 1 and one complete report. In
+  JSON mode stdout must parse as ONE JSON object with `command = import` and a status that matches the exit code
+  (`success` for 0, `error` / `validation_failed` for 1); in text mode it must start with `Imported ` (or `Error: ` for
+  exit 1), end with a newline and contain no line starting with the JVM banner `# A fatal error has been detected`.
+* *Timeout*: `limit_exceeded` (`KSTEP-I-010`), "import did not finish within N ms (wall-clock limit)", as before.
+* *OutOfMemoryError* (exit 3 with the JVM's message) and *output overflow*: `limit_exceeded` (`KSTEP-I-010`).
+* *Anything else* (a signal, exit 132/134/139, exit 0 or 1 without a complete report, another exit code):
+  `read_failed` (`KSTEP-I-009`), "the import worker terminated abnormally (signal 4 (SIGILL)); the file cannot be read
+  safely". `KSTEP-I-009` already means "OCCT cannot read or transfer the file"; a reader that crashes on a file is the
+  same verdict for the user, so no new code was added. The first non-empty stderr line of the worker (at most 300
+  printable characters) follows on stderr as `kstep import: <line>`; the worker's stdout is never printed then.
+* *Worker cannot be started* (no java executable, `IOException`): `io_error` (`KSTEP-I-012`).
+
+The worker runs exactly the former in-process import (`runImportInProcess`). The former watchdog class stays, with a
+new role: inside the worker it fires at timeout + 10 s and halts silently (exit 124, no output), which only matters for
+an orphan whose supervisor was killed with SIGKILL; with the worker's `-XX:+SuppressFatalErrorMessage` a halt during a
+native call cannot print a banner, and its output would not be read anyway. The output-ownership protocol of the old
+watchdog (`disarm` before printing) is gone, because the worker's watchdog prints nothing.
+
+No production test hook. In-process runs for the tests need no switch either: the worker main class can be started
+directly (`java -cp ... dev.kstep.cli.ImportWorker <args>`), which is the in-process import. A switch such as
+`-Dkstep.import.inProcess=true` was rejected because the launcher reads `JAVA_OPTS` / `KSTEP_CLI_OPTS` from the
+environment, so an environment variable could have switched the bound off. Tests: `ImportWorkerSupervisorTest`
+(kstep-cli) runs the supervisor against real child processes of a stand-in worker in the test sources
+(`FakeImportWorker`): regular end passed through, crash after partial output (exit 132), segfault exit 139, truncated
+JSON with exit 1, banner on stdout, real OutOfMemoryError under `-Xmx64m`, timeout with a grandchild process (worker
+and grandchild are dead afterwards), a short timeout, stdout flood beyond the bound, start failure, the regular-end
+rules and the worker command line. `CliImportWorkerIntegrationTest` (kstep-tests) runs the real CLI: a box (JSON, text,
+`--validate`) and a missing file through the worker give byte-identical stdout and the same exit code as the worker main
+class run directly; the four former crashers (generated by `ImportFixtures`: `overrideSelf`, `overrideChain(3000)`,
+`mappedItemChain(1000)`, `mappedItemCycle`) and the 26 s shell file (`repeatedShellFaces(50000)`) give exactly one JSON
+error document on stdout and no banner; `-Dkstep.import.timeoutMillis=1` gives the timeout error in JSON and text, and
+afterwards no process with the test's unique file name is alive. These tests run with and without OCCT.
+
+Costs: one extra JVM start. Measured on the box fixture (`--output json`, macOS arm64, median of 10 runs): the
+worker main class started directly (the former in-process import) 0.29 s, `kstep import` through the worker 0.36 s,
+i.e. about 0.08 s more per import; `kstep-cli --help` alone takes 0.05 s. The supervisor never loads OCCT.
+
+=== Three more pre-transfer checks (fast path, not the guarantee)
+
+The worker bounds every input; the pre-scans give the known worst cases a structured error in well under a second
+instead of a timeout or a crash report. Three cheap, linear checks were added after the existing ones:
+
+* `checkOverrideChains`: follows `OverRiddenStyle()` from every `OVER_RIDING_STYLED_ITEM`, memoised per entity; a cycle
+  (including a self reference) or a chain deeper than 16 (`kMaxOverrideDepth`, `StepImportLimits.MAX_OVERRIDE_DEPTH`;
+  real files use 1) fails with `limit:`.
+* `checkMappedItems`: the graph representation -> `MAPPED_ITEM` -> `REPRESENTATION_MAP` -> mapped representation, same
+  post-order DFS as `checkStructureDepth`: cycle, height above 32 (`kMaxAssemblyDepth`) and more than 10000 mapped-item
+  expansions (path multiplicity, a repeated item counts again; `kMaxMappedItemExpansions`,
+  `StepImportLimits.MAX_MAPPED_ITEM_EXPANSIONS`) fail with `limit:`.
+* `checkShellFaceReferences`: the face-list lengths of all `CONNECTED_FACE_SET`s (`CLOSED_SHELL`, `OPEN_SHELL`) summed;
+  above 250000 (`kMaxShellFaceReferences`, equal to `StepImportLimits.MAX_TOTAL_FACES`; a fixed bound, not the caller's
+  face limit) the read fails with `limit:`.
+
+Measured with the CLI after the change (see the table below): every former crasher except `oc100k` and every former
+slow file of this audit is rejected in 0.4 to 0.7 s for the whole command. Boundary files are still imported: a
+`MAPPED_ITEM` diamond of 12 levels (8190 expansions) in 0.7 s, a chain of 32 in 0.4 s, override chains of depth 16 with
+20000 / 190000 overriding items in 0.6 / 2.2 s, `SHAPE_REPRESENTATION_RELATIONSHIP` chains of 3000 and diamonds of 20
+levels in 0.4 s.
+
+=== Measurement table (worker wave)
+
+All repro files of the audit rounds (`audit3`, `a`, `files2`), `kstep import <f> --output json` with the freshly built
+`installDist` (macOS arm64, OCCT 7.9.3), whole command including both JVM starts. "JSON" = stdout parses as one JSON
+document. Before this wave `oself`, `ocycle`, `ocd3000`, `oc100k`, `mc1000`, `mc3000` and `mcyc` ended with exit 132 and
+no output, `oc2000x20000` took 19 s, `md20` / `md28` / `mt14` / `sh150k_0` and the larger override chains hit the 60 s
+bound, `sh50k_0` took 26 s.
+
+[cols="3,1,1,1,6"]
+|===
+|File |s |Exit |JSON |Result
+
+|`mc1000.step` |0.68 |1 |yes |KSTEP-I-010: limit: mapped item depth 33 exceeds 32
+|`mc300.step` |0.38 |1 |yes |KSTEP-I-010: limit: mapped item depth 33 exceeds 32
+|`mc3000.step` |0.39 |1 |yes |KSTEP-I-010: limit: mapped item depth 33 exceeds 32
+|`mcyc.step` |0.38 |1 |yes |KSTEP-I-010: limit: cyclic mapped item (a representation maps itself)
+|`md10.step` |0.47 |0 |yes |success
+|`md20.step` |0.40 |1 |yes |KSTEP-I-010: limit: more than 10000 mapped item expansions
+|`md28.step` |0.38 |1 |yes |KSTEP-I-010: limit: more than 10000 mapped item expansions
+|`md6.step` |0.39 |0 |yes |success
+|`mt14.step` |0.38 |1 |yes |KSTEP-I-010: limit: more than 10000 mapped item expansions
+|`n10.step` |0.50 |0 |yes |success
+|`n2.step` |0.85 |0 |yes |success
+|`n4.step` |0.62 |0 |yes |success
+|`oc100_100.step` |0.38 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`oc100k.step` |0.56 |1 |yes |KSTEP-I-009: worker terminated abnormally (SIGILL)
+|`oc2000x190000.step` |0.69 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`oc2000x20000.step` |0.43 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`oc2000x80000.step` |0.51 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`oc2k_2k.step` |0.39 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocd1000.step` |0.38 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocd12000.step` |0.40 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocd200.step` |0.38 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocd2000.step` |0.38 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocd25000.step` |0.42 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocd3000.step` |0.38 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocd500.step` |0.38 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocd6000.step` |0.39 |1 |yes |KSTEP-I-010: limit: over-riding styled item chain deeper than 16
+|`ocycle.step` |0.38 |1 |yes |KSTEP-I-010: limit: cyclic over-riding styled item chain
+|`oself.step` |0.39 |1 |yes |KSTEP-I-010: limit: cyclic over-riding styled item chain
+|`sc1000.step` |0.40 |0 |yes |success
+|`sd20.step` |0.40 |0 |yes |success
+|`sh150k_0.step` |0.48 |1 |yes |KSTEP-I-010: limit: shell face references exceed 250000
+|`sh20k_0.step` |11.07 |0 |yes |success
+|`sh50k_0.step` |0.41 |1 |yes |KSTEP-I-010: limit: shell face references exceed 250000
+|`sh5k_0.step` |3.09 |0 |yes |success
+|`sh5k_1.step` |3.11 |0 |yes |success
+|`sh5k_200k.step` |3.74 |0 |yes |success
+|`sh5k_200k_f.step` |3.53 |0 |yes |success
+|`sh5k_200k_solid.step` |0.64 |1 |yes |KSTEP-I-010: limit: styled item count exceeds 200000
+|`d1.step` |0.39 |0 |yes |success
+|`d10_2.step` |0.49 |0 |yes |success
+|`d20_2.step` |0.38 |1 |yes |KSTEP-I-010: limit: more than 10000 part occurrences after expansion
+|`d22.step` |0.37 |1 |yes |KSTEP-I-010: limit: more than 10000 part occurrences after expansion
+|`d24.step` |0.37 |1 |yes |KSTEP-I-010: limit: more than 10000 part occurrences after expansion
+|`d28_2.step` |0.39 |1 |yes |KSTEP-I-010: limit: more than 10000 part occurrences after expansion
+|`d28_3.step` |0.37 |1 |yes |KSTEP-I-010: limit: more than 10000 part occurrences after expansion
+|`fas100k_100.step` |0.38 |1 |yes |KSTEP-I-010: limit: style list length exceeds 64
+|`fas5k_100.step` |0.37 |1 |yes |KSTEP-I-010: limit: style list length exceeds 64
+|`layer400k.step` |0.78 |0 |yes |success
+|`layers4000.step` |1.27 |0 |yes |success
+|`layers60.step` |0.45 |0 |yes |success
+|`mdgpr400k.step` |0.52 |0 |yes |success
+|`mdgprs.step` |0.56 |0 |yes |success
+|`nest16_1000.step` |0.38 |1 |yes |KSTEP-I-010: limit: style expansion work exceeds 10000000
+|`nest32_1000.step` |0.39 |1 |yes |KSTEP-I-010: limit: style expansion work exceeds 10000000
+|`nest64_1.step` |0.37 |1 |yes |KSTEP-I-010: limit: style expansion work exceeds 10000000
+|`nest64_10.step` |0.39 |1 |yes |KSTEP-I-010: limit: style expansion work exceeds 10000000
+|`nest64_100.step` |0.38 |1 |yes |KSTEP-I-010: limit: style expansion work exceeds 10000000
+|`nest64_1000.step` |0.39 |1 |yes |KSTEP-I-010: limit: style expansion work exceeds 10000000
+|`nest64_2000.step` |0.54 |1 |yes |KSTEP-I-010: limit: style expansion work exceeds 10000000
+|`nest8_1000.step` |0.45 |0 |yes |success
+|`psa_200k_10k.step` |0.46 |1 |yes |KSTEP-I-010: limit: style list length exceeds 64
+|`psa_200k_1k.step` |0.43 |1 |yes |KSTEP-I-010: limit: style list length exceeds 64
+|`psa_400k_10k.step` |0.48 |1 |yes |KSTEP-I-010: limit: style list length exceeds 64
+|`si_1k_10k.step` |0.16 |1 |yes |KSTEP-I-006: file larger than 50000000 bytes
+|`sss_200k_10k.step` |0.41 |1 |yes |KSTEP-I-010: limit: style list length exceeds 64
+|===
+
+`oc100k` (one override chain of 100000 items) still crashes the native reader, apparently already while the file is
+parsed, before any pre-scan runs: this is the case the worker exists for, and it now ends as one `read_failed` document
+instead of a silent exit 132. `sh20k_0` (120000 face references, below the shell bound) is still imported, in 11 s.
+
+=== Where there is no worker
+
+Only the `kstep import` command runs the import in a worker. `kstep-mcp` has no import tool (checked again in this wave:
+no caller of `StepImporter`, `StepImportValidation` or `OcctKernel.readStep` outside `kstep-cli`, `kstep-shape` and
+`kstep-geometry`). A library caller of `StepImporter.read` or `OcctKernel.readStep` runs the native reader in its own
+process: no wall-clock or memory bound, and a crash inside OCCT ends that process. Such a caller (and an import tool in
+`kstep-mcp`, should one be added) should start a worker the same way; the supervisor is `internal` to `kstep-cli` today.
+
+=== Remaining limits of the hardening
+
+* The pre-scans model the loops that were found and measured, not every loop in OCCT; the worker is the bound.
+* OCCT-internal loops cannot be interrupted; the supervisor kills the worker process, it does not cancel the call.
+* `-Xmx2g` bounds the Java heap only. OCCT allocates natively; a file that makes OCCT allocate many GB of native memory
+  within 60 s is bounded only by the operating system (a failed allocation is a crash, reported as `read_failed`).
+* Library callers have neither bound (see above).
+* A supervisor killed with SIGKILL leaves the worker running until its own watchdog halts it (timeout + 10 s).
+* Tested on macOS arm64 (and in CI on Linux x86-64). Windows and Intel macOS are not tested: the worker command uses
+  `java.exe` and the same class path, but process-tree killing, exit codes of crashes and the `.bat` launcher were not
+  exercised there.
+* The worker costs one extra JVM start per import (see the costs above).
+
+== Error codes (KSTEP-I-001 to KSTEP-I-013)
+
+[cols="1,2,3,3"]
+|===
+|Code |`errorKind` |Trigger |Test (reachability)
+
+|I-001 |`invalid_path` |NUL or illegal characters in the path (`InvalidPathException`); `--render` names the input file;
+`--render` is a symbolic link |NUL: `StepInputValidationTest`, not reachable through the CLI on POSIX (an argument cannot
+contain NUL); `--render` cases: `OcctCliImportErrorCodesTest`
+|I-002 |`file_not_found` |no such file |`CliImportErrorPathsIntegrationTest`
+|I-003 |`symlink_rejected` |last path component is a symbolic link |`CliImportErrorPathsIntegrationTest`; creating the link must
+succeed on POSIX (the test no longer skips silently)
+|I-004 |`not_a_regular_file` |directory, FIFO, device |directory and FIFO (`mkfifo`) in `CliImportErrorPathsIntegrationTest`
+|I-005 |`empty_file` |zero bytes |`CliImportErrorPathsIntegrationTest`
+|I-006 |`file_too_large` |size above 50 000 000 bytes, checked before reading |sparse file of 50 000 001 bytes through the CLI. The
+second branch (file grows after the size check) is a defence against a race and is not deterministically testable
+|I-007 |`not_step` |no ISO-10303-21 header |`CliImportErrorPathsIntegrationTest`, `StepInputValidationTest`
+|I-008 |`external_reference` |`DOCUMENT_FILE` and friends |`CliImportErrorPathsIntegrationTest`, `OcctStepImportHostileInputTest`
+|I-009 |`read_failed` |OCCT cannot read or transfer the file, product structure cycle, abnormal end of the import worker
+(crash, signal, incomplete report) |`OcctStepImportHostileInputTest`; worker: `ImportWorkerSupervisorTest` (exit 132,
+139, truncated JSON, banner)
+|I-010 |`limit_exceeded` |native limits; structure depth above 32 and more than 10000 part occurrences after expansion
+(both before transfer); style expansion work; override chains, mapped items, shell face references (before transfer);
+Kotlin expansion limits; the 60 s wall-clock bound, the 2 GB heap and the output bound of the `kstep import` worker
+|chain of 33, 2000 and 20 000 levels; one million entities; diamond of 28 levels x 2 and nested style chain 64^4 x 100
+(`OcctCliImportErrorCodesTest`); `StepImporterLimitOcctTest` (resource release on a Kotlin-side limit); override
+chains, mapped items and shells: `CliImportWorkerIntegrationTest`; timeout, heap and output bound of the worker:
+`ImportWorkerSupervisorTest` (unit, real child processes) and `CliImportWorkerIntegrationTest` (timeout through the CLI)
+|I-011 |`no_content` |no part with geometry (also: representation without B-Rep) |`OcctCliImportErrorCodesTest`
+(`structure-only.step`); `--render` without placed geometry is the other trigger
+|I-012 |`io_error` |unreadable file (mode 000), `--render` cannot write, the import worker cannot be started |CLI
+tests for both (mode 000 only when not root, not Windows); worker start: `ImportWorkerSupervisorTest`
+|I-013 |`unit_unresolved` |length unit that cannot be resolved |`OcctStepImportUnitsTest`, `OcctCliImportErrorCodesTest`
+|===
+
+== Not covered
+
+* Colours and layers of assembly instances (component labels): counted, not reported. Edge and vertex colours, invisibility.
+* Imported colours in `--render`; `--render` keeps its palette.
+* NURBS creation in kSTEP (there is no sweep, loft or spline operation). The only true B-spline input is a foreign file
+  (`freecad-loft-1.1.4.step`, written by FreeCAD 1.1.4). The round trips of kSTEP-built shapes cover planes, cylinders,
+  spheres, tori (fillet) and cylinders (revolution), not B-splines.
+* `SHAPE_REPRESENTATION_RELATIONSHIP` chains and diamonds in the pre-transfer check (chains of 3000 and diamonds of 20
+  levels were measured harmless in this wave: 0.4 s); the worker bounds them like any other input.
+* The second `KSTEP-I-006` branch (race), `KSTEP-I-001` with a NUL byte through the CLI (impossible on POSIX).
+* Colour export (planned as Welle S).

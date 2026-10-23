@@ -15,10 +15,120 @@ kstep import build/placed.step --render build/placed.svg   # also render (svg, p
 The text report lists the product structure, each part's exact volume, face count and bounding box, the
 placed occurrences (the assembly is expanded, a part used twice is two occurrences) and totals, in
 millimetres. For `export-placed-assembly.kstep.kts` that is 4 occurrences, volume 17384 mm3 and bounding box
-`[0,0,0]..[40,40,22]`. Warnings (unknown entity types, ignored colours/layers/PMI) go to stderr.
+`[0,0,0]..[40,40,22]`. Warnings (unknown entity types, ignored PMI, missing units) go to stderr.
+
+=== Colours, layers and units
+
+Since ADR-0038 colours and layers are imported. The text report adds a line under a part with its colour and layers, and
+one line for each face that has its own colour or layer (face numbers are 0-based, in OCCT's face order of the part):
+
+----
+Imported styled-box.step (schema AP242..., OCCT 7.9.3, unit mm (file: millimetre), 369 entities)
+Parts:
+  Box  volume 24000.000 mm3  faces 6  bbox [0,0,0]..[20,30,40]
+    colour (1, 0.5, 0)  layers [Layer-A]
+    face 5  colour (0, 0, 1)  layers [Layer-F]
+----
+
+Colours are sRGB values between 0 and 1, as written in the file. The JSON document keeps every earlier key and adds
+`sourceLengthUnit` (`state` is `declared`, `missing` or `mixed`; `names`; `factorToMm`) and `presentation` (counts and the
+layer names) at the top, `colour`, `layers`, `faceStyles` and `surfaceTypes` on each part, and `colour` and `layers` on each
+entry of `bodies`. `ignored.colours` and `ignored.layers` still count the occurrences of the entities in the file text
+(the name is historical). Geometry is always delivered in millimetres: a file in inches, centimetres or metres is
+converted, and `sourceLengthUnit` tells what the file declared. A file with no length unit is read as millimetres with a
+warning (`state` `missing`); a unit that cannot be resolved (for example a conversion factor of 0) is `KSTEP-I-013`.
+
+Not reported yet: colours and layers on assembly instances (counted in `presentation.instanceStylesIgnored`), edge and
+vertex colours, and `--render` still uses its own palette.
 
 `kstep import` is read-only: it writes nothing unless `--render` names a file. It refuses symbolic links,
 non-regular files, files above 50 MB and files that reference other files (`DOCUMENT_FILE` and friends); the
-limits are in ADR-0030. Errors are `KSTEP-I-001`..`KSTEP-I-012` (`--output json` carries `errorKind`, `code`
+limits are in ADR-0030. Errors are `KSTEP-I-001`..`KSTEP-I-013` (`--output json` carries `errorKind`, `code`
 and `message`). It needs the OCCT bridge; without it the command reports `geometry_unavailable`.
 See docs/adr/ADR-0030-read-geometry.adoc for what is and is not covered.
+
+=== Error codes
+
+[cols="1,2,4"]
+|===
+|Code |`errorKind` |Meaning
+
+|`KSTEP-I-001` |`invalid_path` |Illegal characters in the path, or `--render` names the input file or a symbolic link
+|`KSTEP-I-002` |`file_not_found` |No such file
+|`KSTEP-I-003` |`symlink_rejected` |The path is a symbolic link
+|`KSTEP-I-004` |`not_a_regular_file` |Directory, FIFO or device
+|`KSTEP-I-005` |`empty_file` |Zero bytes
+|`KSTEP-I-006` |`file_too_large` |More than 50 000 000 bytes
+|`KSTEP-I-007` |`not_step` |Not a Part 21 file (STEP-XML and stpZ are not supported)
+|`KSTEP-I-008` |`external_reference` |The file references other files
+|`KSTEP-I-009` |`read_failed` |OCCT cannot read or transfer the file, the product structure is cyclic, or the import
+worker process ended abnormally (crash, signal, incomplete report; see "Worker process" below)
+|`KSTEP-I-010` |`limit_exceeded` |A limit is exceeded (see the table below), including a product structure deeper than
+32 levels, more than 10 000 part occurrences after expansion, the 60 s wall-clock bound and the 2 GB heap of the import
+worker
+|`KSTEP-I-011` |`no_content` |No part with B-Rep geometry (structure-only files), or nothing to render
+|`KSTEP-I-012` |`io_error` |The file cannot be read, or the `--render` target cannot be written
+|`KSTEP-I-013` |`unit_unresolved` |The file's length unit cannot be resolved
+|===
+
+=== Limits
+
+Every limit below fails with `KSTEP-I-010` (`limit_exceeded`) unless noted otherwise. The checks marked "before the
+transfer" run on the parsed entities before OCCT builds anything; the others on the transferred document or during the
+expansion. Background and measurements: ADR-0030 and ADR-0038.
+
+[cols="3,1,4"]
+|===
+|Limit |Value |Checked
+
+|File size |50 000 000 bytes |before reading (`KSTEP-I-006`)
+|STEP entity instances |1 000 000 |before the transfer
+|Assembly depth (longest usage chain) |32 levels |before the transfer, and during the expansion
+|Part occurrences after expansion (a part used twice counts twice, also through shared sub-assemblies) |10 000
+|before the transfer (path count of the usage graph), and during the expansion
+|`PRESENTATION_LAYER_ASSIGNMENT` |4 096 |before the transfer
+|Colour definitions (`COLOUR_RGB` and siblings) |10 000 |before the transfer
+|`SURFACE_STYLE_TRANSPARENT` |10 000 |before the transfer
+|`SURFACE_STYLE_RENDERING_WITH_PROPERTIES` |10 000 |before the transfer
+|`STYLED_ITEM` (including `OVER_RIDING_STYLED_ITEM`) |200 000 |before the transfer
+|Styled items x (colour definitions + rendering records) |100 000 000 |before the transfer
+|Length of one style list (styled item, presentation style assignment, surface side style, fill area style, rendering
+properties) |64 |before the transfer
+|Style expansion work: the sum over all styled items of the nested style lists the colour reader walks (real files: 1-3
+per styled item) |10 000 000 |before the transfer
+|Depth of an `OVER_RIDING_STYLED_ITEM` chain (a cycle or self reference is rejected) |16 |before the transfer
+|`MAPPED_ITEM` nesting (representation -> `REPRESENTATION_MAP` -> representation; a cycle is rejected) |32 levels
+|before the transfer
+|`MAPPED_ITEM` expansions (path count of that graph, a repeated item counts again) |10 000 |before the transfer
+|Face references summed over all shells (`CLOSED_SHELL`, `OPEN_SHELL`; a repeated face counts again) |250 000
+|before the transfer
+|XCAF nodes / assembly components / distinct parts |10 000 / 10 000 / 2 000 |after the transfer
+|Faces summed over all distinct parts |250 000 |after the transfer
+|Names |256 UTF-16 code units |truncated, not rejected
+|Wall-clock time of the whole `kstep import` command |60 s |the worker process is killed; exit code 1
+|Java heap of the import worker |2 GB (`-Xmx2g`) |an OutOfMemoryError ends the worker; exit code 1
+|Collected worker output |64 MiB stdout, 4 MiB stderr |the worker is killed; exit code 1
+|===
+
+=== Worker process
+
+`kstep import` does the actual work (reading, transfer, `--validate`, `--render`) in a second JVM, the import worker,
+started from the same Java runtime and class path as the command itself. The command waits for the worker and:
+
+* passes the worker's stdout, stderr and exit code through unchanged when the worker ends regularly (exit 0 or 1 with one
+  complete report: a single JSON document with `--output json`, an `Imported ...` or `Error: ...` report in text mode);
+* otherwise prints ONE structured error, as text or JSON like every other import error, and ends with exit code 1:
+  `limit_exceeded` (`KSTEP-I-010`) after the wall-clock bound (the worker and its child processes are killed), when the
+  worker runs out of heap or when its output exceeds the bound; `read_failed` (`KSTEP-I-009`) when the worker crashed
+  (for example a signal inside the native reader) or ended without a complete report. A short diagnostic line may follow
+  on stderr. With `--output json`, stdout is always exactly one JSON document: the worker's own output of an abnormal end,
+  including any JVM crash message, is never passed through.
+
+The wall-clock bound can be lowered, not raised: `-Dkstep.import.timeoutMillis=<ms>` (for example through `JAVA_OPTS`) or
+the environment variable `KSTEP_IMPORT_TIMEOUT_MILLIS`; values of 60000 and above are ignored. The second JVM start adds
+about 0.1 s to every `kstep import` (see ADR-0038). The bounds apply only to the `kstep import` command: a program that
+calls `StepImporter` or `OcctKernel.readStep` as a library runs the native reader in its own process, without a time or
+memory bound, and a native read in progress cannot be cancelled there (ADR-0038).
+
+NOTE: `KSTEP-I-001` is also the code of the DSL violation `INVERSE_BOUND_VIOLATED` in `kstep-core`. The two never appear in
+the same document (`kstep import --validate` reports counts only), so the numbers were not changed (ADR-0038).

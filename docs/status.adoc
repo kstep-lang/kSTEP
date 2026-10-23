@@ -400,8 +400,10 @@ this writing:
   XCAF reader for structure, shapes and placements; the typed Part 21 layer
   only for product/usage identifiers and `--validate`). Round trip kSTEP to STEP
   to kSTEP and a box written by FreeCAD 1.1.4 were checked on 2026-10-22 (see
-  xref:usage-import.adoc#import-usage[Reading a STEP file back]); other CAD tools, multi-body files,
-  colours/PMI and structure-only files are not covered.
+  xref:usage-import.adoc#import-usage[Reading a STEP file back]); since Welle R (ADR-0038) it also reports colours and
+  layers (part, body, face), the file's length unit (inch, centimetre and metre files are converted and reported) and
+  checks product-structure depth before the transfer; other CAD tools, PMI, instance colours and structure-only files
+  are not covered.
 * (M1 Welle 6) The semantic model now captures `DERIVE`, `INVERSE`, and
   `UNIQUE` entity-body clauses — a gap flagged across three separate
   wave reviews (`ExpressEntity`'s own "losslessly captured" KDoc was,

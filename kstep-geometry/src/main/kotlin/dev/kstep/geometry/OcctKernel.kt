@@ -780,6 +780,9 @@ object OcctKernel {
                 if (e.message?.startsWith("external-reference:") == true) {
                     throw OcctExternalReferenceException(e.message.orEmpty())
                 }
+                if (e.message?.startsWith("unit:") == true) {
+                    throw OcctUnitException(e.message.orEmpty())
+                }
                 throw e
             } catch (e: RuntimeException) {
                 throw OcctGeometryException("OCCT failed to read STEP content", e)
@@ -2096,6 +2099,34 @@ object OcctKernel {
         requireAvailable()
         val raw = shape.withHandle { OcctBridge.nativeSolidSummaries(it) }
         return List(raw.size / 2) { SolidSummary(raw[2 * it], raw[2 * it + 1].toInt()) }
+    }
+
+    private val SURFACE_TYPE_KEYS =
+        listOf(
+            "plane",
+            "cylinder",
+            "cone",
+            "sphere",
+            "torus",
+            "bezierSurface",
+            "bsplineSurface",
+            "surfaceOfRevolution",
+            "surfaceOfExtrusion",
+            "offsetSurface",
+            "other",
+        )
+
+    /**
+     * Number of faces per surface kind, in a stable key vocabulary (`plane`, `cylinder`, `cone`, `sphere`,
+     * `torus`, `bezierSurface`, `bsplineSurface`, `surfaceOfRevolution`, `surfaceOfExtrusion`, `offsetSurface`,
+     * `other`); only kinds that occur are present. [dev.kstep.geometry.select.FaceKind] is deliberately not
+     * widened for this: a B-spline face stays `FaceKind.OTHER` there.
+     */
+    fun surfaceTypeCounts(shape: OcctShape): Map<String, Int> {
+        requireAvailable()
+        val raw = shape.withHandle { OcctBridge.nativeShapeSurfaceTypeCounts(it) }
+        check(raw.size == SURFACE_TYPE_KEYS.size) { "unexpected native surface type payload" }
+        return SURFACE_TYPE_KEYS.indices.filter { raw[it] > 0 }.associate { SURFACE_TYPE_KEYS[it] to raw[it] }
     }
 
     private fun requireFilletArguments(

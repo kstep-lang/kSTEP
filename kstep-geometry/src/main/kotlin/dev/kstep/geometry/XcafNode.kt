@@ -31,3 +31,54 @@ data class StepReadStats(
     val unknownEntityTypes: List<String>,
     val freeRootCount: Int,
 )
+
+/** What a colour or layer assignment refers to inside a PART. */
+enum class XcafStyleTarget { PART, SOLID, FACE }
+
+/**
+ * A colour on [target] of the PART node [nodeIndex]. [subIndex] is the 0-based position in OCCT's face / solid
+ * enumeration of the part (the same order as `OcctShape.faces[i].index - 1` and the solid summaries); 0 for
+ * the part itself.
+ */
+class XcafColorAssignment(
+    val nodeIndex: Int,
+    val target: XcafStyleTarget,
+    val subIndex: Int,
+    val color: RgbColor,
+)
+
+/** A layer name on [target] of the PART node [nodeIndex]; see [XcafColorAssignment] for [subIndex]. */
+class XcafLayerAssignment(
+    val nodeIndex: Int,
+    val target: XcafStyleTarget,
+    val subIndex: Int,
+    val layer: String,
+)
+
+/**
+ * Style counters of one read.
+ *
+ * @property unattached styles on edges, vertices or sub-shapes that could not be matched to a face or solid
+ * @property instanceStylesIgnored colours / layers on assembly component instances (not reported yet)
+ * @property truncated styles dropped because a native cap was reached
+ */
+data class XcafStyleStats(
+    val unattached: Int,
+    val instanceStylesIgnored: Int,
+    val truncated: Int,
+)
+
+/** How the file declares its length unit. */
+enum class LengthUnitState { DECLARED, MISSING, MIXED }
+
+/**
+ * The length unit of the file as declared (the geometry itself is always delivered in millimetres).
+ *
+ * @property names unit names found in the file (`INCH`, `millimetre`, ...)
+ * @property factorToMm millimetres per file unit, `null` if the file declares no length unit
+ */
+data class StepLengthUnitInfo(
+    val state: LengthUnitState,
+    val names: List<String>,
+    val factorToMm: Double?,
+)

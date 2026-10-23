@@ -3,7 +3,8 @@
 
 == Status
 
-Accepted, implemented (kSTEP Welle K). Closes the loop opened by ADR-0027/0028/0029: geometry can be
+Accepted, implemented (kSTEP Welle K). Extended by ADR-0038 (colours, layers, length units, pre-transfer depth
+check, error code `KSTEP-I-013`); where the text below says colours and layers are ignored, that is superseded. Closes the loop opened by ADR-0027/0028/0029: geometry can be
 written; this ADR reads it back, from kSTEP's own files and from files written by other tools.
 
 == Context
@@ -170,9 +171,10 @@ existing renderer, not of the import.
   A validation finding or a missing verdict still prints the full report, with `status` `validation_failed`,
   and exits 1.
 * Product and usage ids need unique names; comments in the file disable enrichment.
-* Units other than millimetres are converted by OCCT, untested.
+* Units other than millimetres are converted by OCCT; checked and tested since ADR-0038.
 * STEP-XML and compressed stpZ are rejected.
-* Colours, layers, PMI, materials and SHUOs are ignored and counted (`ignored.colours` and so on).
+* PMI, materials and SHUOs are ignored and counted (`ignored.pmi` and so on). Colours and layers were ignored here
+  and are imported since ADR-0038.
 * Files without geometry are `no_content`: a structure-only import is follow-up K3.
 * CPU-time DoS by a small but expensive file (see Limits).
 * The OCCT-authored fixture for nested assemblies is flat in kSTEP's DSL: the script DSL cannot place nested
@@ -190,7 +192,8 @@ its own path and sandbox decision; re-export also meets the single-solid rule of
 | K3 | Structure without OCCT (pure Part 21 path); also files that carry products but no geometry.
 | K4 | Colours, layers, PMI, materials, SHUO.
 | K5 | Controlled extern references with base-directory containment.
-| K6 | Files beyond 50 MB; timeout or subprocess isolation for the OCCT transfer.
+| K6 | Files beyond 50 MB; subprocess isolation for the OCCT transfer (a wall-clock watchdog for the
+`kstep import` command came with ADR-0038; library callers still have no time limit).
 | K7 | A `kstep_import` tool in the MCP server.
 |===
 

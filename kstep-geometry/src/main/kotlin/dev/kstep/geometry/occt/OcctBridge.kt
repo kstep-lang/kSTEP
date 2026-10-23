@@ -227,6 +227,24 @@ object OcctBridge {
     /** Distinct unknown entity type names, `\n`-joined, ASCII `[A-Z0-9_]` only. */
     external fun nativeImportUnknownTypes(session: Long): String
 
+    /** 6 doubles per record: node, target (0 part, 1 solid, 2 face), sub-index (0-based), r, g, b in sRGB 0..1. */
+    external fun nativeImportColors(session: Long): DoubleArray
+
+    /** 4 ints per record: node, target (0 part, 1 solid, 2 face), sub-index (0-based), index into the layer names. */
+    external fun nativeImportLayerRefs(session: Long): IntArray
+
+    /** Distinct layer names, `\n`-joined (names never contain control characters). */
+    external fun nativeImportLayerNames(session: Long): String
+
+    /** `[unattached, instanceIgnored, truncated]` style counters. */
+    external fun nativeImportStyleStats(session: Long): IntArray
+
+    /** `[state (0 declared, 1 missing, 2 mixed), factorToMm (NaN if missing)]`. */
+    external fun nativeImportUnitInfo(session: Long): DoubleArray
+
+    /** Distinct length-unit names of the file, `\n`-joined, printable ASCII only. */
+    external fun nativeImportUnitNames(session: Long): String
+
     /** Registers a COPY of the part's shape as a normal shape handle (caller releases it). */
     external fun nativeImportPartShape(
         session: Long,
@@ -416,6 +434,9 @@ object OcctBridge {
      * overlapping parts are rejected with `IllegalArgumentException` (ADR-0032).
      */
     external fun nativeMakeCompound(handles: LongArray): Long
+
+    /** Face counts per `GeomAbs_SurfaceType` ordinal 0..10 (Plane .. OtherSurface), ADR-0038. */
+    external fun nativeShapeSurfaceTypeCounts(handle: Long): IntArray
 
     /** `[volume, faceCount]` for every solid of the shape (at most 1024 solids), ADR-0032. */
     external fun nativeSolidSummaries(handle: Long): DoubleArray

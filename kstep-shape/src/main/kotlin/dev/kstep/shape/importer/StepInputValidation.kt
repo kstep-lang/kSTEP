@@ -32,6 +32,7 @@ enum class StepImportErrorKind(
     NO_CONTENT("KSTEP-I-011", "no_content"),
     GEOMETRY_UNAVAILABLE("KSTEP-S-007", "geometry_unavailable"),
     IO_ERROR("KSTEP-I-012", "io_error"),
+    UNIT_UNRESOLVED("KSTEP-I-013", "unit_unresolved"),
 }
 
 /** Thrown by [StepInputValidation]; carries the [kind] that maps to the CLI error document. */
@@ -43,8 +44,9 @@ class StepInputException(
 /**
  * What the OCCT-free pre-scan learned from the file text.
  *
- * @property ignoredCategories counts of entity instances in categories kSTEP does not import
- *   (`colours`, `layers`, `pmi`); only non-zero entries are present.
+ * @property ignoredCategories counts of entity instances per category (`colours`, `layers`, `pmi`); only
+ *   non-zero entries are present. These count OCCURRENCES IN THE FILE text, not what was imported: since
+ *   ADR-0038 colours and layers are imported, only `pmi` is still ignored.
  */
 data class StepPrescan(
     val schemas: List<String>,
@@ -218,7 +220,8 @@ object StepInputValidation {
                         keyword == "STYLED_ITEM" || keyword == "OVER_RIDING_STYLED_ITEM" -> colours++
                         keyword == "PRESENTATION_LAYER_ASSIGNMENT" -> layers++
                         keyword.startsWith("GEOMETRIC_TOLERANCE") ||
-                            keyword.startsWith("DIMENSIONAL_") ||
+                            // DIMENSIONAL_EXPONENTS belongs to unit definitions (ADR-0038), not to PMI
+                            (keyword.startsWith("DIMENSIONAL_") && keyword != "DIMENSIONAL_EXPONENTS") ||
                             keyword.startsWith("DATUM") -> pmi++
                     }
                 }

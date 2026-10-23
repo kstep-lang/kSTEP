@@ -27,6 +27,13 @@ class OcctStepDocument internal constructor(
 
     val nodes: List<XcafNode>
     val stats: StepReadStats
+    val colors: List<XcafColorAssignment>
+    val layers: List<XcafLayerAssignment>
+
+    /** Distinct layer names of the file. */
+    val layerNames: List<String>
+    val styleStats: XcafStyleStats
+    val lengthUnitInfo: StepLengthUnitInfo
 
     init {
         try {
@@ -63,6 +70,85 @@ class OcctStepDocument internal constructor(
                     unknownEntityCount = rawStats[1],
                     unknownEntityTypes = if (unknown.isEmpty()) emptyList() else unknown.split('\n'),
                     freeRootCount = rawStats[2],
+                )
+            val rawNames = OcctBridge.nativeImportLayerNames(handle)
+            // Sanitising can make distinct native names equal (or empty): keep each cleaned name once and
+            // remap the native name indices onto the deduplicated list.
+            val cleanedNames =
+                if (rawNames.isEmpty()) {
+                    emptyList()
+                } else {
+                    rawNames
+                        .split(
+                            '\n',
+                        ).map { sanitizeImportText(it) }
+                }
+            val uniqueNames = ArrayList<String>()
+            val nameRemap =
+                IntArray(cleanedNames.size) { i ->
+                    val n = cleanedNames[i]
+                    if (n.isEmpty()) {
+                        -1
+                    } else {
+                        val at = uniqueNames.indexOf(n)
+                        if (at >= 0) {
+                            at
+                        } else {
+                            uniqueNames.add(n)
+                            uniqueNames.size - 1
+                        }
+                    }
+                }
+            layerNames = uniqueNames
+            val rawColors = OcctBridge.nativeImportColors(handle)
+            val rawRefs = OcctBridge.nativeImportLayerRefs(handle)
+            check(rawColors.size % 6 == 0 && rawRefs.size % 4 == 0) { "inconsistent native style payload" }
+            val targets = XcafStyleTarget.entries
+            colors =
+                List(rawColors.size / 6) { i ->
+                    val node = rawColors[i * 6].toInt()
+                    val target = rawColors[i * 6 + 1].toInt()
+                    check(
+                        node in 0 until nodeCount && target in targets.indices,
+                    ) { "native colour record out of range" }
+                    check(rawColors.slice(i * 6 + 3..i * 6 + 5).all { it.isFinite() }) { "native colour is not finite" }
+                    XcafColorAssignment(
+                        node,
+                        targets[target],
+                        rawColors[i * 6 + 2].toInt(),
+                        RgbColor(
+                            rawColors[i * 6 + 3].coerceIn(0.0, 1.0),
+                            rawColors[i * 6 + 4].coerceIn(0.0, 1.0),
+                            rawColors[i * 6 + 5].coerceIn(0.0, 1.0),
+                        ),
+                    )
+                }
+            layers =
+                List(rawRefs.size / 4) { i ->
+                    val node = rawRefs[i * 4]
+                    val target = rawRefs[i * 4 + 1]
+                    val nameIndex = rawRefs[i * 4 + 3]
+                    check(node in 0 until nodeCount && target in targets.indices && nameIndex in cleanedNames.indices) {
+                        "native layer record out of range"
+                    }
+                    val mapped = nameRemap[nameIndex]
+                    if (mapped < 0) {
+                        null
+                    } else {
+                        XcafLayerAssignment(node, targets[target], rawRefs[i * 4 + 2], layerNames[mapped])
+                    }
+                }.filterNotNull()
+            val rawStyle = OcctBridge.nativeImportStyleStats(handle)
+            styleStats = XcafStyleStats(rawStyle[0], rawStyle[1], rawStyle[2])
+            val unit = OcctBridge.nativeImportUnitInfo(handle)
+            val unitNames = OcctBridge.nativeImportUnitNames(handle)
+            val state = unit[0].toInt()
+            check(state in 0..2) { "unknown native unit state $state" }
+            lengthUnitInfo =
+                StepLengthUnitInfo(
+                    state = LengthUnitState.entries[state],
+                    names = if (unitNames.isEmpty()) emptyList() else unitNames.split('\n'),
+                    factorToMm = unit[1].takeIf { it.isFinite() && it > 0.0 },
                 )
         } finally {
             Reference.reachabilityFence(this)

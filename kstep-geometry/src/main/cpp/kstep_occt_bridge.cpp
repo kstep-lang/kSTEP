@@ -99,6 +99,7 @@
 #include <Standard_Version.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -125,7 +126,39 @@
 #include <StepData_UndefinedEntity.hxx>
 #include <StepAP214_AppliedDocumentReference.hxx>
 #include <StepBasic_Document.hxx>
+#include <STEPConstruct_UnitContext.hxx>
+#include <STEPControl_Reader.hxx>
+#include <StepBasic_ProductDefinition.hxx>
+#include <StepGeom_GeomRepContextAndGlobUnitAssCtxAndGlobUncertaintyAssCtx.hxx>
+#include <StepGeom_GeometricRepresentationContextAndGlobalUnitAssignedContext.hxx>
+#include <StepRepr_GlobalUnitAssignedContext.hxx>
+#include <StepRepr_ProductDefinitionUsage.hxx>
+#include <TColStd_HSequenceOfExtendedString.hxx>
+#include <TColStd_SequenceOfAsciiString.hxx>
+#include <Quantity_Color.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_ColorType.hxx>
+#include <XCAFDoc_LayerTool.hxx>
 #include <StepBasic_ProductDefinitionWithAssociatedDocuments.hxx>
+#include <StepVisual_ColourSpecification.hxx>
+#include <StepVisual_PresentationLayerAssignment.hxx>
+#include <StepVisual_SurfaceStyleRenderingWithProperties.hxx>
+#include <StepVisual_PresentationStyleAssignment.hxx>
+#include <StepVisual_StyledItem.hxx>
+#include <StepVisual_OverRidingStyledItem.hxx>
+#include <StepRepr_MappedItem.hxx>
+#include <StepRepr_Representation.hxx>
+#include <StepRepr_RepresentationMap.hxx>
+#include <StepRepr_HArray1OfRepresentationItem.hxx>
+#include <StepShape_ConnectedFaceSet.hxx>
+#include <StepVisual_SurfaceSideStyle.hxx>
+#include <StepVisual_SurfaceStyleTransparent.hxx>
+#include <StepVisual_FillAreaStyle.hxx>
+#include <StepVisual_HArray1OfRenderingPropertiesSelect.hxx>
+#include <StepVisual_PresentationStyleSelect.hxx>
+#include <StepVisual_SurfaceStyleElementSelect.hxx>
+#include <StepVisual_SurfaceStyleFillArea.hxx>
+#include <StepVisual_SurfaceStyleUsage.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <TDF_Label.hxx>
@@ -246,6 +279,82 @@ struct ImportNode {
     int shapeSlot = -1;
 };
 
+constexpr int kStyleTargetPart = 0;
+constexpr int kStyleTargetSolid = 1;
+constexpr int kStyleTargetFace = 2;
+constexpr int kMaxLayerNames = 1024;      // distinct layer names per file
+constexpr int kMaxLayersPerTarget = 16;   // layer names reported per part / body / face
+constexpr int kMaxStyleRecords = 250000;  // colour records and layer references, each; bounded by the face limit
+constexpr int kMaxAssemblyDepth = 32;     // hand-synchronized with StepImportLimits.MAX_ASSEMBLY_DEPTH
+constexpr int kMaxUnitNames = 8;
+// Pre-Transfer caps (ADR-0038): OCCT's ReadLayers / ReadColors search the existing layer / colour labels
+// linearly for every record, so the Transfer cost grows quadratically with the number of layer assignments
+// and distinct colour entities (measured: 80k layers = 41 s, 20k colours = 2.2 s). Counted by type BEFORE
+// Transfer(); above the cap the read fails with `limit:` (KSTEP-I-010). Hand-synchronized with
+// StepImportLimits.MAX_LAYER_ASSIGNMENTS and MAX_COLOUR_DEFINITIONS.
+constexpr int kMaxLayerAssignments = 4096;
+constexpr int kMaxColourDefinitions = 10000;
+// OCCT's colour table is keyed by RGBA, so distinct (COLOUR_RGB x SURFACE_STYLE_TRANSPARENT) pairs also make
+// ReadColors quadratic (measured: 80k distinct pairs from 2000 colours = 67 s). Every distinct pair comes from one
+// SURFACE_STYLE_RENDERING_WITH_PROPERTIES, so that record and the transparency record are capped as well.
+// Hand-synchronized with StepImportLimits.MAX_TRANSPARENCY_DEFINITIONS and MAX_RENDERING_PROPERTY_RECORDS.
+constexpr int kMaxTransparencyDefinitions = 10000;
+constexpr int kMaxRenderingPropertyRecords = 10000;
+// ReadColors calls XCAFDoc_ColorTool::AddColor -> FindColor (a linear scan of the colour table) once per STYLED_ITEM,
+// so the cost is (styled items) x (table size); the caps above bound only the table (up to colours + renderings
+// entries). STYLED_ITEM (and OVER_RIDING_STYLED_ITEM, via IsKind) is therefore capped outright and the product
+// styled items x (colour definitions + rendering records) is capped as well (measured: 40k x 20k = 15 s).
+// Hand-synchronized with StepImportLimits.MAX_STYLED_ITEMS and MAX_STYLED_ITEM_COLOUR_WORK.
+constexpr int kMaxStyledItems = 200000;
+constexpr long long kMaxStyledItemColourWork = 100000000LL;
+// OCCT's colour reader walks the whole style list of a styled item's PRESENTATION_STYLE_ASSIGNMENT / SURFACE_SIDE_STYLE
+// once per styled item, and a list may repeat one reference at ~6 bytes per entry, so the cost is (styled items) x
+// (list length) with a tiny colour table (measured: 10k items x 200k entries = 53 s). Real files use 1-3 entries.
+// The same cap applies to the fill-style list of a FILL_AREA_STYLE and the property list of a
+// SURFACE_STYLE_RENDERING_WITH_PROPERTIES, the two remaining lists the colour reader walks.
+// Hand-synchronized with StepImportLimits.MAX_STYLE_LIST_LENGTH.
+constexpr int kMaxStyleListLength = 64;
+// The per-list cap alone does not bound the colour reader: it walks STYLED_ITEM -> PSA -> SURFACE_SIDE_STYLE ->
+// FILL_AREA_STYLE as nested loops, so four lists of 64 multiply to 64^4 = 16.7M steps per styled item (measured:
+// 100 such items = 15 s). The pre-scan therefore sums the weighted expansion cost of every styled item (memoised per
+// entity, linear in the file) and caps the total. Real files cost 1-3 per styled item; the budget is 50 per item at
+// the styled-item cap. Measured: about 1 s of colour-reader work per 100M units, so a file right at the budget adds
+// about 0.1 s (whole CLI run 0.6-0.7 s) (ADR-0038).
+// Hand-synchronized with StepImportLimits.MAX_STYLE_EXPANSION_WORK.
+constexpr long long kMaxStyleExpansionWork = 10000000LL;
+// Part occurrences after expanding the assembly DAG; hand-synchronized with StepImportLimits.MAX_EXPANDED_OCCURRENCES.
+// Checked on the typed usage graph BEFORE Transfer(), because OCCT expands a diamond chain (two usages of the same
+// child per level) during the transfer already (measured: 28 levels = 69 s before the Kotlin-side check fired).
+constexpr long long kMaxExpandedOccurrences = 10000LL;
+// Worker-model wave (ADR-0038): three more cheap typed checks BEFORE Transfer(). They are a fast path for
+// structured errors, not the guarantee; the `kstep import` worker subprocess bounds time and memory regardless.
+// OVER_RIDING_STYLED_ITEM chains: OCCT follows the overridden item recursively (a self reference or a deep chain
+// crashed the process, a 2000-deep chain made the colour reader quadratic). Real files use depth 1.
+// Hand-synchronized with StepImportLimits.MAX_OVERRIDE_DEPTH.
+constexpr int kMaxOverrideDepth = 16;
+// MAPPED_ITEM -> REPRESENTATION_MAP -> representation graph: OCCT expands it recursively during the transfer (deep
+// chains and cycles crashed the process, diamonds ran into the 60 s bound). Depth uses kMaxAssemblyDepth; the number
+// of mapped-item expansions (path multiplicity) is capped here.
+// Hand-synchronized with StepImportLimits.MAX_MAPPED_ITEM_EXPANSIONS.
+constexpr long long kMaxMappedItemExpansions = 10000LL;
+// Sum of the face-list lengths of all shells; a fixed bound (not the caller's face limit), equal to the default face
+// limit. Hand-synchronized with StepImportLimits.MAX_TOTAL_FACES.
+constexpr int kMaxShellFaceReferences = 250000;
+
+struct ImportColor {
+    int node;
+    int target;
+    int sub;  // 0-based face / solid index within the part, 0 for the part itself
+    double r, g, b;
+};
+
+struct ImportLayerRef {
+    int node;
+    int target;
+    int sub;
+    int nameIndex;
+};
+
 struct ImportSession {
     std::vector<ImportNode> nodes;
     std::vector<TopoDS_Shape> partShapes;
@@ -253,6 +362,17 @@ struct ImportSession {
     int unknownEntityCount = 0;
     int freeRootCount = 0;
     std::vector<std::string> unknownTypes;
+    // Welle R (ADR-0038): colours, layers and the declared length unit, copied out of the XCAF document
+    // inside readXcafLocked (the document is closed when that function returns).
+    std::vector<ImportColor> colors;
+    std::vector<ImportLayerRef> layerRefs;
+    std::vector<std::u16string> layerNames;
+    int styleUnattached = 0;
+    int styleInstanceIgnored = 0;
+    int styleTruncated = 0;
+    int unitState = 0;  // 0 declared, 1 missing, 2 mixed
+    double unitFactorToMm = 1.0;
+    std::vector<std::string> unitNames;
 };
 
 // Guarded by g_mutex. Handles come from g_nextHandle (shared with shapes, so they never collide).
@@ -1296,6 +1416,615 @@ int countFaces(const TopoDS_Shape& shape) {
     return faces.Extent();
 }
 
+
+std::u16string sanitizeExtString(const TCollection_ExtendedString& ext, int maxChars) {
+    int len = ext.Length();
+    if (len > maxChars) len = maxChars;
+    std::u16string out;
+    out.reserve(static_cast<size_t>(len));
+    const Standard_ExtString raw = ext.ToExtString();
+    for (int i = 0; i < len; ++i) {
+        const char16_t ch = static_cast<char16_t>(raw[i]);
+        if (ch < 0x20 || (ch >= 0x7f && ch <= 0x9f)) continue;  // control characters never reach output
+        out.push_back(ch);
+    }
+    return out;
+}
+
+std::string sanitizeUnitName(const TCollection_AsciiString& raw) {
+    std::string out;
+    for (int i = 1; i <= raw.Length() && out.size() < 32; ++i) {
+        const char ch = raw.Value(i);
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' ||
+            ch == '-' || ch == '.' || ch == ' ') {
+            out.push_back(ch);
+        }
+    }
+    return out;
+}
+
+/**
+ * Typed length-unit check (ADR-0038), BEFORE Transfer(): a context whose length unit cannot be resolved
+ * (conversion factor zero, negative, not finite) makes OCCT produce garbage geometry (bounding box of 1e100),
+ * so such a file is rejected here. A file without any length unit is not an error: OCCT reads it as
+ * millimetres and the importer reports it.
+ */
+bool inspectLengthUnits(
+    STEPCAFControl_Reader& reader, const Handle(Interface_InterfaceModel)& model, ImportSession& out,
+    std::string& errClass, std::string& errMsg) {
+    const int entityCount = model->NbEntities();
+    bool haveFactor = false;
+    bool mixed = false;
+    double first = 1.0;
+    for (int i = 1; i <= entityCount; ++i) {
+        Handle(Standard_Transient) ent = model->Value(i);
+        if (ent.IsNull()) continue;
+        Handle(StepRepr_GlobalUnitAssignedContext) guac;
+        Handle(StepGeom_GeometricRepresentationContextAndGlobalUnitAssignedContext) a =
+            Handle(StepGeom_GeometricRepresentationContextAndGlobalUnitAssignedContext)::DownCast(ent);
+        if (!a.IsNull()) guac = a->GlobalUnitAssignedContext();
+        Handle(StepGeom_GeomRepContextAndGlobUnitAssCtxAndGlobUncertaintyAssCtx) b =
+            Handle(StepGeom_GeomRepContextAndGlobUnitAssCtxAndGlobUncertaintyAssCtx)::DownCast(ent);
+        if (!b.IsNull()) guac = b->GlobalUnitAssignedContext();
+        if (guac.IsNull()) continue;
+        STEPConstruct_UnitContext ctx;
+        // The status only describes the LAST unit of the context (e.g. mass or time yields 11 because
+        // SiUnitNameFactor knows only metre/radian/steradian), so it says nothing about the length unit and
+        // is deliberately ignored; only a resolved length factor is judged below.
+        ctx.ComputeFactors(guac);
+        if (!ctx.LengthDone()) continue;  // no length unit in this context
+        const double f = ctx.LengthFactor();
+        if (!std::isfinite(f) || f <= 0.0) {
+            errClass = "java/lang/IllegalArgumentException";
+            errMsg = "unit: the file's length unit cannot be resolved (conversion factor is not a positive number)";
+            return false;
+        }
+        if (!haveFactor) {
+            haveFactor = true;
+            first = f;
+        } else if (std::abs(f - first) > 1e-9 * std::max(1.0, std::abs(first))) {
+            mixed = true;
+        }
+    }
+    if (!haveFactor) {
+        out.unitState = 1;
+        out.unitFactorToMm = std::nan("");
+    } else {
+        out.unitState = mixed ? 2 : 0;
+        out.unitFactorToMm = first;
+    }
+    TColStd_SequenceOfAsciiString lens, angs, sols;
+    reader.ChangeReader().FileUnits(lens, angs, sols);
+    for (int i = 1; i <= lens.Length() && static_cast<int>(out.unitNames.size()) < kMaxUnitNames; ++i) {
+        std::string n = sanitizeUnitName(lens.Value(i));
+        if (n.empty()) continue;
+        bool dup = false;
+        for (const auto& e : out.unitNames) dup = dup || e == n;
+        if (!dup) out.unitNames.push_back(n);
+    }
+    return true;
+}
+
+/**
+ * Product-structure depth and cycle check over the typed usage entities, BEFORE Transfer() (ADR-0038):
+ * OCCT transfers NAUO chains recursively, so a chain of several thousand levels (a few MB of text, below
+ * every other limit) could exhaust the native stack. Iterative post-order DFS; the longest chain of usages
+ * is compared with maxDepth. A cycle is reported WITHOUT the `limit:` prefix (read_failed, as before).
+ */
+bool checkStructureDepth(
+    const Handle(Interface_InterfaceModel)& model, int maxDepth, long long maxOccurrences, std::string& errClass,
+    std::string& errMsg) {
+    const int n = model->NbEntities();
+    std::vector<std::vector<int>> children(static_cast<size_t>(n) + 1);
+    bool any = false;
+    for (int i = 1; i <= n; ++i) {
+        Handle(StepRepr_ProductDefinitionUsage) use = Handle(StepRepr_ProductDefinitionUsage)::DownCast(model->Value(i));
+        if (use.IsNull()) continue;
+        Handle(StepBasic_ProductDefinition) from = use->RelatingProductDefinition();
+        if (from.IsNull()) from = use->RelatingProductDefinitionAP242().ProductDefinition();
+        Handle(StepBasic_ProductDefinition) to = use->RelatedProductDefinition();
+        if (to.IsNull()) to = use->RelatedProductDefinitionAP242().ProductDefinition();
+        if (from.IsNull() || to.IsNull()) continue;
+        const int a = model->Number(from);
+        const int b = model->Number(to);
+        if (a <= 0 || b <= 0) continue;
+        children[static_cast<size_t>(a)].push_back(b);
+        any = true;
+    }
+    if (!any) return true;
+    std::vector<char> color(static_cast<size_t>(n) + 1, 0);  // 0 white, 1 grey, 2 black
+    std::vector<int> height(static_cast<size_t>(n) + 1, 0);
+    // Part occurrences below a node after expansion: 1 for a leaf, else the sum over the child EDGES (a duplicated
+    // usage counts twice), saturated just above the limit. A diamond chain doubles per level while the height grows
+    // by one, so the depth check alone lets 2^31 occurrences through.
+    std::vector<long long> leaves(static_cast<size_t>(n) + 1, 0);
+    std::vector<char> hasParent(static_cast<size_t>(n) + 1, 0);
+    for (int v = 1; v <= n; ++v) {
+        for (int c : children[static_cast<size_t>(v)]) hasParent[static_cast<size_t>(c)] = 1;
+    }
+    long long occurrences = 0;
+    int longest = 0;
+    std::vector<std::pair<int, size_t>> stack;
+    for (int root = 1; root <= n; ++root) {
+        if (color[static_cast<size_t>(root)] != 0 || children[static_cast<size_t>(root)].empty()) continue;
+        stack.emplace_back(root, 0);
+        color[static_cast<size_t>(root)] = 1;
+        while (!stack.empty()) {
+            auto& top = stack.back();
+            const int v = top.first;
+            const auto& ch = children[static_cast<size_t>(v)];
+            if (top.second < ch.size()) {
+                const int c = ch[top.second++];
+                if (color[static_cast<size_t>(c)] == 1) {
+                    errClass = "java/lang/IllegalArgumentException";
+                    errMsg = "cyclic product structure: an assembly contains itself";
+                    return false;
+                }
+                if (color[static_cast<size_t>(c)] == 0) {
+                    color[static_cast<size_t>(c)] = 1;
+                    stack.emplace_back(c, 0);
+                }
+            } else {
+                int h = 0;
+                long long below = ch.empty() ? 1 : 0;
+                for (int c : ch) {
+                    h = std::max(h, height[static_cast<size_t>(c)] + 1);
+                    below = std::min(below + leaves[static_cast<size_t>(c)], maxOccurrences + 1);
+                }
+                height[static_cast<size_t>(v)] = h;
+                leaves[static_cast<size_t>(v)] = below;
+                longest = std::max(longest, h);
+                color[static_cast<size_t>(v)] = 2;
+                stack.pop_back();
+            }
+        }
+        if (longest > maxDepth) {
+            errClass = "java/lang/IllegalArgumentException";
+            errMsg = "limit: assembly depth " + std::to_string(longest) + " exceeds " + std::to_string(maxDepth);
+            return false;
+        }
+    }
+    // Sum over the top-level assemblies (no parent); stand-alone parts are bounded by the part limit.
+    for (int v = 1; v <= n; ++v) {
+        if (hasParent[static_cast<size_t>(v)] || children[static_cast<size_t>(v)].empty()) continue;
+        occurrences = std::min(occurrences + leaves[static_cast<size_t>(v)], maxOccurrences + 1);
+    }
+    if (occurrences > maxOccurrences) {
+        errClass = "java/lang/IllegalArgumentException";
+        errMsg = "limit: more than " + std::to_string(maxOccurrences) + " part occurrences after expansion";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Weighted expansion cost of the colour reader BEFORE Transfer() (ADR-0038). OCCT walks, per styled item, its
+ * PRESENTATION_STYLE_ASSIGNMENTs, their style selects, the SURFACE_SIDE_STYLE elements of each SURFACE_STYLE_USAGE
+ * and the fill styles of each FILL_AREA_STYLE (or the properties of a rendering) as nested loops. The cost of one
+ * styled item is therefore sum over PSA ( sum over styles ( sum over side-style elements ( max(1, inner list) ) ) ),
+ * at least 1. PSA and SURFACE_SIDE_STYLE costs are memoised per entity number, so the scan is linear in the file even
+ * when every styled item shares one deep chain. Runs after the per-list caps, so every factor is <= 64 and the total
+ * fits in 64 bits without saturation. Above kMaxStyleExpansionWork the read fails with `limit:` (KSTEP-I-010).
+ */
+bool checkStyleExpansionWork(const Handle(Interface_InterfaceModel)& model, std::string& errClass, std::string& errMsg) {
+    const int n = model->NbEntities();
+    std::vector<long long> memo(static_cast<size_t>(n) + 1, -1);
+    auto sideCost = [&](const Handle(StepVisual_SurfaceSideStyle)& sss) -> long long {
+        const int id = model->Number(sss);
+        if (id > 0 && memo[static_cast<size_t>(id)] >= 0) return memo[static_cast<size_t>(id)];
+        long long c = 0;
+        for (int i = 1; i <= sss->NbStyles(); ++i) {
+            const StepVisual_SurfaceStyleElementSelect sel = sss->StylesValue(i);
+            long long inner = 1;
+            Handle(StepVisual_SurfaceStyleFillArea) ssfa = sel.SurfaceStyleFillArea();
+            if (!ssfa.IsNull() && !ssfa->FillArea().IsNull()) {
+                inner = std::max(1, ssfa->FillArea()->NbFillStyles());
+            } else {
+                Handle(StepVisual_SurfaceStyleRenderingWithProperties) rwp =
+                    Handle(StepVisual_SurfaceStyleRenderingWithProperties)::DownCast(sel.Value());
+                if (!rwp.IsNull() && !rwp->Properties().IsNull()) inner = std::max(1, rwp->Properties()->Length());
+            }
+            c += inner;
+        }
+        c = std::max(1LL, c);
+        if (id > 0) memo[static_cast<size_t>(id)] = c;
+        return c;
+    };
+    auto psaCost = [&](const Handle(StepVisual_PresentationStyleAssignment)& psa) -> long long {
+        const int id = model->Number(psa);
+        if (id > 0 && memo[static_cast<size_t>(id)] >= 0) return memo[static_cast<size_t>(id)];
+        long long c = 0;
+        for (int i = 1; i <= psa->NbStyles(); ++i) {
+            const StepVisual_PresentationStyleSelect sel = psa->StylesValue(i);
+            Handle(StepVisual_SurfaceStyleUsage) ssu = sel.SurfaceStyleUsage();
+            c += (!ssu.IsNull() && !ssu->Style().IsNull()) ? sideCost(ssu->Style()) : 1;
+        }
+        c = std::max(1LL, c);
+        if (id > 0) memo[static_cast<size_t>(id)] = c;
+        return c;
+    };
+    long long work = 0;
+    for (int i = 1; i <= n; ++i) {
+        Handle(StepVisual_StyledItem) item = Handle(StepVisual_StyledItem)::DownCast(model->Value(i));
+        if (item.IsNull()) continue;
+        long long c = 0;
+        for (int j = 1; j <= item->NbStyles(); ++j) {
+            const Handle(StepVisual_PresentationStyleAssignment)& psa = item->StylesValue(j);
+            c += psa.IsNull() ? 1 : psaCost(psa);
+        }
+        work += std::max(1LL, c);
+        if (work > kMaxStyleExpansionWork) {
+            errClass = "java/lang/IllegalArgumentException";
+            errMsg = "limit: style expansion work exceeds " + std::to_string(kMaxStyleExpansionWork);
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Typed count of layer assignments and colour definitions BEFORE Transfer() (ADR-0038). The linear label
+ * search inside OCCT's layer / colour readers makes the transfer quadratic in these counts, and the
+ * process-global g_mutex is held meanwhile, so an unbounded count is a CPU denial of service.
+ */
+bool checkStyleRecordCounts(const Handle(Interface_InterfaceModel)& model, std::string& errClass, std::string& errMsg) {
+    const int n = model->NbEntities();
+    int layers = 0;
+    int colours = 0;
+    int transparencies = 0;
+    int renderings = 0;
+    int styledItems = 0;
+    for (int i = 1; i <= n; ++i) {
+        Handle(Standard_Transient) ent = model->Value(i);
+        if (ent.IsNull()) continue;
+        if (ent->IsKind(STANDARD_TYPE(StepVisual_PresentationLayerAssignment))) {
+            if (++layers > kMaxLayerAssignments) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: layer assignment count exceeds " + std::to_string(kMaxLayerAssignments);
+                return false;
+            }
+        } else if (ent->IsKind(STANDARD_TYPE(StepVisual_ColourSpecification))) {
+            if (++colours > kMaxColourDefinitions) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: colour definition count exceeds " + std::to_string(kMaxColourDefinitions);
+                return false;
+            }
+        } else if (ent->IsKind(STANDARD_TYPE(StepVisual_SurfaceStyleTransparent))) {
+            if (++transparencies > kMaxTransparencyDefinitions) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: colour definition count (transparency) exceeds " +
+                         std::to_string(kMaxTransparencyDefinitions);
+                return false;
+            }
+        } else if (ent->IsKind(STANDARD_TYPE(StepVisual_SurfaceStyleRenderingWithProperties))) {
+            if (++renderings > kMaxRenderingPropertyRecords) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: colour definition count (rendering) exceeds " +
+                         std::to_string(kMaxRenderingPropertyRecords);
+                return false;
+            }
+        } else if (ent->IsKind(STANDARD_TYPE(StepVisual_StyledItem))) {
+            if (++styledItems > kMaxStyledItems) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: styled item count exceeds " + std::to_string(kMaxStyledItems);
+                return false;
+            }
+            if (Handle(StepVisual_StyledItem)::DownCast(ent)->NbStyles() > kMaxStyleListLength) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: style list length exceeds " + std::to_string(kMaxStyleListLength);
+                return false;
+            }
+        } else if (ent->IsKind(STANDARD_TYPE(StepVisual_PresentationStyleAssignment))) {
+            if (Handle(StepVisual_PresentationStyleAssignment)::DownCast(ent)->NbStyles() > kMaxStyleListLength) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: style list length exceeds " + std::to_string(kMaxStyleListLength);
+                return false;
+            }
+        } else if (ent->IsKind(STANDARD_TYPE(StepVisual_SurfaceSideStyle))) {
+            if (Handle(StepVisual_SurfaceSideStyle)::DownCast(ent)->NbStyles() > kMaxStyleListLength) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: style list length exceeds " + std::to_string(kMaxStyleListLength);
+                return false;
+            }
+        } else if (ent->IsKind(STANDARD_TYPE(StepVisual_FillAreaStyle))) {
+            if (Handle(StepVisual_FillAreaStyle)::DownCast(ent)->NbFillStyles() > kMaxStyleListLength) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: style list length exceeds " + std::to_string(kMaxStyleListLength);
+                return false;
+            }
+        }
+        // Not an else-branch: SURFACE_STYLE_RENDERING_WITH_PROPERTIES is counted above already.
+        Handle(StepVisual_SurfaceStyleRenderingWithProperties) rwp =
+            Handle(StepVisual_SurfaceStyleRenderingWithProperties)::DownCast(ent);
+        if (!rwp.IsNull() && !rwp->Properties().IsNull() && rwp->Properties()->Length() > kMaxStyleListLength) {
+            errClass = "java/lang/IllegalArgumentException";
+            errMsg = "limit: style list length exceeds " + std::to_string(kMaxStyleListLength);
+            return false;
+        }
+    }
+    if (styledItems > 0 && !checkStyleExpansionWork(model, errClass, errMsg)) return false;
+    // Every styled item scans the whole colour table once; the table holds at most colours + renderings entries.
+    const long long work = static_cast<long long>(styledItems) * (static_cast<long long>(colours) + renderings);
+    if (work > kMaxStyledItemColourWork) {
+        errClass = "java/lang/IllegalArgumentException";
+        errMsg = "limit: styled item colour work " + std::to_string(work) + " exceeds " +
+                 std::to_string(kMaxStyledItemColourWork);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * OVER_RIDING_STYLED_ITEM chains BEFORE Transfer() (ADR-0038): follows OverRiddenStyle() from every overriding item,
+ * memoised per entity number (linear in the file). A cycle (including a self reference) or a chain deeper than
+ * kMaxOverrideDepth fails with `limit:` (KSTEP-I-010).
+ */
+bool checkOverrideChains(const Handle(Interface_InterfaceModel)& model, std::string& errClass, std::string& errMsg) {
+    const int n = model->NbEntities();
+    std::vector<int> depth(static_cast<size_t>(n) + 1, -1);  // -1 unknown, -2 on the current path
+    std::vector<int> path;
+    for (int i = 1; i <= n; ++i) {
+        if (depth[static_cast<size_t>(i)] >= 0) continue;
+        if (Handle(StepVisual_OverRidingStyledItem)::DownCast(model->Value(i)).IsNull()) continue;
+        path.clear();
+        int cur = i;
+        int base = 0;
+        while (true) {
+            Handle(StepVisual_OverRidingStyledItem) ovr =
+                Handle(StepVisual_OverRidingStyledItem)::DownCast(model->Value(cur));
+            if (ovr.IsNull()) break;  // a plain STYLED_ITEM ends the chain
+            if (depth[static_cast<size_t>(cur)] >= 0) {
+                base = depth[static_cast<size_t>(cur)];
+                break;
+            }
+            if (depth[static_cast<size_t>(cur)] == -2) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: cyclic over-riding styled item chain";
+                return false;
+            }
+            depth[static_cast<size_t>(cur)] = -2;
+            path.push_back(cur);
+            if (static_cast<int>(path.size()) > kMaxOverrideDepth) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: over-riding styled item chain deeper than " + std::to_string(kMaxOverrideDepth);
+                return false;
+            }
+            Handle(StepVisual_StyledItem) next = ovr->OverRiddenStyle();
+            const int nextId = next.IsNull() ? 0 : model->Number(next);
+            if (nextId <= 0) break;
+            cur = nextId;
+        }
+        for (auto it = path.rbegin(); it != path.rend(); ++it) depth[static_cast<size_t>(*it)] = ++base;
+        if (base > kMaxOverrideDepth) {
+            errClass = "java/lang/IllegalArgumentException";
+            errMsg = "limit: over-riding styled item chain deeper than " + std::to_string(kMaxOverrideDepth);
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * MAPPED_ITEM graph BEFORE Transfer() (ADR-0038): an edge runs from a representation to the representation that one
+ * of its MAPPED_ITEMs maps (through the REPRESENTATION_MAP); a repeated item is a repeated edge. Post-order DFS, O(V+E):
+ * a cycle, a height above maxDepth or more than maxExpansions mapped-item expansions (path multiplicity, saturated)
+ * fail with `limit:` (KSTEP-I-010).
+ */
+bool checkMappedItems(
+    const Handle(Interface_InterfaceModel)& model, int maxDepth, long long maxExpansions, std::string& errClass,
+    std::string& errMsg) {
+    const int n = model->NbEntities();
+    std::vector<std::vector<int>> children(static_cast<size_t>(n) + 1);
+    bool any = false;
+    for (int i = 1; i <= n; ++i) {
+        Handle(StepRepr_Representation) rep = Handle(StepRepr_Representation)::DownCast(model->Value(i));
+        if (rep.IsNull() || rep->Items().IsNull()) continue;
+        const Handle(StepRepr_HArray1OfRepresentationItem)& items = rep->Items();
+        for (int j = items->Lower(); j <= items->Upper(); ++j) {
+            Handle(StepRepr_MappedItem) mi = Handle(StepRepr_MappedItem)::DownCast(items->Value(j));
+            if (mi.IsNull() || mi->MappingSource().IsNull()) continue;
+            Handle(StepRepr_Representation) mapped = mi->MappingSource()->MappedRepresentation();
+            const int b = mapped.IsNull() ? 0 : model->Number(mapped);
+            if (b <= 0) continue;
+            children[static_cast<size_t>(i)].push_back(b);
+            any = true;
+        }
+    }
+    if (!any) return true;
+    std::vector<char> color(static_cast<size_t>(n) + 1, 0);  // 0 white, 1 grey, 2 black
+    std::vector<int> height(static_cast<size_t>(n) + 1, 0);
+    std::vector<long long> expansions(static_cast<size_t>(n) + 1, 0);
+    std::vector<char> hasParent(static_cast<size_t>(n) + 1, 0);
+    for (int v = 1; v <= n; ++v) {
+        for (int c : children[static_cast<size_t>(v)]) hasParent[static_cast<size_t>(c)] = 1;
+    }
+    std::vector<std::pair<int, size_t>> stack;
+    for (int root = 1; root <= n; ++root) {
+        if (color[static_cast<size_t>(root)] != 0 || children[static_cast<size_t>(root)].empty()) continue;
+        stack.emplace_back(root, 0);
+        color[static_cast<size_t>(root)] = 1;
+        while (!stack.empty()) {
+            auto& top = stack.back();
+            const int v = top.first;
+            const auto& ch = children[static_cast<size_t>(v)];
+            if (top.second < ch.size()) {
+                const int c = ch[top.second++];
+                if (color[static_cast<size_t>(c)] == 1) {
+                    errClass = "java/lang/IllegalArgumentException";
+                    errMsg = "limit: cyclic mapped item (a representation maps itself)";
+                    return false;
+                }
+                if (color[static_cast<size_t>(c)] == 0) {
+                    color[static_cast<size_t>(c)] = 1;
+                    stack.emplace_back(c, 0);
+                }
+            } else {
+                int h = 0;
+                long long below = 0;
+                for (int c : ch) {
+                    h = std::max(h, height[static_cast<size_t>(c)] + 1);
+                    below = std::min(below + 1 + expansions[static_cast<size_t>(c)], maxExpansions + 1);
+                }
+                if (h > maxDepth) {
+                    errClass = "java/lang/IllegalArgumentException";
+                    errMsg = "limit: mapped item depth " + std::to_string(h) + " exceeds " + std::to_string(maxDepth);
+                    return false;
+                }
+                height[static_cast<size_t>(v)] = h;
+                expansions[static_cast<size_t>(v)] = below;
+                color[static_cast<size_t>(v)] = 2;
+                stack.pop_back();
+            }
+        }
+    }
+    long long total = 0;
+    for (int v = 1; v <= n; ++v) {
+        if (hasParent[static_cast<size_t>(v)] || children[static_cast<size_t>(v)].empty()) continue;
+        total = std::min(total + expansions[static_cast<size_t>(v)], maxExpansions + 1);
+    }
+    if (total > maxExpansions) {
+        errClass = "java/lang/IllegalArgumentException";
+        errMsg = "limit: more than " + std::to_string(maxExpansions) + " mapped item expansions";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Sum of the face-list lengths of all CONNECTED_FACE_SETs (CLOSED_SHELL, OPEN_SHELL) BEFORE Transfer() (ADR-0038): a
+ * shell may repeat one face reference cheaply, and OCCT's shell transfer grows faster than linearly in the list length
+ * (measured: 300k references 26 s). The sum is capped at kMaxShellFaceReferences; above it the read fails with `limit:`.
+ */
+bool checkShellFaceReferences(const Handle(Interface_InterfaceModel)& model, std::string& errClass, std::string& errMsg) {
+    const long long maxFaces = kMaxShellFaceReferences;
+    const int n = model->NbEntities();
+    long long total = 0;
+    for (int i = 1; i <= n; ++i) {
+        Handle(StepShape_ConnectedFaceSet) cfs = Handle(StepShape_ConnectedFaceSet)::DownCast(model->Value(i));
+        if (cfs.IsNull()) continue;
+        total += cfs->NbCfsFaces();
+        if (total > maxFaces) {
+            errClass = "java/lang/IllegalArgumentException";
+            errMsg = "limit: shell face references exceed " + std::to_string(maxFaces);
+            return false;
+        }
+    }
+    return true;
+}
+
+int internLayerName(ImportSession& out, const std::u16string& name) {
+    for (size_t i = 0; i < out.layerNames.size(); ++i) {
+        if (out.layerNames[i] == name) return static_cast<int>(i);
+    }
+    if (static_cast<int>(out.layerNames.size()) >= kMaxLayerNames) return -1;
+    out.layerNames.push_back(name);
+    return static_cast<int>(out.layerNames.size()) - 1;
+}
+
+bool labelColor(
+    const Handle(XCAFDoc_ColorTool)& colorTool, const TDF_Label& label, bool& curveOnly, double& r, double& g,
+    double& b) {
+    Quantity_Color c;
+    curveOnly = false;
+    if (colorTool->GetColor(label, XCAFDoc_ColorSurf, c) || colorTool->GetColor(label, XCAFDoc_ColorGen, c)) {
+        // Quantity_Color stores LINEAR RGB since OCCT 7.5; the file value (COLOUR_RGB) is sRGB (ADR-0038).
+        c.Values(r, g, b, Quantity_TOC_sRGB);
+        return true;
+    }
+    curveOnly = colorTool->GetColor(label, XCAFDoc_ColorCurv, c);
+    return false;
+}
+
+void recordStyle(
+    ImportSession& out, const Handle(XCAFDoc_ColorTool)& colorTool, const Handle(XCAFDoc_LayerTool)& layerTool,
+    const TDF_Label& label, int node, int target, int sub, int maxName) {
+    double r = 0, g = 0, b = 0;
+    bool curveOnly = false;
+    if (labelColor(colorTool, label, curveOnly, r, g, b)) {
+        if (static_cast<int>(out.colors.size()) >= kMaxStyleRecords) {
+            out.styleTruncated++;
+        } else {
+            out.colors.push_back(ImportColor{node, target, sub, r, g, b});
+        }
+    } else if (curveOnly) {
+        out.styleUnattached++;
+    }
+    Handle(TColStd_HSequenceOfExtendedString) layers;
+    if (!layerTool->GetLayers(label, layers) || layers.IsNull()) return;
+    int taken = 0;
+    for (int i = 1; i <= layers->Length(); ++i) {
+        if (taken >= kMaxLayersPerTarget || static_cast<int>(out.layerRefs.size()) >= kMaxStyleRecords) {
+            out.styleTruncated++;
+            break;
+        }
+        const std::u16string name = sanitizeExtString(layers->Value(i), maxName);
+        if (name.empty()) continue;
+        const int idx = internLayerName(out, name);
+        if (idx < 0) {
+            out.styleTruncated++;
+            continue;
+        }
+        out.layerRefs.push_back(ImportLayerRef{node, target, sub, idx});
+        ++taken;
+    }
+}
+
+/** Colours and layers of one PART: the part label itself plus its FACE / SOLID / SHELL sub-shape labels. */
+void collectPartStyles(
+    ImportSession& out, const Handle(XCAFDoc_ColorTool)& colorTool, const Handle(XCAFDoc_LayerTool)& layerTool,
+    const TDF_Label& label, int node, const TopoDS_Shape& shape, int maxName) {
+    recordStyle(out, colorTool, layerTool, label, node, kStyleTargetPart, 0, maxName);
+    TDF_LabelSequence subs;
+    XCAFDoc_ShapeTool::GetSubShapes(label, subs);
+    if (subs.Length() == 0) return;
+    TopTools_IndexedMapOfShape faces, solids;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+    TopTools_IndexedDataMapOfShapeListOfShape shellToSolids;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_SHELL, TopAbs_SOLID, shellToSolids);
+    for (int k = 1; k <= subs.Length(); ++k) {
+        const TDF_Label sub = subs.Value(k);
+        const TopoDS_Shape ss = XCAFDoc_ShapeTool::GetShape(sub);
+        if (ss.IsNull()) continue;
+        int target = -1;
+        int index = 0;
+        if (ss.ShapeType() == TopAbs_FACE) {
+            index = faces.FindIndex(ss);
+            target = kStyleTargetFace;
+        } else if (ss.ShapeType() == TopAbs_SOLID) {
+            index = solids.FindIndex(ss);
+            target = kStyleTargetSolid;
+        } else if (ss.ShapeType() == TopAbs_SHELL) {
+            const int shellIdx = shellToSolids.FindIndex(ss);
+            if (shellIdx > 0 && shellToSolids.FindFromIndex(shellIdx).Extent() == 1) {
+                index = solids.FindIndex(shellToSolids.FindFromIndex(shellIdx).First());
+                target = kStyleTargetSolid;
+            }
+        }
+        if (target < 0 || index <= 0) {
+            // edge / vertex style, or a sub-shape that is not in this part's maps (e.g. other Location): never guess
+            double r, g, b;
+            bool curveOnly;
+            Handle(TColStd_HSequenceOfExtendedString) layers;
+            if (labelColor(colorTool, sub, curveOnly, r, g, b) || curveOnly ||
+                (layerTool->GetLayers(sub, layers) && !layers.IsNull() && layers->Length() > 0)) {
+                out.styleUnattached++;
+            }
+            continue;
+        }
+        recordStyle(out, colorTool, layerTool, sub, node, target, index - 1, maxName);
+    }
+}
+
+bool hasInstanceStyle(
+    const Handle(XCAFDoc_ColorTool)& colorTool, const Handle(XCAFDoc_LayerTool)& layerTool, const TDF_Label& label) {
+    double r, g, b;
+    bool curveOnly;
+    Handle(TColStd_HSequenceOfExtendedString) layers;
+    return labelColor(colorTool, label, curveOnly, r, g, b) || curveOnly ||
+           (layerTool->GetLayers(label, layers) && !layers.IsNull() && layers->Length() > 0);
+}
+
 /**
  * Reads `bytes` through STEPCAFControl_Reader into `out`. MUST be called with g_mutex held
  * (Interface_Static and XCAFApp_Application are process-global). On failure returns false and sets
@@ -1316,8 +2045,8 @@ bool readXcafLocked(
     std::istringstream stream(bytes);
     STEPCAFControl_Reader reader;
     reader.SetNameMode(true);
-    reader.SetColorMode(false);
-    reader.SetLayerMode(false);
+    reader.SetColorMode(true);
+    reader.SetLayerMode(true);
     reader.SetPropsMode(false);
     reader.SetGDTMode(false);
     reader.SetMatMode(false);
@@ -1382,6 +2111,14 @@ bool readXcafLocked(
         }
     }
 
+    // Welle R (ADR-0038): typed checks BEFORE Transfer(), after the external-reference check.
+    if (!checkStructureDepth(model, kMaxAssemblyDepth, kMaxExpandedOccurrences, errClass, errMsg)) return false;
+    if (!checkStyleRecordCounts(model, errClass, errMsg)) return false;
+    if (!checkOverrideChains(model, errClass, errMsg)) return false;
+    if (!checkMappedItems(model, kMaxAssemblyDepth, kMaxMappedItemExpansions, errClass, errMsg)) return false;
+    if (!checkShellFaceReferences(model, errClass, errMsg)) return false;
+    if (!inspectLengthUnits(reader, model, out, errClass, errMsg)) return false;
+
     XcafDocumentGuard guard;
     guard.app = XCAFApp_Application::GetApplication();
     guard.app->NewDocument("MDTV-XCAF", guard.doc);
@@ -1396,6 +2133,8 @@ bool readXcafLocked(
     TDF_LabelSequence frees;
     shapeTool->GetFreeShapes(frees);
     out.freeRootCount = frees.Length();
+    Handle(XCAFDoc_ColorTool) colorTool = XCAFDoc_DocumentTool::ColorTool(guard.doc->Main());
+    Handle(XCAFDoc_LayerTool) layerTool = XCAFDoc_DocumentTool::LayerTool(guard.doc->Main());
 
     // Iterative BFS; each label is visited exactly once (keyed by its entry string), so cycles in
     // the traversal are impossible. `queue` holds node indices of ASSEMBLY/PART nodes still to expand.
@@ -1440,6 +2179,11 @@ bool readXcafLocked(
             }
             ++partCount;
             TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            // A representation without any B-Rep transfers as an EMPTY compound; that is "no geometry"
+            // (structure-only, KSTEP-I-011), not a part with zero volume (ADR-0038).
+            if (!shape.IsNull() && shape.ShapeType() == TopAbs_COMPOUND && !TopoDS_Iterator(shape).More()) {
+                shape = TopoDS_Shape();
+            }
             if (!shape.IsNull()) {
                 totalFaces += countFaces(shape);
                 if (totalFaces > maxFaces) {
@@ -1483,6 +2227,7 @@ bool readXcafLocked(
             if (static_cast<int>(out.nodes.size()) >= maxNodes) {
                 return fail("node count", static_cast<int>(out.nodes.size()) + 1, maxNodes);
             }
+            if (hasInstanceStyle(colorTool, layerTool, compLabel)) out.styleInstanceIgnored++;
             TDF_Label referred = compLabel;
             if (XCAFDoc_ShapeTool::IsReference(compLabel)) {
                 XCAFDoc_ShapeTool::GetReferredShape(compLabel, referred);
@@ -1506,6 +2251,14 @@ bool readXcafLocked(
             (void)compIndex;
             if (refIndex >= 0) queue.push_back(refIndex);
         }
+    }
+    // Colours and layers must be copied out NOW: the XCAF document is closed when this function returns.
+    for (size_t i = 0; i < out.nodes.size(); ++i) {
+        const ImportNode& node = out.nodes[i];
+        if (node.kind != kImportKindPart || node.shapeSlot < 0) continue;
+        collectPartStyles(
+            out, colorTool, layerTool, nodeLabels[i], static_cast<int>(i),
+            out.partShapes[static_cast<size_t>(node.shapeSlot)], maxName);
     }
     return true;
 }
@@ -3556,6 +4309,171 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeImportUnknownTypes(JNIEnv* env, jo
     return env->NewStringUTF(joined.c_str());
 }
 
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportColors(JNIEnv* env, jobject /*self*/, jlong session) {
+    std::vector<jdouble> out;
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            for (const ImportColor& c : it->second->colors) {
+                out.push_back(c.node);
+                out.push_back(c.target);
+                out.push_back(c.sub);
+                out.push_back(c.r);
+                out.push_back(c.g);
+                out.push_back(c.b);
+            }
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading import colours");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    if (!out.empty()) env->SetDoubleArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportLayerRefs(JNIEnv* env, jobject /*self*/, jlong session) {
+    std::vector<jint> out;
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            for (const ImportLayerRef& l : it->second->layerRefs) {
+                out.push_back(l.node);
+                out.push_back(l.target);
+                out.push_back(l.sub);
+                out.push_back(l.nameIndex);
+            }
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading import layer references");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    jintArray result = env->NewIntArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    if (!out.empty()) env->SetIntArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportLayerNames(JNIEnv* env, jobject /*self*/, jlong session) {
+    std::u16string joined;
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            for (size_t i = 0; i < it->second->layerNames.size(); ++i) {
+                if (i > 0) joined.push_back(u'\n');
+                for (char16_t ch : it->second->layerNames[i]) joined.push_back(ch == u'\n' ? u' ' : ch);
+            }
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading layer names");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    return env->NewString(reinterpret_cast<const jchar*>(joined.data()), static_cast<jsize>(joined.size()));
+}
+
+JNIEXPORT jintArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportStyleStats(JNIEnv* env, jobject /*self*/, jlong session) {
+    jint stats[3] = {0, 0, 0};
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            stats[0] = it->second->styleUnattached;
+            stats[1] = it->second->styleInstanceIgnored;
+            stats[2] = it->second->styleTruncated;
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading style stats");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    jintArray result = env->NewIntArray(3);
+    if (result == nullptr) return nullptr;
+    env->SetIntArrayRegion(result, 0, 3, stats);
+    return result;
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportUnitInfo(JNIEnv* env, jobject /*self*/, jlong session) {
+    jdouble info[2] = {0.0, 1.0};
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            info[0] = it->second->unitState;
+            info[1] = it->second->unitFactorToMm;
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading unit info");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    jdoubleArray result = env->NewDoubleArray(2);
+    if (result == nullptr) return nullptr;
+    env->SetDoubleArrayRegion(result, 0, 2, info);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeImportUnitNames(JNIEnv* env, jobject /*self*/, jlong session) {
+    std::string joined;
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_imports.find(session);
+        if (it != g_imports.end()) {
+            found = true;
+            for (size_t i = 0; i < it->second->unitNames.size(); ++i) {
+                if (i > 0) joined.push_back('\n');
+                joined += it->second->unitNames[i];
+            }
+        }
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error reading unit names");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownImportHandle(env, session);
+        return nullptr;
+    }
+    return env->NewStringUTF(joined.c_str());  // sanitizeUnitName guarantees printable ASCII
+}
+
 JNIEXPORT jlong JNICALL
 Java_dev_kstep_geometry_occt_OcctBridge_nativeImportPartShape(JNIEnv* env, jobject /*self*/, jlong session, jint nodeIndex) {
     bool found = false;
@@ -3619,6 +4537,40 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeImportSessionCount(JNIEnv* env, jo
     (void)env;
     std::lock_guard<std::mutex> lock(g_mutex);
     return static_cast<jint>(g_imports.size());
+}
+
+JNIEXPORT jintArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeSurfaceTypeCounts(JNIEnv* env, jobject /*self*/, jlong handle) {
+    // Counts of faces per GeomAbs_SurfaceType ordinal 0..10 (Plane .. OtherSurface), in MapShapes(FACE) order.
+    jint counts[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    bool found = false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        TopoDS_Shape* shape = findShapeLocked(handle);
+        if (shape != nullptr) {
+            found = true;
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+            for (int i = 1; i <= faces.Extent(); ++i) {
+                const int t = static_cast<int>(BRepAdaptor_Surface(TopoDS::Face(faces(i))).GetType());
+                counts[(t >= 0 && t <= 10) ? t : 10]++;
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", std::string("OCCT error counting surface types: ") + e.GetMessageString());
+        return nullptr;
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Native error counting surface types");
+        return nullptr;
+    }
+    if (!found) {
+        throwUnknownHandle(env, handle);
+        return nullptr;
+    }
+    jintArray result = env->NewIntArray(11);
+    if (result == nullptr) return nullptr;
+    env->SetIntArrayRegion(result, 0, 11, counts);
+    return result;
 }
 
 JNIEXPORT jdoubleArray JNICALL

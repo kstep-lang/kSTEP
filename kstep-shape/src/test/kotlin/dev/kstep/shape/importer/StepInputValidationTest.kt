@@ -44,6 +44,8 @@ class StepInputValidationTest :
                 } catch (e: Exception) {
                     false
                 }
+            // Creating a link must work on POSIX; a silent skip would let this guard rot unnoticed (ADR-0038).
+            if (!System.getProperty("os.name").lowercase().contains("windows")) created shouldBe true
             if (created) {
                 kindOf { StepInputValidation.readValidated(link.path) } shouldBe StepImportErrorKind.SYMLINK_REJECTED
             }
@@ -89,6 +91,28 @@ class StepInputValidationTest :
 
         "a NUL byte in the path is an invalid path" {
             kindOf { StepInputValidation.readValidated("a\u0000b.step") } shouldBe StepImportErrorKind.INVALID_PATH
+        }
+
+        "an unreadable file (mode 000) is io_error (KSTEP-I-012)".config(
+            enabled =
+                !System.getProperty("os.name").lowercase().contains("windows") &&
+                    System.getProperty("user.name") != "root",
+        ) {
+            val file = File(dir, "unreadable.step").apply { writeBytes(step("#1=PRODUCT('a','b',\$,());\n")) }
+            try {
+                file.setReadable(false, false) shouldBe true
+                kindOf { StepInputValidation.readValidated(file.path) } shouldBe StepImportErrorKind.IO_ERROR
+            } finally {
+                file.setReadable(true, false)
+                file.delete()
+            }
+        }
+
+        "DIMENSIONAL_EXPONENTS (a unit entity) is not counted as PMI, DIMENSIONAL_SIZE is" {
+            val exponents = StepInputValidation.prescan(step("#1=DIMENSIONAL_EXPONENTS(1.,0.,0.,0.,0.,0.,0.);\n"))
+            exponents.ignoredCategories shouldBe emptyMap()
+            val size = StepInputValidation.prescan(step("#1=DIMENSIONAL_SIZE(#2,'x');\n"))
+            size.ignoredCategories shouldBe mapOf("pmi" to 1)
         }
 
         "error messages name only the given path" {

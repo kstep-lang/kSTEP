@@ -1,12 +1,15 @@
 package dev.kstep.cli
 
 import dev.kstep.geometry.BoundingBox
+import dev.kstep.geometry.LengthUnitState
 import dev.kstep.geometry.MeshColor
 import dev.kstep.geometry.MeshComposition
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctGeometryException
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.PlacedMesh
+import dev.kstep.geometry.RgbColor
+import dev.kstep.geometry.StepLengthUnitInfo
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.geometry.XcafNodeKind
 import dev.kstep.preview.MeshPreview
@@ -14,7 +17,10 @@ import dev.kstep.preview.PreviewEncodingException
 import dev.kstep.preview.RenderFormat
 import dev.kstep.render.RenderLimits
 import dev.kstep.render.gltf.GlbExtras
+import dev.kstep.shape.importer.ImportPresentation
 import dev.kstep.shape.importer.ImportValidationOutcome
+import dev.kstep.shape.importer.ImportedFaceStyle
+import dev.kstep.shape.importer.ImportedPart
 import dev.kstep.shape.importer.ImportedPlacement
 import dev.kstep.shape.importer.ImportedStepModel
 import dev.kstep.shape.importer.StepImportErrorKind
@@ -120,7 +126,73 @@ internal class RenderReport(
     val triangleCount: Int,
 )
 
+/** The message of the wall-clock bound of `kstep import` (`limit_exceeded`, KSTEP-I-010). */
+internal fun importTimeoutMessage(timeoutMillis: Long): String =
+    "import did not finish within $timeoutMillis ms (wall-clock limit); the input is too expensive"
+
+/** The report of a timed-out import, as text or `--output json` (`limit_exceeded`, KSTEP-I-010). */
+internal fun importTimeoutReport(
+    jsonOutput: Boolean,
+    timeoutMillis: Long,
+): String = importErrorReport(jsonOutput, StepImportErrorKind.LIMIT_EXCEEDED, importTimeoutMessage(timeoutMillis))
+
+/** One import error as the single stdout document: `Error: <message>` or the JSON error object. */
+internal fun importErrorReport(
+    jsonOutput: Boolean,
+    kind: StepImportErrorKind,
+    message: String,
+): String =
+    if (jsonOutput) {
+        buildJsonObject {
+            put("status", "error")
+            put("command", "import")
+            put("errorKind", kind.jsonKind)
+            put("code", kind.code)
+            put("message", message)
+        }.toString()
+    } else {
+        "Error: $message"
+    }
+
+/**
+ * `kstep import` (ADR-0038, worker model): the import itself runs in a worker subprocess ([ImportWorker]) that the
+ * supervisor can kill; this process only validates the arguments, supervises the worker and reports its result.
+ */
 fun runImport(command: CliCommand.Import) {
+    val timeoutMillis = ImportWatchdog.resolveTimeoutMillis()
+    val outcome =
+        try {
+            val workerCommand = ImportWorkerLaunch.command(importWorkerArgs(command), timeoutMillis)
+            ImportWorkerSupervisor(timeoutMillis).run(workerCommand)
+        } catch (e: IllegalStateException) {
+            WorkerOutcome.StartFailed(e.message.orEmpty())
+        }
+    when (val verdict = judgeWorkerOutcome(command.jsonOutput, timeoutMillis, outcome)) {
+        is WorkerVerdict.PassThrough -> {
+            System.out.write(verdict.stdout)
+            System.out.flush()
+            System.err.write(verdict.stderr)
+            System.err.flush()
+            if (verdict.exitCode != 0) exitProcess(verdict.exitCode)
+        }
+        is WorkerVerdict.Failure -> {
+            verdict.detail?.let { System.err.println("kstep import: $it") }
+            reportImportError(command.jsonOutput, verdict.kind, verdict.message)
+        }
+    }
+}
+
+/**
+ * The import itself, in the current process: the body of the worker ([ImportWorker]). Library-style callers that need
+ * the wall-clock and memory bounds must go through [runImport] instead.
+ */
+internal fun runImportInProcess(command: CliCommand.Import) {
+    // Orphan bound (ADR-0038): the supervisor kills the worker after the timeout; this silent watchdog only ends a worker
+    // whose supervisor was itself killed, a grace period later. It prints nothing (the supervisor owns the report), and
+    // the worker runs with -XX:+SuppressFatalErrorMessage, so a halt during a native call cannot print a JVM banner.
+    ImportWatchdog(ImportWatchdog.resolveTimeoutMillis() + ImportWorkerLaunch.ORPHAN_GRACE_MILLIS) {
+        Runtime.getRuntime().halt(ImportWorkerLaunch.ORPHAN_EXIT_CODE)
+    }.start()
     val bytes =
         try {
             StepInputValidation.readValidated(command.path)
@@ -143,10 +215,14 @@ fun runImport(command: CliCommand.Import) {
             }
         val validationFailed =
             validation != null && !(validation is ImportValidationOutcome.Validated && validation.clean)
-        if (command.jsonOutput) {
-            println(importJson(command, model, validation, render, validationFailed).toString())
-        } else {
-            println(importText(command, model, validation, render))
+        val report =
+            if (command.jsonOutput) {
+                importJson(command, model, validation, render, validationFailed).toString()
+            } else {
+                importText(command, model, validation, render)
+            }
+        println(report)
+        if (!command.jsonOutput) {
             for (warning in model.warnings) System.err.println("kstep import: $warning")
         }
         if (validationFailed) {
@@ -157,6 +233,16 @@ fun runImport(command: CliCommand.Import) {
         model.close()
     }
 }
+
+/** The worker's arguments, rebuilt from the already validated command (never the raw command line). */
+internal fun importWorkerArgs(command: CliCommand.Import): List<String> =
+    buildList {
+        add(command.path)
+        if (command.jsonOutput) addAll(listOf("--output", "json"))
+        if (command.validate) add("--validate")
+        command.renderOut?.let { addAll(listOf("--render", it)) }
+        addAll(listOf("-w", command.width.toString(), "--height", command.height.toString()))
+    }
 
 /** Returns the render report, or `null` after having reported the failure and set the exit path. */
 private fun renderImported(
@@ -238,19 +324,7 @@ private fun reportImportError(
     kind: StepImportErrorKind,
     message: String,
 ): Nothing {
-    if (jsonOutput) {
-        println(
-            buildJsonObject {
-                put("status", "error")
-                put("command", "import")
-                put("errorKind", kind.jsonKind)
-                put("code", kind.code)
-                put("message", message)
-            }.toString(),
-        )
-    } else {
-        println("Error: $message")
-    }
+    println(importErrorReport(jsonOutput, kind, message))
     exitProcess(1)
 }
 
@@ -306,6 +380,16 @@ private fun rotationLabel(m: DoubleArray): String? {
     return "R"
 }
 
+private fun colourText(c: RgbColor): String = "(${num(c.red)}, ${num(c.green)}, ${num(c.blue)})"
+
+private fun layersText(layers: List<String>): String? =
+    if (layers.isEmpty()) null else "layers [${layers.joinToString(", ")}]"
+
+private fun styleText(p: ImportedPart): String? =
+    listOfNotNull(p.color?.let { "colour ${colourText(it)}" }, layersText(p.layers))
+        .joinToString("  ")
+        .ifEmpty { null }
+
 internal fun importText(
     command: CliCommand.Import,
     model: ImportedStepModel,
@@ -318,8 +402,19 @@ internal fun importText(
             .firstOrNull()
             ?.substringBefore(' ') ?: "unknown"
     val occt = (OcctKernel.availability() as? OcctAvailability.Available)?.occtVersion ?: "unavailable"
+    val fileUnit =
+        model.sourceLengthUnit?.let { unit ->
+            when (unit.state) {
+                LengthUnitState.MISSING -> " (file: none declared)"
+                else ->
+                    unit.names
+                        .joinToString(", ")
+                        .takeIf { it.isNotEmpty() }
+                        ?.let { " (file: $it)" } ?: ""
+            }
+        } ?: ""
     sb.appendLine(
-        "Imported ${File(command.path).name} (schema $schema, OCCT $occt, unit ${model.lengthUnit}, " +
+        "Imported ${File(command.path).name} (schema $schema, OCCT $occt, unit ${model.lengthUnit}$fileUnit, " +
             "${model.stats.entityCount} entities)",
     )
     sb.appendLine(
@@ -365,6 +460,11 @@ internal fun importText(
     for (p in model.parts) {
         val volume = p.volume?.let { "${fixed3(it)} mm3" } ?: "n/a"
         sb.appendLine("  ${p.name}  volume $volume  faces ${p.topology?.faces ?: 0}  bbox ${box(p.boundingBox)}")
+        styleText(p)?.let { sb.appendLine("    $it") }
+        for (f in p.faceStyles) {
+            val parts = listOfNotNull(f.color?.let { "colour ${colourText(it)}" }, layersText(f.layers))
+            sb.appendLine("    face ${f.faceIndex}  ${parts.joinToString("  ")}")
+        }
     }
     sb.appendLine("Occurrences:")
     for (o in model.occurrences) {
@@ -436,6 +536,58 @@ private fun jsonPlacement(p: ImportedPlacement): JsonObject =
         }
     }
 
+/** Colour as `{"r","g","b"}` (sRGB 0..1), or `null`. */
+private fun jsonColour(c: RgbColor?): JsonElement =
+    if (c == null) {
+        JsonNull
+    } else {
+        buildJsonObject {
+            put("r", jsonNum(c.red))
+            put("g", jsonNum(c.green))
+            put("b", jsonNum(c.blue))
+        }
+    }
+
+private fun jsonLayers(layers: List<String>): JsonArray = JsonArray(layers.map { JsonPrimitive(it) })
+
+private fun jsonFaceStyles(styles: List<ImportedFaceStyle>): JsonArray =
+    buildJsonArray {
+        for (f in styles) {
+            add(
+                buildJsonObject {
+                    put("face", f.faceIndex)
+                    put("colour", jsonColour(f.color))
+                    put("layers", jsonLayers(f.layers))
+                },
+            )
+        }
+    }
+
+private fun jsonUnit(info: StepLengthUnitInfo?): JsonElement =
+    if (info == null) {
+        JsonNull
+    } else {
+        buildJsonObject {
+            put("state", info.state.name.lowercase())
+            put("names", JsonArray(info.names.map { JsonPrimitive(it) }))
+            put("factorToMm", jsonNum(info.factorToMm))
+        }
+    }
+
+private fun jsonPresentation(p: ImportPresentation?): JsonElement =
+    if (p == null) {
+        JsonNull
+    } else {
+        buildJsonObject {
+            put("coloredTargets", p.coloredTargets)
+            put("layerAssignments", p.layerAssignments)
+            put("layers", jsonLayers(p.layerNames))
+            put("unattached", p.unattached)
+            put("instanceStylesIgnored", p.instanceStylesIgnored)
+            put("truncated", p.truncated)
+        }
+    }
+
 private fun kotlinx.serialization.json.JsonObjectBuilder.putNullable(
     key: String,
     value: String?,
@@ -471,6 +623,8 @@ internal fun importJson(
             },
         )
         put("lengthUnit", model.lengthUnit)
+        put("sourceLengthUnit", jsonUnit(model.sourceLengthUnit))
+        put("presentation", jsonPresentation(model.presentation))
         put("entityCount", model.stats.entityCount)
         put("structureSource", model.structureSource.name.lowercase())
         put(
@@ -511,6 +665,12 @@ internal fun importJson(
                                 } ?: JsonNull,
                             )
                             put("boundingBox", jsonBox(p.boundingBox))
+                            put("colour", jsonColour(p.color))
+                            put("layers", jsonLayers(p.layers))
+                            put("faceStyles", jsonFaceStyles(p.faceStyles))
+                            p.surfaceTypes?.let { types ->
+                                put("surfaceTypes", buildJsonObject { types.forEach { (k, v) -> put(k, v) } })
+                            }
                             p.bodies?.let { bodies ->
                                 put(
                                     "bodies",
@@ -520,6 +680,8 @@ internal fun importJson(
                                                 buildJsonObject {
                                                     put("volume", jsonNum(b.volume))
                                                     put("faces", b.faces)
+                                                    put("colour", jsonColour(b.color))
+                                                    put("layers", jsonLayers(b.layers))
                                                 },
                                             )
                                         }

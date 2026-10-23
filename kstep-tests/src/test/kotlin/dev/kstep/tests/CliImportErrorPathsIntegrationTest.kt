@@ -29,6 +29,9 @@ class CliImportErrorPathsIntegrationTest :
             return target
         }
 
+        val isWindows = System.getProperty("os.name").lowercase().contains("windows")
+        val canChmod = !isWindows && System.getProperty("user.name") != "root"
+
         fun errorOf(vararg args: String): Pair<String, String> {
             val result = runner.run(*args, "--output", "json")
             result.exitCode shouldBe 1
@@ -60,6 +63,8 @@ class CliImportErrorPathsIntegrationTest :
                 } catch (e: Exception) {
                     false
                 }
+            // On POSIX creating the link must work: a silent skip would let this guard rot unnoticed (ADR-0038).
+            if (!isWindows) created shouldBe true
             if (created) errorOf("import", link.name) shouldBe ("symlink_rejected" to "KSTEP-I-003")
         }
 
@@ -103,5 +108,41 @@ class CliImportErrorPathsIntegrationTest :
         ) {
             fixture("import/box-20x30x40.step")
             errorOf("import", "box-20x30x40.step") shouldBe ("geometry_unavailable" to "KSTEP-S-007")
+        }
+
+        "a FIFO is not a regular file and is rejected before any open (no blocking)".config(
+            enabled = !isWindows && File("/usr/bin/mkfifo").exists(),
+        ) {
+            val fifo = File(workDir, "pipe.step")
+            fifo.delete()
+            ProcessBuilder("mkfifo", fifo.path).start().waitFor() shouldBe 0
+            try {
+                errorOf("import", fifo.name) shouldBe ("not_a_regular_file" to "KSTEP-I-004")
+            } finally {
+                fifo.delete()
+            }
+        }
+
+        "a sparse file of 50 000 001 bytes is file_too_large (KSTEP-I-006) without being read" {
+            val sparse = File(workDir, "sparse-too-large.step")
+            sparse.delete()
+            java.io.RandomAccessFile(sparse, "rw").use { it.setLength(50_000_001L) }
+            try {
+                errorOf("import", sparse.name) shouldBe ("file_too_large" to "KSTEP-I-006")
+            } finally {
+                sparse.delete()
+            }
+        }
+
+        "an unreadable input file (mode 000) is io_error (KSTEP-I-012)".config(enabled = canChmod) {
+            val file = File(workDir, "unreadable-cli.step")
+            fixture("import/box-20x30x40.step").copyTo(file, overwrite = true)
+            try {
+                file.setReadable(false, false) shouldBe true
+                errorOf("import", file.name) shouldBe ("io_error" to "KSTEP-I-012")
+            } finally {
+                file.setReadable(true, false)
+                file.delete()
+            }
         }
     })

@@ -22,4 +22,14 @@ box `[90,100]x[-15,5]x[0,5]`; the wrong composition order would give `[-5,5]x[80
 limit tests (8 XCAF nodes, 4 components, 3 parts, 18 faces, root assembly "Baugruppe").
 |`freecad-box-1.1.4.step` |Written by FreeCAD 1.1.4 (OCCT 7.8 STEP processor) with `scripts/interop/freecad_make_box.py`: one `Part::Box`
 10 x 20 x 30 labelled `FreeCADBox`, schema `AUTOMOTIVE_DESIGN`. A foreign writer that Linux CI (no FreeCAD) can still read.
+|`styled-box.step` |`scripts/interop/make_import_extras_fixtures.py` (ADR-0038): `box-20x30x40.step` plus `COLOUR_RGB(1.,0.5,0.)` on the solid, `COLOUR_RGB(0.,0.,1.)` on the top face
+(z = 40, area 600, normal +Z), an `MDGPR` and the layers `Layer-A` (solid) and `Layer-F` (top face). Volume 24000 unchanged. The top face is face index 5 (0-based).
+|`two-body-styled.step` |Same generator, from `kstep export export-two-bodies-different.kstep.kts` (bodies of volume 6000 and 64): the first solid red, the second green.
+|`inch-box.step` |Same generator: the length unit of `box-20x30x40.step` replaced by `CONVERSION_BASED_UNIT('INCH')` (25.4 mm). The 20 x 30 x 40 box therefore measures 508 x 762 x 1016 mm.
+|`cm-box.step`, `m-box.step` |Same generator: `SI_UNIT(.CENTI.,.METRE.)` (200 x 300 x 400 mm) and `SI_UNIT($,.METRE.)` (20000 x 30000 x 40000 mm).
+|`no-unit-box.step` |Same generator: `GLOBAL_UNIT_ASSIGNED_CONTEXT` without a length unit. OCCT reads the box as millimetres.
+|`unresolved-unit-box.step` |Same generator: a conversion-based length unit with factor `0.`. Without the pre-transfer check OCCT yields a bounding box of 1e100.
+|`structure-only.step` |Same generator: product structure and a `SHAPE_REPRESENTATION` that holds only an axis placement (no B-Rep). Imports as `KSTEP-I-011`.
+|`freecad-loft-1.1.4.step` |Written by FreeCAD 1.1.4 with `scripts/interop/freecad_make_loft.py`: smooth loft through circles of radius 10 (z = 0), 8 (z = 10) and 5 (z = 20),
+labelled `FreeCADLoft`, volume 3987.0608 (FreeCAD's own `Shape.Volume`). Two planar faces and one B-spline face (two circles alone give a cone).
 |===

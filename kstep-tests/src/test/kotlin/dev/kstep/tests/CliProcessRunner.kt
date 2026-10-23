@@ -34,6 +34,7 @@ class CliProcessRunner(
         vararg args: String,
         jvmArgs: List<String> = emptyList(),
         timeoutSeconds: Long = 120,
+        mainClass: String = "dev.kstep.cli.MainKt",
     ): CliInvocationResult {
         val javaBin = File(File(System.getProperty("java.home"), "bin"), "java").absolutePath
         val classpath = System.getProperty("java.class.path")
@@ -46,7 +47,7 @@ class CliProcessRunner(
                     addAll(jvmArgs)
                     add("-cp")
                     add(classpath)
-                    add("dev.kstep.cli.MainKt")
+                    add(mainClass)
                     addAll(args)
                 }
             val process =
