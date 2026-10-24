@@ -222,11 +222,13 @@ of `kstep-geometry` / `kstep-constraints` and are found the same way), the argum
   memory of OCCT is NOT covered by `-Xmx`; a native allocation failure is a crash (below).
 * `-XX:+SuppressFatalErrorMessage` (no fatal-error banner, no `hs_err_pid*.log` in the working directory, which the
   audit runs had left behind) and `-XX:-CreateCoredumpOnCrash`.
+* `-Djava.io.tmpdir=<private directory>`, see "Temporary directory of the worker" below. The property is set by the
+  supervisor for every run and is never forwarded from the supervisor's own value.
 * `-XX:TieredStopAtLevel=1` like the CLI itself; `-Dstdout.encoding` / `-Dstderr.encoding` (and `file.encoding`) of the
   supervisor, so the worker encodes its report exactly as the in-process command did (a pipe would otherwise get
   `native.encoding`); the native-bridge override properties and `java.awt.headless` when set; the effective timeout.
 
-The supervisor reads the worker's stdout and stderr on two threads into memory, at most 64 MiB and 4 MiB (beyond that
+The supervisor reads the worker's stdout and stderr on two threads into memory, at most 16 MiB and 4 MiB (beyond that
 the worker is killed: `limit_exceeded`), waits at most the timeout (60 s, lowerable as before via
 `kstep.import.timeoutMillis` / `KSTEP_IMPORT_TIMEOUT_MILLIS`) and then kills the worker and all its descendants
 (`destroyForcibly`) and waits for its end. A shutdown hook kills the worker when the supervisor itself is ended
@@ -241,9 +243,43 @@ the worker is killed: `limit_exceeded`), waits at most the timeout (60 s, lowera
 * *Anything else* (a signal, exit 132/134/139, exit 0 or 1 without a complete report, another exit code):
   `read_failed` (`KSTEP-I-009`), "the import worker terminated abnormally (signal 4 (SIGILL)); the file cannot be read
   safely". `KSTEP-I-009` already means "OCCT cannot read or transfer the file"; a reader that crashes on a file is the
-  same verdict for the user, so no new code was added. The first non-empty stderr line of the worker (at most 300
+  same verdict for the user, so no new code was added. One diagnostic line of the worker's stderr (at most 300
   printable characters) follows on stderr as `kstep import: <line>`; the worker's stdout is never printed then.
+  `diagnosticLine` picks the first line that names an exception or error, else the first line that is not
+  `[thread] INFO|DEBUG|TRACE` log output, so the SLF4J line that reports the loaded OCCT bridge no longer stands in for
+  the cause; if the stderr holds only such log lines, no diagnostic line is printed.
+* *Incomplete output* (`WorkerOutcome.IncompleteOutput`): the worker ended on its own but a descendant still held an
+  output pipe after the stream readers' bounded wait. The verdict is `read_failed` "(incomplete output)", as before; the
+  outcome carries the worker's real exit value instead of the former sentinel `-1`, which could collide with a real
+  exit value on Windows.
+* A crash AFTER a complete report, for example in `model.close()`, therefore also ends as `read_failed`: the exit code
+  is no longer 0 or 1. This is deliberately the safe side; a report that the worker could not finish cleanly is not
+  passed on.
 * *Worker cannot be started* (no java executable, `IOException`): `io_error` (`KSTEP-I-012`).
+
+==== Temporary directory of the worker
+
+Native-library extracts (`OcctNativeLibrary`, `PlaneGcsNativeLibrary`) and the temp files of the exporters are created
+under `java.io.tmpdir`; they used to be removed by `deleteOnExit`, which never runs when the worker is killed (timeout,
+overflow, SIGTERM of the supervisor). Each run therefore gets its own directory: the supervisor creates a randomly named
+`kstep-import-*` directory below its own `java.io.tmpdir` with `Files.createTempDirectory` (atomic, mode `rwx------` on
+POSIX file systems, so there is no window for a pre-placed link or a foreign reader), passes it to the worker as
+`-Djava.io.tmpdir`, and removes it after the worker and its descendants are gone: on a regular end, a crash, a timeout, an
+output overflow, an interrupt and from the shutdown hook (SIGTERM/Ctrl-C of the supervisor). The removal uses
+`Files.walkFileTree` without following links, so a symbolic link in the directory is deleted itself and never its
+target; an error on one entry does not stop the removal of the rest and is logged (path only, no contents). No path
+from the input file takes part. If the directory cannot be created the import fails as `io_error` ("cannot create
+worker temp directory"), because without it no worker is started. `deleteOnExit` stays in the libraries as a second net.
+A supervisor killed with SIGKILL cannot clean up: the directory remains (see the remaining limits).
+
+==== Paths that name the worker's own descriptors
+
+`/dev/fd/N`, `/dev/stdin` and `/proc/self/...` would name descriptors of the worker, not of the caller. They are not
+resolved or rewritten: the path is printed verbatim in the report (`file`), so canonicalising it in the supervisor would
+change the byte-identical output, and `toRealPath` follows links and would undo `KSTEP-I-003`. On Linux and macOS
+`/dev/stdin` and `/dev/fd/N` are symbolic links (`KSTEP-I-003`), a character device or pipe is `KSTEP-I-004`; either way
+the import ends with a structured error and never reads a foreign descriptor. A descriptor cannot be handed to the
+worker with `ProcessBuilder` in any case. The input must be a regular file.
 
 The worker runs exactly the former in-process import (`runImportInProcess`). The former watchdog class stays, with a
 new role: inside the worker it fires at timeout + 10 s and halts silently (exit 124, no output), which only matters for
@@ -259,12 +295,20 @@ environment, so an environment variable could have switched the bound off. Tests
 (`FakeImportWorker`): regular end passed through, crash after partial output (exit 132), segfault exit 139, truncated
 JSON with exit 1, banner on stdout, real OutOfMemoryError under `-Xmx64m`, timeout with a grandchild process (worker
 and grandchild are dead afterwards), a short timeout, stdout flood beyond the bound, start failure, the regular-end
-rules and the worker command line. `CliImportWorkerIntegrationTest` (kstep-tests) runs the real CLI: a box (JSON, text,
+rules and the worker command line; since this wave also the stderr bound, incomplete output (a grandchild that inherits
+the pipes and outlives the worker), the diagnostic line, the private temp directory (removed after a crash, a regular
+end and a timeout; a symbolic link inside it never leads to deleting its target), the shutdown hook (a harness process
+supervising a sleeping worker is ended with SIGTERM: the worker is dead and the directory gone) and the orphan bound (a
+worker without a supervisor halts with exit 124 and empty stdout). Every stand-in ends itself after two minutes and
+every wait in the tests is a poll of the process state, never a fixed sleep. `CliImportWorkerIntegrationTest` (kstep-tests) runs the real CLI: a box (JSON, text,
 `--validate`) and a missing file through the worker give byte-identical stdout and the same exit code as the worker main
 class run directly; the four former crashers (generated by `ImportFixtures`: `overrideSelf`, `overrideChain(3000)`,
 `mappedItemChain(1000)`, `mappedItemCycle`) and the 26 s shell file (`repeatedShellFaces(50000)`) give exactly one JSON
 error document on stdout and no banner; `-Dkstep.import.timeoutMillis=1` gives the timeout error in JSON and text, and
-afterwards no process with the test's unique file name is alive. These tests run with and without OCCT.
+the run's private `java.io.tmpdir` is empty afterwards; a regular import with a private `java.io.tmpdir` is identical to
+the default one; `/dev/stdin` is a structured error. Under `-Pkstep.occt.require=true` (CI) the OCCT-gated cases are
+not switched off by a missing bridge, and a test fails if the bridge is unavailable. These tests run with and without
+OCCT.
 
 Costs: one extra JVM start. Measured on the box fixture (`--output json`, macOS arm64, median of 10 runs): the
 worker main class started directly (the former in-process import) 0.29 s, `kstep import` through the worker 0.36 s,
@@ -390,11 +434,21 @@ process: no wall-clock or memory bound, and a crash inside OCCT ends that proces
 * `-Xmx2g` bounds the Java heap only. OCCT allocates natively; a file that makes OCCT allocate many GB of native memory
   within 60 s is bounded only by the operating system (a failed allocation is a crash, reported as `read_failed`).
 * Library callers have neither bound (see above).
-* A supervisor killed with SIGKILL leaves the worker running until its own watchdog halts it (timeout + 10 s).
+* A supervisor killed with SIGKILL leaves the worker running until its own watchdog halts it (timeout + 10 s), and its
+  `kstep-import-*` temp directory stays behind (nobody is left to remove it).
+* If the worker ended on its own while a descendant still holds a pipe (`IncompleteOutput`), the supervisor can no
+  longer find that descendant (`Process.descendants()` is empty once the worker is gone) and does not kill it. The worker
+  starts no child processes, so this is theoretical today; the test ends its stand-in grandchild by PID.
+* The temp directory is removed only after the worker is gone; a native library mapped by a killed process on Windows
+  could still block the removal (Windows is untested, see below). The failure is logged, not fatal.
 * Tested on macOS arm64 (and in CI on Linux x86-64). Windows and Intel macOS are not tested: the worker command uses
   `java.exe` and the same class path, but process-tree killing, exit codes of crashes and the `.bat` launcher were not
   exercised there.
 * The worker costs one extra JVM start per import (see the costs above).
+* The stdout bound is 16 MiB (before this wave 64 MiB). The largest report measured is an assembly diamond of 12 levels
+  (4096 part occurrences, the boundary of the expansion limit of 10000): 3.06 MB, so the full limit is about 7.5 MB and
+  the bound leaves a factor of two. The report is parsed in memory (a UTF-16 string and the JSON tree), which the
+  default heap carries at that size. A test fails if the constant is raised above 16 MiB.
 
 == Error codes (KSTEP-I-001 to KSTEP-I-013)
 
@@ -416,13 +470,13 @@ second branch (file grows after the size check) is a defence against a race and 
 |I-008 |`external_reference` |`DOCUMENT_FILE` and friends |`CliImportErrorPathsIntegrationTest`, `OcctStepImportHostileInputTest`
 |I-009 |`read_failed` |OCCT cannot read or transfer the file, product structure cycle, abnormal end of the import worker
 (crash, signal, incomplete report) |`OcctStepImportHostileInputTest`; worker: `ImportWorkerSupervisorTest` (exit 132,
-139, truncated JSON, banner)
+139, truncated JSON, banner, incomplete output, diagnostic line)
 |I-010 |`limit_exceeded` |native limits; structure depth above 32 and more than 10000 part occurrences after expansion
 (both before transfer); style expansion work; override chains, mapped items, shell face references (before transfer);
 Kotlin expansion limits; the 60 s wall-clock bound, the 2 GB heap and the output bound of the `kstep import` worker
 |chain of 33, 2000 and 20 000 levels; one million entities; diamond of 28 levels x 2 and nested style chain 64^4 x 100
 (`OcctCliImportErrorCodesTest`); `StepImporterLimitOcctTest` (resource release on a Kotlin-side limit); override
-chains, mapped items and shells: `CliImportWorkerIntegrationTest`; timeout, heap and output bound of the worker:
+chains, mapped items and shells: `CliImportWorkerIntegrationTest`; timeout, heap, stdout and stderr bound of the worker:
 `ImportWorkerSupervisorTest` (unit, real child processes) and `CliImportWorkerIntegrationTest` (timeout through the CLI)
 |I-011 |`no_content` |no part with geometry (also: representation without B-Rep) |`OcctCliImportErrorCodesTest`
 (`structure-only.step`); `--render` without placed geometry is the other trigger

@@ -162,8 +162,10 @@ fun runImport(command: CliCommand.Import) {
     val timeoutMillis = ImportWatchdog.resolveTimeoutMillis()
     val outcome =
         try {
-            val workerCommand = ImportWorkerLaunch.command(importWorkerArgs(command), timeoutMillis)
-            ImportWorkerSupervisor(timeoutMillis).run(workerCommand)
+            val workerArgs = importWorkerArgs(command)
+            ImportWorkerSupervisor(timeoutMillis).runWith { dir ->
+                ImportWorkerLaunch.command(workerArgs, timeoutMillis, tmpDir = dir)
+            }
         } catch (e: IllegalStateException) {
             WorkerOutcome.StartFailed(e.message.orEmpty())
         }
@@ -190,9 +192,7 @@ internal fun runImportInProcess(command: CliCommand.Import) {
     // Orphan bound (ADR-0038): the supervisor kills the worker after the timeout; this silent watchdog only ends a worker
     // whose supervisor was itself killed, a grace period later. It prints nothing (the supervisor owns the report), and
     // the worker runs with -XX:+SuppressFatalErrorMessage, so a halt during a native call cannot print a JVM banner.
-    ImportWatchdog(ImportWatchdog.resolveTimeoutMillis() + ImportWorkerLaunch.ORPHAN_GRACE_MILLIS) {
-        Runtime.getRuntime().halt(ImportWorkerLaunch.ORPHAN_EXIT_CODE)
-    }.start()
+    startOrphanBound()
     val bytes =
         try {
             StepInputValidation.readValidated(command.path)
@@ -233,6 +233,15 @@ internal fun runImportInProcess(command: CliCommand.Import) {
         model.close()
     }
 }
+
+/**
+ * Orphan bound of the worker (ADR-0038): halts the process silently, with [ImportWorkerLaunch.ORPHAN_EXIT_CODE], once
+ * the timeout plus a grace period has passed without the supervisor having ended it.
+ */
+internal fun startOrphanBound(): ImportWatchdog =
+    ImportWatchdog(ImportWatchdog.resolveTimeoutMillis() + ImportWorkerLaunch.ORPHAN_GRACE_MILLIS) {
+        Runtime.getRuntime().halt(ImportWorkerLaunch.ORPHAN_EXIT_CODE)
+    }.start()
 
 /** The worker's arguments, rebuilt from the already validated command (never the raw command line). */
 internal fun importWorkerArgs(command: CliCommand.Import): List<String> =

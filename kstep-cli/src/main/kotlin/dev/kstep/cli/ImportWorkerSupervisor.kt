@@ -1,12 +1,19 @@
 package dev.kstep.cli
 
 import dev.kstep.shape.importer.StepImportErrorKind
+import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -14,6 +21,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal sealed interface WorkerOutcome {
     /** The worker ended on its own within the timeout; [exitCode] is the raw process exit value. */
     class Exited(
+        val pid: Long,
+        val exitCode: Int,
+        val stdout: ByteArray,
+        val stderr: ByteArray,
+    ) : WorkerOutcome
+
+    /**
+     * The worker ended on its own but a descendant kept an output pipe open, so the output is not known to be complete.
+     * [exitCode] is the worker's real exit value, informational only.
+     */
+    class IncompleteOutput(
         val pid: Long,
         val exitCode: Int,
         val stdout: ByteArray,
@@ -63,24 +81,50 @@ internal class ImportWorkerSupervisor(
     private val timeoutMillis: Long,
     private val maxStdoutBytes: Int = MAX_STDOUT_BYTES,
     private val maxStderrBytes: Int = MAX_STDERR_BYTES,
+    private val streamJoinMillis: Long = STREAM_JOIN_MILLIS,
+    private val tempBase: Path = Path.of(System.getProperty("java.io.tmpdir")),
     private val start: (List<String>) -> Process = { ProcessBuilder(it).start() },
 ) {
     init {
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
     }
 
-    fun run(command: List<String>): WorkerOutcome {
+    /** Runs a fixed [command]; the worker still gets its own temp directory, which only the command can use. */
+    fun run(command: List<String>): WorkerOutcome = runWith { command }
+
+    /**
+     * Creates the private temp directory of this run, starts the worker with the command [buildCommand] returns for it,
+     * and removes the directory again after the worker (and its descendants) are gone, on every path.
+     */
+    fun runWith(buildCommand: (workerTmpDir: Path) -> List<String>): WorkerOutcome {
+        val dir =
+            try {
+                WorkerTempDir.create(tempBase.toAbsolutePath())
+            } catch (_: IOException) {
+                return WorkerOutcome.StartFailed("cannot create worker temp directory")
+            } catch (_: SecurityException) {
+                return WorkerOutcome.StartFailed("cannot create worker temp directory")
+            }
         val process =
             try {
-                start(command)
+                start(buildCommand(dir))
             } catch (e: IOException) {
+                WorkerTempDir.deleteRecursively(dir)
                 return WorkerOutcome.StartFailed(e.message.orEmpty())
             } catch (e: SecurityException) {
+                WorkerTempDir.deleteRecursively(dir)
                 return WorkerOutcome.StartFailed(e.message.orEmpty())
+            } catch (e: RuntimeException) {
+                WorkerTempDir.deleteRecursively(dir)
+                throw e
             }
         val pid = process.pid()
-        // The supervisor itself being ended (Ctrl-C, SIGTERM) must not leave the worker running.
-        val hook = Thread({ kill(process) }, "kstep-import-worker-reaper")
+        // The supervisor itself being ended (Ctrl-C, SIGTERM) must not leave the worker or its temp directory behind.
+        val hook =
+            Thread({
+                kill(process)
+                WorkerTempDir.deleteRecursively(dir)
+            }, "kstep-import-worker-reaper")
         val hookInstalled =
             try {
                 Runtime.getRuntime().addShutdownHook(hook)
@@ -102,12 +146,12 @@ internal class ImportWorkerSupervisor(
             val finished = process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
             if (!finished) {
                 kill(process)
-                out.join(STREAM_JOIN_MILLIS)
-                err.join(STREAM_JOIN_MILLIS)
+                out.join(streamJoinMillis)
+                err.join(streamJoinMillis)
                 return WorkerOutcome.TimedOut(pid)
             }
-            out.join(STREAM_JOIN_MILLIS)
-            err.join(STREAM_JOIN_MILLIS)
+            out.join(streamJoinMillis)
+            err.join(streamJoinMillis)
             if (overflow.get() || out.overflowed || err.overflowed) {
                 kill(process)
                 return WorkerOutcome.OutputOverflow(pid, if (out.overflowed) maxStdoutBytes else maxStderrBytes)
@@ -115,7 +159,7 @@ internal class ImportWorkerSupervisor(
             if (out.isAlive || err.isAlive) {
                 // A descendant still holds a pipe open: the output is not known to be complete.
                 kill(process)
-                return WorkerOutcome.Exited(pid, INCOMPLETE_OUTPUT_EXIT, out.bytes(), err.bytes())
+                return WorkerOutcome.IncompleteOutput(pid, process.exitValue(), out.bytes(), err.bytes())
             }
             return WorkerOutcome.Exited(pid, process.exitValue(), out.bytes(), err.bytes())
         } catch (e: InterruptedException) {
@@ -123,6 +167,11 @@ internal class ImportWorkerSupervisor(
             Thread.currentThread().interrupt()
             return WorkerOutcome.TimedOut(pid)
         } finally {
+            // Delete only once the worker is gone, so nothing can still write into (or re-create) the directory.
+            if (process.isAlive) kill(process)
+            if (!WorkerTempDir.deleteRecursively(dir)) {
+                logger.warn { "could not remove the import worker temp directory $dir" }
+            }
             if (hookInstalled) {
                 try {
                     Runtime.getRuntime().removeShutdownHook(hook)
@@ -182,17 +231,16 @@ internal class ImportWorkerSupervisor(
     }
 
     companion object {
-        /** Bound of the collected worker stdout (a large assembly's JSON report is a few MB). */
-        const val MAX_STDOUT_BYTES: Int = 64 * 1024 * 1024
+        /** Bound of the collected worker stdout (the report at the expansion limit is about 7.5 MB, see ADR-0038). */
+        const val MAX_STDOUT_BYTES: Int = 16 * 1024 * 1024
 
         /** Bound of the collected worker stderr (warnings in text mode). */
         const val MAX_STDERR_BYTES: Int = 4 * 1024 * 1024
 
-        /** Exit value used when the worker ended but a descendant kept a pipe open. */
-        const val INCOMPLETE_OUTPUT_EXIT: Int = -1
+        /** How long the stream readers are given to finish after the worker ended or was killed. */
+        const val STREAM_JOIN_MILLIS: Long = 10_000L
 
         private const val CHUNK_BYTES = 64 * 1024
-        private const val STREAM_JOIN_MILLIS = 10_000L
         private const val KILL_WAIT_SECONDS = 10L
 
         /** Kills the worker and its descendants and waits (bounded) until the worker is gone. */
@@ -249,6 +297,12 @@ internal fun judgeWorkerOutcome(
                 sanitizeDetail(outcome.reason),
             )
         is WorkerOutcome.Exited -> judgeExited(jsonOutput, outcome)
+        is WorkerOutcome.IncompleteOutput ->
+            WorkerVerdict.Failure(
+                StepImportErrorKind.READ_FAILED,
+                "the import worker terminated abnormally (incomplete output); the file cannot be read safely",
+                diagnosticLine(String(outcome.stderr, ImportWorkerLaunch.stderrCharset())),
+            )
     }
 
 private fun judgeExited(
@@ -272,14 +326,13 @@ private fun judgeExited(
     val how =
         when {
             code > 128 -> "signal ${code - 128}" + (SIGNAL_NAMES[code - 128]?.let { " ($it)" } ?: "")
-            code == ImportWorkerSupervisor.INCOMPLETE_OUTPUT_EXIT -> "incomplete output"
             code == 0 || code == 1 -> "exit code $code without a complete report"
             else -> "exit code $code"
         }
     return WorkerVerdict.Failure(
         StepImportErrorKind.READ_FAILED,
         "the import worker terminated abnormally ($how); the file cannot be read safely",
-        firstLine(stderrText),
+        diagnosticLine(stderrText),
     )
 }
 
@@ -309,12 +362,26 @@ internal fun isRegularEnd(
     return if (exitCode == 0) status == "success" else status == "error" || status == "validation_failed"
 }
 
-private fun firstLine(text: String): String? =
-    text
-        .lineSequence()
-        .map { it.trim() }
-        .firstOrNull { it.isNotEmpty() }
-        ?.let { sanitizeDetail(it) }
+/** Log lines the worker's logging backend may print before the real failure (not the cause of an abnormal end). */
+private val LOG_NOISE = Regex("""^\[[^\]]*]\s+(INFO|DEBUG|TRACE)\b""")
+
+/**
+ * The one line of the worker's stderr that best explains an abnormal end: the first exception or error line, else the
+ * first line that is not INFO/DEBUG/TRACE log output; `null` if there is only such noise (nothing misleading is printed).
+ */
+internal fun diagnosticLine(stderr: String): String? {
+    val candidates =
+        stderr
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .filterNot { LOG_NOISE.containsMatchIn(it) }
+            .toList()
+    val best =
+        candidates.firstOrNull { it.contains("Exception") || it.startsWith("Caused by") || it.contains("Error") }
+            ?: candidates.firstOrNull()
+    return best?.let { sanitizeDetail(it) }
+}
 
 private fun sanitizeDetail(text: String): String? =
     text
@@ -323,3 +390,72 @@ private fun sanitizeDetail(text: String): String? =
         .ifBlank { null }
 
 private const val MAX_DETAIL_CHARS = 300
+
+private val logger = KotlinLogging.logger {}
+
+/** The private, per-run `java.io.tmpdir` of one import worker (ADR-0038). */
+internal object WorkerTempDir {
+    private const val PREFIX = "kstep-import-"
+
+    /** Creates a fresh, randomly named directory below [base], readable only by the current user where possible. */
+    fun create(base: Path): Path =
+        if ("posix" in base.fileSystem.supportedFileAttributeViews()) {
+            Files.createTempDirectory(
+                base,
+                PREFIX,
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")),
+            )
+        } else {
+            Files.createTempDirectory(base, PREFIX)
+        }
+
+    /** Deletes [dir] with everything in it, never following a symbolic link; `false` if something could not be removed. */
+    fun deleteRecursively(dir: Path): Boolean {
+        var clean = true
+        try {
+            Files.walkFileTree(
+                dir,
+                object : SimpleFileVisitor<Path>() {
+                    override fun visitFile(
+                        file: Path,
+                        attrs: BasicFileAttributes,
+                    ): FileVisitResult {
+                        if (!tryDelete(file)) clean = false
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    override fun visitFileFailed(
+                        file: Path,
+                        exc: IOException,
+                    ): FileVisitResult {
+                        clean = false
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    override fun postVisitDirectory(
+                        dir: Path,
+                        exc: IOException?,
+                    ): FileVisitResult {
+                        if (!tryDelete(dir)) clean = false
+                        return FileVisitResult.CONTINUE
+                    }
+                },
+            )
+        } catch (_: IOException) {
+            clean = false
+        } catch (_: SecurityException) {
+            clean = false
+        }
+        return clean
+    }
+
+    private fun tryDelete(path: Path): Boolean =
+        try {
+            Files.deleteIfExists(path)
+            true
+        } catch (_: IOException) {
+            false
+        } catch (_: SecurityException) {
+            false
+        }
+}

@@ -130,6 +130,37 @@ if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
   r="$(mkdist nolaunch)"; rm "$r/bin/kstep-cli"
   (cd "$WORK/d-nolaunch" && zip -qr ../nolaunch.zip kstep-cli-1.0.0)
   expect_rc "verify-dist rejects missing launcher" 1 bash "$D" "$WORK/nolaunch.zip" 1.0.0
+
+  # Full smoke test against a stub launcher (a shell script, no Java needed): export writes a STEP header, import answers
+  # as given by $STUB_IMPORT ("unavailable" = the expected geometry_unavailable error, anything else = success).
+  mkstub() { # name
+    local r="$WORK/d-$1/kstep-cli-1.0.0"
+    mkdir -p "$r/bin" "$r/lib"
+    : > "$r/bin/kstep-cli.bat"; : > "$r/lib/kstep-cli-1.0.0.jar"
+    cat > "$r/bin/kstep-cli" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  --help) echo "Usage: kstep-cli"; exit 0 ;;
+  export)
+    while [ "$#" -gt 0 ]; do [ "$1" = "--out" ] && out="$2"; shift; done
+    printf 'ISO-10303-21;\nEND-ISO-10303-21;\n' > "$out"; exit 0 ;;
+  import)
+    if [ "${STUB_IMPORT:-}" = "unavailable" ]; then
+      echo '{"status":"error","command":"import","errorKind":"geometry_unavailable","code":"KSTEP-S-007"}'; exit 1
+    fi
+    echo '{"status":"success","command":"import"}'; exit 0 ;;
+esac
+exit 3
+STUB
+  }
+  : > "$WORK/fixture.kts"
+  mkstub ok; (cd "$WORK/d-ok" && zip -qr ../ok.zip kstep-cli-1.0.0)
+  STUB_IMPORT=unavailable expect_rc "verify-dist accepts geometry_unavailable import" 0 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
+  contains "$WORK/out" "OK:"; check "verify-dist prints OK" $?
+  STUB_IMPORT=success expect_rc "verify-dist rejects an import that does not report geometry_unavailable" 1 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
+  contains "$WORK/err" "exited 0, expected 1"; check "reports unexpected import exit" $?
 else
   echo "note: zip/unzip missing, skipping verify-dist negative tests" >&2
 fi

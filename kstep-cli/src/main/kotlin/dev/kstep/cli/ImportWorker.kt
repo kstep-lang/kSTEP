@@ -63,6 +63,7 @@ internal object ImportWorkerLaunch {
     fun jvmOptions(
         timeoutMillis: Long,
         maxHeap: String = WORKER_MAX_HEAP,
+        tmpDir: Path? = null,
     ): List<String> =
         buildList {
             add("-Xmx$maxHeap")
@@ -77,6 +78,9 @@ internal object ImportWorkerLaunch {
             System.getProperty("file.encoding")?.let { add("-Dfile.encoding=$it") }
             for (name in FORWARDED_PROPERTIES) System.getProperty(name)?.let { add("-D$name=$it") }
             add("-D${ImportWatchdog.TIMEOUT_PROPERTY}=$timeoutMillis")
+            // The worker's own temp directory (native-library extracts, temp files): the supervisor removes it afterwards.
+            // Deliberately not forwarded from the supervisor's own java.io.tmpdir.
+            tmpDir?.let { add("-Djava.io.tmpdir=$it") }
         }
 
     /** The java executable of the running JVM (`java.home`), the same runtime the CLI was started with. */
@@ -98,10 +102,11 @@ internal object ImportWorkerLaunch {
         timeoutMillis: Long,
         mainClass: String = WORKER_MAIN_CLASS,
         maxHeap: String = WORKER_MAX_HEAP,
+        tmpDir: Path? = null,
     ): List<String> =
         buildList {
             add(javaExecutable())
-            addAll(jvmOptions(timeoutMillis, maxHeap))
+            addAll(jvmOptions(timeoutMillis, maxHeap, tmpDir))
             add("-cp")
             add(System.getProperty("java.class.path"))
             add(mainClass)

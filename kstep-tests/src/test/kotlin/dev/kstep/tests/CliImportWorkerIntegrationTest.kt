@@ -4,6 +4,7 @@ import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctKernel
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldBeEmpty
+import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
@@ -12,7 +13,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.UUID
+import kotlin.io.path.listDirectoryEntries
+import kotlin.io.path.name
 
 /**
  * End-to-end coverage of the `kstep import` worker model (ADR-0038): the CLI runs the import in a worker subprocess
@@ -24,6 +29,19 @@ class CliImportWorkerIntegrationTest :
         val workDir = File("build/cli-import-worker").apply { mkdirs() }
         val runner = CliProcessRunner(workDir)
         val available = OcctKernel.availability() is OcctAvailability.Available
+        // CI's strict jobs pass -Pkstep.occt.require=true (forwarded to this JVM by build.gradle.kts): there the OCCT-gated
+        // cases must run and fail loudly instead of passing without the bridge.
+        val required = System.getProperty("kstep.occt.require") == "true"
+        val windows =
+            System
+                .getProperty("os.name")
+                .orEmpty()
+                .lowercase()
+                .contains("windows")
+
+        "the OCCT bridge is available when kstep.occt.require=true" {
+            if (required) available shouldBe true
+        }
 
         fun box(name: String = "box-20x30x40.step"): File {
             val target = File(workDir, name)
@@ -88,7 +106,7 @@ class CliImportWorkerIntegrationTest :
             }
         }
 
-        "moderate override chains, mapped items and shells are still imported".config(enabled = available) {
+        "moderate override chains, mapped items and shells are still imported".config(enabled = available || required) {
             val cases =
                 mapOf(
                     "ochain2.step" to ImportFixtures.overrideChain(2),
@@ -103,11 +121,12 @@ class CliImportWorkerIntegrationTest :
             }
         }
 
-        "the wall-clock bound kills the worker and reports limit_exceeded, in JSON and in text" {
+        "the wall-clock bound kills the worker, reports limit_exceeded and removes the worker's temp directory" {
             // A 1 ms bound: the worker JVM cannot even start within it, so the supervisor's timeout path runs.
             val marker = "timeout-${UUID.randomUUID()}.step"
             box(marker)
-            val bound = listOf("-Dkstep.import.timeoutMillis=1")
+            val privateTmp = Files.createTempDirectory(workDir.toPath().toAbsolutePath(), "tmp-")
+            val bound = listOf("-Dkstep.import.timeoutMillis=1", "-Djava.io.tmpdir=$privateTmp")
             val json = runner.run("import", marker, "--output", "json", jvmArgs = bound)
             json.exitCode shouldBe 1
             val doc = pureJson(json.stdout)
@@ -117,18 +136,39 @@ class CliImportWorkerIntegrationTest :
             val text = runner.run("import", marker, jvmArgs = bound)
             text.exitCode shouldBe 1
             text.stdout shouldStartWith "Error: import did not finish within 1 ms"
-            // No worker of these runs is left behind (the file name is unique to this test).
-            val leftovers =
-                ProcessHandle
-                    .allProcesses()
-                    .filter { p ->
-                        p.isAlive &&
-                            p
-                                .info()
-                                .commandLine()
-                                .orElse("")
-                                .contains(marker)
-                    }.toList()
-            leftovers.shouldBeEmpty()
+            // Both runs removed the temp directory they created before starting the worker. The kill of the worker
+            // itself is proven by PID in ImportWorkerSupervisorTest.
+            privateTmp.listDirectoryEntries().filter { it.name.startsWith("kstep-") }.shouldBeEmpty()
+        }
+
+        "a regular import with a private java.io.tmpdir works and leaves nothing behind".config(
+            enabled =
+                available || required,
+        ) {
+            box()
+            val privateTmp = Files.createTempDirectory(workDir.toPath().toAbsolutePath(), "tmp-")
+            val args = listOf("--output", "json")
+            val reference = runner.run("import", "box-20x30x40.step", *args.toTypedArray())
+            val viaPrivateTmp =
+                runner.run(
+                    "import",
+                    "box-20x30x40.step",
+                    *args.toTypedArray(),
+                    jvmArgs = listOf("-Djava.io.tmpdir=$privateTmp"),
+                )
+            viaPrivateTmp.exitCode shouldBe 0
+            viaPrivateTmp.stdout shouldBe reference.stdout
+            privateTmp.listDirectoryEntries().filter { it.name.startsWith("kstep-") }.shouldBeEmpty()
+        }
+
+        "a path naming a descriptor of the worker is a structured error, never a read of foreign descriptors".config(
+            enabled = !windows && Files.exists(Path.of("/dev/stdin")),
+        ) {
+            // /dev/fd/N, /dev/std* and /proc/self/... would name the worker's own descriptors. They are not regular
+            // files (or are symbolic links, which are refused): the import ends with a structured error.
+            val result = runner.run("import", "/dev/stdin", "--output", "json")
+            result.exitCode shouldBe 1
+            val doc = pureJson(result.stdout)
+            listOf("KSTEP-I-003", "KSTEP-I-004") shouldContain doc["code"]!!.jsonPrimitive.content
         }
     })

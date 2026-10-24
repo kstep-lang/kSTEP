@@ -55,4 +55,13 @@ OUTFILE="$TMP/smoke.step"
 FIRST="$(head -n 1 "$OUTFILE" | tr -d '\r')"
 [ "$FIRST" = "ISO-10303-21;" ] || fail "exported file does not start with ISO-10303-21; (got: $FIRST)"
 
-echo "OK: $ZIP verified (layout, no natives, --help, export smoke test)"
+# Import smoke test: the zip ships no native bridge, so importing the file just exported must end with the one-line
+# JSON error geometry_unavailable (exit 1), never with a crash or a hang (ADR-0038).
+rc=0
+IMP="$("$BIN" import "$OUTFILE" --output json 2>"$TMP/import.err")" || rc=$?
+[ "$rc" -eq 1 ] || fail "kstep-cli import (no native bridge) exited $rc, expected 1"
+[ "$(printf '%s\n' "$IMP" | wc -l | tr -d ' ')" = "1" ] || fail "import stdout is not one JSON line"
+printf '%s' "$IMP" | grep -q '"errorKind":"geometry_unavailable"' \
+  || fail "import did not report geometry_unavailable (got: $IMP)"
+
+echo "OK: $ZIP verified (layout, no natives, --help, export and import smoke tests)"

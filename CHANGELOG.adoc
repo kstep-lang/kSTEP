@@ -7,6 +7,29 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Fixed
+
+* `kstep import`: the worker now runs with its own private `java.io.tmpdir` (`kstep-import-*`, mode 0700), which the
+  supervisor removes after the worker is gone on every path (timeout, crash, output overflow, SIGTERM). Before, the
+  extracted native bridge was left in the system temp directory whenever the worker was killed.
+* `kstep import`: the stderr diagnostic line of an abnormal worker end shows the exception or error instead of the
+  first SLF4J INFO line ("OCCT JNI bridge loaded ..."); log-only output prints no misleading line.
+* `kstep import`: an incomplete worker output (a descendant holding the pipe) no longer uses exit value `-1`, which could
+  collide with a real exit value; it is a distinct outcome and still ends as `read_failed`.
+* Test suite: the worker supervisor tests no longer depend on sleeping forever or on fixed waits (stand-ins end
+  themselves, process death is polled, the PID file is written atomically); the integration test replaces its process-list search (racy, and
+  passing when the worker was never started) by a check of the run's temp directory, and honours
+  `-Pkstep.occt.require=true`.
+
+=== Changed
+
+* `kstep import`: the bound on the worker's stdout is 16 MiB instead of 64 MiB (the largest measured report at the
+  expansion limit is about 7.5 MB).
+* `scripts/release/verify-dist.sh` also imports the exported file and expects the one-line `geometry_unavailable` JSON
+  error of the native-free zip.
+* Documented (ADR-0038): `/dev/fd/N`, `/dev/stdin` and `/proc/self/...` are not resolved; the input must be a regular
+  file, and the structured error is `KSTEP-I-003` or `KSTEP-I-004`.
+
 == 0.3.0 — 2026-10-24 (pre-release)
 
 Fourth pre-release. It makes the geometry layer parametric and adds presentation data: sketches gain radius,
