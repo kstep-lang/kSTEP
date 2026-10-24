@@ -285,8 +285,9 @@ xref:status.adoc#status[Status] for `KSTEP-M-002`'s scope):
   transforms on the OCCT bridge — see ADR-0029; open: multi-body results,
   cone/sphere, arbitrary revolve axes, sweep/loft. **(Welle P, done)** Mirror and
   uniform scale as shape operations, bodies combined with `OcctKernel.compound` — see ADR-0036.
-  **(Welle Q, done)** Face and vertex selection, `nearest(point)` and shell — see ADR-0037; open: pocket or hole from
-  a face, draft, thickening (Welle Q2).
+  **(Welle Q, done)** Face and vertex selection, `nearest(point)` and shell — see ADR-0037.
+  **(Welle Q2, done on master, unreleased)** Pocket or hole from a face, draft and per-face thickening — see ADR-0040;
+  open: names for the new faces, rotated and open pockets, draft of curved faces, negative thickening.
   **(Geometrie Welle 6, pulled forward, done)**
   `kstep-constraints` now exists: a PlaneGCS 2D geometric constraint-solver
   bridge, initially solving point systems under distance constraints — see

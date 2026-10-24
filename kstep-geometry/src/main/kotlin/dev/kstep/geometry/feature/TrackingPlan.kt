@@ -96,6 +96,10 @@ internal object TrackingPlanner {
                     "a shell generates inner walls but naming them is a follow-up (ADR-0037); name the edges at " +
                         "their generator before the shell -- GeneratedEdges(featureIndex = <generator>) is " +
                         "followed through an INWARD shell"
+                } else if (source is PocketFeature || source is DraftFeature || source is ThickenFeature) {
+                    "pocket, draft and thicken create new faces and edges, but naming them is a follow-up " +
+                        "(ADR-0040); name the edge at its generator before the step -- " +
+                        "GeneratedEdges(featureIndex = <generator>) is followed through a pocket"
                 } else if (source is MirrorFeature || source is ScaleFeature) {
                     "mirror/scale copy edges but generate none; name the edge at its generator before the step -- " +
                         "GeneratedEdges(featureIndex = <generator>) is followed through the mirror/scale step"
@@ -131,7 +135,9 @@ internal object TrackingPlanner {
             is HoleFeature -> GeneratorKind.HOLE
             // Mirror/scale copy every edge one-to-one and generate none (ADR-0036). A shell generates inner walls, but
             // naming them is a follow-up (ADR-0037); until then it is not a generator.
-            is MirrorFeature, is ScaleFeature, is ShellFeature -> GeneratorKind.NONE
+            // Pocket walls and draft/thicken faces are new faces; naming them is a follow-up (ADR-0040).
+            is MirrorFeature, is ScaleFeature, is ShellFeature, is PocketFeature, is DraftFeature, is ThickenFeature ->
+                GeneratorKind.NONE
             is BoxFeature,
             is CylinderFeature,
             is TranslateFeature,
@@ -225,6 +231,8 @@ internal object TrackingPlanner {
                 "feature[$i] (${derived::class.simpleName}) cannot be tracked through" +
                     if (derived is ShellFeature) {
                         ": an OUTWARD shell keeps the original edges as the inner edges of the cavity (ADR-0037)"
+                    } else if (derived is DraftFeature || derived is ThickenFeature) {
+                        ": a draft or thicken rebuilds every edge, so no edge history exists (ADR-0040)"
                     } else {
                         ""
                     }
@@ -264,7 +272,11 @@ internal object TrackingPlanner {
             is ScaleFeature,
             is BooleanFeature,
             is HoleFeature,
+            // A pocket strictly inside a face keeps every original edge by identity (ADR-0040).
+            is PocketFeature,
             -> true
+            // Measured (ADR-0040): neither BRepOffsetAPI_DraftAngle nor BRepOffset_MakeOffset reports a usable edge history.
+            is DraftFeature, is ThickenFeature -> false
             // MakeThickSolid keeps every original edge by identity (ADR-0037). INWARD that is the outer skin; OUTWARD it
             // would silently follow the INNER cavity edges, so it is refused rather than guessed.
             is ShellFeature -> feature.direction == ShellDirection.INWARD

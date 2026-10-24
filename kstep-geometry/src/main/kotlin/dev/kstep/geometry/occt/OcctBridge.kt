@@ -563,6 +563,71 @@ object OcctBridge {
         outHistory: Array<IntArray?>,
     ): Long
 
+    // ---------------------------------------------------------------------------------------
+    // Welle Q2 (ADR-0040): pocket / hole from a face, draft, thicken
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Cuts a pocket into the PLANAR face `faceIndex` (0-based, `MapShapes(FACE)` order). The profile is a polygon
+     * `profileUv` (u0, v0, u1, v1, ...) or, when `profileUv` is empty, the circle `circleDiameter` at (`circleU`,
+     * `circleV`), in the local frame of the face (ADR-0040). `mode` 0 = blind (`depth` > 0), 1 = through.
+     *
+     * @throws IllegalArgumentException for invalid arguments, a face that is not planar, a profile that does not lie
+     *   completely inside the face, a blind depth not less than the extent of the body, or a shape beyond
+     *   [dev.kstep.geometry.OcctKernel.MAX_POCKET_INPUT_FACES].
+     * @throws IllegalStateException if `handle` is unknown, OCCT fails or the result is not a single valid solid.
+     */
+    external fun nativePocketShape(
+        handle: Long,
+        faceIndex: Int,
+        profileUv: DoubleArray,
+        circleDiameter: Double,
+        circleU: Double,
+        circleV: Double,
+        depth: Double,
+        mode: Int,
+    ): Long
+
+    /** Same as [nativePocketShape] plus the encoded edge history in `outHistory[0]`. */
+    external fun nativePocketShapeTracked(
+        handle: Long,
+        faceIndex: Int,
+        profileUv: DoubleArray,
+        circleDiameter: Double,
+        circleU: Double,
+        circleV: Double,
+        depth: Double,
+        mode: Int,
+        outHistory: Array<IntArray?>,
+    ): Long
+
+    /**
+     * Drafts the planar faces `faces` by `angleDegrees` (`BRepOffsetAPI_DraftAngle`) about the neutral plane through
+     * (`ox`, `oy`, `oz`) perpendicular to the pull direction (`nx`, `ny`, `nz`). A positive angle narrows the
+     * material along the pull direction. No edge history (measured: every edge of the draft is a new edge, ADR-0040).
+     */
+    external fun nativeDraftShape(
+        handle: Long,
+        faces: IntArray,
+        angleDegrees: Double,
+        ox: Double,
+        oy: Double,
+        oz: Double,
+        nx: Double,
+        ny: Double,
+        nz: Double,
+    ): Long
+
+    /**
+     * Pushes the planar faces `faces` outward by `distance` > 0 and extends their neighbours
+     * (`BRepOffset_MakeOffset::SetOffsetOnFace`). No edge history (ADR-0040).
+     */
+    external fun nativeThickenShape(
+        handle: Long,
+        faces: IntArray,
+        distance: Double,
+    ): Long
+
     /** Number of shapes currently registered in the native handle registry (test-only handle hygiene). */
     external fun nativeLiveShapeCount(): Int
 }

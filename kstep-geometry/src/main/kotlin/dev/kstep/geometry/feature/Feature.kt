@@ -3,6 +3,9 @@ package dev.kstep.geometry.feature
 import dev.kstep.geometry.BooleanOperation
 import dev.kstep.geometry.GeneratedRole
 import dev.kstep.geometry.GenerationSource
+import dev.kstep.geometry.NeutralPlane
+import dev.kstep.geometry.PocketDepth
+import dev.kstep.geometry.PocketProfile
 import dev.kstep.geometry.ProfilePoint
 import dev.kstep.geometry.ProfileRegion
 import dev.kstep.geometry.RevolveAxis
@@ -18,8 +21,8 @@ import dev.kstep.geometry.select.SelectionTolerance
  * Two kinds of case: root features that build a shape from scalars ([BoxFeature],
  * [ExtrudeFeature], [CylinderFeature], [RevolveFeature]) and [DerivedFeature]s that consume one or
  * more EARLIER shapes of the same sequence, referenced by index ([FilletFeature],
- * [ChamferFeature], [TranslateFeature], [MirrorFeature], [ScaleFeature], [ShellFeature], [BooleanFeature],
- * [HoleFeature]). The split exists so
+ * [ChamferFeature], [TranslateFeature], [MirrorFeature], [ScaleFeature], [ShellFeature], [PocketFeature],
+ * [DraftFeature], [ThickenFeature], [BooleanFeature], [HoleFeature]). The split exists so
  * [FeatureRebuilder] can validate every referenced index generically (ADR-0015 anticipated it once
  * a second `baseIndex`-carrying feature existed; ADR-0029 introduced it).
  *
@@ -304,6 +307,47 @@ data class ShellFeature(
     val openFaces: FaceReference,
     val thickness: Double,
     val direction: ShellDirection = ShellDirection.INWARD,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/**
+ * Replays [dev.kstep.geometry.OcctKernel.pocket] (Welle Q2, ADR-0040): cuts [profile] to [depth] into the ONE planar
+ * face [face] resolves to on the shape of feature [baseIndex]. Resolving to several faces is an error (a pocket never
+ * picks the first of a tie); [FaceIndices] must hold exactly one index. A tracked edge can be followed through a
+ * pocket; the new pocket walls have no persistent names yet.
+ */
+data class PocketFeature(
+    val baseIndex: Int,
+    val face: FaceReference,
+    val profile: PocketProfile,
+    val depth: PocketDepth,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/**
+ * Replays [dev.kstep.geometry.OcctKernel.draft] (Welle Q2, ADR-0040): drafts the planar [faces] of the shape of feature
+ * [baseIndex] by [angleDegrees] about [neutralPlane]. A positive angle narrows the material along the pull direction.
+ * Edges cannot be tracked through a draft (every edge of a draft is new).
+ */
+data class DraftFeature(
+    val baseIndex: Int,
+    val faces: FaceReference,
+    val angleDegrees: Double,
+    val neutralPlane: NeutralPlane,
+) : DerivedFeature {
+    override val baseIndices: List<Int> get() = listOf(baseIndex)
+}
+
+/**
+ * Replays [dev.kstep.geometry.OcctKernel.thicken] (Welle Q2, ADR-0040): pushes the planar [faces] of the shape of
+ * feature [baseIndex] outward by [distance] (> 0), extending the neighbours. Edges cannot be tracked through it.
+ */
+data class ThickenFeature(
+    val baseIndex: Int,
+    val faces: FaceReference,
+    val distance: Double,
 ) : DerivedFeature {
     override val baseIndices: List<Int> get() = listOf(baseIndex)
 }

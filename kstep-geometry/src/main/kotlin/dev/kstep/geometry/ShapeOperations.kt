@@ -34,3 +34,44 @@ fun shell(
     thickness: Double,
     direction: ShellDirection = ShellDirection.INWARD,
 ): OcctShape = OcctKernel.shell(shape, openFaces, thickness, direction)
+
+/**
+ * A copy of [shape] with a pocket (or hole) cut into the ONE planar face [face] selects. The [profile] is in the local
+ * coordinate system of that face (origin = its centroid, U = +X projected into the face, V = N x U) and must lie
+ * completely inside it. Several matching faces are an error, never a silent first pick. See [OcctKernel.pocket].
+ */
+fun pocket(
+    shape: OcctShape,
+    face: FaceSelector,
+    profile: PocketProfile,
+    depth: PocketDepth,
+): OcctShape = OcctKernel.pocket(shape, face, profile, depth)
+
+/** A blind [pocket] of [depth] (> 0). A hole is `pocket(shape, face, PocketProfile.Circle(d), depth)`. */
+fun pocket(
+    shape: OcctShape,
+    face: FaceSelector,
+    profile: PocketProfile,
+    depth: Double,
+): OcctShape = OcctKernel.pocket(shape, face, profile, PocketDepth.Blind(depth))
+
+/**
+ * A drafted copy of [shape]: the planar faces [faces] select lean by [angleDegrees] about [neutralPlane]; positive
+ * narrows the material along the pull direction. See [OcctKernel.draft] and ADR-0040.
+ */
+fun draft(
+    shape: OcctShape,
+    faces: FaceSelector,
+    angleDegrees: Double,
+    neutralPlane: NeutralPlane,
+): OcctShape = OcctKernel.draft(shape, faces, angleDegrees, neutralPlane)
+
+/**
+ * A copy of [shape] with the planar faces [faces] select pushed outward by [distance] (> 0); their neighbours are
+ * extended. See [OcctKernel.thicken] and ADR-0040.
+ */
+fun thicken(
+    shape: OcctShape,
+    faces: FaceSelector,
+    distance: Double,
+): OcctShape = OcctKernel.thicken(shape, faces, distance)

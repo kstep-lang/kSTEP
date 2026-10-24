@@ -91,6 +91,10 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
         // (checked by grep, and no new vector type is introduced -- dev.kstep.shape owns Vec3).
         // Welle P (ADR-0036) adds MirrorPlane and the top-level mirror(...)/scale(...) shape operations;
         // no `fun mirror` / `fun scale` exists elsewhere in src/main and Kotlin's default imports have none.
+        // Welle Q2 (ADR-0040) adds PocketProfile, PocketDepth, NeutralPlane and the script functions pocket(...), draft(...)
+        // and thicken(...). Checked by grep on the sources and the generated AP242 types: no `pocket`, `draft`,
+        // `thicken`, `PocketProfile`, `PocketDepth` or `NeutralPlane` exists elsewhere (the AP242 `Draughting*` entities
+        // are different names).
         "dev.kstep.geometry.*",
         // Welle L (ADR-0031): Edges, Faces, Direction3, Point3, EdgeKind, FaceKind, EdgeSelector,
         // SelectionTolerance, EdgeSelectionException -- geometric edge selection for fillet/chamfer.

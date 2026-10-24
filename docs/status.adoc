@@ -679,7 +679,7 @@ scan before either lands.
   and uniform scale as shape operations and `OcctKernel.compound`. Welle Q (ADR-0037) adds face and vertex selection,
   `nearest(point)` and shell. Waves M, N, N2, P and Q each have an interop script under `scripts/interop/` that
   re-checks their example exports with OCCT and FreeCAD. Not covered: tangency at arc ends, names for multi-body sketches and for the inner wall
-  of a shell, a persisted history, non-uniform scale, pocket or hole from a face, draft and thickening (Welle Q2).
+  of a shell, a persisted history, non-uniform scale (Welle Q2, ADR-0040, adds pocket or hole from a face, draft and thickening; its open points are in the ADR).
 * Welle S (ADR-0039): colours and layers in the STEP export. `shape(..., colour, layer)`, `style(...)` and
   `styleFaces(...)` annotate a part or single faces; a styled part is written through `STEPCAFControl_Writer` and the style
   entities are merged into the Part 21 file, an unstyled part keeps the old writer and stays byte-identical (three

@@ -76,6 +76,10 @@
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepOffset_MakeOffset.hxx>
+#include <Draft_ErrorStatus.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -5876,6 +5880,639 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShellShapeTracked(
         return 0;
     }
     return shellShapeImpl(env, handle, openFaces, thickness, direction, "nativeShellShapeTracked", outHistory);
+}
+
+
+// ------------------------------------------------------------------------------------------
+// Welle Q2 (ADR-0040): pocket / hole from a face, draft, thicken.
+// Measured on OCCT 7.9.3 (scripts/interop/spike_face_ops_history.cpp, numbers in ADR-0040). Hand-synchronized with the
+// constants in dev.kstep.geometry.OcctKernel. No new toolkit: BRepOffsetAPI_DraftAngle and BRepOffset_MakeOffset are in
+// TKOffset, the pocket is a prism cut (BRepPrimAPI_MakePrism / BRepAlgoAPI_Cut, TKPrim / TKBO), BRepClass_FaceClassifier is
+// in TKTopAlgo -- all linked already. BRepFeat_MakePrism (TKFeat) is deliberately NOT used.
+// Every function: argument checks before the lock; lookup, OCCT calls and checks inside ONE g_mutex critical section;
+// throwJava()/registerShape() only after it.
+// ------------------------------------------------------------------------------------------
+constexpr int kMaxPocketInputFaces = 400;      // pocket of a 200-face prism: 35 ms, of a 400-face prism 73 ms
+constexpr int kMaxPocketProfilePoints = 1024;
+constexpr int kMaxDraftInputFaces = 200;       // draft of 48 faces: 33 ms; 64 faces of a 198-gon fail geometrically
+constexpr int kMaxDraftFaces = 64;
+constexpr int kMaxThickenInputFaces = 200;     // offset-on-face of a 200-face prism: 129 ms, of a 400-face prism 407 ms
+constexpr int kMaxThickenFaces = 64;
+constexpr double kMinDraftAngleDeg = 1e-3;
+constexpr double kMaxDraftAngleDeg = 45.0;     // exclusive
+constexpr int kPocketBlind = 0;
+constexpr int kPocketThrough = 1;
+constexpr int kPocketCircleSamples = 32;
+
+struct OpFailure {
+    const char* cls = nullptr;
+    std::string msg;
+};
+
+static void failOp(OpFailure& f, const char* cls, const std::string& msg) {
+    if (f.cls == nullptr) {
+        f.cls = cls;
+        f.msg = msg;
+    }
+}
+
+struct Q2Frame {
+    gp_Pnt o;
+    gp_Dir n, u, v;
+};
+
+/** Outward normal and the face-local frame (ADR-0040: origin = centroid, U = +X (else +Y) projected, V = N x U). */
+static bool q2PlanarFrame(const TopoDS_Face& face, Q2Frame& out) {
+    BRepAdaptor_Surface surf(face);
+    if (surf.GetType() != GeomAbs_Plane) return false;
+    gp_Dir n = surf.Plane().Axis().Direction();
+    if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(face, props);
+    gp_Vec x(1, 0, 0);
+    if (std::abs(n.Dot(gp_Dir(1, 0, 0))) > 1.0 - 1e-9) x = gp_Vec(0, 1, 0);
+    const gp_Vec u = x - gp_Vec(n) * x.Dot(gp_Vec(n));
+    const gp_Dir ud(u);
+    const gp_Dir vd(gp_Vec(n).Crossed(gp_Vec(ud)));
+    out = {props.CentreOfMass(), n, ud, vd};
+    return true;
+}
+
+static gp_Pnt q2At(const Q2Frame& f, double u, double v, double w) {
+    return gp_Pnt(f.o.XYZ() + f.u.XYZ() * u + f.v.XYZ() * v + f.n.XYZ() * w);
+}
+
+/** True when the closed polygon (u0,v0,u1,v1,...) has two non-adjacent edges that touch or cross. */
+static bool q2SelfIntersects(const std::vector<double>& uv) {
+    const size_t n = uv.size() / 2;
+    auto orient = [&](size_t a, size_t b, double cx, double cy) {
+        return (uv[2 * b] - uv[2 * a]) * (cy - uv[2 * a + 1]) - (uv[2 * b + 1] - uv[2 * a + 1]) * (cx - uv[2 * a]);
+    };
+    auto onSeg = [&](size_t a, size_t b, double cx, double cy) {
+        return std::min(uv[2 * a], uv[2 * b]) <= cx && cx <= std::max(uv[2 * a], uv[2 * b]) &&
+               std::min(uv[2 * a + 1], uv[2 * b + 1]) <= cy && cy <= std::max(uv[2 * a + 1], uv[2 * b + 1]);
+    };
+    for (size_t i = 0; i < n; ++i) {
+        const size_t i2 = (i + 1) % n;
+        for (size_t j = i + 1; j < n; ++j) {
+            const size_t j2 = (j + 1) % n;
+            if (j == i + 1 || (i == 0 && j == n - 1)) continue;  // adjacent edges share a vertex
+            const double d1 = orient(i, i2, uv[2 * j], uv[2 * j + 1]);
+            const double d2 = orient(i, i2, uv[2 * j2], uv[2 * j2 + 1]);
+            const double d3 = orient(j, j2, uv[2 * i], uv[2 * i + 1]);
+            const double d4 = orient(j, j2, uv[2 * i2], uv[2 * i2 + 1]);
+            if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+            if (d1 == 0 && onSeg(i, i2, uv[2 * j], uv[2 * j + 1])) return true;
+            if (d2 == 0 && onSeg(i, i2, uv[2 * j2], uv[2 * j2 + 1])) return true;
+            if (d3 == 0 && onSeg(j, j2, uv[2 * i], uv[2 * i + 1])) return true;
+            if (d4 == 0 && onSeg(j, j2, uv[2 * i2], uv[2 * i2 + 1])) return true;
+        }
+    }
+    return false;
+}
+
+static jlong pocketShapeImpl(
+    JNIEnv* env, jlong handle, jint faceIndex, jdoubleArray profileUv, jdouble circleDiameter, jdouble circleU,
+    jdouble circleV, jdouble depth, jint mode, const char* fn, jobjectArray outHistory) {
+    const std::string name(fn);
+    if (mode != kPocketBlind && mode != kPocketThrough) {
+        throwJava(env, "java/lang/IllegalArgumentException", name + ": mode must be 0 (blind) or 1 (through), got " + std::to_string(mode));
+        return 0;
+    }
+    std::vector<double> uv;
+    const jsize uvLen = profileUv == nullptr ? 0 : env->GetArrayLength(profileUv);
+    const bool circle = uvLen == 0;
+    if (!circle) {
+        if (uvLen % 2 != 0 || uvLen / 2 < kMinProfilePoints || uvLen / 2 > kMaxPocketProfilePoints) {
+            throwJava(
+                env, "java/lang/IllegalArgumentException",
+                name + ": a polygon profile needs between " + std::to_string(kMinProfilePoints) + " and " +
+                    std::to_string(kMaxPocketProfilePoints) + " points, got " + std::to_string(uvLen / 2.0) + " (value count " +
+                    std::to_string(uvLen) + ")");
+            return 0;
+        }
+        uv.resize(static_cast<size_t>(uvLen));
+        env->GetDoubleArrayRegion(profileUv, 0, uvLen, uv.data());
+        if (env->ExceptionCheck()) return 0;
+        for (double c : uv) {
+            if (!std::isfinite(c) || std::abs(c) > kMaxAbsCoordinate) {
+                throwJava(env, "java/lang/IllegalArgumentException", name + ": profile coordinates must be finite and within +/-" + std::to_string(kMaxAbsCoordinate));
+                return 0;
+            }
+        }
+        const size_t pn = uv.size() / 2;
+        double area2 = 0.0;
+        for (size_t i = 0; i < pn; ++i) {
+            const size_t j = (i + 1) % pn;
+            if (std::hypot(uv[2 * j] - uv[2 * i], uv[2 * j + 1] - uv[2 * i + 1]) < kMinDimension) {
+                throwJava(env, "java/lang/IllegalArgumentException", name + ": profile has two coincident consecutive points");
+                return 0;
+            }
+            area2 += uv[2 * i] * uv[2 * j + 1] - uv[2 * j] * uv[2 * i + 1];
+        }
+        if (!(std::abs(area2) / 2.0 > 1e-12)) {
+            throwJava(env, "java/lang/IllegalArgumentException", name + ": profile has no area");
+            return 0;
+        }
+        if (q2SelfIntersects(uv)) {
+            throwJava(env, "java/lang/IllegalArgumentException", name + ": profile intersects itself");
+            return 0;
+        }
+    } else {
+        if (!std::isfinite(circleDiameter) || circleDiameter < kMinDimension || circleDiameter > kMaxDimension ||
+            !std::isfinite(circleU) || !std::isfinite(circleV) || std::abs(circleU) > kMaxAbsCoordinate ||
+            std::abs(circleV) > kMaxAbsCoordinate) {
+            throwJava(env, "java/lang/IllegalArgumentException", name + ": circle diameter must be finite within [" + std::to_string(kMinDimension) + ", " + std::to_string(kMaxDimension) + "] and its centre finite");
+            return 0;
+        }
+    }
+    if (mode == kPocketBlind && (!std::isfinite(depth) || depth < kMinDimension || depth > kMaxDimension)) {
+        throwJava(env, "java/lang/IllegalArgumentException", name + ": depth must be finite within [" + std::to_string(kMinDimension) + ", " + std::to_string(kMaxDimension) + "], got " + std::to_string(depth));
+        return 0;
+    }
+    if (faceIndex < 0) {
+        throwJava(env, "java/lang/IllegalArgumentException", name + ": face index must not be negative, got " + std::to_string(faceIndex));
+        return 0;
+    }
+    try {
+        OpFailure fail;
+        bool unknownHandle = false;
+        std::vector<jint> history;
+        TopoDS_Shape result;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape == nullptr) {
+                unknownHandle = true;
+            } else {
+                const int solids = countSolids(*shape);
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(*shape, TopAbs_FACE, faces);
+                Q2Frame frame;
+                if (solids != 1 || countShells(*shape) != 1) {
+                    failOp(fail, "java/lang/IllegalArgumentException", name + ": needs exactly one solid with one shell");
+                } else if (faces.Extent() > kMaxPocketInputFaces) {
+                    failOp(fail, "java/lang/IllegalArgumentException", name + ": shape has " + std::to_string(faces.Extent()) + " faces, more than " + std::to_string(kMaxPocketInputFaces));
+                } else if (faceIndex >= faces.Extent()) {
+                    failOp(fail, "java/lang/IllegalArgumentException", name + ": face index " + std::to_string(faceIndex) + " is out of range 0.." + std::to_string(faces.Extent() - 1));
+                } else if (!q2PlanarFrame(TopoDS::Face(faces(faceIndex + 1)), frame)) {
+                    failOp(fail, "java/lang/IllegalArgumentException", name + ": face " + std::to_string(faceIndex) + " must be planar");
+                }
+                Bnd_Box box;
+                double extent = 0.0, margin = 0.0;
+                if (fail.cls == nullptr) {
+                    BRepBndLib::AddOptimal(*shape, box, Standard_False, Standard_False);
+                    if (box.IsVoid()) {
+                        failOp(fail, "java/lang/IllegalArgumentException", name + ": shape has no bounding box");
+                    } else {
+                        double x0, y0, z0, x1, y1, z1;
+                        box.Get(x0, y0, z0, x1, y1, z1);
+                        double lo = 1e300, hi = -1e300;
+                        for (double cx : {x0, x1}) for (double cy : {y0, y1}) for (double cz : {z0, z1}) {
+                            const double pr = frame.n.X() * cx + frame.n.Y() * cy + frame.n.Z() * cz;
+                            lo = std::min(lo, pr);
+                            hi = std::max(hi, pr);
+                        }
+                        extent = hi - lo;
+                        margin = std::max(1e-3, 1e-3 * std::sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0) + (z1 - z0) * (z1 - z0)));
+                        if (mode == kPocketBlind && !(depth < extent)) {
+                            failOp(fail, "java/lang/IllegalArgumentException", name + ": depth " + std::to_string(depth) + " is not less than the extent of the body along the face normal (" + std::to_string(extent) + "); use through = true");
+                        } else if (extent + 2.0 * margin > kMaxDimension) {
+                            failOp(fail, "java/lang/IllegalArgumentException", name + ": body is too large for a through pocket");
+                        }
+                    }
+                }
+                if (fail.cls == nullptr) {
+                    const TopoDS_Face target = TopoDS::Face(faces(faceIndex + 1));
+                    auto buildProfileFace = [&](double w, TopoDS_Face& out) -> bool {
+                        if (circle) {
+                            gp_Circ c(gp_Ax2(q2At(frame, circleU, circleV, w), frame.n), circleDiameter / 2.0);
+                            BRepBuilderAPI_MakeEdge e(c);
+                            if (!e.IsDone()) return false;
+                            BRepBuilderAPI_MakeWire wire(e.Edge());
+                            if (!wire.IsDone()) return false;
+                            BRepBuilderAPI_MakeFace f(wire.Wire(), Standard_True);
+                            if (!f.IsDone()) return false;
+                            out = f.Face();
+                            return true;
+                        }
+                        BRepBuilderAPI_MakePolygon poly;
+                        for (size_t i = 0; i < uv.size() / 2; ++i) poly.Add(q2At(frame, uv[2 * i], uv[2 * i + 1], w));
+                        poly.Close();
+                        if (!poly.IsDone()) return false;
+                        BRepBuilderAPI_MakeFace f(poly.Wire(), Standard_True);
+                        if (!f.IsDone()) return false;
+                        out = f.Face();
+                        return true;
+                    };
+                    TopoDS_Face probe;
+                    if (!buildProfileFace(0.0, probe) || !BRepCheck_Analyzer(probe).IsValid()) {
+                        failOp(fail, "java/lang/IllegalArgumentException", name + ": the profile does not form a valid face");
+                    } else {
+                        // Contour must lie strictly inside the face: ON (touching the rim) and OUT are errors (ADR-0040, P3).
+                        std::vector<gp_Pnt> samples;
+                        if (circle) {
+                            samples.push_back(q2At(frame, circleU, circleV, 0.0));
+                            for (int k = 0; k < kPocketCircleSamples; ++k) {
+                                const double a = 2.0 * M_PI * k / kPocketCircleSamples;
+                                samples.push_back(q2At(frame, circleU + circleDiameter / 2.0 * std::cos(a), circleV + circleDiameter / 2.0 * std::sin(a), 0.0));
+                            }
+                        } else {
+                            const size_t pn = uv.size() / 2;
+                            for (size_t i = 0; i < pn; ++i) {
+                                const size_t j = (i + 1) % pn;
+                                samples.push_back(q2At(frame, uv[2 * i], uv[2 * i + 1], 0.0));
+                                samples.push_back(q2At(frame, (uv[2 * i] + uv[2 * j]) / 2.0, (uv[2 * i + 1] + uv[2 * j + 1]) / 2.0, 0.0));
+                            }
+                        }
+                        for (const gp_Pnt& sp : samples) {
+                            BRepClass_FaceClassifier cls(target, sp, 1e-7);
+                            if (cls.State() != TopAbs_IN) {
+                                failOp(fail, "java/lang/IllegalArgumentException", name + ": the profile must lie completely inside face " + std::to_string(faceIndex) + " (a point of the contour is on or beyond its boundary)");
+                                break;
+                            }
+                        }
+                        GProp_GProps profProps;
+                        BRepGProp::SurfaceProperties(probe, profProps);
+                        const double profileArea = profProps.Mass();
+                        if (fail.cls == nullptr) {
+                            BRepAlgoAPI_Common common(probe, target);
+                            GProp_GProps cp;
+                            if (common.IsDone()) BRepGProp::SurfaceProperties(common.Shape(), cp);
+                            if (!common.IsDone() || std::abs(cp.Mass() - profileArea) > 1e-6 * profileArea + 1e-12) {
+                                failOp(fail, "java/lang/IllegalArgumentException", name + ": the profile must lie completely inside face " + std::to_string(faceIndex));
+                            }
+                        }
+                        TopoDS_Face toolFace;
+                        if (fail.cls == nullptr && !buildProfileFace(margin, toolFace)) {
+                            failOp(fail, "java/lang/IllegalStateException", name + ": could not build the tool profile");
+                        }
+                        if (fail.cls == nullptr) {
+                            const double length = mode == kPocketBlind ? depth + margin : extent + 2.0 * margin;
+                            const double effDepth = mode == kPocketBlind ? depth : extent;
+                            GProp_GProps before;
+                            BRepGProp::VolumeProperties(*shape, before);
+                            const double v0 = before.Mass();
+                            BRepPrimAPI_MakePrism prism(toolFace, gp_Vec(frame.n) * -length);
+                            prism.Build();
+                            if (!prism.IsDone()) {
+                                failOp(fail, "java/lang/IllegalStateException", name + ": could not build the pocket tool");
+                            } else {
+                                BRepAlgoAPI_Cut cut(*shape, prism.Shape());
+                                if (!cut.IsDone()) {
+                                    failOp(fail, "java/lang/IllegalStateException", name + ": OCCT could not cut the pocket (IsDone() is false)");
+                                } else {
+                                    TopoDS_Shape raw = cut.Shape();
+                                    const int rs = countSolids(raw);
+                                    if (rs == 0) {
+                                        failOp(fail, "java/lang/IllegalStateException", name + ": the pocket left no solid");
+                                    } else if (rs > 1) {
+                                        failOp(fail, "java/lang/IllegalStateException", name + ": the pocket splits the body into " + std::to_string(rs) + " solids");
+                                    } else if (countShells(raw) != 1) {
+                                        failOp(fail, "java/lang/IllegalStateException", name + ": the pocket creates an internal void");
+                                    } else {
+                                        result = unwrapSingleSolid(raw);
+                                        const SolidCheckResult chk = runSolidChecks(result);
+                                        GProp_GProps after;
+                                        BRepGProp::VolumeProperties(result, after);
+                                        const double removed = v0 - after.Mass();
+                                        if (!chk.valid || !chk.positiveVolume) {
+                                            failOp(fail, "java/lang/IllegalStateException", name + ": the result failed OCCT's own validity check");
+                                        } else if (mode == kPocketBlind && removed < profileArea * depth * (1.0 - 1e-6) - 1e-6) {
+                                            // Inside solid material the removed volume is exactly area * depth; less means the
+                                            // prism left the body (the material under the profile is thinner than the depth).
+                                            failOp(fail, "java/lang/IllegalArgumentException", name + ": blind depth " + std::to_string(depth) + " reaches through the material under the profile; use through = true");
+                                            result = TopoDS_Shape();
+                                        } else if (!(removed > 1e-9 * v0) || removed > profileArea * effDepth * (1.0 + 1e-6) + 1e-6) {
+                                            failOp(fail, "java/lang/IllegalStateException", name + ": implausible removed volume " + std::to_string(removed));
+                                        } else if (outHistory != nullptr && !encodeEdgeHistory(cut, {shape}, result, history)) {
+                                            failOp(fail, "java/lang/IllegalArgumentException", name + ": edge history exceeds the size limit");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }  // g_mutex released here
+        if (unknownHandle) {
+            throwUnknownHandle(env, handle);
+            return 0;
+        }
+        if (fail.cls != nullptr) {
+            throwJava(env, fail.cls, fail.msg);
+            return 0;
+        }
+        if (outHistory != nullptr && !publishHistory(env, outHistory, history)) return 0;
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": OCCT error: " + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": native error: " + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": unknown native error");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativePocketShape(
+    JNIEnv* env, jobject /*self*/, jlong handle, jint faceIndex, jdoubleArray profileUv, jdouble circleDiameter,
+    jdouble circleU, jdouble circleV, jdouble depth, jint mode) {
+    return pocketShapeImpl(env, handle, faceIndex, profileUv, circleDiameter, circleU, circleV, depth, mode, "nativePocketShape", nullptr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativePocketShapeTracked(
+    JNIEnv* env, jobject /*self*/, jlong handle, jint faceIndex, jdoubleArray profileUv, jdouble circleDiameter,
+    jdouble circleU, jdouble circleV, jdouble depth, jint mode, jobjectArray outHistory) {
+    if (!checkHistoryHolder(env, outHistory, "nativePocketShapeTracked")) return 0;
+    return pocketShapeImpl(env, handle, faceIndex, profileUv, circleDiameter, circleU, circleV, depth, mode, "nativePocketShapeTracked", outHistory);
+}
+
+/** Reads and validates a list of 0-based face indices; returns false with a pending Java exception. */
+static bool q2ReadFaces(JNIEnv* env, jintArray faces, int maxFaces, const std::string& name, std::vector<jint>& out) {
+    if (faces == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", name + ": faces must not be null");
+        return false;
+    }
+    const jsize n = env->GetArrayLength(faces);
+    if (n < 1 || n > maxFaces) {
+        throwJava(env, "java/lang/IllegalArgumentException", name + ": faces must have between 1 and " + std::to_string(maxFaces) + " entries, got " + std::to_string(n));
+        return false;
+    }
+    out.resize(static_cast<size_t>(n));
+    env->GetIntArrayRegion(faces, 0, n, out.data());
+    return !env->ExceptionCheck();
+}
+
+static const char* q2DraftStatusName(Draft_ErrorStatus s) {
+    switch (s) {
+        case Draft_NoError: return "NoError";
+        case Draft_FaceRecomputation: return "FaceRecomputation";
+        case Draft_EdgeRecomputation: return "EdgeRecomputation";
+        case Draft_VertexRecomputation: return "VertexRecomputation";
+    }
+    return "Unknown";
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeDraftShape(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray faces, jdouble angleDeg, jdouble ox, jdouble oy, jdouble oz,
+    jdouble nx, jdouble ny, jdouble nz) {
+    const std::string name("nativeDraftShape");
+    std::vector<jint> idx;
+    if (!q2ReadFaces(env, faces, kMaxDraftFaces, name, idx)) return 0;
+    if (!std::isfinite(angleDeg) || std::abs(angleDeg) < kMinDraftAngleDeg || !(std::abs(angleDeg) < kMaxDraftAngleDeg)) {
+        throwJava(env, "java/lang/IllegalArgumentException", name + ": angle must be finite with " + std::to_string(kMinDraftAngleDeg) + " <= |angle| < " + std::to_string(kMaxDraftAngleDeg) + " degrees, got " + std::to_string(angleDeg));
+        return 0;
+    }
+    for (double c : {ox, oy, oz}) {
+        if (!std::isfinite(c) || std::abs(c) > kMaxAbsCoordinate) {
+            throwJava(env, "java/lang/IllegalArgumentException", name + ": neutral plane origin must be finite within +/-" + std::to_string(kMaxAbsCoordinate));
+            return 0;
+        }
+    }
+    const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (!std::isfinite(len) || len < kMinDirectionLength) {
+        throwJava(env, "java/lang/IllegalArgumentException", name + ": pull direction must be finite and not zero");
+        return 0;
+    }
+    {
+        std::vector<jint> sorted(idx);
+        std::sort(sorted.begin(), sorted.end());
+        for (size_t i = 0; i < sorted.size(); ++i) {
+            if (sorted[i] < 0 || (i > 0 && sorted[i] == sorted[i - 1])) {
+                throwJava(env, "java/lang/IllegalArgumentException", name + ": face indices must be non-negative and unique");
+                return 0;
+            }
+        }
+    }
+    try {
+        OpFailure fail;
+        bool unknownHandle = false;
+        TopoDS_Shape result;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape == nullptr) {
+                unknownHandle = true;
+            } else {
+                TopTools_IndexedMapOfShape allFaces;
+                TopExp::MapShapes(*shape, TopAbs_FACE, allFaces);
+                if (countSolids(*shape) != 1 || countShells(*shape) != 1) {
+                    failOp(fail, "java/lang/IllegalArgumentException", name + ": needs exactly one solid with one shell");
+                } else if (allFaces.Extent() > kMaxDraftInputFaces) {
+                    failOp(fail, "java/lang/IllegalArgumentException", name + ": shape has " + std::to_string(allFaces.Extent()) + " faces, more than " + std::to_string(kMaxDraftInputFaces));
+                }
+                for (size_t i = 0; i < idx.size() && fail.cls == nullptr; ++i) {
+                    if (idx[i] >= allFaces.Extent()) {
+                        failOp(fail, "java/lang/IllegalArgumentException", name + ": face index " + std::to_string(idx[i]) + " is out of range 0.." + std::to_string(allFaces.Extent() - 1));
+                    } else if (BRepAdaptor_Surface(TopoDS::Face(allFaces(idx[i] + 1))).GetType() != GeomAbs_Plane) {
+                        failOp(fail, "java/lang/IllegalArgumentException", name + ": face " + std::to_string(idx[i]) + " must be planar (draft supports planar faces only, ADR-0040)");
+                    }
+                }
+                if (fail.cls == nullptr) {
+                    const gp_Dir pull(nx / len, ny / len, nz / len);
+                    const gp_Pnt origin(ox, oy, oz);
+                    const gp_Pln neutral(origin, pull);
+                    const double radians = angleDeg * M_PI / 180.0;
+                    GProp_GProps before;
+                    BRepGProp::VolumeProperties(*shape, before);
+                    const double v0 = before.Mass();
+                    // Side of the neutral plane the drafted faces lie on, along the pull direction.
+                    Bnd_Box fb;
+                    for (jint i : idx) BRepBndLib::AddOptimal(allFaces(i + 1), fb, Standard_False, Standard_False);
+                    double lo = 1e300, hi = -1e300, scale = 1.0;
+                    if (!fb.IsVoid()) {
+                        double x0, y0, z0, x1, y1, z1;
+                        fb.Get(x0, y0, z0, x1, y1, z1);
+                        scale = std::max({x1 - x0, y1 - y0, z1 - z0, 1.0});
+                        for (double cx : {x0, x1}) for (double cy : {y0, y1}) for (double cz : {z0, z1}) {
+                            const double pr = pull.X() * (cx - ox) + pull.Y() * (cy - oy) + pull.Z() * (cz - oz);
+                            lo = std::min(lo, pr);
+                            hi = std::max(hi, pr);
+                        }
+                    }
+                    BRepOffsetAPI_DraftAngle draft(*shape);
+                    for (jint i : idx) {
+                        draft.Add(TopoDS::Face(allFaces(i + 1)), pull, radians, neutral);
+                        if (!draft.AddDone()) {
+                            int bad = -1;
+                            const TopoDS_Shape problem = draft.ProblematicShape();
+                            if (!problem.IsNull()) bad = allFaces.FindIndex(problem) - 1;
+                            failOp(fail, "java/lang/IllegalStateException", name + ": OCCT cannot draft face " + std::to_string(i) + " (Draft_ErrorStatus " + q2DraftStatusName(draft.Status()) + (bad >= 0 ? ", problematic face " + std::to_string(bad) : std::string()) + "); a face parallel to the neutral plane or an adjacent face that cannot be adapted");
+                            break;
+                        }
+                    }
+                    if (fail.cls == nullptr) {
+                        draft.Build();
+                        if (!draft.IsDone()) {
+                            failOp(fail, "java/lang/IllegalStateException", name + ": OCCT could not build the draft (IsDone() is false; the angle is probably too large for the geometry)");
+                        } else {
+                            const TopoDS_Shape raw = draft.Shape();
+                            if (countSolids(raw) != 1 || countShells(raw) != 1) {
+                                failOp(fail, "java/lang/IllegalStateException", name + ": OCCT did not return exactly one solid with one shell");
+                            } else {
+                                result = unwrapSingleSolid(raw);
+                                const SolidCheckResult chk = runSolidChecks(result);
+                                GProp_GProps after;
+                                BRepGProp::VolumeProperties(result, after);
+                                const double v1 = after.Mass();
+                                Bnd_Box rb;
+                                BRepBndLib::AddOptimal(result, rb, Standard_False, Standard_False);
+                                bool inBounds = !rb.IsVoid();
+                                if (inBounds) {
+                                    double bx0, by0, bz0, bx1, by1, bz1;
+                                    rb.Get(bx0, by0, bz0, bx1, by1, bz1);
+                                    for (double c : {bx0, by0, bz0, bx1, by1, bz1}) inBounds = inBounds && std::isfinite(c) && std::abs(c) <= kMaxAbsCoordinate;
+                                }
+                                if (!chk.valid || !chk.positiveVolume) {
+                                    failOp(fail, "java/lang/IllegalStateException", name + ": the draft failed OCCT's own validity check");
+                                } else if (!inBounds) {
+                                    failOp(fail, "java/lang/IllegalArgumentException", name + ": result must stay within +/-" + std::to_string(kMaxAbsCoordinate));
+                                } else if (!(std::abs(v1 - v0) > 1e-12 * v0)) {
+                                    failOp(fail, "java/lang/IllegalStateException", name + ": the draft did not change the body");
+                                } else {
+                                    // Sign: a positive angle narrows the material along the pull direction (ADR-0040, D1).
+                                    const double tol = 1e-9 * scale;
+                                    int expectShrink = 0;  // 1 shrink, -1 grow, 0 mixed
+                                    if (lo >= -tol) expectShrink = angleDeg > 0 ? 1 : -1;
+                                    else if (hi <= tol) expectShrink = angleDeg > 0 ? -1 : 1;
+                                    if ((expectShrink == 1 && !(v1 < v0)) || (expectShrink == -1 && !(v1 > v0))) {
+                                        failOp(fail, "java/lang/IllegalStateException", name + ": OCCT drafted the wrong way (volume change contradicts the angle sign)");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (unknownHandle) {
+            throwUnknownHandle(env, handle);
+            return 0;
+        }
+        if (fail.cls != nullptr) {
+            throwJava(env, fail.cls, fail.msg);
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": OCCT error: " + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": native error: " + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": unknown native error");
+    }
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeThickenShape(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray faces, jdouble distance) {
+    const std::string name("nativeThickenShape");
+    std::vector<jint> idx;
+    if (!q2ReadFaces(env, faces, kMaxThickenFaces, name, idx)) return 0;
+    if (!std::isfinite(distance) || distance < kMinDimension || distance > kMaxDimension) {
+        throwJava(env, "java/lang/IllegalArgumentException", name + ": distance must be finite within [" + std::to_string(kMinDimension) + ", " + std::to_string(kMaxDimension) + "], got " + std::to_string(distance));
+        return 0;
+    }
+    {
+        std::vector<jint> sorted(idx);
+        std::sort(sorted.begin(), sorted.end());
+        for (size_t i = 0; i < sorted.size(); ++i) {
+            if (sorted[i] < 0 || (i > 0 && sorted[i] == sorted[i - 1])) {
+                throwJava(env, "java/lang/IllegalArgumentException", name + ": face indices must be non-negative and unique");
+                return 0;
+            }
+        }
+    }
+    try {
+        OpFailure fail;
+        bool unknownHandle = false;
+        TopoDS_Shape result;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape == nullptr) {
+                unknownHandle = true;
+            } else {
+                TopTools_IndexedMapOfShape allFaces;
+                TopExp::MapShapes(*shape, TopAbs_FACE, allFaces);
+                if (countSolids(*shape) != 1 || countShells(*shape) != 1) {
+                    failOp(fail, "java/lang/IllegalArgumentException", name + ": needs exactly one solid with one shell");
+                } else if (allFaces.Extent() > kMaxThickenInputFaces) {
+                    failOp(fail, "java/lang/IllegalArgumentException", name + ": shape has " + std::to_string(allFaces.Extent()) + " faces, more than " + std::to_string(kMaxThickenInputFaces));
+                }
+                for (size_t i = 0; i < idx.size() && fail.cls == nullptr; ++i) {
+                    if (idx[i] >= allFaces.Extent()) {
+                        failOp(fail, "java/lang/IllegalArgumentException", name + ": face index " + std::to_string(idx[i]) + " is out of range 0.." + std::to_string(allFaces.Extent() - 1));
+                    } else if (BRepAdaptor_Surface(TopoDS::Face(allFaces(idx[i] + 1))).GetType() != GeomAbs_Plane) {
+                        failOp(fail, "java/lang/IllegalArgumentException", name + ": face " + std::to_string(idx[i]) + " must be planar (thicken supports planar faces only, ADR-0040)");
+                    }
+                }
+                if (fail.cls == nullptr) {
+                    GProp_GProps before, total;
+                    BRepGProp::VolumeProperties(*shape, before);
+                    BRepGProp::SurfaceProperties(*shape, total);
+                    const double v0 = before.Mass();
+                    BRepOffset_MakeOffset offset;
+                    offset.Initialize(
+                        *shape, 0.0, Precision::Confusion(), BRepOffset_Skin, Standard_True, Standard_False,
+                        GeomAbs_Intersection, Standard_False);
+                    for (jint i : idx) offset.SetOffsetOnFace(TopoDS::Face(allFaces(i + 1)), distance);
+                    offset.MakeOffsetShape();
+                    if (!offset.IsDone()) {
+                        failOp(fail, "java/lang/IllegalStateException", name + ": OCCT could not offset the faces (IsDone() is false)");
+                    } else {
+                        const TopoDS_Shape raw = offset.Shape();
+                        if (countSolids(raw) != 1 || countShells(raw) != 1) {
+                            failOp(fail, "java/lang/IllegalStateException", name + ": OCCT did not return exactly one solid with one shell");
+                        } else {
+                            result = unwrapSingleSolid(raw);
+                            const SolidCheckResult chk = runSolidChecks(result);
+                            GProp_GProps after;
+                            BRepGProp::VolumeProperties(result, after);
+                            const double grown = after.Mass() - v0;
+                            Bnd_Box rb;
+                            BRepBndLib::AddOptimal(result, rb, Standard_False, Standard_False);
+                            bool inBounds = !rb.IsVoid();
+                            if (inBounds) {
+                                double x0, y0, z0, x1, y1, z1;
+                                rb.Get(x0, y0, z0, x1, y1, z1);
+                                for (double c : {x0, y0, z0, x1, y1, z1}) inBounds = inBounds && std::isfinite(c) && std::abs(c) <= kMaxAbsCoordinate;
+                            }
+                            if (!chk.valid || !chk.positiveVolume) {
+                                failOp(fail, "java/lang/IllegalStateException", name + ": the result failed OCCT's own validity check");
+                            } else if (!inBounds) {
+                                failOp(fail, "java/lang/IllegalArgumentException", name + ": result must stay within +/-" + std::to_string(kMaxAbsCoordinate));
+                            } else if (!(grown > 1e-12 * v0) || grown > total.Mass() * distance * (1.0 + 1e-3) + 1e-6) {
+                                failOp(fail, "java/lang/IllegalStateException", name + ": implausible volume change " + std::to_string(grown) + " (outward offset expected, at most area * distance)");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (unknownHandle) {
+            throwUnknownHandle(env, handle);
+            return 0;
+        }
+        if (fail.cls != nullptr) {
+            throwJava(env, fail.cls, fail.msg);
+            return 0;
+        }
+        return registerShape(std::move(result));
+    } catch (const Standard_Failure& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": OCCT error: " + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": native error: " + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", name + ": unknown native error");
+    }
+    return 0;
 }
 
 

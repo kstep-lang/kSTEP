@@ -7,6 +7,28 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Added
+
+* Welle Q2 (ADR-0040): faces as the input of three more operations. `pocket(shape, faces, profile, depth)` cuts a
+  rectangle, circle or polygon (`PocketProfile`) into the one planar face a selector names, blind or through
+  (`PocketDepth`); a hole is a circular pocket. A blind depth that would reach through the material under the profile
+  (stepped body, existing cavity) is refused. The profile lives in a local coordinate system of the face (origin =
+  centroid, `U` = +X projected into the face, `V` = N x U) and must lie strictly inside the face; an ambiguous
+  selection is `KSTEP-S-011`, not a silent first pick. `draft(shape, faces, angleDegrees, NeutralPlane(origin,
+  pullDirection))` tapers planar faces (`BRepOffsetAPI_DraftAngle`; a positive angle narrows the material along the pull
+  direction). `thicken(shape, faces, distance)` pushes planar faces outward and extends their neighbours
+  (`BRepOffset_MakeOffset`). Matching `OcctKernel` functions and the feature types `PocketFeature`, `DraftFeature` and
+  `ThickenFeature`, which rebuild with undo/redo. A tracked edge is followed through a pocket; draft and thicken report
+  no usable edge history, so tracking through them is refused with the reason.
+* `scripts/interop/verify-face-ops-2.sh` (with `--spike` and `--baseline`) re-checks the six example exports with OCCT and
+  FreeCAD and compares the pre-Q2 examples byte for byte with the previous commit.
+
+=== Notes
+
+* Not built (ADR-0040, with the measurement behind each): names for pocket walls and drafted or offset faces, a rotated
+  pocket rectangle, pockets that reach the rim, pockets on curved faces, draft of non-planar faces, negative thickening
+  and thickening a sheet face into a solid. No new native toolkit: `BRepFeat_MakePrism` (`TKFeat`) is not used.
+
 === Fixed
 
 * `kstep import`: the worker now runs with its own private `java.io.tmpdir` (`kstep-import-*`, mode 0700), which the

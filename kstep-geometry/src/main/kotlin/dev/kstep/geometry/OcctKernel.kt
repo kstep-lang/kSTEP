@@ -16,6 +16,7 @@ import dev.kstep.geometry.select.SelectorTree
 import dev.kstep.geometry.select.VertexSelection
 import dev.kstep.geometry.select.VertexSelector
 import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
  * Public entry point to the OCCT (Open CASCADE Technology) geometry kernel. Every other public
@@ -190,6 +191,33 @@ object OcctKernel {
 
     /** Welle Q: upper bound on the faces one [shell] opens; mirrors `kMaxShellOpenFaces`. */
     const val MAX_SHELL_OPEN_FACES: Int = 64
+
+    /** Welle Q2 (ADR-0040): upper bound on the faces of a shape [pocket] accepts; mirrors `kMaxPocketInputFaces`.
+     *  Measured: a pocket in a 200-face prism takes 35 ms and in a 400-face prism 73 ms (OCCT 7.9.3). */
+    const val MAX_POCKET_INPUT_FACES: Int = 400
+
+    /** Welle Q2: upper bound on the points of a [PocketProfile.Polygon]; mirrors `kMaxPocketProfilePoints`. */
+    const val MAX_POCKET_PROFILE_POINTS: Int = 1024
+
+    /** Welle Q2: upper bound on the faces of a shape [draft] accepts; mirrors `kMaxDraftInputFaces`. Measured: 48
+     *  drafted faces take 33 ms (OCCT 7.9.3). */
+    const val MAX_DRAFT_INPUT_FACES: Int = 200
+
+    /** Welle Q2: upper bound on the faces one [draft] call drafts; mirrors `kMaxDraftFaces`. */
+    const val MAX_DRAFT_FACES: Int = 64
+
+    /** Welle Q2: smallest accepted absolute draft angle in degrees; mirrors `kMinDraftAngleDeg`. */
+    const val MIN_DRAFT_ANGLE_DEGREES: Double = 1e-3
+
+    /** Welle Q2: the draft angle must be strictly less than this in absolute value (degrees); mirrors `kMaxDraftAngleDeg`. */
+    const val MAX_DRAFT_ANGLE_DEGREES: Double = 45.0
+
+    /** Welle Q2: upper bound on the faces of a shape [thicken] accepts; mirrors `kMaxThickenInputFaces`. Measured: the
+     *  offset of one face of a 200-face prism takes 129 ms and of a 400-face prism 407 ms (OCCT 7.9.3). */
+    const val MAX_THICKEN_INPUT_FACES: Int = 200
+
+    /** Welle Q2: upper bound on the faces one [thicken] call offsets; mirrors `kMaxThickenFaces`. */
+    const val MAX_THICKEN_FACES: Int = 64
 
     /** Welle P (ADR-0036): smallest accepted [scale] factor; mirrors `kMinScaleFactor` in `kstep_occt_bridge.cpp`. */
     const val MIN_SCALE_FACTOR: Double = 1e-6
@@ -1164,6 +1192,376 @@ object OcctKernel {
             require(thickness < smallest / 2.0) {
                 "shell thickness $thickness must be less than half the smallest extent (${smallest / 2.0})"
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Welle Q2 (ADR-0040): pocket / hole from a face, draft, thicken.
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Cuts a pocket (or, with a [PocketProfile.Circle], a hole) into the planar face [faceIndex] of [shape]. The
+     * [profile] is given in the local coordinate system of the face (see [PocketProfile]); it must lie completely
+     * inside the face -- touching the rim or crossing it is an error, never silently clipped. A blind [depth] must be
+     * less than the extent of the body along the face normal; use [PocketDepth.Through] to cut through. [shape] is
+     * neither modified nor consumed.
+     *
+     * @throws IllegalArgumentException for an invalid profile or depth, a face that is not planar or out of range,
+     *   a profile that leaves the face, a blind depth that is not less than the extent of the body, or a shape with
+     *   more than [MAX_POCKET_INPUT_FACES] faces or that is not exactly one solid.
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT cannot cut the pocket or the result is not one valid solid.
+     */
+    fun pocket(
+        shape: OcctShape,
+        faceIndex: Int,
+        profile: PocketProfile,
+        depth: PocketDepth,
+    ): OcctShape {
+        requirePocketArguments(faceIndex, profile, depth)
+        requireAvailable()
+        requirePocketOperand(shape, faceIndex)
+        val args = PocketNativeArgs.of(profile, depth)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativePocketShape(
+                        h,
+                        faceIndex,
+                        args.uv,
+                        args.diameter,
+                        args.circleU,
+                        args.circleV,
+                        args.depth,
+                        args.mode,
+                    )
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to cut the pocket ($profile, $depth)", e)
+                }
+            }
+        return OcctShape(handle)
+    }
+
+    /**
+     * [pocket] into the one planar face [face] resolves to. Never guesses: a selection that matches nothing, or more
+     * than one face (a tie), throws [dev.kstep.geometry.select.FaceSelectionException] listing the candidates.
+     */
+    fun pocket(
+        shape: OcctShape,
+        face: FaceSelector,
+        profile: PocketProfile,
+        depth: PocketDepth,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): OcctShape = pocket(shape, selectFaces(shape, face, 1, tolerance).single(), profile, depth)
+
+    /**
+     * [pocket] that also returns the [EdgeHistory]. Measured (ADR-0040): the cut keeps every edge of the original
+     * solid by identity (a profile strictly inside the face touches none of them), so a tracked edge survives.
+     */
+    fun pocketWithHistory(
+        shape: OcctShape,
+        faceIndex: Int,
+        profile: PocketProfile,
+        depth: PocketDepth,
+    ): TrackedShape {
+        requirePocketArguments(faceIndex, profile, depth)
+        requireAvailable()
+        requirePocketOperand(shape, faceIndex)
+        val args = PocketNativeArgs.of(profile, depth)
+        val holder = arrayOfNulls<IntArray>(1)
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativePocketShapeTracked(
+                        h,
+                        faceIndex,
+                        args.uv,
+                        args.diameter,
+                        args.circleU,
+                        args.circleV,
+                        args.depth,
+                        args.mode,
+                        holder,
+                    )
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to cut the pocket ($profile, $depth)", e)
+                }
+            }
+        return trackedResult(handle, holder, listOf(shape))
+    }
+
+    /** The profile as the flat arrays the bridge takes: either a polygon `uv` or a circle. */
+    private class PocketNativeArgs(
+        val uv: DoubleArray,
+        val diameter: Double,
+        val circleU: Double,
+        val circleV: Double,
+        val depth: Double,
+        val mode: Int,
+    ) {
+        companion object {
+            fun of(
+                profile: PocketProfile,
+                depth: PocketDepth,
+            ): PocketNativeArgs {
+                val blind = (depth as? PocketDepth.Blind)?.depth ?: 0.0
+                val mode = if (depth is PocketDepth.Through) 1 else 0
+                return when (profile) {
+                    is PocketProfile.Circle ->
+                        PocketNativeArgs(DoubleArray(0), profile.diameter, profile.u, profile.v, blind, mode)
+                    is PocketProfile.Rectangle -> {
+                        val x0 = profile.u - profile.width / 2.0
+                        val x1 = profile.u + profile.width / 2.0
+                        val y0 = profile.v - profile.length / 2.0
+                        val y1 = profile.v + profile.length / 2.0
+                        PocketNativeArgs(doubleArrayOf(x0, y0, x1, y0, x1, y1, x0, y1), 0.0, 0.0, 0.0, blind, mode)
+                    }
+                    is PocketProfile.Polygon -> {
+                        val uv = DoubleArray(profile.points.size * 2)
+                        profile.points.forEachIndexed { i, p ->
+                            uv[2 * i] = p.x
+                            uv[2 * i + 1] = p.y
+                        }
+                        PocketNativeArgs(uv, 0.0, 0.0, 0.0, blind, mode)
+                    }
+                }
+            }
+        }
+    }
+
+    /** The scalar rules of [pocket], checked before any native call. */
+    private fun requirePocketArguments(
+        faceIndex: Int,
+        profile: PocketProfile,
+        depth: PocketDepth,
+    ) {
+        require(faceIndex >= 0) { "pocket face index must not be negative, got $faceIndex" }
+
+        fun positive(
+            what: String,
+            value: Double,
+        ) {
+            require(value.isFinite()) { "pocket $what must be finite, got $value" }
+            require(value in MIN_DIMENSION..MAX_DIMENSION) {
+                "pocket $what must be within [$MIN_DIMENSION, $MAX_DIMENSION], got $value"
+            }
+        }
+
+        fun coordinate(
+            what: String,
+            value: Double,
+        ) {
+            require(value.isFinite() && abs(value) <= MAX_ABS_COORDINATE) {
+                "pocket $what must be finite and within +/-$MAX_ABS_COORDINATE, got $value"
+            }
+        }
+
+        when (profile) {
+            is PocketProfile.Rectangle -> {
+                positive("rectangle width", profile.width)
+                positive("rectangle length", profile.length)
+                coordinate("rectangle u", profile.u)
+                coordinate("rectangle v", profile.v)
+            }
+            is PocketProfile.Circle -> {
+                positive("circle diameter", profile.diameter)
+                coordinate("circle u", profile.u)
+                coordinate("circle v", profile.v)
+            }
+            is PocketProfile.Polygon -> {
+                val pts = profile.points
+                require(pts.size in MIN_PROFILE_POINTS..MAX_POCKET_PROFILE_POINTS) {
+                    "pocket polygon needs between $MIN_PROFILE_POINTS and $MAX_POCKET_PROFILE_POINTS points, " +
+                        "got ${pts.size}"
+                }
+                pts.forEach {
+                    coordinate("polygon u", it.x)
+                    coordinate("polygon v", it.y)
+                }
+                var area2 = 0.0
+                for (i in pts.indices) {
+                    val a = pts[i]
+                    val b = pts[(i + 1) % pts.size]
+                    require(hypot(b.x - a.x, b.y - a.y) >= MIN_DIMENSION) {
+                        "pocket polygon has two coincident consecutive points"
+                    }
+                    area2 += a.x * b.y - b.x * a.y
+                }
+                require(abs(area2) / 2.0 > 1e-12) { "pocket polygon has no area" }
+            }
+        }
+        if (depth is PocketDepth.Blind) positive("depth", depth.depth)
+    }
+
+    /** The rules that need the shape itself; the native side re-derives all of them under its lock. */
+    private fun requirePocketOperand(
+        shape: OcctShape,
+        faceIndex: Int,
+    ) {
+        requireSingleSolidOperand(shape, "pocket")
+        require(shape.topology.solids == 1) { "pocket needs exactly one solid, got ${shape.topology.solids}" }
+        val faces = shape.topology.faces
+        require(faces <= MAX_POCKET_INPUT_FACES) {
+            "pocket input has $faces faces, more than the limit of $MAX_POCKET_INPUT_FACES"
+        }
+        require(faceIndex < faces) { "pocket face index $faceIndex is out of range 0..${faces - 1}" }
+        require(shape.faces[faceIndex].kind == FaceKind.PLANE) { "pocket face $faceIndex must be planar" }
+    }
+
+    /**
+     * Drafts (tapers) the planar faces [faceIndices] of [shape] by [angleDegrees] about [neutral]
+     * (`BRepOffsetAPI_DraftAngle`). A positive angle narrows the material along the pull direction of [neutral]
+     * (the faces lean INTO the material), a negative angle widens it. The faces keep their size on the neutral plane.
+     * No edge history is offered: every edge of a draft is a new edge (ADR-0040).
+     *
+     * @throws IllegalArgumentException if [faceIndices] is empty, has more than [MAX_DRAFT_FACES] entries, a negative
+     *   or duplicate index, an index beyond the faces of [shape], or a face that is not planar; if [angleDegrees] is
+     *   not finite or not within `[MIN_DRAFT_ANGLE_DEGREES, MAX_DRAFT_ANGLE_DEGREES)` in magnitude; if [shape] has more
+     *   than [MAX_DRAFT_INPUT_FACES] faces or is not exactly one solid; if the drafted body would leave +/-[MAX_ABS_COORDINATE] (the neutral plane can
+     *   lie far from the body, so a face may swing out well beyond the origin bound).
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT cannot draft the faces (for example a face parallel to the neutral plane,
+     *   or an angle that makes a face vanish) or the result is invalid.
+     */
+    fun draft(
+        shape: OcctShape,
+        faceIndices: Collection<Int>,
+        angleDegrees: Double,
+        neutral: NeutralPlane,
+    ): OcctShape {
+        requireDraftArguments(faceIndices, angleDegrees, neutral)
+        requireAvailable()
+        requireFaceOperand(shape, faceIndices, "draft", MAX_DRAFT_INPUT_FACES)
+        val indices = faceIndices.toIntArray()
+        val o = neutral.origin
+        val d = neutral.pullDirection
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeDraftShape(h, indices, angleDegrees, o.x, o.y, o.z, d.x, d.y, d.z)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to draft shape (angle $angleDegrees degrees)", e)
+                }
+            }
+        return OcctShape(handle)
+    }
+
+    /**
+     * [draft] on the faces [faces] resolves to (see [selectFaces]). Never guesses: a selection that matches nothing, or
+     * a count different from [expected], throws [dev.kstep.geometry.select.FaceSelectionException].
+     */
+    fun draft(
+        shape: OcctShape,
+        faces: FaceSelector,
+        angleDegrees: Double,
+        neutral: NeutralPlane,
+        expected: Int? = null,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): OcctShape = draft(shape, selectFaces(shape, faces, expected, tolerance), angleDegrees, neutral)
+
+    /** The scalar rules of [draft], checked before any native call. */
+    private fun requireDraftArguments(
+        faceIndices: Collection<Int>,
+        angleDegrees: Double,
+        neutral: NeutralPlane,
+    ) {
+        require(angleDegrees.isFinite()) { "draft angle must be finite, got $angleDegrees" }
+        require(abs(angleDegrees) >= MIN_DRAFT_ANGLE_DEGREES && abs(angleDegrees) < MAX_DRAFT_ANGLE_DEGREES) {
+            "draft angle must satisfy $MIN_DRAFT_ANGLE_DEGREES <= |angle| < $MAX_DRAFT_ANGLE_DEGREES degrees, " +
+                "got $angleDegrees"
+        }
+        val o = neutral.origin
+        require(listOf(o.x, o.y, o.z).all { it.isFinite() && abs(it) <= MAX_ABS_COORDINATE }) {
+            "draft neutral plane origin must be finite and within +/-$MAX_ABS_COORDINATE, got $o"
+        }
+        requireFaceIndexList(faceIndices, "draft", MAX_DRAFT_FACES)
+    }
+
+    /**
+     * Pushes the planar faces [faceIndices] of [shape] outward by [distance] and extends their neighbours
+     * (OCCT: `BRepOffset_MakeOffset` with a per-face offset). With a distance of 2 the top of a 40 x 30 x 20 box
+     * moves to z = 22 and the volume grows by 40 * 30 * 2. The distance is always positive. No edge history is
+     * offered: the algorithm rebuilds every face (ADR-0040).
+     *
+     * @throws IllegalArgumentException if [faceIndices] is empty, has more than [MAX_THICKEN_FACES] entries, a negative
+     *   or duplicate index, an index beyond the faces of [shape] or a face that is not planar; if [distance] is not
+     *   finite or outside `[MIN_DIMENSION, MAX_DIMENSION]`; if [shape] has more than [MAX_THICKEN_INPUT_FACES] faces or
+     *   is not exactly one solid.
+     * @throws IllegalStateException if [shape] is already closed.
+     * @throws OcctUnavailableException if the native bridge is not available.
+     * @throws OcctGeometryException if OCCT cannot offset the faces or the result is invalid or implausible.
+     */
+    fun thicken(
+        shape: OcctShape,
+        faceIndices: Collection<Int>,
+        distance: Double,
+    ): OcctShape {
+        require(distance.isFinite()) { "thicken distance must be finite, got $distance" }
+        require(distance in MIN_DIMENSION..MAX_DIMENSION) {
+            "thicken distance must be within [$MIN_DIMENSION, $MAX_DIMENSION], got $distance"
+        }
+        requireFaceIndexList(faceIndices, "thicken", MAX_THICKEN_FACES)
+        requireAvailable()
+        requireFaceOperand(shape, faceIndices, "thicken", MAX_THICKEN_INPUT_FACES)
+        val indices = faceIndices.toIntArray()
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeThickenShape(h, indices, distance)
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to thicken shape (distance $distance)", e)
+                }
+            }
+        return OcctShape(handle)
+    }
+
+    /** [thicken] on the faces [faces] resolves to (see [selectFaces]). */
+    fun thicken(
+        shape: OcctShape,
+        faces: FaceSelector,
+        distance: Double,
+        expected: Int? = null,
+        tolerance: SelectionTolerance = SelectionTolerance(),
+    ): OcctShape = thicken(shape, selectFaces(shape, faces, expected, tolerance), distance)
+
+    private fun requireFaceIndexList(
+        faceIndices: Collection<Int>,
+        operation: String,
+        maxFaces: Int,
+    ) {
+        require(faceIndices.isNotEmpty()) { "$operation needs at least one face" }
+        require(faceIndices.size <= maxFaces) { "$operation takes at most $maxFaces faces, got ${faceIndices.size}" }
+        require(faceIndices.all { it >= 0 }) { "$operation face indices must not be negative: $faceIndices" }
+        require(faceIndices.toSet().size == faceIndices.size) { "$operation face indices must be unique: $faceIndices" }
+    }
+
+    /** Operand rules shared by [draft] and [thicken]; the native side re-derives all of them under its lock. */
+    private fun requireFaceOperand(
+        shape: OcctShape,
+        faceIndices: Collection<Int>,
+        operation: String,
+        maxInputFaces: Int,
+    ) {
+        requireSingleSolidOperand(shape, operation)
+        require(shape.topology.solids == 1) { "$operation needs exactly one solid, got ${shape.topology.solids}" }
+        val faces = shape.topology.faces
+        require(faces <= maxInputFaces) { "$operation input has $faces faces, more than the limit of $maxInputFaces" }
+        faceIndices.forEach {
+            require(it < faces) { "$operation face index $it is out of range 0..${faces - 1}" }
+        }
+        val infos = shape.faces
+        faceIndices.forEach {
+            require(infos[it].kind == FaceKind.PLANE) { "$operation face $it must be planar (ADR-0040)" }
         }
     }
 

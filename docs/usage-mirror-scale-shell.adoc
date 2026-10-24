@@ -1,4 +1,4 @@
-= Usage: mirror, scale, face and vertex selection, shell
+= Usage: mirror, scale, face and vertex selection, shell, pocket, draft, thicken
 
 == Mirror and scale (Welle P)
 
@@ -69,9 +69,55 @@ val edgesThere = OcctKernel.selectEdges(box, Edges.atVertex(Vertices.nearest(100
 * Errors: an empty or wrongly sized face, edge or vertex selection is `KSTEP-S-011` with the candidates
   (`hello-face-selection-empty.kstep.kts`, `hello-nearest-ambiguous.kstep.kts`); a wall that is too thick is
   `KSTEP-S-003` (`hello-shell-invalid.kstep.kts`).
-* Not covered: a pocket or hole from a face, draft and thickening (planned), names for the inner wall of a shell. See
-  ADR-0037.
+* Not covered: names for the inner wall of a shell. See ADR-0037. Pocket, draft and thickening: next section.
 
 `scripts/interop/verify-face-ops.sh` re-checks the five example exports with OCCT and FreeCAD (`--spike` also runs the
 standalone shell spike). This wave adds the OCCT toolkit `TKOffset` (`libocct-modeling-algorithms-dev` on Ubuntu, part of
 Homebrew's `opencascade`).
+
+== Pocket, hole, draft, thicken (Welle Q2)
+
+Three operations take faces as their input. All return a modified COPY.
+
+[source,kotlin]
+----
+val box = OcctKernel.makeBox(40.0, 30.0, 20.0)
+val top = Faces.atMax(Direction3.Z)
+
+val pocket = pocket(box, top, PocketProfile.Rectangle(10.0, 10.0), 5.0)               // V = 23500
+val blindHole = pocket(box, top, PocketProfile.Circle(8.0), 6.0)                       // V = 24000 - 96 pi
+val throughHole = pocket(box, top, PocketProfile.Circle(8.0), PocketDepth.Through)     // V = 24000 - 320 pi
+val offCentre = pocket(box, Faces.atMax(Direction3.X), PocketProfile.Circle(4.0, u = 5.0, v = 3.0), 10.0)
+
+// Taper the four side faces by 5 degrees; the box narrows along +Z, its size at z = 0 is kept.
+val sides = Faces.normal(Direction3.X) or Faces.normal(Direction3.NEG_X) or Faces.normal(Direction3.Y) or Faces.normal(Direction3.NEG_Y)
+val tapered = draft(box, sides, 5.0, NeutralPlane(Point3(0.0, 0.0, 0.0), Direction3.Z))     // V = 21631.963
+
+// Push the top face 2 mm outwards, the neighbours follow: V = 40 * 30 * 22.
+val taller = thicken(box, top, 2.0)
+----
+
+* *Face-local coordinates.* A pocket profile is given in the local frame of its face: origin = the centroid of the face,
+  `N` = the outward normal, `U` = global +X projected into the face (global +Y when the face is perpendicular to X),
+  `V` = `N x U`. On the top of a box `u` runs along +X and `v` along +Y; on a +X face `u` runs along +Y and `v` along +Z.
+* *Inside the face, strictly.* A profile that touches the rim, crosses it or lies outside is an error, never clipped. The
+  depth of a blind pocket must be less than the extent of the body along the face normal; use `PocketDepth.Through` otherwise.
+* *One face.* A pocket needs a selector (or `FaceIndices`) that resolves to exactly one planar face; a tie is
+  `KSTEP-S-011` with the candidates (`hello-pocket-ambiguous.kstep.kts`). In a feature history use
+  `PocketFeature(baseIndex, SelectFaces(...), profile, depth)`.
+* *Draft.* `1e-3 <= |angle| < 45` degrees, planar faces, at most 64 per call. Positive narrows the material along the pull
+  direction of the neutral plane, negative widens it. OCCT refuses a face parallel to the neutral plane and an angle that
+  makes a face vanish: `KSTEP-S-003` (`hello-draft-invalid.kstep.kts`). Feature: `DraftFeature`.
+* *Thicken.* Distance > 0, planar faces; the faces move along their outward normal and their neighbours are extended.
+  Feature: `ThickenFeature`.
+* *Tracking.* A name set before a pocket (`TrackedEdges`, `GeneratedEdges` at an earlier generator) is followed through it,
+  because the cut keeps the original edges. A draft or thicken rebuilds every edge, so tracking through them is refused with
+  the reason. The new faces and edges have no persistent names yet.
+* Limits (measured, ADR-0040): pocket input up to 400 faces, profile up to 1024 points; draft and thicken input up to 200
+  faces.
+* Not covered: names for the new faces, a rotated rectangle, pockets that reach the rim, curved faces, negative thickening.
+  See ADR-0040.
+
+`scripts/interop/verify-face-ops-2.sh` re-checks the six example exports with OCCT and FreeCAD (`--spike` runs the
+standalone spike, `--baseline` compares the older examples byte for byte with the previous commit). No new OCCT toolkit is
+needed.

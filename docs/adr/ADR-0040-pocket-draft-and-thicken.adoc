@@ -1,0 +1,231 @@
+= ADR-0040: Pocket and hole from a face, draft and thicken (Welle Q2)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle Q2). Builds on ADR-0037 (face selection, shell), ADR-0034 (edge history) and ADR-0036
+(shape operations). Every number below comes from `scripts/interop/spike_face_ops_history.cpp` (OCCT 7.9.3, macOS arm64).
+
+== Context
+
+ADR-0037 listed three operations as "not in this wave": a pocket or hole starting on a chosen face, a draft, and thickening
+a face. All three take a face (or faces) of an existing solid as their input. The spike measured what OCCT does before any
+code was written; the decisions below follow the measurements, and what the measurements did not support is not built.
+
+== Decisions
+
+P1:: *A pocket is a prism cut.* The profile becomes a planar face, `BRepPrimAPI_MakePrism` sweeps it into the body along
+the negative face normal, `BRepAlgoAPI_Cut` subtracts it. That is the same path as `cut` and `hole`. `BRepFeat_MakePrism`
+(toolkit `TKFeat`, not linked) is NOT used, so the link line and the CI packages are unchanged. The tool starts a margin
+`max(1e-3, 1e-3 * bounding-box diagonal)` OUTSIDE the face, so it never starts coplanar with the face it cuts; the spike
+shows identical results for a flush and an overshooting start (23500, 11 faces), the overshoot is simply the numerically
+safer choice. A through pocket is `extent + 2 * margin` long, where `extent` is the spread of the bounding-box corners
+projected on the face normal.
+
+P2:: *Face-local coordinate system.* Origin = the centroid of the target face, `N` = the outward normal, `U` = global +X
+projected into the face plane and normalised (global +Y when `|N . X| > 1 - 1e-9`), `V = N x U`. Profile coordinates are
+`(u, v)` relative to the origin. Measured: top face of the box (`N = +Z`): `U = +X`, `V = +Y`; face with `N = +X`: `U = +Y`,
+`V = +Z`. A rectangle has no rotation in Q2 (use a polygon).
+
+P3:: *The profile must lie strictly inside the face; nothing is clipped.* Every polygon vertex, every edge midpoint (a circle:
+its centre and 32 contour points) is classified with `BRepClass_FaceClassifier` (tolerance 1e-7) and must be `TopAbs_IN`;
+in addition the area of `Common(profile face, target face)` must equal the profile area to 1e-6 relative, which also
+catches an edge that crosses a concave rim. Measured: a point exactly on the rim is `ON` (also at an offset of 1e-9), a
+point beyond it is `OUT`. OCCT itself accepts a profile that crosses the rim and cuts a notch (50 x 10 on the 40 x 30 face
+gives V = 22000, 10 faces, a quite different shape), so without this check a typo would silently produce a valid but wrong
+body. An open pocket (a slot reaching an edge) is a follow-up.
+
+P4:: *Depth.* `PocketDepth.Blind(d)` needs `0 < d < extent`; `d >= extent` is refused with "use through = true" (a blind
+pocket that is as deep as the body is a through cut and would hide that). A blind depth that reaches through the material
+under the profile (removed volume < profile area x depth, e.g. on a stepped body, or when it breaks into an existing
+cavity under the profile) is refused with "blind depth reaches through the material under the profile".
+`PocketDepth.Through` cuts the whole body.
+
+P5:: *One face, no guessing.* `OcctKernel.pocket(shape, FaceSelector, ...)` and a `PocketFeature` with a `SelectFaces`
+reference resolve with `expected = 1` even when the feature says `expected = null`; a tie is a `FaceSelectionException`
+with the candidate list (`KSTEP-S-011`). `FaceIndices` must hold exactly one index. Only planar faces; the result must be
+one solid with one shell (a pocket that splits the body or leaves an internal void is refused, like `boolean`).
+
+P6:: *Edge history through a pocket.* The cut keeps every edge of the original solid by identity as long as the profile is
+inside the face (measured: 12 of 12 edges kept for the rectangle, the circle and the through hole; the 200 and 400 face
+prisms: 594 of 594 and 1194 of 1194). `pocketWithHistory` therefore returns the standard `EdgeHistory`, and a
+`TrackedEdges` reference follows an edge through a pocket. The new pocket walls and floor have no persistent names yet
+(`GeneratorKind.NONE`, see "Not in this wave").
+
+D1:: *Draft sign.* `angleDegrees > 0` means: the material NARROWS along the pull direction of the neutral plane (the drafted
+faces lean into the material), `< 0` widens it. Measured with `BRepOffsetAPI_DraftAngle::Add(F, pull, angle, plane)`:
+pull +Z, neutral plane z = 0, four side faces of the 40 x 30 x 20 box, `+5 deg` gives V = 21631.963 (top face smaller);
+`-5 deg` gives V = 26531.328. The same body results from pull -Z with the neutral plane z = 20 and `+5 deg`. The public
+sign is therefore the OCCT sign and no inversion is needed; the bridge nevertheless checks it: when every drafted face lies
+on the pull side of the neutral plane the volume must shrink for a positive and grow for a negative angle, and when it lies
+on the other side the reverse. If the faces straddle the plane only "V > 0 and V changed" is required (measured: neutral
+plane z = 10, +5 deg gives V = 24020.411, the upper half narrows and the lower half widens).
+
+D2:: *Draft preconditions and failures.* `1e-3 <= |angle| < 45` degrees, 1 to 64 planar faces, a neutral plane
+(`NeutralPlane(origin, pullDirection)`; the pull direction is normalised, `Direction3` already forbids the zero vector).
+`AddDone()` is false for a face parallel to the neutral plane (measured: `Draft_ErrorStatus` = `FaceRecomputation`, 1) and
+the bridge reports status name and the problematic face index. `Build()` is false when the angle is too large for the
+geometry (measured: a 10 x 10 x 20 box at 30 and 44 degrees; the top would degenerate). Both are `OcctGeometryException`
+(`KSTEP-S-003`). Not-planar faces are refused (`IllegalArgumentException`).
+
+D3:: *The volume of a drafted box is the prismatoid volume, not the frustum volume.* The cross sections of the box (40 x 30
+to 36.5 x 26.5) are not similar rectangles, so `h/3 (A1 + A2 + sqrt(A1 A2))` is only an approximation: 21631.016 against
+the exact `h/6 (A1 + 4 Am + A2) = 24000 - 28000 tan a + 32000/3 tan^2 a = 21631.963` (difference 0.95). The tests use the
+exact formula.
+
+D4:: *No edge history through a draft.* Measured: all 12 edges of the drafted box are reported neither `Modified` nor kept
+(12 "lost"), at the face level 2 of 6 faces are `Modified` and 0 survive by identity. A draft therefore rebuilds every edge;
+`DraftFeature` is not trackable and a `TrackedEdges` reference through it fails with this reason instead of guessing.
+
+T1:: *Thicken = per-face outward offset, built.* `BRepOffset_MakeOffset::Initialize(S, 0, Confusion, Skin, Intersection =
+true, SelfInter = false, GeomAbs_Intersection, Thickening = false)` plus `SetOffsetOnFace(F, d)` for each chosen face
+(the other faces keep offset 0) moves the face by `d` and extends its neighbours. Measured on the box: top +2 gives
+V = 26400, box z 0..22, 6 faces, valid, identical in three repeats; top +2 and +X +3 gives 28380 (a 43 x 30 x 22 block); top
+and +X both +2 give 27720 (42 x 30 x 22). `BRepOffset_MakeOffset` is public in 7.9.3 and its symbols are in `libTKOffset`
+(already linked, no new `-l`). `thicken(shape, faces, d)` takes `d > 0` (outward); a negative offset works (top -2 gives
+21600) but is a different operation ("push in") and is not offered. Planar faces only; sanity bound
+`0 < V1 - V0 <= d * (total surface area) * (1 + 1e-3)`. No edge history: the algorithm rebuilds every face (0 of 6 faces
+survive by identity).
+
+T2:: *Thickening a single sheet face into a solid is NOT built.* `BRepOffset_MakeOffset` with `Thickening = true` on an
+isolated face does produce a valid solid (the 40 x 30 face with d = +-2 gives V = 2400, 6 faces, on the side of the sign), but
+kSTEP's operations take exactly one solid, a face is not a shape here, and a sheet shape would have to flow through the
+whole shape / feature / export pipeline. That is a different wave.
+
+T3:: *"Pad from a face" (extrude the face and fuse) is NOT offered under the name thicken.* It gives the same volume on the
+box (26400, but 10 faces) because it does not extend the neighbours; calling it thicken would be a lie. It is a `boolean`
+of an extrusion today.
+
+L1:: *Limits, measured.* Pocket in a 200-face prism 35 ms, in a 400-face prism 73 ms -> `MAX_POCKET_INPUT_FACES = 400`,
+1024 profile points. Offset of one face of a 200-face prism 129 ms, of a 400-face prism 407 ms ->
+`MAX_THICKEN_INPUT_FACES = 200`, 64 faces. Draft of 12 / 24 / 48 faces 8 / 16 / 33 ms -> `MAX_DRAFT_INPUT_FACES = 200`, 64
+faces per call (64 faces of a 198-gon fail geometrically, because the neighbouring faces are 1.8 degrees apart: a reported
+`IsDone() == false`, not a count limit). Lengths in `[1e-7, 1e7]`, coordinates within +/-1e7.
+
+L2:: *Error codes.* No new code. `FaceSelectionException` is `KSTEP-S-011`, an OCCT failure is `KSTEP-S-003`, invalid
+arguments follow the existing mapping.
+
+== Measurements (OCCT 7.9.3, macOS arm64, `scripts/interop/spike_face_ops_history.cpp`)
+
+[cols="3,5"]
+|===
+| Question | Result
+
+| Pocket 10 x 10, depth 5, tool flush with the face
+| V = 23500, 11 faces, 1 solid, valid, box unchanged, 12 of 12 edges kept, 1.3 ms
+
+| same, tool starting 1e-3 outside
+| identical (23500, 11 faces, 1.8 ms)
+
+| Hole d = 8, depth 6 (flush and overshoot)
+| V = 23698.407105, 8 faces
+
+| Hole d = 8, through (flush and with margin)
+| V = 22994.690351, 7 faces (the seam does not add a face)
+
+| Rectangle touching the +X rim (x 15..20 on a 40 wide face)
+| V = 23750, 10 faces; 11 edges kept, 1 split into 2, 2 generated (rim contact merges faces, hence P3)
+
+| Rectangle crossing the rim (50 x 10)
+| V = 22000, 10 faces (a notch, valid, silently wrong)
+
+| Face classification: inside / beyond / on the rim (also at 1e-9)
+| IN / OUT / ON / ON
+
+| Face frame, top (N +Z) and +X face
+| U = +X, V = +Y; U = +Y, V = +Z
+
+| Draft +5 deg, pull +Z, plane z = 0, four sides
+| V = 21631.962928, 6 faces, valid, 0 edges mapped; -5 deg V = 26531.328085; +5 deg with pull -Z, plane z = 20: 21631.962928
+
+| Draft +5 deg with neutral plane z = 10
+| V = 24020.411377, bbox x -0.875..40.875
+
+| Draft, single +X face
+| V = 23475.068019
+
+| Draft 44 / 60 deg on the box, 30 / 44 deg on 10 x 10 x 20
+| `Build()` / `IsDone()` false (the top face would vanish)
+
+| Draft, face parallel to the neutral plane
+| `AddDone()` false, `Draft_ErrorStatus` 1 (FaceRecomputation)
+
+| Draft of a cylinder face (axis parallel to the pull)
+| accepted, a cone, V = 5247.89, 3 faces; NOT exposed (planar faces only, the general axis case is unmeasured)
+
+| Offset top +2 / -2
+| V = 26400 (z 0..22) / 21600 (z 0..18), 6 faces, valid
+
+| Offset top +2 and +X +3, three repeats
+| V = 28380, 6 faces, identical
+
+| Offset top +2 and +X +2
+| V = 27720 (42 x 30 x 22)
+
+| Offset top +1000
+| IsDone, V = 1224000, z 0..1020
+
+| Offset a planar end face of a cylinder +2
+| V = 6911.5038, 3 faces
+
+| Sheet face thickening +-2 (`Thickening = true`)
+| V = 2400, 6 faces, z 20..22 / 18..20 (not built, T2)
+
+| Pad (extrude the face + fuse) +2
+| V = 26400 but 10 faces (not thicken, T3)
+
+| Pocket 10 x 10 x 5, 200 / 400-face prism
+| 14 ms (35 ms with the checks) / 28 ms (73 ms); 594 of 594 and 1194 of 1194 edges kept
+
+| Draft of 12 / 24 / 48 faces; 64 faces of a 198-gon
+| 8 / 16 / 33 ms; `IsDone()` false
+
+| Offset of one face, 200 / 400-face prism
+| 129 ms / 407 ms
+|===
+
+== Sign conventions
+
+* Draft: positive narrows the material along `NeutralPlane.pullDirection`; the faces keep their size on the neutral plane.
+* Thicken: the distance is positive and moves the face along its OUTWARD normal.
+* Pocket: the profile is cut along the INWARD normal of the face.
+
+== Face-local coordinate system
+
+See P2. Pocket profile coordinates are relative to the centroid of the face AS IT IS NOW: after a pocket the centroid of a
+face with an inner wire moves slightly, so a second pocket on the same face uses the new centroid.
+
+== Failure modes
+
+Argument errors (`IllegalArgumentException`) are raised before the native bridge is needed: non-finite or out-of-range
+numbers, a polygon with fewer than 3 or more than 1024 points, coincident consecutive points, no area, self-intersection,
+an empty, duplicate or too long face list. Geometry errors that need the shape are raised natively under the lock:
+non-planar face, face index out of range, profile not inside the face, blind depth not less than the body extent. OCCT
+failures (`IllegalStateException` in the bridge, `OcctGeometryException` in Kotlin): `IsDone()` false, more than one solid
+or an internal void, an invalid result, an implausible volume change, a draft that goes the wrong way.
+
+== Not in this wave
+
+* Names for the pocket walls / floor and the drafted or offset faces (`GeneratedFaces`, `TrackedFaces`): they are new faces
+  and need an `encodeFaceHistory`; until then `GeneratedEdges` through these features is refused with a pointer here.
+* Rotating a pocket rectangle; pockets on curved faces; a pocket across several faces; open pockets and slots that reach
+  the rim (P3).
+* Draft of non-planar faces (the cylinder case works for a pull parallel to the axis but is not generalised), variable
+  draft angles, a draft with a parting line.
+* Edge tracking through a draft or thicken (D4, T1).
+* Negative thickening ("push in") and thickening a sheet face into a solid (T2); "pad from face" as a feature (T3).
+* A migration: kSTEP persists no feature history, so there is none. Files that use none of the new features are unchanged
+  (checked byte for byte against the previous commit, see Verification).
+
+== Verification
+
+Hand calculations: box 40 x 30 x 20 (V 24000). Pocket 10 x 10 x 5: 24000 - 500 = 23500, 11 faces (6 + 4 walls + floor).
+Hole d 8, depth 6: 24000 - 96 pi = 23698.4071, 8 faces; through: 24000 - 320 pi = 22994.6904, 7 faces. Rebuilt with height
+30: 40 * 30 * 30 - 500 = 35500. Draft 5 deg, exact: with `t = tan 5 deg`, `24000 - 28000 t + 32000/3 t^2 = 21631.9629`,
+outward `+28000 t`: 26531.3281. Thicken top by 2: 40 * 30 * 22 = 26400.
+
+`scripts/interop/verify-face-ops-2.sh` exports the six example scripts and compares them with these numbers through OCCT's
+typed reader and FreeCAD; `--baseline` additionally exports the pre-Q2 scripts with the CLI of the previous commit and with
+this tree and compares them byte for byte (time stamp normalised). Tests: `FaceOpsValidationTest` (no OCCT),
+`OcctPocketFeatureTest`, `OcctDraftFeatureTest`, `OcctThickenFeatureTest` and the extended
+`CliExportOcctFaceOpsIntegrationTest`. The decisive evidence is the CI job "OCCT + PlaneGCS required" on Ubuntu and macOS.

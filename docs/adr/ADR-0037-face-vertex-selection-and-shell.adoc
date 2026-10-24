@@ -222,6 +222,9 @@ already used; no new third-party dependency.
 
 == Not in this wave (Welle Q2)
 
+NOTE: Welle Q2 built the pocket, the draft and the per-face thickening below; see ADR-0040 for what was built and what
+still is not.
+
 * *Pocket or hole from a face.* Needs a local coordinate system on the planar face, a sketch placement on that face, a
   direction "into the face" and a history for the CUT, and it raises its own naming question (the walls, as `HoleWall`
   does for holes).

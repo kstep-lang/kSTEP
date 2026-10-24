@@ -193,6 +193,9 @@ object FeatureRebuilder {
                 is SelectedFilletFeature -> edges(feature.edges)
                 is SelectedChamferFeature -> edges(feature.edges)
                 is ShellFeature -> (feature.openFaces as? SelectFaces)?.let { SelectorTree.validate(it.selector) }
+                is PocketFeature -> (feature.face as? SelectFaces)?.let { SelectorTree.validate(it.selector) }
+                is DraftFeature -> (feature.faces as? SelectFaces)?.let { SelectorTree.validate(it.selector) }
+                is ThickenFeature -> (feature.faces as? SelectFaces)?.let { SelectorTree.validate(it.selector) }
                 else -> Unit
             }
         }
@@ -266,6 +269,26 @@ object FeatureRebuilder {
                     resolveFaces(feature.openFaces, feature.baseIndex, built),
                     feature.thickness,
                     feature.direction,
+                )
+            is PocketFeature ->
+                OcctKernel.pocket(
+                    built[feature.baseIndex],
+                    resolvePocketFace(feature.face, feature.baseIndex, built),
+                    feature.profile,
+                    feature.depth,
+                )
+            is DraftFeature ->
+                OcctKernel.draft(
+                    built[feature.baseIndex],
+                    resolveFaces(feature.faces, feature.baseIndex, built),
+                    feature.angleDegrees,
+                    feature.neutralPlane,
+                )
+            is ThickenFeature ->
+                OcctKernel.thicken(
+                    built[feature.baseIndex],
+                    resolveFaces(feature.faces, feature.baseIndex, built),
+                    feature.distance,
                 )
             is ExtrudeRegionFeature -> OcctKernel.extrudeRegion(feature.region, feature.height)
             is RevolveRegionFeature -> OcctKernel.revolveRegion(feature.region, feature.angleDegrees, feature.axis)
@@ -455,6 +478,16 @@ object FeatureRebuilder {
                     feature.thickness,
                     feature.direction,
                 )
+            is PocketFeature ->
+                OcctKernel.pocketWithHistory(
+                    built[feature.baseIndex],
+                    resolvePocketFace(feature.face, feature.baseIndex, built),
+                    feature.profile,
+                    feature.depth,
+                )
+            // Draft and thicken rebuild every edge (ADR-0040); the tracking plan refuses them before this is reached.
+            is DraftFeature, is ThickenFeature ->
+                error("feature[$index] (${feature::class.simpleName}) cannot be built with edge history")
             is BooleanFeature ->
                 OcctKernel.booleanWithHistory(feature.operation, built[feature.leftIndex], built[feature.rightIndex])
             is HoleFeature ->
@@ -495,7 +528,31 @@ object FeatureRebuilder {
                 error("feature[$index] (${feature::class.simpleName}) cannot be built with edge history")
         }
 
-    /** Resolves the faces a [ShellFeature] opens against the shape of its own base feature, afresh on every rebuild. */
+    /**
+     * The ONE face a [PocketFeature] cuts into: a selector is resolved with `expected = 1` even when the feature does
+     * not say so, so a tie is an error with the candidate list instead of a silent first pick (ADR-0040).
+     */
+    private fun resolvePocketFace(
+        reference: FaceReference,
+        baseIndex: Int,
+        built: List<OcctShape>,
+    ): Int =
+        when (reference) {
+            is SelectFaces ->
+                OcctKernel
+                    .selectFaces(built[baseIndex], reference.selector, reference.expected ?: 1, reference.tolerance)
+                    .also {
+                        require(it.size == 1) { "a pocket needs exactly one face, the selection matched ${it.size}" }
+                    }.single()
+            is FaceIndices -> {
+                require(reference.indices.size == 1) {
+                    "a pocket needs exactly one face index, got ${reference.indices.size}"
+                }
+                reference.indices.single()
+            }
+        }
+
+    /** Resolves the faces a [ShellFeature], [DraftFeature] or [ThickenFeature] works on against the shape of its own base feature, afresh on every rebuild. */
     private fun resolveFaces(
         reference: FaceReference,
         baseIndex: Int,

@@ -49,6 +49,24 @@ class CliExportOcctFaceOpsIntegrationTest :
                 Expected("export-shell-box-outward", 8912.0, 11, listOf(-2.0, -2.0, -2.0), listOf(42.0, 32.0, 20.0)),
                 Expected("export-shell-cylinder", 461.0 * PI, 5, listOf(-10.0, -10.0, 0.0), listOf(10.0, 10.0, 20.0)),
                 Expected("export-shell-feature-rebuild", 9792.0, 11, listOf(0.0, 0.0, 0.0), listOf(40.0, 30.0, 30.0)),
+                Expected("export-pocket-rect", 23500.0, 11, listOf(0.0, 0.0, 0.0), listOf(40.0, 30.0, 20.0)),
+                Expected(
+                    "export-pocket-hole-blind",
+                    24000.0 - 96.0 * PI,
+                    8,
+                    listOf(0.0, 0.0, 0.0),
+                    listOf(40.0, 30.0, 20.0),
+                ),
+                Expected(
+                    "export-pocket-hole-through",
+                    24000.0 - 320.0 * PI,
+                    7,
+                    listOf(0.0, 0.0, 0.0),
+                    listOf(40.0, 30.0, 20.0),
+                ),
+                Expected("export-pocket-feature-rebuild", 35500.0, 11, listOf(0.0, 0.0, 0.0), listOf(40.0, 30.0, 30.0)),
+                Expected("export-draft-box", 21631.962928, 6, listOf(0.0, 0.0, 0.0), listOf(40.0, 30.0, 20.0)),
+                Expected("export-thicken-face", 26400.0, 6, listOf(0.0, 0.0, 0.0), listOf(40.0, 30.0, 22.0)),
                 Expected(
                     "export-nearest-fillet",
                     6000.0 - 2.0 * (4.0 - PI) * 30.0,
@@ -118,6 +136,33 @@ class CliExportOcctFaceOpsIntegrationTest :
             parsed["code"]!!.jsonPrimitive.content shouldBe "KSTEP-S-003"
             parsed["message"]!!.jsonPrimitive.content shouldContain "thickness 12.0"
             parsed["message"]!!.jsonPrimitive.content shouldContain "half the smallest extent"
+            out.exists() shouldBe false
+        }
+
+        "a pocket whose face selector matches two faces exits non-zero with KSTEP-S-011 and the candidates".config(
+            enabled = available,
+        ) {
+            val script = copyFixture("hello-pocket-ambiguous.kstep.kts")
+            val out = File(workDir, "pocket-ambiguous.step").apply { delete() }
+            val result = runner.run("export", script.name, "--out", out.name)
+            (result.exitCode != 0) shouldBe true
+            val output = result.stdout + result.stderr
+            output shouldContain "KSTEP-S-011"
+            output shouldContain "#"
+            output shouldNotContain "\tat "
+            out.exists() shouldBe false
+        }
+
+        "a draft OCCT cannot build exits non-zero with KSTEP-S-003 naming the draft status".config(
+            enabled = available,
+        ) {
+            val script = copyFixture("hello-draft-invalid.kstep.kts")
+            val out = File(workDir, "draft-invalid.step").apply { delete() }
+            val result = runner.run("export", script.name, "--out", out.name, "--output", "json")
+            result.exitCode shouldBe 1
+            val parsed = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+            parsed["code"]!!.jsonPrimitive.content shouldBe "KSTEP-S-003"
+            parsed["message"]!!.jsonPrimitive.content shouldContain "draft"
             out.exists() shouldBe false
         }
 

@@ -73,7 +73,9 @@ link:CHANGELOG.adoc[CHANGELOG]. What is in place:
   headless preview rendering. Both native bridges need system libraries
   (Linux x86-64 or macOS arm64) and are not part of the release zip.
 
-Not yet available: PMI, pocket/hole from a face, draft and thickening, Windows
+Pocket/hole from a face, draft and thickening are on the unreleased master (Welle Q2, ADR-0040).
+
+Not yet available: PMI, names for the faces these create, Windows
 and Intel Mac support for the native bridges, and interoperability checks
 beyond OpenCascade-based readers (OCCT, FreeCAD).
 
