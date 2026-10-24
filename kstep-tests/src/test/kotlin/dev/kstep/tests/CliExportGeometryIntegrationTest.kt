@@ -304,4 +304,20 @@ class CliExportGeometryIntegrationTest :
                     ).use { it.readBytes().toList() }
             }
         }
+
+        // Single-style goldens generated with the master CLI (95cce51, OCCT 7.9.3) BEFORE ADR-0039 S2.
+        for (golden in listOf("part-colour", "face-colour")) {
+            "single-style $golden export is byte-identical to the pre-S2 golden file".config(enabled = available) {
+                val script = copyFixture("export-golden-$golden.kstep.kts")
+                val out = File(workDir, "golden-$golden-out.step").apply { delete() }
+
+                val result = runner.run("export", script.name, "--out", out.name)
+
+                result.exitCode shouldBe 0
+                out.readBytes().toList() shouldBe
+                    requireNotNull(
+                        CliExportGeometryIntegrationTest::class.java.getResourceAsStream("/export-golden-$golden.step"),
+                    ).use { it.readBytes().toList() }
+            }
+        }
     })

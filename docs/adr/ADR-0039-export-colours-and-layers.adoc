@@ -103,6 +103,53 @@ runs, so uncoloured output is unchanged. The recommended band 0.4 to 0.95 of `Me
   `scripts/interop/verify-export-colours-layers.sh`. FreeCAD cannot report colours in a headless `freecadcmd` (the
   colour needs the GUI importer or view objects); that part of the FreeCAD check is therefore limited to geometry.
 * Byte identity of unstyled exports against goldens made before the change.
+* S2 (see below): `Ap242GeometryExtractionStyledTest` (21 cases, no native bridge), the S2 cases of
+  `OcctExportColoursLayersTest` and `CliExportOcctColoursLayersIntegrationTest`, the example of `docs/usage.adoc`
+  (compared with its fixture), and sections e) to g) of `verify-export-colours-layers.sh`.
+
+== S2: part colour together with face colours (`OVER_RIDING_STYLED_ITEM`)
+
+Welle S rejected a part that has a colour AND a coloured face: `STEPCAFControl_Writer` writes the face colour as an
+`OVER_RIDING_STYLED_ITEM`, which was not on the allow-list of D4, so the export stopped with "unexpected entity
+OVER_RIDING_STYLED_ITEM ... refusing to merge it". A part with only a part colour, or only face colours, was not affected.
+
+Measured with `spike_export_styles.cpp` (OCCT 7.9.3, `write.step.assembly` 0 and 2 give identical entities):
+
+[cols="2,4"]
+|===
+|Scenario |Result
+
+|`part-face` (orange part, blue top face) |One more entity than `part`: `OVER_RIDING_STYLED_ITEM('overriding color',(#psa),#face,#styled_item_of_the_solid)`, with its own `PRESENTATION_STYLE_ASSIGNMENT` chain ending in `DRAUGHTING_PRE_DEFINED_COLOUR('blue')`. `item` is the `ADVANCED_FACE`, `over_ridden_style` is the `STYLED_ITEM` of the `MANIFOLD_SOLID_BREP`. The MDGPR lists both styled items.
+|`part-face-layer` |As above, plus `PRESENTATION_LAYER_ASSIGNMENT('Layer-F','visible',(#face))`: the layer sits on the face.
+|`part-faces-multi` (orange, top blue, bottom red) |Two overriding items, both overriding the same solid `STYLED_ITEM`. Chain length 1.
+|`part-face-same` (face colour equals part colour) |The override is still written (it reuses the part's `COLOUR_RGB`). `kstep import` reports a face style.
+|`part-face-assembly` (two parts, one with a face colour) |One `MDGPR` per part; the override belongs to the first part only.
+|New entity types besides `OVER_RIDING_STYLED_ITEM` |None. No `INVISIBILITY`, no `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM`.
+|===
+
+Rules added to D4 (all fail closed, any violation is a `ShapeExportException` naming the `#id`):
+
+* `OVER_RIDING_STYLED_ITEM` joins the allow-list and the roots of the style closure. Everything else outside the list is
+  still refused, as before.
+* A styled item (either type) must be a simple instance, not a complex one. `STYLED_ITEM` has exactly 3 arguments,
+  `OVER_RIDING_STYLED_ITEM` exactly 4. The check on the target used to look for the name `STYLED_ITEM` only, which an
+  overriding item does not contain; it now covers both.
+* An overriding item must be attached to an `ADVANCED_FACE` or `FACE_SURFACE`, never to a solid (the spike never shows a
+  solid override).
+* `over_ridden_style` must be a reference to a styled item inside the style closure; a colour, a face, a solid, an
+  undefined id or product structure is refused. Chains are followed iteratively with their own visited set: a cycle
+  (including self-reference) is refused, as is a chain longer than 16 (OCCT writes 1), and the chain must end at a plain
+  `STYLED_ITEM` on a `MANIFOLD_SOLID_BREP`.
+* The face of the override must lie below that solid (`facesBelow`: iterative, bounded by 200000 instances, computed once
+  per solid), so an override cannot recolour a face of another solid.
+* Every item of an MDGPR must be a styled item of the style closure.
+
+Numbering needs no new code: `Part21Document.renumbered` shifts every `#N`, also in the fourth argument. A test
+renumbers the merged subgraph by 1000, checks both references, that no reference dangles and that the result reads back
+(`Part21ReadMode.TOLERANT`, because `STRICT` knows only kSTEP's own entities).
+
+Single-style goldens (`export-golden-part-colour.step`, `export-golden-face-colour.step`) were produced with the master
+CLI (95cce51, OCCT 7.9.3) before any code change; the guard test passes on both the old and the new code.
 
 == Not covered
 

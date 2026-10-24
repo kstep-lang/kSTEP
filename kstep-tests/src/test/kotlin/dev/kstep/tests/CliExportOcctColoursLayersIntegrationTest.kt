@@ -97,6 +97,89 @@ class CliExportOcctColoursLayersIntegrationTest :
             json["totals"]!!.jsonObject["volume"]!!.jsonPrimitive.double shouldBe (7000.0 plusOrMinus 1e-6)
         }
 
+        fun repoFile(relative: String): File {
+            var dir: File? = File(System.getProperty("user.dir")).absoluteFile
+            while (dir != null && !File(dir, relative).isFile) dir = dir.parentFile
+            return requireNotNull(
+                dir,
+            ) { "$relative not found above ${System.getProperty("user.dir")}" }.resolve(relative)
+        }
+
+        fun assertPartAndFace(
+            part: JsonObject,
+            height: Double,
+        ) {
+            part["volume"]!!.jsonPrimitive.double shouldBe (200.0 * height plusOrMinus 1e-6)
+            val colour = part["colour"]!!.jsonObject
+            colour["r"]!!.jsonPrimitive.double shouldBe (1.0 plusOrMinus 1e-6)
+            colour["g"]!!.jsonPrimitive.double shouldBe (0.5 plusOrMinus 1e-6)
+            colour["b"]!!.jsonPrimitive.double shouldBe (0.0 plusOrMinus 1e-6)
+            val faceStyle = part["faceStyles"]!!.jsonArray.single().jsonObject
+            faceStyle["colour"]!!.jsonObject["b"]!!.jsonPrimitive.double shouldBe (1.0 plusOrMinus 1e-6)
+            faceStyle["colour"]!!.jsonObject["r"]!!.jsonPrimitive.double shouldBe (0.0 plusOrMinus 1e-6)
+        }
+
+        "a part colour together with a top face colour exports and comes back through kstep import".config(
+            enabled = available,
+        ) {
+            for (height in listOf("30.0", "40.0")) {
+                val script =
+                    copyFixture(
+                        "export-colour-part-and-face.kstep.kts",
+                    ) { it.replace("val height = 30.0", "val height = $height") }
+                val out = File(workDir, "part-and-face-$height.step").apply { delete() }
+                val exported = runner.run("export", script.name, "--out", out.name)
+                exported.exitCode shouldBe 0
+                out.readText() shouldContain "OVER_RIDING_STYLED_ITEM"
+
+                val part = importJson(out)["parts"]!!.jsonArray.single().jsonObject
+                assertPartAndFace(part, height.toDouble())
+                part["faceStyles"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject["layers"]!!
+                    .jsonArray
+                    .map { it.jsonPrimitive.content } shouldBe listOf("Layer-F")
+                part["faceStyles"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject["face"]!!
+                    .jsonPrimitive.int shouldBe 5
+            }
+        }
+
+        "an assembly where only one part has a face colour keeps every part colour".config(enabled = available) {
+            val script = copyFixture("export-colour-assembly-part-face.kstep.kts")
+            val out = File(workDir, "assembly-part-face.step").apply { delete() }
+            runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+
+            val parts = importJson(out)["parts"]!!.jsonArray.map { it.jsonObject }
+            val red = parts.single { it["productId"]!!.jsonPrimitive.content == "RED" }
+            val green = parts.single { it["productId"]!!.jsonPrimitive.content == "GREEN" }
+            red["colour"]!!.jsonObject["r"]!!.jsonPrimitive.double shouldBe (1.0 plusOrMinus 1e-6)
+            red["faceStyles"]!!.jsonArray.size shouldBe 1
+            green["colour"]!!.jsonObject["g"]!!.jsonPrimitive.double shouldBe (0.6 plusOrMinus 1e-6)
+            (green["faceStyles"]?.jsonArray?.size ?: 0) shouldBe 0
+        }
+
+        "the colours-and-layers example in docs/usage.adoc exports and reads back".config(enabled = available) {
+            val doc = repoFile("docs/usage.adoc").readText()
+            val section = doc.substring(doc.indexOf("[[colours-layers]]"))
+            val start = section.indexOf("----\n", section.indexOf("[source,kotlin]")) + 5
+            val block = section.substring(start, section.indexOf("----\n", start))
+            // Drift guard: the fixture contains the documentation block verbatim.
+            copyFixture("export-docs-colours-layers.kstep.kts").readText() shouldContain block
+
+            val out = File(workDir, "docs-example.step").apply { delete() }
+            runner.run("export", "export-docs-colours-layers.kstep.kts", "--out", out.name).exitCode shouldBe 0
+            val part = importJson(out)["parts"]!!.jsonArray.single().jsonObject
+            part["colour"]!!.jsonObject["r"]!!.jsonPrimitive.double shouldBe (1.0 plusOrMinus 1e-6)
+            part["layers"]!!.jsonArray.map { it.jsonPrimitive.content } shouldBe listOf("Housing")
+            val face = part["faceStyles"]!!.jsonArray.single().jsonObject
+            face["colour"]!!.jsonObject["b"]!!.jsonPrimitive.double shouldBe (1.0 plusOrMinus 1e-6)
+            face["layers"]!!.jsonArray.map { it.jsonPrimitive.content } shouldBe listOf("Top")
+        }
+
         "an invalid colour exits non-zero with KSTEP-S-012 in text and JSON and writes no file".config(
             enabled = available,
         ) {

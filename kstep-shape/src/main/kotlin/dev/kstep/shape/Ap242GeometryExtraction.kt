@@ -58,6 +58,7 @@ internal object Ap242GeometryExtraction {
         setOf(
             "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
             "STYLED_ITEM",
+            "OVER_RIDING_STYLED_ITEM",
             "PRESENTATION_STYLE_ASSIGNMENT",
             "SURFACE_STYLE_USAGE",
             "SURFACE_SIDE_STYLE",
@@ -70,7 +71,18 @@ internal object Ap242GeometryExtraction {
         )
 
     private val STYLE_ROOT_NAMES: Set<String> =
-        setOf("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION", "STYLED_ITEM", "PRESENTATION_LAYER_ASSIGNMENT")
+        setOf(
+            "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
+            "STYLED_ITEM",
+            "OVER_RIDING_STYLED_ITEM",
+            "PRESENTATION_LAYER_ASSIGNMENT",
+        )
+
+    private val STYLED_ITEM_NAMES: Set<String> = setOf("STYLED_ITEM", "OVER_RIDING_STYLED_ITEM")
+
+    /** OCCT writes a chain length of 1 (a face override of the solid's colour); the bound only guards against abuse. */
+    private const val MAX_OVERRIDE_CHAIN = 16
+    private val FACE_NAMES: Set<String> = setOf("ADVANCED_FACE", "FACE_SURFACE")
 
     /** What a `STYLED_ITEM` or a `PRESENTATION_LAYER_ASSIGNMENT` may be attached to. */
     private val STYLE_TARGET_NAMES: Set<String> = setOf("MANIFOLD_SOLID_BREP", "ADVANCED_FACE", "FACE_SURFACE")
@@ -79,6 +91,11 @@ internal object Ap242GeometryExtraction {
      * Like [extract], plus the colour and layer entities of the document. Fails closed: every style entity must be on
      * the allow-list [STYLE_ENTITY_NAMES], must attach only to solids or faces inside the geometry closure, and its own
      * downward closure may only end in the geometry closure -- never in product structure.
+     *
+     * A face colour on a coloured part is written by OCCT as an `OVER_RIDING_STYLED_ITEM(name, styles, face,
+     * over_ridden_style)` (ADR-0039 S2). It is accepted only as a simple instance with four arguments, attached to a
+     * face, overriding a styled item of the style closure through a bounded, acyclic chain that ends in a plain
+     * `STYLED_ITEM` on a solid containing that face. Anything else is refused.
      */
     fun extractStyled(document: Part21RawDocument): GeometrySubgraph {
         val base = extract(document)
@@ -116,40 +133,158 @@ internal object Ap242GeometryExtraction {
 
         val styleInstances = document.instances.filter { it.id in styleIds }
         val geometryById = base.instances.associateBy { it.id }
+        val styleById = styleInstances.associateBy { it.id }
+        val facesBySolid = HashMap<Int, Set<Int>>()
         for (instance in styleInstances) {
             val names = entityNamesOf(instance)
-            val simple = instance as? Part21SimpleInstance
-            val targets: List<Part21Value> =
-                when {
-                    "STYLED_ITEM" in names -> listOfNotNull(simple?.args?.getOrNull(2))
-                    "PRESENTATION_LAYER_ASSIGNMENT" in names ->
-                        (simple?.args?.getOrNull(2) as? Part21Value.ListValue)?.items.orEmpty()
-                    else -> emptyList()
-                }
-            if (("STYLED_ITEM" in names || "PRESENTATION_LAYER_ASSIGNMENT" in names) &&
-                (simple == null || targets.isEmpty())
-            ) {
-                throw ShapeExportException("#${instance.id} has no recognisable style target")
-            }
-            for (target in targets) {
-                val ref = (target as? Part21Value.Ref)?.id
-                val referenced = ref?.let { geometryById[it] }
-                if (referenced == null || entityNamesOf(referenced).none { it in STYLE_TARGET_NAMES }) {
-                    throw ShapeExportException(
-                        "#${instance.id} is attached to something that is neither a solid nor a face of the exported shape",
-                    )
-                }
-            }
-            if ("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" in names) {
-                val context = (simple?.args?.getOrNull(2) as? Part21Value.Ref)?.id
-                if (context == null || context !in geometryIds) {
-                    throw ShapeExportException("#${instance.id} does not use the representation context of the shape")
-                }
+            when {
+                names.any { it in STYLED_ITEM_NAMES } ->
+                    checkStyledItem(instance, geometryById, styleById) { solidId ->
+                        facesBySolid.getOrPut(solidId) { facesBelow(solidId, geometryById) }
+                    }
+                "PRESENTATION_LAYER_ASSIGNMENT" in names -> checkLayerAssignment(instance, geometryById)
+                "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" in names ->
+                    checkPresentationRepresentation(instance, geometryIds, styleById)
             }
         }
 
         val all = base.instances.map { it.id }.toSet() + styleIds
         return GeometrySubgraph(document.instances.filter { it.id in all }, base.rootRepresentationId)
+    }
+
+    private fun refId(value: Part21Value?): Int? = (value as? Part21Value.Ref)?.id
+
+    private fun isTargetOf(
+        id: Int?,
+        geometryById: Map<Int, Part21EntityInstance>,
+        allowed: Set<String>,
+    ): Boolean = id?.let { geometryById[it] }?.let { entityNamesOf(it).any { name -> name in allowed } } == true
+
+    private fun checkStyledItem(
+        instance: Part21EntityInstance,
+        geometryById: Map<Int, Part21EntityInstance>,
+        styleById: Map<Int, Part21EntityInstance>,
+        facesOf: (Int) -> Set<Int>,
+    ) {
+        val simple = instance as? Part21SimpleInstance
+        if (simple == null || entityNamesOf(instance).size != 1) {
+            throw ShapeExportException("#${instance.id} is a complex instance containing a styled item -- refusing it")
+        }
+        val overriding = simple.entityName == "OVER_RIDING_STYLED_ITEM"
+        val expectedArgs = if (overriding) 4 else 3
+        if (simple.args.size != expectedArgs) {
+            throw ShapeExportException(
+                "#${instance.id} ${simple.entityName} has ${simple.args.size} arguments, expected $expectedArgs",
+            )
+        }
+        val target = refId(simple.args[2])
+        if (!isTargetOf(target, geometryById, STYLE_TARGET_NAMES)) {
+            throw ShapeExportException(
+                "#${instance.id} is attached to something that is neither a solid nor a face of the exported shape",
+            )
+        }
+        if (overriding) {
+            if (!isTargetOf(target, geometryById, FACE_NAMES)) {
+                throw ShapeExportException(
+                    "#${instance.id} is an over-riding styled item that is not attached to a face",
+                )
+            }
+            val solid = overriddenSolid(simple, styleById, geometryById)
+            if (target !in facesOf(solid)) {
+                throw ShapeExportException(
+                    "#${instance.id} overrides the style of a solid that does not contain its face #$target",
+                )
+            }
+        }
+    }
+
+    /** Follows `over_ridden_style` iteratively to the plain `STYLED_ITEM` and returns the solid it is attached to. */
+    private fun overriddenSolid(
+        start: Part21SimpleInstance,
+        styleById: Map<Int, Part21EntityInstance>,
+        geometryById: Map<Int, Part21EntityInstance>,
+    ): Int {
+        val visited = mutableSetOf(start.id)
+        var current: Part21SimpleInstance = start
+        while (current.entityName == "OVER_RIDING_STYLED_ITEM") {
+            val nextId = refId(current.args.getOrNull(3))
+            val next = nextId?.let { styleById[it] } as? Part21SimpleInstance
+            if (next == null || next.entityName !in STYLED_ITEM_NAMES) {
+                throw ShapeExportException(
+                    "#${current.id} overrides something that is not a styled item of the colour and layer entities",
+                )
+            }
+            if (!visited.add(next.id)) {
+                throw ShapeExportException("the over-riding chain of #${start.id} loops at #${next.id}")
+            }
+            if (visited.size > MAX_OVERRIDE_CHAIN) {
+                throw ShapeExportException(
+                    "the over-riding chain of #${start.id} exceeds the maximum length of $MAX_OVERRIDE_CHAIN",
+                )
+            }
+            current = next
+        }
+        val solid = refId(current.args.getOrNull(2))
+        if (solid == null || !isTargetOf(solid, geometryById, setOf("MANIFOLD_SOLID_BREP"))) {
+            throw ShapeExportException("the over-riding chain of #${start.id} does not end at a styled solid")
+        }
+        return solid
+    }
+
+    /** All faces below a solid; iterative, bounded by [MAX_CLOSURE_SIZE], computed once per solid by the caller. */
+    private fun facesBelow(
+        solidId: Int,
+        geometryById: Map<Int, Part21EntityInstance>,
+    ): Set<Int> {
+        val seen = HashSet<Int>()
+        val faces = HashSet<Int>()
+        val stack = ArrayDeque<Int>()
+        stack.addLast(solidId)
+        while (stack.isNotEmpty()) {
+            val id = stack.removeLast()
+            if (!seen.add(id)) continue
+            if (seen.size > MAX_CLOSURE_SIZE) {
+                throw ShapeExportException("solid #$solidId exceeds the maximum supported size of $MAX_CLOSURE_SIZE")
+            }
+            val instance = geometryById[id] ?: continue
+            if (entityNamesOf(instance).any { it in FACE_NAMES }) faces.add(id)
+            for (ref in instance.referencedIds()) stack.addLast(ref)
+        }
+        return faces
+    }
+
+    private fun checkLayerAssignment(
+        instance: Part21EntityInstance,
+        geometryById: Map<Int, Part21EntityInstance>,
+    ) {
+        val listArg = (instance as? Part21SimpleInstance)?.args?.getOrNull(2)
+        val targets = (listArg as? Part21Value.ListValue)?.items.orEmpty()
+        if (targets.isEmpty()) throw ShapeExportException("#${instance.id} has no recognisable style target")
+        for (target in targets) {
+            if (!isTargetOf(refId(target), geometryById, STYLE_TARGET_NAMES)) {
+                throw ShapeExportException(
+                    "#${instance.id} is attached to something that is neither a solid nor a face of the exported shape",
+                )
+            }
+        }
+    }
+
+    private fun checkPresentationRepresentation(
+        instance: Part21EntityInstance,
+        geometryIds: Set<Int>,
+        styleById: Map<Int, Part21EntityInstance>,
+    ) {
+        val args = (instance as? Part21SimpleInstance)?.args
+        val context = refId(args?.getOrNull(2))
+        if (context == null || context !in geometryIds) {
+            throw ShapeExportException("#${instance.id} does not use the representation context of the shape")
+        }
+        for (item in (args?.getOrNull(1) as? Part21Value.ListValue)?.items.orEmpty()) {
+            val styled = refId(item)?.let { styleById[it] }
+            if (styled == null || entityNamesOf(styled).none { it in STYLED_ITEM_NAMES }) {
+                throw ShapeExportException("#${instance.id} lists an item that is not a styled item")
+            }
+        }
     }
 
     fun extract(document: Part21RawDocument): GeometrySubgraph {

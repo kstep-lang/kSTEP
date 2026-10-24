@@ -674,6 +674,10 @@ stepFile(fileName = "bracket.step") {
   right away against the shape already registered with `shape(...)` and never guesses (an empty or wrongly sized
   selection is `KSTEP-S-011` with the candidates). Because the script runs again on every rebuild, `Faces.atMax(Z)` stays
   the top face when a dimension changes.
+* A part colour and a face colour can be combined. OCCT writes the face colour as an `OVER_RIDING_STYLED_ITEM` that
+  overrides the part's `STYLED_ITEM` on that face (ADR-0039, section S2); `kstep import` reads both back.
+  The example above is the file `kstep-tests/src/test/resources/export-docs-colours-layers.kstep.kts`
+  (`bracket` is a part, `body` an `OcctKernel` shape), exported and read back by a test that also compares it with this block.
 * Colours are sRGB with components in 0..1: `StepColour.rgb(r, g, b)`, `StepColour.hex("#RRGGBB")` or the small
   palette `StepColours` (`RED`, `GREEN`, `BLUE`, `ORANGE`, `YELLOW`, `GREY`, `BLACK`, `WHITE`). Transparency is not supported
   (`#RRGGBBAA` is refused).

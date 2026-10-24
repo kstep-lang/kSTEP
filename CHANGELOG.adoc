@@ -23,6 +23,11 @@ minor versions may contain breaking changes.
 
 === Fixed
 
+* Export: a part colour together with a face colour no longer aborts with "unexpected entity OVER_RIDING_STYLED_ITEM ...
+  refusing to merge it". The overriding item is merged fail-closed: simple instance with four arguments, attached to a
+  face, overriding a styled item of the style closure through an acyclic chain of at most 16 that ends at a styled solid
+  containing that face; unknown entities are still refused (ADR-0039 S2). Two single-style golden files guard the
+  unchanged output.
 * Import: the new colour and layer mode made the OCCT transfer quadratic in the number of layer assignments and distinct
   colours (80k layers took 41 s under the global OCCT lock). A pre-transfer typed count now rejects more than 4096 layer
   assignments or 10000 colour definitions with `limit_exceeded` (`KSTEP-I-010`). The count also covers

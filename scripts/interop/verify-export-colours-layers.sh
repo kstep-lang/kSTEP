@@ -21,7 +21,7 @@ c++ -std=c++17 -I"$P/include/opencascade" -L"$P/lib" -Wl,-rpath,"$P/lib" "$ROOT/
 if [ "${1:-}" = "--spike" ]; then
   c++ -std=c++17 -I"$P/include/opencascade" -L"$P/lib" -Wl,-rpath,"$P/lib" "$ROOT/scripts/interop/spike_export_styles.cpp" \
     -o "$OUT/spike_export_styles" -lTKGeomAlgo -lTKTopAlgo -lTKG2d $LIBS 2>/dev/null
-  for sc in plain xcaf-plain part face layer alpha multi unicode; do
+  for sc in plain xcaf-plain part face layer alpha multi unicode part-face part-face-layer part-faces-multi part-face-same part-face-assembly; do
     for a in 0 2; do "$OUT/spike_export_styles" "$sc" "$a" "$OUT/spike-$sc-$a.step" >/dev/null 2>&1 && echo "spike $sc assembly=$a ok"; done
   done
 fi
@@ -44,15 +44,32 @@ echo "== c) placed assembly with two coloured parts"
 has_jq && "$KSTEP" import "$OUT/assembly.step" --output json 2>/dev/null \
   | jq -c '{parts: [.parts[] | {productId, colour, layers}], totals, placements: [.assemblies[0].components[] | {name, t: .placement.translation}]}'
 
-echo "== d) unstyled exports are byte-identical to the goldens generated before ADR-0039"
-for n in box multi-solid placed-assembly; do
+echo "== d) single-style and unstyled exports are byte-identical to the goldens generated before ADR-0039 / S2"
+for n in box multi-solid placed-assembly part-colour face-colour; do
   "$KSTEP" export "$RES/export-golden-$n.kstep.kts" --out "$OUT/golden-$n.step" >/dev/null 2>&1
   cmp "$OUT/golden-$n.step" "$RES/export-golden-$n.step" && echo "  $n identical"
 done
 
+echo "== e) part colour plus face colour (ADR-0039 S2), height 30 and 40"
+for h in 30.0 40.0; do
+  sed "s/val height = 30.0/val height = $h/" "$RES/export-colour-part-and-face.kstep.kts" > "$OUT/part-face-$h.kstep.kts"
+  "$KSTEP" export "$OUT/part-face-$h.kstep.kts" --out "$OUT/part-face-$h.step" 2>/dev/null
+  echo "-- height $h"; "$OUT/dump_xcaf_tree" styles "$OUT/part-face-$h.step"
+  has_jq && "$KSTEP" import "$OUT/part-face-$h.step" --output json 2>/dev/null | jq -c '.parts[0] | {volume, colour, faceStyles}'
+done
+
+echo "== f) placed assembly, only one part with a face colour"
+"$KSTEP" export "$RES/export-colour-assembly-part-face.kstep.kts" --out "$OUT/assembly-part-face.step" 2>/dev/null
+has_jq && "$KSTEP" import "$OUT/assembly-part-face.step" --output json 2>/dev/null \
+  | jq -c '{parts: [.parts[] | {productId, colour, faceStyles}], totals}'
+
+echo "== g) the example of docs/usage.adoc"
+"$KSTEP" export "$RES/export-docs-colours-layers.kstep.kts" --out "$OUT/docs-example.step" 2>/dev/null
+has_jq && "$KSTEP" import "$OUT/docs-example.step" --output json 2>/dev/null | jq -c '.parts[0] | {volume, colour, layers, faceStyles}'
+
 echo "== FreeCAD reads the styled files (geometry only; colours are not readable headless)"
 if [ -x "$FC" ]; then
-  for f in colour-layer-box assembly; do
+  for f in colour-layer-box assembly part-face-30.0 assembly-part-face; do
     echo "-- $f"
     PYTHONDONTWRITEBYTECODE=1 STEP_FILE="$OUT/$f.step" "$FC" "$ROOT/scripts/interop/freecad_read_styles.py" 2>&1 \
       | grep -E "^(objects|  )" || true

@@ -121,6 +121,150 @@ class OcctExportColoursLayersTest :
             }
         }
 
+        fun OcctStepDocument.faceColoursOf(node: Int) =
+            colors.filter {
+                it.nodeIndex == node &&
+                    it.target == XcafStyleTarget.FACE
+            }
+
+        "a part colour and a top face colour both read back, the face is the geometric top face".config(
+            enabled = available,
+        ) {
+            for (withLayer in listOf(false, true)) {
+                val layer = if (withLayer) ", layer = \"Layer-F\"" else ""
+                val text =
+                    export(
+                        """
+                        val box = part("PF")
+                        root(box)
+                        shape(box, OcctKernel.makeBox(10.0, 20.0, 30.0), colour = StepColour.rgb(1.0, 0.5, 0.0))
+                        styleFaces(box, Faces.atMax(Direction3.Z), colour = StepColour.rgb(0.0, 0.0, 1.0)$layer, expected = 1)
+                        """.trimIndent(),
+                    )
+                text shouldContain "OVER_RIDING_STYLED_ITEM"
+                read(text).use { doc ->
+                    val part = doc.nodes.single { it.kind == XcafNodeKind.PART }
+                    val partColour = doc.colors.single { it.target != XcafStyleTarget.FACE }
+                    partColour.color.red shouldBe (1.0 plusOrMinus 1e-6)
+                    partColour.color.green shouldBe (0.5 plusOrMinus 1e-6)
+                    partColour.color.blue shouldBe (0.0 plusOrMinus 1e-6)
+                    val faceColour = doc.faceColoursOf(part.index).single()
+                    faceColour.color.blue shouldBe (1.0 plusOrMinus 1e-6)
+                    faceColour.color.red shouldBe (0.0 plusOrMinus 1e-6)
+                    doc.partShape(part.index).use { shape ->
+                        shape.volume shouldBe (6000.0 plusOrMinus 1e-6)
+                        val face = shape.faces.single { it.index == faceColour.subIndex }
+                        face.area shouldBe (200.0 plusOrMinus 1e-6)
+                        face.normal!!.z shouldBe (1.0 plusOrMinus 1e-9)
+                        face.centroid.z shouldBe (30.0 plusOrMinus 1e-9)
+                        // the same face the selector picks, not a hard-coded index
+                        face.index shouldBe shape.faces.maxBy { it.centroid.z }.index
+                    }
+                    if (withLayer) {
+                        val faceLayer = doc.layers.single()
+                        faceLayer.layer shouldBe "Layer-F"
+                        faceLayer.target shouldBe XcafStyleTarget.FACE
+                        faceLayer.subIndex shouldBe faceColour.subIndex
+                    } else {
+                        doc.layers.size shouldBe 0
+                    }
+                }
+            }
+        }
+
+        "a part colour with a top and a bottom face colour keeps three distinct styles on the right faces".config(
+            enabled = available,
+        ) {
+            val text =
+                export(
+                    """
+                    val box = part("PM")
+                    root(box)
+                    shape(box, OcctKernel.makeBox(10.0, 20.0, 30.0), colour = StepColour.rgb(1.0, 0.5, 0.0))
+                    styleFaces(box, Faces.atMax(Direction3.Z), colour = StepColour.rgb(0.0, 0.0, 1.0), expected = 1)
+                    styleFaces(box, Faces.atMin(Direction3.Z), colour = StepColour.rgb(1.0, 0.0, 0.0), expected = 1)
+                    """.trimIndent(),
+                )
+            read(text).use { doc ->
+                val part = doc.nodes.single { it.kind == XcafNodeKind.PART }
+                val faces = doc.faceColoursOf(part.index)
+                faces.size shouldBe 2
+                doc.partShape(part.index).use { shape ->
+                    val top = faces.single { it.color.blue > 0.5 }
+                    val bottom = faces.single { it.color.red > 0.5 }
+                    shape.faces
+                        .single { it.index == top.subIndex }
+                        .normal!!
+                        .z shouldBe (1.0 plusOrMinus 1e-9)
+                    shape.faces
+                        .single { it.index == bottom.subIndex }
+                        .normal!!
+                        .z shouldBe (-1.0 plusOrMinus 1e-9)
+                }
+            }
+        }
+
+        "a face colour equal to the part colour is still written as an override and reads back as a face style".config(
+            enabled = available,
+        ) {
+            val text =
+                export(
+                    """
+                    val box = part("SAME")
+                    root(box)
+                    shape(box, OcctKernel.makeBox(10.0, 20.0, 30.0), colour = StepColour.rgb(1.0, 0.5, 0.0))
+                    styleFaces(box, Faces.atMax(Direction3.Z), colour = StepColour.rgb(1.0, 0.5, 0.0), expected = 1)
+                    """.trimIndent(),
+                )
+            text shouldContain "OVER_RIDING_STYLED_ITEM"
+            read(text).use { doc ->
+                val part = doc.nodes.single { it.kind == XcafNodeKind.PART }
+                doc
+                    .faceColoursOf(part.index)
+                    .single()
+                    .color.green shouldBe (0.5 plusOrMinus 1e-6)
+            }
+        }
+
+        "a placed assembly with a face colour on one of two coloured parts keeps all colours and the placement".config(
+            enabled = available,
+        ) {
+            val text =
+                export(
+                    """
+                    val asm = part("ASM")
+                    val red = part("RED")
+                    val green = part("GREEN")
+                    val nr = nextAssemblyUsageOccurrence("NR") { name = "r"; relatingProductDefinition = asm; relatedProductDefinition = red }.getOrThrow()
+                    val ng = nextAssemblyUsageOccurrence("NG") { name = "g"; relatingProductDefinition = asm; relatedProductDefinition = green }.getOrThrow()
+                    roots(nr, ng)
+                    shape(red, OcctKernel.makeBox(10.0, 20.0, 30.0), colour = StepColour.rgb(1.0, 0.0, 0.0))
+                    styleFaces(red, Faces.atMax(Direction3.Z), colour = StepColour.rgb(0.0, 0.0, 1.0), expected = 1)
+                    shape(green, OcctKernel.makeBox(10.0, 10.0, 10.0), colour = StepColour.rgb(0.0, 0.6, 0.0))
+                    place(ng, translation = vec(30.0, 0.0, 0.0))
+                    """.trimIndent(),
+                )
+            read(text).use { doc ->
+                val byName = doc.nodes.filter { it.kind == XcafNodeKind.PART }.associateBy { it.name }
+                val red = byName.getValue("RED")
+                val green = byName.getValue("GREEN")
+                doc.colors
+                    .single { it.nodeIndex == red.index && it.target != XcafStyleTarget.FACE }
+                    .color.red shouldBe (1.0 plusOrMinus 1e-6)
+                doc.colors
+                    .single { it.nodeIndex == green.index }
+                    .color.green shouldBe (0.6 plusOrMinus 1e-6)
+                doc
+                    .faceColoursOf(red.index)
+                    .single()
+                    .color.blue shouldBe (1.0 plusOrMinus 1e-6)
+                doc.faceColoursOf(green.index).size shouldBe 0
+                doc.nodes
+                    .single { it.kind == XcafNodeKind.COMPONENT && it.referredIndex == green.index }
+                    .localMatrix[3] shouldBe (30.0 plusOrMinus 1e-9)
+            }
+        }
+
         "two coloured parts of a placed assembly keep their colours and their placement".config(enabled = available) {
             val text =
                 export(
