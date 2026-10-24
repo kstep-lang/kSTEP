@@ -3,7 +3,7 @@
 
 Per the project's scope-reduction decision (kSTEP-ADR-0001, analogous to
 kUML-ADR-0004), V1 deliberately excludes B-rep geometry and PMI (a geometry layer
-was added afterwards, see Welle H to L below), and
+was added afterwards, see Welle H to S below; PMI is still not supported), and
 focuses on a semantic core that a type-safe DSL benefits from most:
 
 . EXPRESS parser (done) + EXPRESS-to-Kotlin code generation (done, see
@@ -216,9 +216,8 @@ xref:status.adoc#status[Status] for `KSTEP-M-002`'s scope):
   verified in `Part21RoundtripTest`) — see xref:status.adoc#status[Status] and
   xref:usage.adoc[Usage]. **Still open, and not to be conflated with the above**:
   kSTEP-ADR-0001's actual acceptance bar is a lossless roundtrip
-  through an *external* CAD/PLM tool (e.g. FreeCAD), which has not
-  been attempted — no such tool is available in this development
-  environment. A self-roundtrip proves internal consistency (the
+  through an *external* CAD/PLM system other than OpenCascade-based
+  readers and FreeCAD (checks with those are listed below). A self-roundtrip proves internal consistency (the
   writer and reader agree with each other); it does not prove kSTEP's
   Part 21 output is actually interoperable with real-world STEP
   tooling, nor that this reader can parse real-world Part 21 files
@@ -278,8 +277,10 @@ xref:status.adoc#status[Status] for `KSTEP-M-002`'s scope):
   measured result" claim on top of `OcctKernel` exactly as it already is —
   see the `kstep-geometry` row in xref:modules.adoc[Modules] and
   `docs/adr/ADR-0015-parametric-feature-history-foundation.adoc` for the
-  scope boundary (still no stable geometric edge identity, undo/redo,
-  feature-tree UI, or serialization — all remain open follow-ups).
+  scope boundary (at that time no stable geometric edge identity, undo/redo,
+  feature-tree UI, or serialization; persistent edge names and in-memory
+  undo/redo followed with Welle N and N2, a feature-tree UI and a persisted
+  history are still open).
   **(Welle J, done)** Booleans, cylinder, hole, revolve, chamfer and rigid
   transforms on the OCCT bridge — see ADR-0029; open: multi-body results,
   cone/sphere, arbitrary revolve axes, sweep/loft. **(Welle P, done)** Mirror and
@@ -299,10 +300,10 @@ xref:status.adoc#status[Status] for `KSTEP-M-002`'s scope):
   C-Welle 2b. **(C-Welle 2c, done)** Parallel and perpendicular
   constraints added on the same points-only API — see the
   `kstep-constraints` row in xref:modules.adoc[Modules] and
-  `docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc`. Still
-  remaining: `L2LAngle`/`P2PAngle` (angle-between-line/point-pairs) and
-  `CoordinateX`/`CoordinateY`, deferred to C-Welle 3 alongside sketch
-  entities. Sketch entities, an incremental/interactive solver,
+  `docs/adr/ADR-0014-planegcs-parallel-and-perpendicular.adoc`. `L2LAngle`
+  arrived with Welle M as the sketch constraint `angle(l1, l2, degrees)`
+  (ADR-0032); still remaining: `P2PAngle` and `CoordinateX`/`CoordinateY`.
+  An incremental/interactive solver,
   PlaneGCS's own diagnosis API, AP242 mapping of sketches,
   multi-platform support beyond Linux x86-64 and macOS arm64, and a WASM path remain later items
   (the `kstep-sketch` module itself arrived with Welle L). Additional
@@ -337,16 +338,35 @@ xref:status.adoc#status[Status] for `KSTEP-M-002`'s scope):
   render` in SVG/PNG/text — see `docs/adr/ADR-0011-headless-preview-
   rendering.adoc`. **(gltf-glb-export wave, done)** `kstep render -f glb`
   additionally exports a self-contained, Khronos-validator-clean binary
-  glTF 2.0 document — see `docs/adr/ADR-0016-gltf-glb-export.adoc`. Still
+  glTF 2.0 document — see `docs/adr/ADR-0016-gltf-glb-export.adoc`.
   **(Welle L, done)** The constraint-sketch DSL (`kstep-sketch`: `sketch { }`,
   degrees-of-freedom analysis, extrude/revolve of regions with holes) and
   geometric edge selection with edge tracking through OCCT's history for
   `fillet`/`chamfer` -- see ADR-0031 and the "Sketches and edge selection"
-  usage section. Honest scope: circle/arc radii are fixed measures (no
-  tangency, equal-radius or angle constraints yet), a sketch is solved once
-  and is not a re-solving history feature, tracked edges follow only
-  operations that report a history (no revolve/extrude source, no generated
-  edges), and the selection is stable only while its geometric predicate
-  stays true. Still open: undo/redo, those sketch follow-ups, and
-  multi-platform distribution of the viewer/CLI beyond linux-x86-64 and
-  macOS arm64.
+  usage section. Scope at Welle L: circle/arc radii were fixed measures, a
+  sketch was solved once, and tracked edges followed only operations that
+  report a history; the selection is stable only while its geometric
+  predicate stays true.
+  **(Welle M, done)** Radii as solver unknowns, `radius`/`diameter`/
+  `equalRadius`/`tangent`/`angle` constraints, `SketchFeature` as a
+  re-solving step of a feature history, and several bodies from one sketch --
+  see ADR-0032; open: tangency at arc ends, contours touching each other.
+  **(Welle N and N2, done)** Persistent names for edges generated by extrude
+  and revolve and by fillet, chamfer, boolean and hole (`GeneratedEdges`), and
+  in-memory undo/redo (`FeatureHistory`) -- see ADR-0033 and ADR-0034; open:
+  names for multi-body sketches and for the inner wall of a shell, a persisted
+  history, a feature-tree UI.
+  **(Welle O, done)** `kstep render`, `kstep asciidoc` and the preview (SVG,
+  PNG, GLB) draw every instance of a placed assembly at its composed place --
+  see ADR-0035; a model with several shapes but no assembly usage still
+  previews the first shape only.
+  **(Welle R and S, done)** Colours (sRGB) and layers of parts and faces are
+  written by `kstep export` and read back by `kstep import`, which also reports
+  the length unit, bounds the known OCCT worst cases before the transfer and
+  runs in a supervised worker process -- see ADR-0038 and ADR-0039; open:
+  transparency, colours and layers on assembly instances, edge colours, face
+  colours in the preview, PMI, and a time/memory bound for library callers of
+  the importer.
+  Still open across the geometry layer: multi-platform distribution of the
+  native bridges, viewer and CLI beyond Linux x86-64 and macOS arm64 (Windows
+  and Intel Macs are not supported).

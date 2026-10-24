@@ -33,3 +33,10 @@ matched except by `Edges.seams()`. Without the PlaneGCS bridge (for example the 
 `KSTEP-S-009` and a hint; everything that does not solve a sketch is unaffected.
 `scripts/interop/verify-sketch-selection.sh` re-checks all four example exports with OCCT and FreeCAD. See
 docs/adr/ADR-0031-sketch-dsl-and-edge-selection.adoc.
+
+Since Welle M (ADR-0032) radii are no longer only fixed measures: `fixedRadius = false` makes a radius a solver
+unknown, with the constraints `radius`, `diameter`, `equalRadius`, `tangent(line, circle)`, `tangent(circle, circle,
+internal)` and `angle(l1, l2, degrees)`. `sketchFeature(...)` makes a sketch a re-solving step of a feature history,
+and several separate outer contours become several bodies (`toRegions()`). Tangency at arc ends and contours touching
+each other are not supported. `scripts/interop/verify-sketch-extensions.sh` re-checks the examples. See
+docs/adr/ADR-0032-sketch-extensions.adoc and, for naming the edges of a sketch, xref:usage-naming.adoc[Usage: naming].

@@ -58,17 +58,24 @@ afterwards as an optional layer.
 
 == Status
 
-The current release is **v0.2.0** (2026-10-22), a pre-release; the `master`
-branch carries further work listed under "Unreleased" in the
+The current release is **v0.3.0** (2026-10-24), a pre-release; changes on
+the `master` branch after it are listed under "Unreleased" in the
 link:CHANGELOG.adoc[CHANGELOG]. What is in place:
 
 * EXPRESS parser, semantic model and Kotlin code generation, with an
   AP242 V1 entity layer (`kstep-core`) and STEP Part 21 export/import.
 * A Kotlin scripting host for `*.kstep.kts` files, the `kstep` command-line
   tool (`export`, `import`, `render`, `asciidoc`, `mcp`) and an MCP server.
-* Optional geometry: an OpenCascade (OCCT) bridge, a PlaneGCS sketch solver and
+* Optional geometry: an OpenCascade (OCCT) bridge (primitives, booleans, holes,
+  fillet/chamfer, mirror, uniform scale, shell, edge/face/vertex selection,
+  persistent edge names, a feature history with undo/redo), a PlaneGCS sketch
+  solver, placed assemblies, colours and layers in export and import, and
   headless preview rendering. Both native bridges need system libraries
-  and are not part of the release zip.
+  (Linux x86-64 or macOS arm64) and are not part of the release zip.
+
+Not yet available: PMI, pocket/hole from a face, draft and thickening, Windows
+and Intel Mac support for the native bridges, and interoperability checks
+beyond OpenCascade-based readers (OCCT, FreeCAD).
 
 The wave-by-wave log is in link:docs/status.adoc[Status]; open points are in
 the link:docs/roadmap.adoc[Roadmap]. Both say what is and is not verified.
@@ -216,7 +223,7 @@ Details per module: link:docs/modules.adoc[Modules].
 | link:docs/modules.adoc[Modules] | Per-module reference.
 | link:docs/building.adoc[Building] | Build, CI, and the optional OCCT, PlaneGCS, viewer and validator setups.
 | link:docs/releasing.adoc[Releasing] | How a release is cut.
-| link:docs/usage.adoc[Usage] | Library and CLI usage, MCP server, scripts.
+| link:docs/usage.adoc[Usage] | Library and CLI usage, MCP server, scripts, colours and layers in the export.
 | link:docs/usage-sketches.adoc[Usage: sketches] | Sketches and edge selection.
 | link:docs/usage-naming.adoc[Usage: naming] | Persistent edge naming, undo/redo.
 | link:docs/usage-mirror-scale-shell.adoc[Usage: mirror, scale, shell] | Mirror, scale, face and vertex selection, shell.
