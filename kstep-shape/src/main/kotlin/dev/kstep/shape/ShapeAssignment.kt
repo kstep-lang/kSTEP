@@ -2,6 +2,7 @@ package dev.kstep.shape
 
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.geometry.OcctShape
+import dev.kstep.geometry.style.ShapeStyle
 
 /**
  * Genuinely one AP242 product definition, coupled to genuinely one OCCT solid.
@@ -21,4 +22,9 @@ data class ShapeAssignment(
     val shape: OcctShape,
     /** The `name` of the emitted `PRODUCT_DEFINITION_SHAPE`. An empty string is the usual value. */
     val shapeName: String = "",
+    /**
+     * Colour and layers of the part and of some of its faces (ADR-0039). An annotation on the result: no shape
+     * operation, no effect on the feature history. [ShapeStyle.NONE] keeps the export byte-identical to earlier versions.
+     */
+    val style: ShapeStyle = ShapeStyle.NONE,
 )

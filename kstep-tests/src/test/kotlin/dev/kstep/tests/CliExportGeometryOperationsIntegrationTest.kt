@@ -79,7 +79,7 @@ class CliExportGeometryOperationsIntegrationTest :
                     .orEmpty()
                     .filter { it.extension in setOf("step", "svg", "glb", "stp") }
                     .map { it.name }
-                    .filterNot { it == "export-golden-assembly.step" } // the one committed golden
+                    .filterNot { it.startsWith("export-golden-") } // the committed golden files
             strays shouldBe emptyList()
         }
     })

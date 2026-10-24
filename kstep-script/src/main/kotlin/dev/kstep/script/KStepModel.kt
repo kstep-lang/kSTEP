@@ -4,7 +4,15 @@ import dev.kstep.core.DslViolation
 import dev.kstep.core.ValidationResult
 import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctShape
+import dev.kstep.geometry.select.FaceSelector
+import dev.kstep.geometry.style.FaceStyle
+import dev.kstep.geometry.style.LayerNames
+import dev.kstep.geometry.style.ShapeStyle
+import dev.kstep.geometry.style.StepColour
+import dev.kstep.geometry.style.StyleErrorKind
+import dev.kstep.geometry.style.StyleException
 import dev.kstep.shape.RigidPlacement
 import dev.kstep.shape.Rotation
 import dev.kstep.shape.ShapeAssignment
@@ -73,6 +81,14 @@ class KStepModelBuilder internal constructor() {
     private val collectedViolations = mutableListOf<DslViolation>()
     private val registeredShapes = mutableListOf<ShapeAssignment>()
     private val registeredPlacements = mutableListOf<UsagePlacement>()
+    private val styles = java.util.IdentityHashMap<ProductDefinition, StyleAccumulator>()
+
+    // Colours and layers of one part (ADR-0039), collected in any call order and applied in build().
+    private class StyleAccumulator {
+        var colour: StepColour? = null
+        var layer: String? = null
+        val faces = java.util.TreeMap<Int, Pair<StepColour?, String?>>()
+    }
 
     /** Registers an already-validated entity (typically the result of a builder's `getOrThrow()`). */
     fun root(entity: Any) {
@@ -89,7 +105,8 @@ class KStepModelBuilder internal constructor() {
      * same wave.
      */
     fun shape(assignment: ShapeAssignment) {
-        registeredShapes += assignment
+        registeredShapes += assignment.copy(style = ShapeStyle.NONE)
+        applyStyle(assignment.productDefinition, assignment.style)
     }
 
     /** Convenience overload: builds a [ShapeAssignment] from its two required parts inline,
@@ -98,8 +115,85 @@ class KStepModelBuilder internal constructor() {
         productDefinition: ProductDefinition,
         shape: OcctShape,
         shapeName: String = "",
+        colour: StepColour? = null,
+        layer: String? = null,
     ) {
         registeredShapes += ShapeAssignment(productDefinition, shape, shapeName)
+        if (colour != null || layer != null) style(productDefinition, colour, layer)
+    }
+
+    /**
+     * Gives the part of [productDefinition] a [colour] and/or a [layer] in the exported STEP file (ADR-0039). An
+     * annotation on the result, not a shape operation. May be called before or after [shape]; the product definition
+     * must have a shape by the end of the `stepFile` block. A second colour or a second layer for the same part is an
+     * error (`KSTEP-S-014`).
+     */
+    fun style(
+        productDefinition: ProductDefinition,
+        colour: StepColour? = null,
+        layer: String? = null,
+    ) {
+        layer?.let { LayerNames.require(it) }
+        val acc = styles.getOrPut(productDefinition) { StyleAccumulator() }
+        if (colour != null) {
+            if (acc.colour != null) throw conflict("part '${productDefinition.id}' already has a colour")
+            acc.colour = colour
+        }
+        if (layer != null) {
+            if (acc.layer != null) throw conflict("part '${productDefinition.id}' already has a layer")
+            acc.layer = layer
+        }
+    }
+
+    /**
+     * Gives the faces [faces] resolves to a [colour] and/or a [layer] (ADR-0039). The selector is resolved right away
+     * against the shape already registered for [productDefinition] and never guesses: no match or a count different
+     * from [expected] fails with `KSTEP-S-011` and the candidate list. Because the script is evaluated again on every
+     * rebuild, `Faces.atMax(Direction3.Z)` keeps meaning the top face when a dimension changes. A face can get a colour
+     * and a layer once each (`KSTEP-S-014`).
+     */
+    fun styleFaces(
+        productDefinition: ProductDefinition,
+        faces: FaceSelector,
+        colour: StepColour? = null,
+        layer: String? = null,
+        expected: Int? = null,
+    ) {
+        if (colour == null && layer == null) {
+            throw StyleException(StyleErrorKind.CONFLICT, "styleFaces needs a colour or a layer")
+        }
+        layer?.let { LayerNames.require(it) }
+        val assignment =
+            registeredShapes.lastOrNull { it.productDefinition === productDefinition }
+                ?: throw StyleException(
+                    StyleErrorKind.TARGET,
+                    "styleFaces: product definition '${productDefinition.id}' has no shape yet; call shape(...) first",
+                )
+        val indices = OcctKernel.selectFaces(assignment.shape, faces, expected)
+        val acc = styles.getOrPut(productDefinition) { StyleAccumulator() }
+        for (index in indices) {
+            val (oldColour, oldLayer) = acc.faces[index] ?: (null to null)
+            if (colour != null && oldColour != null) throw conflict("face $index already has a colour")
+            if (layer != null && oldLayer != null) throw conflict("face $index already has a layer")
+            acc.faces[index] = (colour ?: oldColour) to (layer ?: oldLayer)
+        }
+    }
+
+    private fun conflict(message: String) = StyleException(StyleErrorKind.CONFLICT, message)
+
+    private fun applyStyle(
+        productDefinition: ProductDefinition,
+        style: ShapeStyle,
+    ) {
+        if (style.isEmpty) return
+        style(productDefinition, style.colour, style.layer)
+        for (face in style.faces) {
+            val acc = styles.getOrPut(productDefinition) { StyleAccumulator() }
+            val (oldColour, oldLayer) = acc.faces[face.faceIndex] ?: (null to null)
+            if (face.colour != null && oldColour != null) throw conflict("face ${face.faceIndex} already has a colour")
+            if (face.layer != null && oldLayer != null) throw conflict("face ${face.faceIndex} already has a layer")
+            acc.faces[face.faceIndex] = (face.colour ?: oldColour) to (face.layer ?: oldLayer)
+        }
     }
 
     /**
@@ -176,12 +270,34 @@ class KStepModelBuilder internal constructor() {
         }
     }
 
+    private fun styledShapes(): List<ShapeAssignment> {
+        for (productDefinition in styles.keys) {
+            if (registeredShapes.none { it.productDefinition === productDefinition }) {
+                throw StyleException(
+                    StyleErrorKind.TARGET,
+                    "style(...) for product definition '${productDefinition.id}', which has no shape",
+                )
+            }
+        }
+        return registeredShapes.map { a ->
+            val acc = styles[a.productDefinition] ?: return@map a
+            a.copy(
+                style =
+                    ShapeStyle(
+                        colour = acc.colour,
+                        layer = acc.layer,
+                        faces = acc.faces.map { (index, v) -> FaceStyle(index, v.first, v.second) },
+                    ),
+            )
+        }
+    }
+
     internal fun build(header: Part21Header): KStepModel =
         KStepModel(
             header = header,
             roots = validRoots.toList(),
             violations = collectedViolations.toList(),
-            shapes = registeredShapes.toList(),
+            shapes = styledShapes(),
             placements = registeredPlacements.toList(),
         )
 }

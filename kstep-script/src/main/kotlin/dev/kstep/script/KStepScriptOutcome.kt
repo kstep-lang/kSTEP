@@ -48,6 +48,18 @@ object KStepScriptOutcomeCodes {
      * by what generated them (`GeneratedEdges`) cannot be resolved (ADR-0033). The constant keeps its name
      * `EDGE_SELECTION_FAILED` although it now covers faces and vertices as well. */
     const val EDGE_SELECTION_FAILED = "KSTEP-S-011"
+
+    /** A colour is invalid: not a finite number in 0..1 per component, not `#RRGGBB`, or transparency (ADR-0039). */
+    const val STYLE_INVALID_COLOUR = "KSTEP-S-012"
+
+    /** A layer name is invalid: blank, longer than 128 characters, or containing a control character (ADR-0039). */
+    const val STYLE_INVALID_LAYER = "KSTEP-S-013"
+
+    /** A second colour or layer was given for the same part or face (ADR-0039). */
+    const val STYLE_CONFLICT = "KSTEP-S-014"
+
+    /** A style targets something that does not exist: a part without a shape or a face index out of range (ADR-0039). */
+    const val STYLE_TARGET_UNKNOWN = "KSTEP-S-015"
 }
 
 /** One compiler diagnostic, stripped down to what a CLI/JSON consumer needs: no internal

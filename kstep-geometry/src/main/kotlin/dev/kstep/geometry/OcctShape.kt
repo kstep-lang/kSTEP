@@ -9,6 +9,9 @@ import dev.kstep.geometry.select.VertexInfo
 import dev.kstep.geometry.select.decodeEdgeInfo
 import dev.kstep.geometry.select.decodeFaceInfo
 import dev.kstep.geometry.select.decodeVertexInfo
+import dev.kstep.geometry.style.ShapeStyle
+import dev.kstep.geometry.style.StyleErrorKind
+import dev.kstep.geometry.style.StyleException
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.lang.ref.Cleaner
 import java.lang.ref.Reference
@@ -231,7 +234,11 @@ class OcctShape internal constructor(
      *   Its parent directory must already exist.
      * @param schema which STEP AP schema OCCT should tag the file with. Defaults to
      *   [StepSchema.AP242DIS], matching the rest of kSTEP's AP242 focus.
+     * @param style colours and layers (ADR-0039). An empty style takes the unchanged `STEPControl_Writer` path
+     *   (byte-identical to earlier versions); a non-empty one writes through `STEPCAFControl_Writer`. Face indices
+     *   refer to [faces].
      * @return `target`, resolved to the same absolute/normalized path actually written.
+     * @throws StyleException if a face index of [style] does not exist.
      * @throws IllegalStateException if this shape is already [close]d.
      * @throws IllegalArgumentException if `target`'s parent directory does not exist or is not a
      *   directory.
@@ -240,6 +247,7 @@ class OcctShape internal constructor(
     fun writeStepFile(
         target: Path,
         schema: StepSchema = StepSchema.AP242DIS,
+        style: ShapeStyle = ShapeStyle.NONE,
     ): Path {
         checkOpen()
         val absolute = target.toAbsolutePath().normalize()
@@ -247,9 +255,34 @@ class OcctShape internal constructor(
         require(parent != null && Files.isDirectory(parent)) {
             "Parent directory of $absolute does not exist or is not a directory: $parent"
         }
+        if (!style.isEmpty) {
+            val faceCount = faces.size
+            style.faces.firstOrNull { it.faceIndex >= faceCount }?.let {
+                throw StyleException(
+                    StyleErrorKind.TARGET,
+                    "face index ${it.faceIndex} is outside 0..${faceCount - 1}",
+                )
+            }
+        }
         val status =
             try {
-                OcctBridge.nativeWriteStep(handle, absolute.toString(), schema.occtValue)
+                if (style.isEmpty) {
+                    OcctBridge.nativeWriteStep(handle, absolute.toString(), schema.occtValue)
+                } else {
+                    val styled = style.faces.filter { it.colour != null || it.layer != null }
+                    OcctBridge.nativeWriteStepStyled(
+                        handle,
+                        absolute.toString(),
+                        schema.occtValue,
+                        style.colour?.toArray(),
+                        style.layer,
+                        IntArray(styled.size) { styled[it].faceIndex },
+                        DoubleArray(styled.size * 3) { i ->
+                            styled[i / 3].colour?.toArray()?.get(i % 3) ?: Double.NaN
+                        },
+                        Array(styled.size) { styled[it].layer },
+                    )
+                }
             } catch (e: RuntimeException) {
                 throw OcctGeometryException("OCCT STEP export failed for $absolute", e)
             } finally {

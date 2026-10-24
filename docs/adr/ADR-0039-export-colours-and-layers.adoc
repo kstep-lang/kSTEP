@@ -1,0 +1,114 @@
+= ADR-0039: Colours and layers in the STEP export (Welle S)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle S). Completes the round trip started by ADR-0038: what `kstep import` reads, `kstep
+export` can now write. Builds on the Part 21 merge of ADR-0009 and ADR-0027.
+
+== Context
+
+`kstep export` merged the OCCT B-Rep of a part into a validated AP242 product structure (ADR-0009). OCCT's writer for
+that is `STEPControl_Writer`, which knows nothing about colours or layers. `STYLED_ITEM`, `PRESENTATION_LAYER_ASSIGNMENT`
+and the colour entities point AT breps and faces, so they lie outside the downward closure of the shape representation
+that `Ap242GeometryExtraction` keeps. They would have been dropped silently.
+
+== Decisions
+
+D1:: *Two strictly separate write paths.* A part without colour or layer (`ShapeStyle.isEmpty`) takes exactly the old path
+(`nativeWriteStep`, `extract`, merge). Nothing in that path changed, so byte identity is structural. A styled part takes
+`nativeWriteStepStyled`: a `STEPCAFControl_Writer` on an XCAF document with colour and layer mode on. Three golden files
+(single box, two bodies, placed assembly with geometry) were generated from the unchanged pipeline BEFORE the change
+(`export-golden-*.step`, commit 0bfed1f) and compared byte for byte in `CliExportGeometryIntegrationTest`.
+
+D2:: *The XCAF writer does the shape-to-face mapping, kSTEP does not.* The alternative was to create `STYLED_ITEM`s in
+Kotlin and map `MapShapes(FACE)` indices to `ADVANCED_FACE` ids in the OCCT text. That order is not guaranteed, and a wrong
+guess colours the wrong face. `AddSubShape` plus `SetColor`/`SetLayer` on the sub-shape label leaves the mapping to the
+writer. Face indices are `OcctShape.faces[i].index`, the `TopExp::MapShapes(FACE)` order, as in ADR-0038 D2.
+
+D3:: *Colours are sRGB.* `Quantity_Color(r, g, b, Quantity_TOC_sRGB)`; the file holds `COLOUR_RGB('',1.,0.500000003429,0.)`
+for (1, 0.5, 0), error 3.4e-9. Linear input would have written 0.735 for 0.5 (inverse of the measurement in ADR-0038 D3).
+OCCT writes the six primaries as `DRAUGHTING_PRE_DEFINED_COLOUR('blue')`; the importer reads that back as (0, 0, 1).
+
+D4:: *Allow-list and closure check when merging.* `Ap242GeometryExtraction.extractStyled` takes the normal geometry
+closure and adds the style entities: `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION`, `STYLED_ITEM`,
+`PRESENTATION_STYLE_ASSIGNMENT`, `SURFACE_STYLE_USAGE`, `SURFACE_SIDE_STYLE`, `SURFACE_STYLE_FILL_AREA`,
+`FILL_AREA_STYLE`, `FILL_AREA_STYLE_COLOUR`, `COLOUR_RGB`, `DRAUGHTING_PRE_DEFINED_COLOUR`,
+`PRESENTATION_LAYER_ASSIGNMENT`. It fails closed (`ShapeExportException`): an entity outside the list, a `STYLED_ITEM` or
+layer that is attached to anything but a `MANIFOLD_SOLID_BREP`, `ADVANCED_FACE` or `FACE_SURFACE` of the exported
+geometry, an MDGPR whose context is not the context of the shape representation. The style instances are appended to the
+geometry instances, so renumbering, `offset`, `geometryById` and the placement bridge stay as they were.
+
+D5:: *Transparency is not supported.* `Quantity_ColorRGBA(..., 0.5)` is written (`SURFACE_STYLE_RENDERING_WITH_PROPERTIES`
+and `SURFACE_STYLE_TRANSPARENT(0.5)`), but the XCAF reader of `dump_xcaf_tree` and of `kstep import` returns only RGB, so
+the alpha cannot be read back by our tools. The rule was: support it only if it is read back. `StepColour` therefore has
+no alpha, and `StepColour.hex("#RRGGBBAA")` is `KSTEP-S-012` ("transparency is not supported").
+
+D6:: *One layer and one colour per target; errors with their own codes.* `KSTEP-S-012` invalid colour, `KSTEP-S-013`
+invalid layer name, `KSTEP-S-014` second colour or layer for one part or face (equal values count too), `KSTEP-S-015`
+unknown target (a style for a part without a shape, a face index outside the shape). An empty or wrongly sized face
+selection in `styleFaces` stays `KSTEP-S-011`; a failing XCAF write is `KSTEP-S-008`. Several layers per target are not
+supported; STEP allows them and the importer reports up to 16.
+
+D7:: *Layer names are printable ASCII without backslash, 1 to 128 characters.* Measured: OCCT writes non-ASCII text raw
+(umlauts and emoji as UTF-8 bytes, not `\X2\`) and doubles a backslash. kSTEP's Part 21 reader and writer (V1) implement
+no `\X\`/`\X2\` escapes and reject both with `Part21EncodingException`, only while merging, with a cryptic message. Rather
+than widen the Part 21 text handling for the whole product, the layer name is validated in Kotlin (and again natively) and
+refused up front with `KSTEP-S-013`. Apostrophes (doubled by OCCT, undoubled by the reader) and quotation marks work.
+
+D8:: *OCCT wraps long string literals.* A layer name of about 70 characters or more is written with a bare line feed
+INSIDE the quotes at column 72, which the reader rejects. On the styled path only, `Ap242ShapeExporter.unwrapStringLiterals`
+removes line breaks inside `'...'` before reading. The 128-character test case covers it.
+
+D9:: *The native function validates everything again.* Null arguments, array lengths, face count (10000), distinct
+layer names (256), duplicate or negative indices, finite colours in 0..1, layer syntax and the index range (against
+`MapShapes(FACE)` under the lock) are checked; bad input is an `IllegalArgumentException`, never a crash. One lock
+(`g_mutex`) covers the handle lookup, the global `Interface_Static` parameters (`write.step.schema`, `write.step.assembly`,
+set explicitly on both paths) and the XCAF application. `XcafDocumentGuard` closes the document on every path,
+`PrinterSilencer` keeps OCCT's statistics off stdout, and `nativeXcafDocumentCount` lets a test prove that no document
+leaks. `throwJava` runs only after the lock is released.
+
+D10:: *Preview and GLB show the part colour only.* `RenderContent.Geometry` carries an optional `ColoredMesh`; with a
+colour, SVG and PNG use the albedo multiplier of ADR-0017 and the GLB gets `COLOR_0`. Without any colour the old code
+runs, so uncoloured output is unchanged. The recommended band 0.4 to 0.95 of `MeshColor` is only a recommendation:
+(0, 0, 1) renders valid but dark, and no correction is applied.
+
+== Measurements (OCCT 7.9.3, Homebrew, macOS arm64; `scripts/interop/spike_export_styles.cpp`)
+
+[cols="3,3"]
+|===
+|Question |Result
+
+|Does the XCAF writer change the shape representation compared with `STEPControl_Writer`? |No. Entity names and counts are identical for `write.step.assembly` 0 and 2 (box and 2-solid compound).
+|Style entities for a part colour |`STYLED_ITEM('color',...)` on the `MANIFOLD_SOLID_BREP`, `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION`, `PRESENTATION_STYLE_ASSIGNMENT`, `SURFACE_STYLE_USAGE`, `SURFACE_SIDE_STYLE`, `SURFACE_STYLE_FILL_AREA`, `FILL_AREA_STYLE`, `FILL_AREA_STYLE_COLOUR`, `COLOUR_RGB`.
+|Style entities for a face colour |The same, with the `STYLED_ITEM` on the `ADVANCED_FACE`; the layer is attached to the face too.
+|Context of the MDGPR |The `GEOMETRIC_REPRESENTATION_CONTEXT` of the shape representation (same `#id`), also for a compound.
+|Layer |`PRESENTATION_LAYER_ASSIGNMENT('Layer-A','visible',(#brep))`; for a 2-solid part both breps.
+|Part colour on a 2-solid compound |One `STYLED_ITEM` per solid; reading back gives each solid the colour and the layer.
+|Colour precision |sRGB (1, 0.5, 0) is written as 1., 0.500000003429, 0.; read back within 1e-8.
+|Pure primaries |`DRAUGHTING_PRE_DEFINED_COLOUR('blue')`.
+|Alpha 0.5 |Written, but not returned by the readers used here (D5).
+|Length unit |`SetLengthUnit(1.0, Millimeter)` behaves as in the import session.
+|Non-ASCII layer name |Written raw; backslash doubled (D7).
+|Layer name over about 70 characters |Line feed inside the literal (D8).
+|===
+
+== Checked
+
+* In-process: `OcctExportColoursLayersTest` (colour on 1e-6, layer, the styled face is the geometric top face with normal
+  +Z, area 200 and centroid z = height for 30 and 40, assemblies keep colours and placement, two-body parts, hostile
+  layer names, every error code, hostile native arguments, 50 styled exports leak neither shapes nor documents).
+* Subprocess: `CliExportOcctColoursLayersIntegrationTest` (export, `kstep import`, JSON error documents, render).
+* Foreign tools: OCCT's own `dump_xcaf_tree styles`, and FreeCAD 1.1.4 (volumes, solids, bounding boxes, placement) with
+  `scripts/interop/verify-export-colours-layers.sh`. FreeCAD cannot report colours in a headless `freecadcmd` (the
+  colour needs the GUI importer or view objects); that part of the FreeCAD check is therefore limited to geometry.
+* Byte identity of unstyled exports against goldens made before the change.
+
+== Not covered
+
+* Transparency (D5), PMI, curve and edge colours, instance colours on assembly components, several layers per target.
+* A colour on one solid of a multi-solid part (only the whole part and single faces are targets).
+* Layer names beyond printable ASCII (D7), until the Part 21 text handling gets the `\X2\` escapes.
+* Face colours and layers in the preview and in the GLB. They need a triangle-to-face mapping (`nativeShapeTriangles`
+  returns only coordinates) and several palette entries per part.
+* Layers in the preview (they are metadata).

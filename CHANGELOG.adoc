@@ -7,6 +7,20 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Added
+
+* Export: colours and layers (ADR-0039, Welle S). `shape(pd, shape, name, colour, layer)`, `style(pd, colour, layer)` and
+  `styleFaces(pd, selector, colour, layer, expected)` give a part or single faces an sRGB colour (`StepColour.rgb`,
+  `StepColour.hex`, `StepColours`) and a layer name. A styled part is written through `STEPCAFControl_Writer` (new JNI
+  entry point `nativeWriteStepStyled`), and the style entities (`STYLED_ITEM`, `PRESENTATION_LAYER_ASSIGNMENT`, colours)
+  are merged into the Part 21 file with a fail-closed allow-list. Parts without a style are written by the unchanged
+  path and stay byte-identical (three golden files generated before the change). `kstep import` reads the colours and
+  layers back; `kstep render` shows the part colour (SVG, PNG, GLB `COLOR_0`). New codes `KSTEP-S-012` (invalid colour),
+  `KSTEP-S-013` (invalid layer name), `KSTEP-S-014` (second colour or layer for one target), `KSTEP-S-015` (unknown target).
+  Layer names are printable ASCII (1 to 128 characters, no backslash); transparency is not supported.
+* `scripts/interop/verify-export-colours-layers.sh` and `freecad_read_styles.py`; `spike_export_styles.cpp` holds the
+  measurements behind ADR-0039.
+
 === Fixed
 
 * Import: the new colour and layer mode made the OCCT transfer quadratic in the number of layer assignments and distinct

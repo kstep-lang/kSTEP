@@ -1,6 +1,8 @@
 package dev.kstep.preview
 
 import dev.kstep.generated.ap242v1.ProductDefinition
+import dev.kstep.geometry.ColoredMesh
+import dev.kstep.geometry.MeshColor
 import dev.kstep.geometry.MeshComposition
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctGeometryException
@@ -8,6 +10,7 @@ import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctUnavailableException
 import dev.kstep.geometry.PlacedMesh
 import dev.kstep.geometry.TriangleMesh
+import dev.kstep.geometry.style.StepColour
 import dev.kstep.render.RenderLimits
 import dev.kstep.render.gltf.GlbExtras
 import dev.kstep.render.gltf.GlbWriteResult
@@ -54,6 +57,11 @@ private sealed interface RenderContent {
         /** Drawn instances of a placed assembly (ADR-0035); `null` for the single-shape preview. */
         val instanceCount: Int? = null,
         val distinctShapeCount: Int? = null,
+        /**
+         * The part colours of the script (ADR-0039), as a coloured mesh over [mesh]; `null` when no shape carries a
+         * colour, in which case every output is byte-identical to the uncoloured rendering.
+         */
+        val colored: ColoredMesh? = null,
     ) : RenderContent
 
     // Carries no lines of its own -- renderBytes computes the summary card's text fresh from
@@ -66,6 +74,9 @@ private sealed interface RenderContent {
         val reason: String,
     ) : RenderContent
 }
+
+// Part colours go straight into the albedo multiplier; reduces to NEUTRAL only for white, which is exact (ADR-0039).
+private fun StepColour.toMeshColor() = MeshColor(r, g, b)
 
 // The one exceptionClass value KStepScriptOutcome.RuntimeError carries when
 // OcctKernel.makeBox/extrudeProfile/fillet throws BEFORE stepFile ever runs, on a machine
@@ -253,13 +264,26 @@ object PreviewRenderer {
                     }
                     assemblyGeometry(model, expansion.instances, width, height)
                 } else {
-                    val mesh =
-                        model.shapes
-                            .first()
-                            .shape
-                            .triangulate()
-                    val triangles = MeshProjection.project(mesh, width.toDouble(), height.toDouble())
-                    RenderContent.Geometry(mesh, triangles, model.shapes.size, previewedShapeIndex = 0)
+                    val first = model.shapes.first()
+                    val mesh = first.shape.triangulate()
+                    val colour = first.style.colour
+                    if (colour == null) {
+                        val triangles = MeshProjection.project(mesh, width.toDouble(), height.toDouble())
+                        RenderContent.Geometry(mesh, triangles, model.shapes.size, previewedShapeIndex = 0)
+                    } else {
+                        val colored =
+                            MeshComposition.mergeColored(
+                                listOf(PlacedMesh(mesh, color = colour.toMeshColor())),
+                            )
+                        val triangles = MeshProjection.project(colored, width.toDouble(), height.toDouble())
+                        RenderContent.Geometry(
+                            colored.mesh,
+                            triangles,
+                            model.shapes.size,
+                            previewedShapeIndex = 0,
+                            colored = colored,
+                        )
+                    }
                 }
             } catch (e: OcctUnavailableException) {
                 return notice(e.message ?: "OCCT unavailable", RenderFallbackReasons.OCCT_UNAVAILABLE)
@@ -328,12 +352,26 @@ object PreviewRenderer {
                     "(at least $total over ${instances.size} instance(s))"
             }
         }
+        val anyColour = shapeOf.values.any { it.style.colour != null }
         val parts =
             instances.map { instance ->
-                PlacedMesh(meshOf.getValue(instance.productDefinition), instance.placement.toGeometryPlacement())
+                PlacedMesh(
+                    meshOf.getValue(instance.productDefinition),
+                    instance.placement.toGeometryPlacement(),
+                    shapeOf
+                        .getValue(instance.productDefinition)
+                        .style.colour
+                        ?.toMeshColor() ?: MeshColor.NEUTRAL,
+                )
             }
-        val merged = MeshComposition.merge(parts)
-        val triangles = MeshProjection.project(merged, width.toDouble(), height.toDouble())
+        val colored = if (anyColour) MeshComposition.mergeColored(parts) else null
+        val merged = colored?.mesh ?: MeshComposition.merge(parts)
+        val triangles =
+            if (colored != null) {
+                MeshProjection.project(colored, width.toDouble(), height.toDouble())
+            } else {
+                MeshProjection.project(merged, width.toDouble(), height.toDouble())
+            }
         return RenderContent.Geometry(
             merged,
             triangles,
@@ -341,6 +379,7 @@ object PreviewRenderer {
             previewedShapeIndex = 0,
             instanceCount = instances.size,
             distinctShapeCount = instanceCountOf.size,
+            colored = colored,
         )
     }
 
@@ -433,7 +472,7 @@ object PreviewRenderer {
                     )
                 val result =
                     if (content is RenderContent.Geometry) {
-                        GlbWriter.write(content.mesh, extras)
+                        content.colored?.let { GlbWriter.write(it, extras) } ?: GlbWriter.write(content.mesh, extras)
                     } else {
                         GlbWriter.writeEmptyScene(extras)
                     }

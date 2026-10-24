@@ -118,8 +118,19 @@ object Ap242ShapeExporter {
         val bridge = mutableListOf<Part21EntityInstance>()
         for ((index, assignment) in assignments.withIndex()) {
             val occtText = writeOcctStepText(assignment)
-            val occtDoc = Part21Reader.readRawDocument(occtText, Part21ReadMode.TOLERANT)
-            val geometry = Ap242GeometryExtraction.extract(occtDoc)
+            val occtDoc =
+                Part21Reader.readRawDocument(
+                    // Only the styled path: OCCT wraps string literals longer than ~70 characters (layer names) with a
+                    // bare line feed INSIDE the literal, which the Part 21 reader rejects (ADR-0039 D8).
+                    if (assignment.style.isEmpty) occtText else unwrapStringLiterals(occtText),
+                    Part21ReadMode.TOLERANT,
+                )
+            val geometry =
+                if (assignment.style.isEmpty) {
+                    Ap242GeometryExtraction.extract(occtDoc)
+                } else {
+                    Ap242GeometryExtraction.extractStyled(occtDoc)
+                }
             totalInstances += geometry.instances.size
             if (totalInstances > MAX_TOTAL_GEOMETRY_INSTANCES) {
                 throw ShapeExportException(
@@ -276,11 +287,27 @@ object Ap242ShapeExporter {
         val tempDir = Files.createTempDirectory("kstep-shape-")
         try {
             val stepFile = tempDir.resolve("occt.step")
-            assignment.shape.writeStepFile(stepFile)
+            assignment.shape.writeStepFile(stepFile, style = assignment.style)
             return Files.readString(stepFile)
         } finally {
             deleteRecursively(tempDir)
         }
+    }
+
+    /**
+     * Removes line breaks that lie inside `'...'` string literals (a doubled apostrophe stays a literal apostrophe).
+     * Linear, no allocation beyond the result.
+     */
+    internal fun unwrapStringLiterals(text: String): String {
+        if (text.indexOf('\n') < 0 && text.indexOf('\r') < 0) return text
+        val out = StringBuilder(text.length)
+        var inString = false
+        for (c in text) {
+            if (c == '\'') inString = !inString
+            if (inString && (c == '\n' || c == '\r')) continue
+            out.append(c)
+        }
+        return out.toString()
     }
 
     private fun deleteRecursively(root: Path) {

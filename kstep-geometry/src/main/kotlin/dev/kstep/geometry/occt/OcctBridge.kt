@@ -37,6 +37,27 @@ object OcctBridge {
         schema: String,
     ): Int
 
+    /**
+     * Writes the shape through `STEPCAFControl_Writer` with colours and layers (ADR-0039): [partColour] is null or
+     * `[r, g, b]` (sRGB 0..1), [partLayer] the layer of the whole part. Per styled face, [faceIndices] holds the index
+     * (`TopExp::MapShapes(FACE)` order), [faceColours] three values (NaN in the first = no colour) and [faceLayers] the
+     * layer or null. Returns the `IFSelect_ReturnStatus` (1 = done); invalid arguments throw
+     * `IllegalArgumentException`.
+     */
+    external fun nativeWriteStepStyled(
+        handle: Long,
+        absolutePath: String,
+        schema: String,
+        partColour: DoubleArray?,
+        partLayer: String?,
+        faceIndices: IntArray,
+        faceColours: DoubleArray,
+        faceLayers: Array<String?>,
+    ): Int
+
+    /** Number of XCAF documents currently open in the process (test-only: leak detection). */
+    external fun nativeXcafDocumentCount(): Int
+
     external fun nativeReleaseShape(handle: Long)
 
     /**

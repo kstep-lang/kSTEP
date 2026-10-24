@@ -289,4 +289,19 @@ class CliExportGeometryIntegrationTest :
             Json.parseToJsonElement(json.stdout.trim()).jsonObject.keys shouldBe
                 setOf("status", "outPath", "rootCount", "shapeCount")
         }
+
+        for (golden in listOf("box", "multi-solid", "placed-assembly")) {
+            "unstyled $golden export is byte-identical to the pre-ADR-0039 golden file".config(enabled = available) {
+                val script = copyFixture("export-golden-$golden.kstep.kts")
+                val out = File(workDir, "golden-$golden-out.step").apply { delete() }
+
+                val result = runner.run("export", script.name, "--out", out.name)
+
+                result.exitCode shouldBe 0
+                out.readBytes().toList() shouldBe
+                    requireNotNull(
+                        CliExportGeometryIntegrationTest::class.java.getResourceAsStream("/export-golden-$golden.step"),
+                    ).use { it.readBytes().toList() }
+            }
+        }
     })

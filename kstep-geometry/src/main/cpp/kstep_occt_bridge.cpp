@@ -95,6 +95,9 @@
 #include <Message_Messenger.hxx>
 #include <Message_SequenceOfPrinters.hxx>
 #include <STEPControl_Writer.hxx>
+#include <STEPCAFControl_Writer.hxx>
+#include <Quantity_ColorRGBA.hxx>
+#include <set>
 #include <Standard_Failure.hxx>
 #include <Standard_Version.hxx>
 #include <TopAbs_ShapeEnum.hxx>
@@ -2532,6 +2535,255 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStep(
             env, "java/lang/IllegalStateException", std::string("Native error writing STEP file: ") + e.what());
     } catch (...) {
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error writing STEP file");
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------------------------------
+// Welle S (colours and layers in the STEP export). See docs/adr/ADR-0039-export-colours-and-layers.adoc.
+// ------------------------------------------------------------------------------------------
+namespace {
+constexpr jsize kMaxStyledFaces = 10000;
+constexpr size_t kMaxStyleLayerNames = 256;
+constexpr jsize kMaxLayerNameUnits = 128;
+
+extern "C++" {
+/** True if the layer name is acceptable: 1..128 printable ASCII characters without a backslash, not blank. */
+bool layerNameValid(const std::u16string& name) {
+    if (name.empty() || name.size() > static_cast<size_t>(kMaxLayerNameUnits)) return false;
+    bool nonBlank = false;
+    for (char16_t c : name) {
+        if (c < 0x20 || c > 0x7E || c == u'\\') return false;
+        if (c != u' ') nonBlank = true;
+    }
+    return nonBlank;
+}
+
+/** Copies a Java string into UTF-16; false on OutOfMemoryError (pending exception). */
+bool copyJavaString(JNIEnv* env, jstring s, std::u16string& out) {
+    const jchar* chars = env->GetStringChars(s, nullptr);
+    if (chars == nullptr) return false;
+    const jsize len = env->GetStringLength(s);
+    out.assign(reinterpret_cast<const char16_t*>(chars), static_cast<size_t>(len));
+    env->ReleaseStringChars(s, chars);
+    return true;
+}
+
+TCollection_ExtendedString toExtendedString(const std::u16string& s) {
+    return TCollection_ExtendedString(reinterpret_cast<const Standard_ExtString>(s.c_str()));
+}
+
+bool colourValid(double r, double g, double b) {
+    return std::isfinite(r) && std::isfinite(g) && std::isfinite(b) && r >= 0.0 && r <= 1.0 && g >= 0.0 &&
+           g <= 1.0 && b >= 0.0 && b <= 1.0;
+}
+}  // extern "C++"
+}  // namespace
+
+/**
+ * Writes the shape as STEP through STEPCAFControl_Writer with colours and layers attached to the part and to
+ * individual faces (ADR-0039). partColour: null or [r,g,b] (sRGB, 0..1); faceColours: 3 doubles per face, NaN in
+ * the first component = no colour for that face; faceLayers: one entry per face, null = no layer. Returns the
+ * IFSelect_ReturnStatus as nativeWriteStep does. Invalid arguments throw IllegalArgumentException.
+ */
+JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepStyled(
+    JNIEnv* env, jobject /*self*/, jlong handle, jstring absolutePath, jstring schema, jdoubleArray partColour,
+    jstring partLayer, jintArray faceIndices, jdoubleArray faceColours, jobjectArray faceLayers) {
+    if (absolutePath == nullptr || schema == nullptr || faceIndices == nullptr || faceColours == nullptr ||
+        faceLayers == nullptr) {
+        throwJava(env, "java/lang/NullPointerException", "nativeWriteStepStyled: null argument");
+        return 0;
+    }
+    const char* pathChars = env->GetStringUTFChars(absolutePath, nullptr);
+    if (pathChars == nullptr) return 0;
+    std::string path(pathChars);
+    env->ReleaseStringUTFChars(absolutePath, pathChars);
+    const char* schemaChars = env->GetStringUTFChars(schema, nullptr);
+    if (schemaChars == nullptr) return 0;
+    std::string schemaValue(schemaChars);
+    env->ReleaseStringUTFChars(schema, schemaChars);
+
+    // Copy and validate every argument BEFORE taking the lock.
+    const jsize nFaces = env->GetArrayLength(faceIndices);
+    if (nFaces > kMaxStyledFaces || env->GetArrayLength(faceColours) != nFaces * 3 ||
+        env->GetArrayLength(faceLayers) != nFaces) {
+        throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: inconsistent face style arrays");
+        return 0;
+    }
+    bool hasPartColour = false;
+    double pc[3] = {0, 0, 0};
+    if (partColour != nullptr) {
+        if (env->GetArrayLength(partColour) != 3) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: partColour needs 3 values");
+            return 0;
+        }
+        env->GetDoubleArrayRegion(partColour, 0, 3, pc);
+        if (!colourValid(pc[0], pc[1], pc[2])) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: invalid part colour");
+            return 0;
+        }
+        hasPartColour = true;
+    }
+    std::u16string partLayerName;
+    bool hasPartLayer = false;
+    if (partLayer != nullptr) {
+        if (!copyJavaString(env, partLayer, partLayerName)) return 0;
+        if (!layerNameValid(partLayerName)) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: invalid part layer name");
+            return 0;
+        }
+        hasPartLayer = true;
+    }
+    std::vector<jint> indices(static_cast<size_t>(nFaces));
+    std::vector<double> colours(static_cast<size_t>(nFaces) * 3);
+    if (nFaces > 0) {
+        env->GetIntArrayRegion(faceIndices, 0, nFaces, indices.data());
+        env->GetDoubleArrayRegion(faceColours, 0, nFaces * 3, colours.data());
+    }
+    std::vector<std::u16string> layers(static_cast<size_t>(nFaces));
+    std::vector<char> hasLayer(static_cast<size_t>(nFaces), 0);
+    std::set<std::u16string> distinct;
+    if (hasPartLayer) distinct.insert(partLayerName);
+    std::set<jint> seen;
+    for (jsize i = 0; i < nFaces; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        if (!seen.insert(indices[k]).second || indices[k] < 0) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: duplicate or negative face index");
+            return 0;
+        }
+        const bool hasColour = !std::isnan(colours[k * 3]);
+        if (hasColour && !colourValid(colours[k * 3], colours[k * 3 + 1], colours[k * 3 + 2])) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: invalid face colour");
+            return 0;
+        }
+        if (!hasColour) colours[k * 3] = std::nan("");
+        jstring ls = static_cast<jstring>(env->GetObjectArrayElement(faceLayers, i));
+        if (env->ExceptionCheck()) return 0;
+        if (ls != nullptr) {
+            const bool ok = copyJavaString(env, ls, layers[k]);
+            env->DeleteLocalRef(ls);
+            if (!ok) return 0;
+            if (!layerNameValid(layers[k])) {
+                throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: invalid face layer name");
+                return 0;
+            }
+            hasLayer[k] = 1;
+            distinct.insert(layers[k]);
+        }
+    }
+    if (distinct.size() > kMaxStyleLayerNames) {
+        throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: too many distinct layer names");
+        return 0;
+    }
+
+    try {
+        bool found = false;
+        bool schemaAccepted = false;
+        bool faceOutOfRange = false;
+        jint result = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            TopoDS_Shape* shape = findShapeLocked(handle);
+            if (shape != nullptr) {
+                found = true;
+                TopTools_IndexedMapOfShape faceMap;
+                TopExp::MapShapes(*shape, TopAbs_FACE, faceMap);
+                for (jsize i = 0; i < nFaces; ++i) {
+                    if (indices[static_cast<size_t>(i)] >= faceMap.Extent()) faceOutOfRange = true;
+                }
+                if (!faceOutOfRange) {
+                    // The writer is constructed before SetCVal (see nativeWriteStep for why) and the printers are
+                    // detached for the whole call: stdout is a JSON or MCP stream.
+                    STEPCAFControl_Writer writer;
+                    PrinterSilencer silencer;
+                    schemaAccepted = Interface_Static::SetCVal("write.step.schema", schemaValue.c_str());
+                    Interface_Static::SetIVal("write.step.assembly", countSolids(*shape) > 1 ? 0 : 2);
+                    if (schemaAccepted) {
+                        XcafDocumentGuard guard;
+                        guard.app = XCAFApp_Application::GetApplication();
+                        guard.app->NewDocument("MDTV-XCAF", guard.doc);
+                        XCAFDoc_DocumentTool::SetLengthUnit(guard.doc, 1.0, UnitsMethods_LengthUnit_Millimeter);
+                        Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(guard.doc->Main());
+                        Handle(XCAFDoc_ColorTool) colorTool = XCAFDoc_DocumentTool::ColorTool(guard.doc->Main());
+                        Handle(XCAFDoc_LayerTool) layerTool = XCAFDoc_DocumentTool::LayerTool(guard.doc->Main());
+                        TDF_Label part = shapeTool->AddShape(*shape, Standard_False);
+                        if (hasPartColour) {
+                            colorTool->SetColor(
+                                part, Quantity_Color(pc[0], pc[1], pc[2], Quantity_TOC_sRGB), XCAFDoc_ColorSurf);
+                        }
+                        if (hasPartLayer) {
+                            layerTool->SetLayer(part, toExtendedString(partLayerName), Standard_False);
+                        }
+                        for (jsize i = 0; i < nFaces; ++i) {
+                            const size_t k = static_cast<size_t>(i);
+                            const bool hasColour = !std::isnan(colours[k * 3]);
+                            if (!hasColour && !hasLayer[k]) continue;
+                            TDF_Label sub = shapeTool->AddSubShape(part, faceMap.FindKey(indices[k] + 1));
+                            if (sub.IsNull()) {
+                                result = static_cast<jint>(IFSelect_RetFail);
+                                break;
+                            }
+                            if (hasColour) {
+                                colorTool->SetColor(
+                                    sub,
+                                    Quantity_Color(colours[k * 3], colours[k * 3 + 1], colours[k * 3 + 2], Quantity_TOC_sRGB),
+                                    XCAFDoc_ColorSurf);
+                            }
+                            if (hasLayer[k]) {
+                                layerTool->SetLayer(sub, toExtendedString(layers[k]), Standard_False);
+                            }
+                        }
+                        if (result == 0) {
+                            writer.SetColorMode(Standard_True);
+                            writer.SetLayerMode(Standard_True);
+                            if (!writer.Transfer(guard.doc, STEPControl_AsIs)) {
+                                result = static_cast<jint>(IFSelect_RetFail);
+                            } else {
+                                result = static_cast<jint>(writer.Write(path.c_str()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!found) {
+            throwUnknownHandle(env, handle);
+            return 0;
+        }
+        if (faceOutOfRange) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: face index out of range");
+            return 0;
+        }
+        if (!schemaAccepted) {
+            throwJava(env, "java/lang/IllegalStateException", "OCCT rejected STEP schema: " + schemaValue);
+            return 0;
+        }
+        return result;
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env,
+            "java/lang/IllegalStateException",
+            std::string("OCCT error writing styled STEP file: ") + e.GetMessageString());
+    } catch (const std::exception& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("Native error writing styled STEP file: ") + e.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error writing styled STEP file");
+    }
+    return 0;
+}
+
+/** Number of XCAF documents currently open in the process (test-only: leak detection). */
+JNIEXPORT jint JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeXcafDocumentCount(JNIEnv* env, jobject /*self*/) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        return static_cast<jint>(XCAFApp_Application::GetApplication()->NbDocuments());
+    } catch (const Standard_Failure& e) {
+        throwJava(
+            env, "java/lang/IllegalStateException", std::string("OCCT error counting documents: ") + e.GetMessageString());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native error counting documents");
     }
     return 0;
 }

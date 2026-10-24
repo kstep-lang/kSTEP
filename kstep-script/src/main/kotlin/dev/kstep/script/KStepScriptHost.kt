@@ -3,6 +3,8 @@ package dev.kstep.script
 import dev.kstep.core.DslViolation
 import dev.kstep.geometry.select.EdgeNamingException
 import dev.kstep.geometry.select.TopologySelectionException
+import dev.kstep.geometry.style.StyleErrorKind
+import dev.kstep.geometry.style.StyleException
 import dev.kstep.sketch.SketchException
 import dev.kstep.sketch.SketchSolverUnavailableException
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -175,6 +177,14 @@ object KStepScriptHost {
                     is EdgeNamingException ->
                         KStepScriptOutcomeCodes.EDGE_SELECTION_FAILED to
                             (current.message ?: "edge naming failed")
+                    // Welle S (ADR-0039): colours and layers of the export.
+                    is StyleException ->
+                        when (current.kind) {
+                            StyleErrorKind.INVALID_COLOUR -> KStepScriptOutcomeCodes.STYLE_INVALID_COLOUR
+                            StyleErrorKind.INVALID_LAYER -> KStepScriptOutcomeCodes.STYLE_INVALID_LAYER
+                            StyleErrorKind.CONFLICT -> KStepScriptOutcomeCodes.STYLE_CONFLICT
+                            StyleErrorKind.TARGET -> KStepScriptOutcomeCodes.STYLE_TARGET_UNKNOWN
+                        } to (current.message ?: "invalid style")
                     else -> null to null
                 }
             if (code != null && text != null) {

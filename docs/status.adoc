@@ -670,5 +670,11 @@ scan before either lands.
   `PreviewSummary` (`dev.kstep.cli` -> `dev.kstep.preview`) -- no published
   artifacts exist yet, so this is not a breaking change for anyone outside
   this repo.
+* Welle S (ADR-0039): colours and layers in the STEP export. `shape(..., colour, layer)`, `style(...)` and
+  `styleFaces(...)` annotate a part or single faces; a styled part is written through `STEPCAFControl_Writer` and the style
+  entities are merged into the Part 21 file, an unstyled part keeps the old writer and stays byte-identical (three
+  goldens generated before the change). New codes `KSTEP-S-012` to `KSTEP-S-015`. Verified with `kstep import`, OCCT's
+  own XCAF reader and FreeCAD (geometry; colours are not readable in headless FreeCAD). Not covered: transparency,
+  Unicode layer names, instance colours, curve and edge colours, face colours in the preview.
 
 See xref:roadmap.adoc#roadmap[Roadmap] for what's planned next.

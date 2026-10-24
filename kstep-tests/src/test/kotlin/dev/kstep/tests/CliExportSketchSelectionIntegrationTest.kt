@@ -139,7 +139,7 @@ class CliExportSketchSelectionIntegrationTest :
                     .orEmpty()
                     .filter { it.extension in setOf("step", "svg", "glb", "stp") }
                     .map { it.name }
-                    .filterNot { it == "export-golden-assembly.step" }
+                    .filterNot { it.startsWith("export-golden-") }
             strays shouldBe emptyList()
         }
     })

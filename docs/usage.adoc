@@ -652,3 +652,47 @@ A two-line ("setext") section title underline (`Title\n-----------\n`) is
 never mistaken for such a delimiter opener, even though a `-----------` run
 alone is indistinguishable from one — the scanner checks the line above it
 first, matching Asciidoctor's own rule (Stolperfalle 12 in the ADR).
+
+[[colours-layers]]
+== Colours and layers in the export
+
+Since ADR-0039 a part and single faces can carry a colour and a layer in the exported STEP file. They are annotations on
+the result: no shape operation, no effect on the feature history, and a script without any colour or layer is exported
+byte for byte as before.
+
+[source,kotlin]
+----
+stepFile(fileName = "bracket.step") {
+    root(bracket)
+    shape(bracket, body, colour = StepColour.rgb(1.0, 0.5, 0.0), layer = "Housing")   // the whole part
+    styleFaces(bracket, Faces.atMax(Direction3.Z), colour = StepColours.BLUE, layer = "Top", expected = 1)
+}
+----
+
+* `shape(pd, shape, shapeName, colour, layer)` styles the whole part. `style(pd, colour, layer)` does the same later, in
+  any order. `styleFaces(pd, selector, colour, layer, expected)` styles the faces a face selector resolves to; it resolves
+  right away against the shape already registered with `shape(...)` and never guesses (an empty or wrongly sized
+  selection is `KSTEP-S-011` with the candidates). Because the script runs again on every rebuild, `Faces.atMax(Z)` stays
+  the top face when a dimension changes.
+* Colours are sRGB with components in 0..1: `StepColour.rgb(r, g, b)`, `StepColour.hex("#RRGGBB")` or the small
+  palette `StepColours` (`RED`, `GREEN`, `BLUE`, `ORANGE`, `YELLOW`, `GREY`, `BLACK`, `WHITE`). Transparency is not supported
+  (`#RRGGBBAA` is refused).
+* A layer name has 1 to 128 printable ASCII characters (no backslash, not blank). At most 10000 styled faces and 256
+  distinct layer names per part. A part with several solids (`OcctKernel.compound`) gives every solid the part colour and
+  layer.
+* One colour and one layer per part and per face. A second one is an error, equal or not.
+
+[cols="1,3"]
+|===
+|Code |Meaning
+
+|`KSTEP-S-012` |Invalid colour: not a finite number in 0..1, not `#RRGGBB`, or transparency.
+|`KSTEP-S-013` |Invalid layer name: blank, longer than 128 characters, or a character outside printable ASCII or a backslash.
+|`KSTEP-S-014` |A second colour or layer for the same part or face.
+|`KSTEP-S-015` |Unknown target: a style for a part without a shape, or a face index outside the shape.
+|===
+
+`kstep render` shows the part colour (SVG, PNG and GLB with a `COLOR_0` attribute); face colours and layers appear only in
+the STEP file. `kstep import` reads the result back, see xref:usage-import.adoc#import-usage[Reading a STEP file back].
+`scripts/interop/verify-export-colours-layers.sh` re-checks the example exports with kSTEP, OCCT and FreeCAD. See
+docs/adr/ADR-0039-export-colours-and-layers.adoc.

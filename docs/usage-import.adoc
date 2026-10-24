@@ -38,6 +38,8 @@ entry of `bodies`. `ignored.colours` and `ignored.layers` still count the occurr
 converted, and `sourceLengthUnit` tells what the file declared. A file with no length unit is read as millimetres with a
 warning (`state` `missing`); a unit that cannot be resolved (for example a conversion factor of 0) is `KSTEP-I-013`.
 
+`kstep export` writes colours and layers that `kstep import` reads back (ADR-0039, see xref:usage.adoc#colours-layers[Colours and layers in the export]).
+
 Not reported yet: colours and layers on assembly instances (counted in `presentation.instanceStylesIgnored`), edge and
 vertex colours, and `--render` still uses its own palette.
 

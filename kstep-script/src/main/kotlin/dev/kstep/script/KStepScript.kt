@@ -99,6 +99,9 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
         // and the script function shell(...), plus ShellDirection in dev.kstep.geometry. Checked by grep: no
         // generated AP242 entity or other default import has a `Vertices`, `Vertex*Selector`, `shell` or `nearest`.
         "dev.kstep.geometry.select.*",
+        // Welle S (ADR-0039): StepColour, StepColours, ShapeStyle, FaceStyle, LayerNames, StyleException -- colours and
+        // layers for the export. Checked by grep: none of these names exists in the generated AP242 types or other imports.
+        "dev.kstep.geometry.style.*",
         // Welle L (ADR-0031): sketch { }, Sketch, SketchException and the sketch error types.
         "dev.kstep.sketch.*",
         // ShapeAssignment -- the type `shape(...)` registers on KStepModel.shapes.
