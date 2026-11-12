@@ -1,0 +1,15 @@
+# artifactIds published to Maven Central under dev.kstep (ADR-0043).
+# Single source for check-maven-central.sh and verify-maven-artifacts.sh. The root
+# build.gradle.kts task verifyPublicationCoverage keeps this list identical to publishedModules.
+kstep-core
+kstep-express
+kstep-step21
+kstep-script
+kstep-shape
+kstep-geometry
+kstep-constraints
+kstep-sketch
+kstep-render
+kstep-preview
+kstep-mcp
+kstep-asciidoc

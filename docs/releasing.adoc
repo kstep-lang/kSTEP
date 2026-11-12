@@ -12,7 +12,9 @@ A release is a `vX.Y.Z` tag. Pushing it runs `.github/workflows/release.yml`
 . Push the tag explicitly: `git push origin refs/tags/vX.Y.Z`. (`git push --follow-tags` only
   transfers annotated tags.)
 
-The workflow has two jobs with separated rights:
+. Check the `maven-central` job in the Actions log (see <<Publishing to Maven Central>>).
+
+The workflow has three jobs with separated rights:
 
 |===
 | Job | Permissions | What it does
@@ -27,6 +29,10 @@ The workflow has two jobs with separated rights:
 | `contents: write`
 | Re-validates the tag, checks the checksum, then creates or updates the GitHub release with the
   `gh` CLI. It checks out and runs no repository code.
+| `maven-central`
+| `contents: read`
+| Runs after `publish`, only when the four Maven Central secrets exist. Publishes the twelve library
+  modules, signed, and skips versions that are already on Maven Central. See below.
 |===
 
 Assets: `kstep-cli-X.Y.Z.zip` and `kstep-cli-X.Y.Z.zip.sha256`. Verify a download with
@@ -41,3 +47,76 @@ release is edited and its assets are replaced.
 The zip contains *no* native bridges: OCCT and PlaneGCS functions fall back to their documented
 unavailable path. Not part of the pipeline yet: Maven Central, a Homebrew tap, signatures and
 provenance (follow-up waves).
+
+== Publishing to Maven Central
+
+See link:adr/ADR-0043-maven-central-publishing.adoc[ADR-0043]. Nothing has been uploaded yet; the
+pipeline is prepared and stays inactive until the secrets below exist.
+
+=== What is published
+
+The twelve library modules as `dev.kstep:<module>`: `kstep-core`, `kstep-express`, `kstep-step21`,
+`kstep-script`, `kstep-shape`, `kstep-geometry`, `kstep-constraints`, `kstep-sketch`, `kstep-render`,
+`kstep-preview`, `kstep-mcp` and `kstep-asciidoc` (the Gradle project `:kstep-docs:kstep-asciidoc`).
+Not published: `kstep-cli`, `kstep-viewer`, `kstep-tests` and the `kstep-docs` parent. The list is the
+`publishedModules` map in `build.gradle.kts`; `scripts/release/published-artifacts.txt` mirrors it and
+`./gradlew check` (task `verifyPublicationCoverage`) fails when they differ or a new module is in neither list.
+
+The jars contain *no native libraries*. `kstep-geometry` and `kstep-constraints` ship only the Kotlin API; whoever
+uses them from Maven Central builds the bridges (see _Building_ in the README) and loads them with
+`-Dkstep.occt.bridge.library=/absolute/path/libkstep_occt_bridge.so` and
+`-Dkstep.planegcs.bridge.library=/absolute/path/libkstep_planegcs_bridge.so` (`.dylib` on macOS).
+Without them the geometry and sketch functions report their documented "unavailable" state.
+
+=== One-time setup (manual, by the maintainer)
+
+. Create an account at https://central.sonatype.com.
+. Verify the namespace `dev.kstep`: add the DNS TXT record Sonatype asks for to `kstep.dev` (netcup).
+. Generate a user token in the portal. Its two halves become `SONATYPE_USERNAME` and `SONATYPE_PASSWORD`.
+. Create a GPG key and publish the public key to keys.openpgp.org and keyserver.ubuntu.com.
+. Store the armored secret key as `GPG_SIGNING_KEY` and its passphrase as `GPG_PASSPHRASE`:
++
+----
+gh secret set SONATYPE_USERNAME --repo kstep-lang/kSTEP
+gh secret set SONATYPE_PASSWORD --repo kstep-lang/kSTEP
+gh secret set GPG_SIGNING_KEY   --repo kstep-lang/kSTEP
+gh secret set GPG_PASSPHRASE    --repo kstep-lang/kSTEP
+gh secret list --repo kstep-lang/kSTEP
+----
++
+`gh secret set` is interactive, so no value appears in the terminal or shell history.
+
+=== Flow
+
+`build` stages all artifacts into `build/maven-staging` and runs `verify-maven-artifacts.sh` (file set, checksums,
+POM content, no native libraries, LICENSE/NOTICE in every jar) on every release run, dry runs included. After `publish`
+has created the GitHub release, `maven-central` checks the four secrets (missing secrets skip the job with a notice, not
+an error), confirms the tag still points at the built commit, probes Maven Central for all twelve POMs
+(`check-maven-central.sh`: all present means skip, none present means upload, a mixed or unknown state fails), and runs
+`./gradlew clean publishToMavenCentral -Pkstep.native.exclude=true`, which signs in memory and releases automatically.
+Artifacts can take up to about 30 minutes to show up on repo1.maven.org; progress is visible at
+https://central.sonatype.com/publishing/deployments.
+
+Maven Central is immutable. A published version is never re-tagged or overwritten; fix forward with the next patch version.
+
+=== When something fails
+
+* Probe step fails with a partial state: look at the Deployments page in the Central Portal, drop a FAILED deployment,
+  publish a VALIDATED one by hand, then re-run.
+* Upload step fails: read the log (it never contains credentials), fix the cause, re-run via `workflow_dispatch` with the
+  `tag` and `dry_run=false`. The GitHub release is updated in place and an existing Central state is skipped.
+* Job skipped for missing secrets: set them, then re-run the same way.
+* A dry run on a tag from before this configuration (for example v0.3.0) only exercises the path where the Maven steps are
+  skipped; the first real test of the Maven path is the next tag.
+
+=== Local dry run
+
+----
+./gradlew clean
+./gradlew publishAllPublicationsToBuildStagingRepository -Pkstep.native.exclude=true
+bash scripts/release/verify-maven-artifacts.sh build/maven-staging 0.3.0
+----
+
+Without `-Pkstep.native.exclude=true` the task `verifyNoNativeLibraries` fails the run on a machine that has OCCT, so a
+local bridge can never end up in a jar. For a signed rehearsal use a throw-away key in a temporary `GNUPGHOME` and pass it
+as `ORG_GRADLE_PROJECT_signingInMemoryKey` (never commit it), then add `--signed` to the verification.

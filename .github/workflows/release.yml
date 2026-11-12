@@ -12,8 +12,8 @@ name: Release
 #   kstep-geometry/kstep-constraints put the built .so into their own jars via
 #   processResources, so a runner image with Eigen/Boost headers would otherwise leak a
 #   Linux-only library into a zip that is advertised as platform independent.
-# - Not part of this workflow (follow-up waves): Maven Central, Homebrew tap, signing and
-#   provenance.
+# - Maven Central is published by the job `maven-central`, after the GitHub release, gated on
+#   secrets and idempotent (ADR-0043). Not part of this workflow: Homebrew tap, provenance.
 # - Deliberately NOT pull_request_target and no secrets other than the job's github.token.
 on:
   push:
@@ -49,6 +49,8 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
+      commit: ${{ steps.onmaster.outputs.commit }}
+      has_publishing: ${{ steps.pubsupport.outputs.has }}
     steps:
       - name: Resolve and validate tag
         id: resolve
@@ -91,6 +93,7 @@ jobs:
           persist-credentials: false
 
       - name: Tag is on master
+        id: onmaster
         env:
           TAG: ${{ steps.resolve.outputs.tag }}
         run: |
@@ -101,6 +104,18 @@ jobs:
           fi
           if [ "$(git -C src cat-file -t "refs/tags/$TAG")" != "tag" ]; then
             echo "::warning::Tag $TAG is lightweight; annotated tags are the convention."
+          fi
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Detect publishing support in the tagged source
+        id: pubsupport
+        run: |
+          # Older tags (e.g. v0.3.0 rebuilt by dispatch) predate the Maven Central configuration.
+          if grep -q 'vanniktech-publish' src/gradle/libs.versions.toml; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::The tagged source has no Maven Central publishing configuration; the Maven steps are skipped."
           fi
 
       - name: Version check (tag vs build.gradle.kts)
@@ -158,6 +173,26 @@ jobs:
             -Pkstep.eigen.includeDir=/nonexistent \
             -Pkstep.boost.includeDir=/nonexistent \
             --stacktrace
+
+      - name: Stage Maven artifacts (no upload)
+        if: steps.pubsupport.outputs.has == 'true'
+        working-directory: src
+        run: |
+          # Same checkout, directly after `clean check`: no second clean needed.
+          ./gradlew publishAllPublicationsToBuildStagingRepository \
+            -Pkstep.native.exclude=true \
+            -Pkstep.occt.includeDir=/nonexistent \
+            -Pkstep.eigen.includeDir=/nonexistent \
+            -Pkstep.boost.includeDir=/nonexistent \
+            --no-configuration-cache --stacktrace
+
+      - name: Verify Maven artifacts
+        if: steps.pubsupport.outputs.has == 'true'
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          # Every release run, dry runs included, checks the artifacts before anything is published.
+          bash tools/scripts/release/verify-maven-artifacts.sh src/build/maven-staging "$VERSION"
 
       - name: Verify distribution
         env:
@@ -267,4 +302,132 @@ jobs:
             echo '```json'
             gh release view "$TAG" --json url,isPrerelease,assets
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  maven-central:
+    name: publish libraries to Maven Central
+    needs: [build, publish]
+    if: >-
+      needs.build.outputs.has_publishing == 'true' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Last on purpose: the immutable step comes after the idempotent GitHub release (ADR-0043).
+    permissions:
+      contents: read
+    steps:
+      - name: Re-validate tag and version
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ "$TAG" =~ $RE ]] || [ "$VERSION" != "${TAG#v}" ]; then
+            echo "::error::Invalid tag/version from build job."
+            exit 1
+          fi
+
+      - name: Detect Maven Central secrets
+        id: gate
+        env:
+          HAS_USER: ${{ secrets.SONATYPE_USERNAME != '' }}
+          HAS_PASS: ${{ secrets.SONATYPE_PASSWORD != '' }}
+          HAS_KEY: ${{ secrets.GPG_SIGNING_KEY != '' }}
+          HAS_PW: ${{ secrets.GPG_PASSPHRASE != '' }}
+        run: |
+          # Only booleans and secret NAMES are ever printed, never values.
+          missing=()
+          [ "$HAS_USER" = "true" ] || missing+=(SONATYPE_USERNAME)
+          [ "$HAS_PASS" = "true" ] || missing+=(SONATYPE_PASSWORD)
+          [ "$HAS_KEY" = "true" ] || missing+=(GPG_SIGNING_KEY)
+          [ "$HAS_PW" = "true" ] || missing+=(GPG_PASSPHRASE)
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Maven Central secrets not (fully) configured, skipping upload. Missing: ${missing[*]}"
+          fi
+
+      - name: Check out release tooling (workflow revision)
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          persist-credentials: false
+          sparse-checkout: scripts/release
+
+      - name: Check out tagged source
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.build.outputs.tag }}
+          path: src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag still points at the built commit
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          BUILT_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          COMMIT="$(git -C src rev-parse "refs/tags/$TAG^{commit}")"
+          if [ "$COMMIT" != "$BUILT_COMMIT" ]; then
+            echo "::error::Tag $TAG moved since the build job ($BUILT_COMMIT -> $COMMIT); refusing to publish."
+            exit 1
+          fi
+
+      - name: Check if libraries are already on Maven Central
+        id: mc
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          bash tools/scripts/release/check-maven-central.sh "$VERSION" | tee probe.txt
+          grep '^state=' probe.txt >> "$GITHUB_OUTPUT"
+          if grep -qx 'state=published' probe.txt; then
+            echo "::notice::v$VERSION is already on Maven Central, skipping the upload."
+          fi
+
+      - name: Set up JDK 21
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        if: steps.gate.outputs.ready == 'true'
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-read-only: true
+
+      - name: Publish libraries to Maven Central
+        if: steps.gate.outputs.ready == 'true' && steps.mc.outputs.state == 'absent'
+        working-directory: src
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          # The secrets exist only in this step. No --info/--debug: never log credentials.
+          ./gradlew clean publishToMavenCentral \
+            -Pkstep.native.exclude=true \
+            -Pkstep.occt.includeDir=/nonexistent \
+            -Pkstep.eigen.includeDir=/nonexistent \
+            -Pkstep.boost.includeDir=/nonexistent \
+            --no-configuration-cache --stacktrace
+
+      - name: Summary
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          STATE: ${{ steps.mc.outputs.state }}
+        run: |
+          {
+            echo '### Maven Central'
+            echo "Version $VERSION, state before upload: $STATE."
+            echo 'Deployments: https://central.sonatype.com/publishing/deployments'
+            echo 'Artifacts can take up to about 30 minutes to appear on repo1.maven.org.'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -165,5 +165,141 @@ else
   echo "note: zip/unzip missing, skipping verify-dist negative tests" >&2
 fi
 
+# ---- check-maven-central (curl stubbed, no network) ----------------------------------
+M="$HERE/check-maven-central.sh"
+MC_LIST="$WORK/mc-artifacts.txt"
+printf '# comment\nkstep-core\nkstep-asciidoc\n\nkstep-mcp\n' > "$MC_LIST"
+mkdir -p "$WORK/mcbin"
+cat > "$WORK/mcbin/curl" <<'STUB'
+#!/usr/bin/env bash
+# Stub: the last argument is the URL; the code comes from $MC_CODES (artifact=code lines, default 404).
+url="${*: -1}"
+echo "$url" >> "$MC_LOG"
+art="$(basename "$(dirname "$(dirname "$url")")")"
+code="$(grep "^$art=" "$MC_CODES" 2>/dev/null | head -1 | cut -d= -f2)"
+printf '%s' "${code:-404}"
+STUB
+chmod +x "$WORK/mcbin/curl"
+export MC_LOG="$WORK/mc.log" MC_CODES="$WORK/mc.codes"
+mc() { PATH="$WORK/mcbin:$PATH" bash "$M" "$@"; }
+: > "$MC_LOG"
+printf '' > "$MC_CODES"
+expect_rc "central all 404 -> absent" 0 mc 0.4.0 https://example.invalid/maven2 "$MC_LIST"
+contains "$WORK/out" "state=absent"; check "central state=absent" $?
+contains "$MC_LOG" "https://example.invalid/maven2/dev/kstep/kstep-asciidoc/0.4.0/kstep-asciidoc-0.4.0.pom"
+check "central URL form" $?
+printf 'kstep-core=200\nkstep-asciidoc=200\nkstep-mcp=200\n' > "$MC_CODES"
+expect_rc "central all 200 -> published" 0 mc 0.4.0 https://example.invalid/maven2 "$MC_LIST"
+contains "$WORK/out" "state=published"; check "central state=published" $?
+printf 'kstep-core=200\n' > "$MC_CODES"
+expect_rc "central mixed -> error" 1 mc 0.4.0 https://example.invalid/maven2 "$MC_LIST"
+contains "$WORK/err" "::error::"; check "central mixed emits ::error::" $?
+printf 'kstep-core=500\n' > "$MC_CODES"
+expect_rc "central 500 -> error" 1 mc 0.4.0 https://example.invalid/maven2 "$MC_LIST"
+printf 'kstep-mcp=000\n' > "$MC_CODES"
+expect_rc "central 000 -> error" 1 mc 0.4.0 https://example.invalid/maven2 "$MC_LIST"
+printf '' > "$MC_CODES"
+for bad in "0.4" "v0.4.0" "0.4.0;x" ""; do
+  expect_rc "central rejects version [$bad]" 2 mc "$bad" https://example.invalid/maven2 "$MC_LIST"
+done
+expect_rc "central rejects http base" 2 mc 0.4.0 http://example.invalid/maven2 "$MC_LIST"
+
+# ---- verify-maven-artifacts (fixture repository built with python3) -------------------
+if command -v python3 >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+  VM="$HERE/verify-maven-artifacts.sh"
+  VM_LIST="$WORK/vm-artifacts.txt"
+  printf 'kstep-core\nkstep-express\n' > "$VM_LIST"
+  mkrepo() { # name; builds $WORK/repo-<name> with a good fixture
+    python3 -I - "$WORK/repo-$1" <<'PY'
+import hashlib, os, sys, zipfile
+root = sys.argv[1]
+arts = ["kstep-core", "kstep-express"]
+POM = """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>
+<groupId>dev.kstep</groupId><artifactId>%s</artifactId><version>1.0.0</version>
+<name>%s</name><description>d</description><url>https://kstep.dev</url>
+<licenses><license><name>Apache-2.0</name></license></licenses>
+<developers><developer><id>ibetchvaia</id></developer></developers>
+<scm><connection>c</connection><developerConnection>d</developerConnection>
+<url>https://github.com/kstep-lang/kSTEP</url></scm>
+<dependencies>%s</dependencies></project>"""
+DEP = "<dependency><groupId>dev.kstep</groupId><artifactId>kstep-express</artifactId><version>1.0.0</version></dependency>"
+def jar(path, names):
+    with zipfile.ZipFile(path, "w") as z:
+        for n in names:
+            z.writestr(n, "x")
+for a in arts:
+    d = os.path.join(root, "dev/kstep", a, "1.0.0")
+    os.makedirs(d)
+    base = os.path.join(d, a + "-1.0.0")
+    legal = ["META-INF/LICENSE", "META-INF/NOTICE"]
+    main = legal + ["dev/kstep/x/A.class"]
+    if a == "kstep-core":
+        main.append("dev/kstep/generated/ap242v1/Product.class")
+    jar(base + ".jar", main)
+    jar(base + "-sources.jar", legal + ["dev/kstep/x/A.kt"])
+    jar(base + "-javadoc.jar", legal)
+    open(base + ".pom", "w").write(POM % (a, a, DEP if a == "kstep-core" else ""))
+    open(base + ".module", "w").write('{"variants":[{"name":"apiElements"}]}')
+    for f in os.listdir(d):
+        p = os.path.join(d, f)
+        data = open(p, "rb").read()
+        for algo in ("md5", "sha1", "sha256", "sha512"):
+            open(p + "." + algo, "w").write(hashlib.new(algo, data).hexdigest())
+PY
+  }
+  rehash() { # file: rewrites checksums of a modified file
+    python3 -I - "$1" <<'PY'
+import hashlib, sys
+p = sys.argv[1]
+data = open(p, "rb").read()
+for algo in ("md5", "sha1", "sha256", "sha512"):
+    open(p + "." + algo, "w").write(hashlib.new(algo, data).hexdigest())
+PY
+  }
+  CORE="dev/kstep/kstep-core/1.0.0/kstep-core-1.0.0"
+  mkrepo good
+  expect_rc "verify-maven good fixture" 0 bash "$VM" "$WORK/repo-good" 1.0.0 "$VM_LIST"
+  mkrepo nosrc; rm "$WORK/repo-nosrc/$CORE-sources.jar"
+  expect_rc "verify-maven missing sources jar" 1 bash "$VM" "$WORK/repo-nosrc" 1.0.0 "$VM_LIST"
+  mkrepo extra; mkdir -p "$WORK/repo-extra/dev/kstep/kstep-cli"
+  expect_rc "verify-maven extra module directory" 1 bash "$VM" "$WORK/repo-extra" 1.0.0 "$VM_LIST"
+  mkrepo so
+  python3 -I - "$WORK/repo-so/$CORE.jar" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "a") as z:
+    z.writestr("dev/kstep/geometry/native/linux-x86-64/libkstep_occt_bridge.so", "x")
+PY
+  rehash "$WORK/repo-so/$CORE.jar"
+  expect_rc "verify-maven native library in jar" 1 bash "$VM" "$WORK/repo-so" 1.0.0 "$VM_LIST"
+  mkrepo sha; printf 'deadbeef' > "$WORK/repo-sha/$CORE.jar.sha1"
+  expect_rc "verify-maven wrong checksum" 1 bash "$VM" "$WORK/repo-sha" 1.0.0 "$VM_LIST"
+  mkrepo nolic
+  sed -i.bak 's#<licenses>.*</licenses>##' "$WORK/repo-nolic/$CORE.pom"; rm "$WORK/repo-nolic/$CORE.pom.bak"
+  rehash "$WORK/repo-nolic/$CORE.pom"
+  expect_rc "verify-maven POM without licence" 1 bash "$VM" "$WORK/repo-nolic" 1.0.0 "$VM_LIST"
+  mkrepo cli
+  sed -i.bak 's#<artifactId>kstep-express</artifactId><version>1.0.0</version></dependency>#<artifactId>kstep-cli</artifactId><version>1.0.0</version></dependency>#' \
+    "$WORK/repo-cli/$CORE.pom"; rm "$WORK/repo-cli/$CORE.pom.bak"
+  rehash "$WORK/repo-cli/$CORE.pom"
+  expect_rc "verify-maven POM depending on kstep-cli" 1 bash "$VM" "$WORK/repo-cli" 1.0.0 "$VM_LIST"
+  mkrepo nogen
+  python3 -I - "$WORK/repo-nogen/$CORE.jar" <<'PY'
+import sys, zipfile
+p = sys.argv[1]
+with zipfile.ZipFile(p) as z:
+    items = [(n, z.read(n)) for n in z.namelist() if "ap242v1" not in n]
+with zipfile.ZipFile(p, "w") as z:
+    for n, d in items:
+        z.writestr(n, d)
+PY
+  rehash "$WORK/repo-nogen/$CORE.jar"
+  expect_rc "verify-maven core jar without generated classes" 1 bash "$VM" "$WORK/repo-nogen" 1.0.0 "$VM_LIST"
+  mkrepo asc; : > "$WORK/repo-asc/$CORE.jar.asc"
+  expect_rc "verify-maven .asc without --signed" 1 bash "$VM" "$WORK/repo-asc" 1.0.0 "$VM_LIST"
+else
+  echo "note: python3/unzip missing, skipping verify-maven-artifacts tests" >&2
+fi
+
 echo "PASS $PASSED/$TOTAL"
 [ "$PASSED" -eq "$TOTAL" ]

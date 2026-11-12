@@ -13,6 +13,8 @@ kotlinx-serialization = "1.11.0"
 compose-multiplatform = "1.11.1"
 # material3 has followed its own version cadence since CMP 1.10, hence the separate ref.
 compose-material3 = "1.9.0"
+# Maven Central publishing (ADR-0043); same plugin and version as kUML.
+vanniktech-publish = "0.37.0"
 
 [libraries]
 antlr4 = { module = "org.antlr:antlr4", version.ref = "antlr" }
@@ -44,3 +46,4 @@ kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", versi
 ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint-plugin" }
 compose-multiplatform = { id = "org.jetbrains.compose", version.ref = "compose-multiplatform" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+vanniktech-publish = { id = "com.vanniktech.maven.publish", version.ref = "vanniktech-publish" }

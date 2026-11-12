@@ -127,12 +127,28 @@ private val jdkHomeProvider =
 val jniMdPresent =
     nativePlatform != null &&
         File(jdkHomeProvider.get(), "include/${nativePlatform.jniOsInclude}/jni_md.h").isFile
-val nativeBuildable = nativePlatform != null && occtHeadersPresent && compilerAvailable && jniMdPresent
+// -Pkstep.native.exclude=true: the Maven Central publication must never carry a native library (ADR-0043).
+val nativeExclude =
+    providers
+        .gradleProperty("kstep.native.exclude")
+        .map { it == "true" }
+        .orElse(false)
+        .get()
+if (nativeExclude && providers.gradleProperty("kstep.occt.require").orNull == "true") {
+    throw GradleException("kstep.native.exclude=true contradicts kstep.occt.require=true")
+}
+val nativeBuildable =
+    !nativeExclude &&
+        nativePlatform != null &&
+        occtHeadersPresent &&
+        compilerAvailable &&
+        jniMdPresent
 
 if (!nativeBuildable) {
     logger.warn(
         "kstep-geometry: the OCCT native bridge will NOT be compiled this run " +
-            "(platform=${nativePlatform?.id}, jniMdPresent=$jniMdPresent, occtHeadersPresent=$occtHeadersPresent " +
+            "(nativeExclude=$nativeExclude, platform=${nativePlatform?.id}, jniMdPresent=$jniMdPresent, " +
+            "occtHeadersPresent=$occtHeadersPresent " +
             "[looked in ${occtIncludeDir.get()}], compilerAvailable=$compilerAvailable). " +
             "dev.kstep.geometry.OcctKernel will report OcctAvailability.Unavailable at runtime. " +
             "See README 'Building' for the apt-get (Linux) / brew (macOS arm64) command that installs " +
@@ -295,8 +311,10 @@ val compileOcctBridge =
     }
 
 tasks.named<ProcessResources>("processResources") {
-    dependsOn(compileOcctBridge)
-    from(nativeOutputDir) {
-        into("dev/kstep/geometry/native/${nativePlatform?.id ?: "unsupported"}")
+    if (!nativeExclude) {
+        dependsOn(compileOcctBridge)
+        from(nativeOutputDir) {
+            into("dev/kstep/geometry/native/${nativePlatform?.id ?: "unsupported"}")
+        }
     }
 }

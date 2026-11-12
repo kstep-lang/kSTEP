@@ -120,12 +120,28 @@ private val jdkHomeProvider =
 val jniMdPresent =
     nativePlatform != null &&
         File(jdkHomeProvider.get(), "include/${nativePlatform.jniOsInclude}/jni_md.h").isFile
-val nativeBuildable = nativePlatform != null && eigenPresent && boostPresent && compilerAvailable && jniMdPresent
+// -Pkstep.native.exclude=true: the Maven Central publication must never carry a native library (ADR-0043).
+val nativeExclude =
+    providers
+        .gradleProperty("kstep.native.exclude")
+        .map { it == "true" }
+        .orElse(false)
+        .get()
+if (nativeExclude && providers.gradleProperty("kstep.planegcs.require").orNull == "true") {
+    throw GradleException("kstep.native.exclude=true contradicts kstep.planegcs.require=true")
+}
+val nativeBuildable =
+    !nativeExclude &&
+        nativePlatform != null &&
+        eigenPresent &&
+        boostPresent &&
+        compilerAvailable &&
+        jniMdPresent
 
 if (!nativeBuildable) {
     logger.warn(
         "kstep-constraints: the PlaneGCS native bridge will NOT be compiled this run " +
-            "(platform=${nativePlatform?.id}, jniMdPresent=$jniMdPresent, " +
+            "(nativeExclude=$nativeExclude, platform=${nativePlatform?.id}, jniMdPresent=$jniMdPresent, " +
             "eigenPresent=$eigenPresent [looked in ${eigenIncludeDir.get()}], " +
             "boostPresent=$boostPresent [looked in ${boostIncludeDir.get()}], compilerAvailable=$compilerAvailable). " +
             "dev.kstep.constraints.PlaneGcsSolver will report PlaneGcsAvailability.Unavailable at runtime. " +
@@ -242,8 +258,10 @@ val compilePlaneGcsBridge =
     }
 
 tasks.named<ProcessResources>("processResources") {
-    dependsOn(compilePlaneGcsBridge)
-    from(nativeOutputDir) {
-        into("dev/kstep/constraints/native/${nativePlatform?.id ?: "unsupported"}")
+    if (!nativeExclude) {
+        dependsOn(compilePlaneGcsBridge)
+        from(nativeOutputDir) {
+            into("dev/kstep/constraints/native/${nativePlatform?.id ?: "unsupported"}")
+        }
     }
 }

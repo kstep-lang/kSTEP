@@ -1,0 +1,89 @@
+= ADR-0043: Maven Central publishing for the library modules
+:toc:
+
+== Status
+
+Accepted, prepared (build and CI only). No artifact has been uploaded; the namespace verification, the signing key and
+the repository secrets are still to be created by the maintainer. Amends ADR-0025.
+
+== Context
+
+kSTEP is only distributed as a GitHub release zip (the CLI). The library modules cannot be consumed from other builds.
+kUML publishes its libraries with `com.vanniktech.maven.publish` and has run into several traps that this wave avoids on
+purpose: modules slipping into the upload through a deny-list, an unsigned or half-uploaded release, and a release tag that
+carried the previous version.
+
+Facts that shape the design: all modules are Kotlin JVM (no KMP, no Gradle plugin module); no library depends on
+`kstep-cli`, `kstep-viewer` or `kstep-tests`; `kstep-core` compiles the generated AP242 classes of `kstep-express` into
+itself; `kstep-geometry` and `kstep-constraints` copy their JNI libraries into their own jars through `processResources`.
+
+== Decision
+
+D1:: *Allow-list.* The `publishedModules` map in the root `build.gradle.kts` selects modules by Gradle path. The task
+`verifyPublicationCoverage` (part of `check`) fails when a subproject is in neither `publishedModules` nor
+`nonPublishedModules`, when the lists overlap, when leaf names collide, or when `scripts/release/published-artifacts.txt`
+differs from the list. Twelve modules are published; `kstep-cli`, `kstep-viewer`, `kstep-tests` and the `kstep-docs` parent
+are not.
+
+D2:: *artifactId is the leaf project name.* `:kstep-docs:kstep-asciidoc` becomes `dev.kstep:kstep-asciidoc`, not
+`kstep-docs-kstep-asciidoc`. The coverage check proves the leaf names are unique.
+
+D3:: *No native libraries in any published jar.* Three layers: the property `-Pkstep.native.exclude=true` stops
+`kstep-geometry` and `kstep-constraints` from compiling or packing the bridges (it contradicts `kstep.occt.require` and
+`kstep.planegcs.require` and fails fast if combined); the task `verifyNoNativeLibraries` inspects the main, sources and
+javadoc jars of every published module and every publish task depends on it, so even `publishToMavenLocal` on a machine with
+OCCT fails closed; `verify-maven-artifacts.sh` repeats the check on the staged repository. The `/nonexistent` include-dir
+flags stay in `release.yml` as a second line of defence. Users of the Central jars build the bridges themselves and load
+them with the existing system properties `kstep.occt.bridge.library` and `kstep.planegcs.bridge.library`. Platform jars
+with natives (classifiers) are out of scope.
+
+D4:: *Javadoc as an empty jar,* as in kUML (Central requires the file; Dokka would add build time for little value). Sources
+jars are real. `LICENSE` and `NOTICE` go into `META-INF/` of all three jars (Apache-2.0 section 4(d)). The javadoc jar is a plain
+`Zip` subclass of the plugin, hence `into("META-INF")` instead of `metaInf {}`.
+
+D5:: *Signing and upload guards.* Signing is switched on only when the Gradle property `signingInMemoryKey` exists (no
+signer-less sign tasks in the credential-free dry run). A requested upload task (`publishToMavenCentral`,
+`publishAndReleaseToMavenCentral`, `publishAllPublicationsToMavenCentralRepository`) fails at configuration time without the
+key and without `-Pkstep.native.exclude=true`; the messages name properties, never values. Uploads use `automaticRelease = true`
+as in kUML.
+
+D6:: *Order and gating in `release.yml`.* A new job `maven-central` runs after `build` (check, dist verification and
+`verify-maven-artifacts.sh` already passed) and after `publish` (the idempotent GitHub release already exists), so the
+immutable step is last and its failure does not block the release. The job has only `contents: read`. It runs only when all
+four secrets (`SONATYPE_USERNAME`, `SONATYPE_PASSWORD`, `GPG_SIGNING_KEY`, `GPG_PASSPHRASE`) exist; otherwise it succeeds with
+a notice naming the missing secrets. It requires the tag to still point at the commit the build job saw. The secrets are
+present only in the one upload step; no `--info`/`--debug`.
+
+D7:: *Idempotency by probing all twelve POMs.* `check-maven-central.sh` sends read-only HEAD requests: all 200 means skip, all
+404 means upload, a mix or any other status (including network failure) fails closed. kUML probes one module only, which cannot
+detect a partial state. Re-running goes through `workflow_dispatch` with `dry_run=false`; hence no separate republish workflow,
+and with `automaticRelease` no staging workflow either (the Central Portal "Publish" button is the manual fallback).
+
+D8:: *Older tags.* A step detects whether the tagged source contains the publishing configuration (`vanniktech-publish` in
+`libs.versions.toml`); if not, the Maven steps and the Central job are skipped. A dry-run rebuild of `v0.3.0` therefore only
+covers that path.
+
+D9:: *Local verification repository.* Every published module gets a repository `buildStaging` pointing at
+`build/maven-staging`, written with checksums (and signatures when signed), leaving `~/.m2` untouched. `ci.yml` stages and
+verifies it on every PR in the job without OCCT.
+
+== Consequences
+
+* The first real Central upload is the next tag after the maintainer has verified the namespace `dev.kstep` (DNS TXT on `kstep.dev`),
+  created the key and set the secrets (see `docs/releasing.adoc`). Whether Gradle 9.6.1 plus plugin 0.37.0 bundle the twelve modules
+  into one portal deployment or twelve is not known; it only affects how a partial state is resolved by hand.
+* `kstep-mcp` is published as a library although it has a `main()` and a `slf4j-simple` runtime dependency, which forces a logging
+  backend on consumers. Open question for the maintainer (kUML does not publish its MCP module); no behaviour change in this wave.
+* `kstep-express` pulls `antlr4-runtime` and `kotlinpoet` transitively.
+* Users of `kstep-geometry`/`kstep-constraints` from Central do not get OCCT or PlaneGCS.
+
+== Not verified
+
+The actual upload, namespace verification, how the portal groups the deployments, the time until the artifacts show up on
+repo1.maven.org, and the `release.yml` Maven path under real GitHub runners (CI exercises the staging and verification
+only).
+
+== Differences from kUML
+
+Allow-list instead of deny-list; coverage check; Central after the GitHub release in its own job; secrets gate; all twelve
+POMs probed; native-library fail-closed checks; no staging or republish workflow.

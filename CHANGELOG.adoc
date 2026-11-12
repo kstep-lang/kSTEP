@@ -9,6 +9,8 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Maven Central publishing configuration for the twelve library modules (`dev.kstep`), signed, without native libraries; the
+  release workflow gets a `maven-central` job gated on secrets and idempotent. Nothing has been published yet (ADR-0043).
 * Welle U (ADR-0042): transparency and edge colours in the STEP export. `StepColour` gets an opacity: `StepColour.rgba(r, g,
   b, a)`, `StepColour.hex("#RRGGBBAA")`, `StepColour.a` and `isOpaque`; an alpha outside 0..1 or not a number is
   `KSTEP-S-012`. A translucent part or face colour is written with `SURFACE_STYLE_TRANSPARENT(1 - a)` and read back by OCCT

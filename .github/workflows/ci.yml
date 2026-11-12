@@ -188,6 +188,15 @@ jobs:
         # guard: that step only exists in build-native (OCCT is absent here by design),
         # but PlaneGCS is required in both jobs, so this guard applies in both.
 
+      - name: Stage and verify Maven artifacts (no upload)
+        run: |
+          # Separate invocation: -Pkstep.native.exclude=true contradicts -Pkstep.planegcs.require=true.
+          ./gradlew publishAllPublicationsToBuildStagingRepository -Pkstep.native.exclude=true --stacktrace
+          VERSION="$(sed -n 's/^[[:space:]]*version = "\([^"]*\)".*/\1/p' build.gradle.kts | head -1)"
+          bash scripts/release/verify-maven-artifacts.sh build/maven-staging "$VERSION"
+        # First real probe of ADR-0043's publishing configuration on every PR, long before a tag.
+        # Placed after the skip guard so the guard still sees the strict run's test results.
+
       - name: Upload test and ktlint reports
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

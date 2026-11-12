@@ -10,7 +10,8 @@ image:https://img.shields.io/github/license/kstep-lang/kSTEP[Apache 2.0,link=htt
 image:https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml/badge.svg?branch=master[CI,link=https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml]
 
 WARNING: kSTEP is in early, pre-release development (M2). The API is
-unstable and nothing is published to Maven Central or Homebrew yet; tagged releases
+unstable and nothing is published to Maven Central or Homebrew yet (the Maven Central
+publishing is prepared in the build, see link:docs/releasing.adoc[releasing]); tagged releases
 (https://github.com/kstep-lang/kSTEP/releases[GitHub releases], see
 link:CHANGELOG.adoc[CHANGELOG]) are pre-releases: v0.1.0 is source-only, from
 v0.1.1 on a JVM-only CLI zip without native bridges is attached. See
