@@ -39,7 +39,7 @@ layer that is attached to anything but a `MANIFOLD_SOLID_BREP`, `ADVANCED_FACE` 
 geometry, an MDGPR whose context is not the context of the shape representation. The style instances are appended to the
 geometry instances, so renumbering, `offset`, `geometryById` and the placement bridge stay as they were.
 
-D5:: *Transparency is not supported.* `Quantity_ColorRGBA(..., 0.5)` is written (`SURFACE_STYLE_RENDERING_WITH_PROPERTIES`
+D5:: *Transparency is not supported.* (Superseded in part by ADR-0042: the reader returned only RGB because our code used the RGB overload; the RGBA overload returns the alpha, and transparency is supported since Welle U.) `Quantity_ColorRGBA(..., 0.5)` is written (`SURFACE_STYLE_RENDERING_WITH_PROPERTIES`
 and `SURFACE_STYLE_TRANSPARENT(0.5)`), but the XCAF reader of `dump_xcaf_tree` and of `kstep import` returns only RGB, so
 the alpha cannot be read back by our tools. The rule was: support it only if it is read back. `StepColour` therefore has
 no alpha, and `StepColour.hex("#RRGGBBAA")` is `KSTEP-S-012` ("transparency is not supported").
@@ -153,7 +153,7 @@ CLI (95cce51, OCCT 7.9.3) before any code change; the guard test passes on both 
 
 == Not covered
 
-* Transparency (D5), PMI, curve and edge colours, instance colours on assembly components, several layers per target.
+* Transparency (D5, since Welle U see ADR-0042), PMI, curve and edge colours (since Welle U see ADR-0042), instance colours on assembly components, several layers per target.
 * A colour on one solid of a multi-solid part (only the whole part and single faces are targets).
 * Layer names beyond printable ASCII (D7), until the Part 21 text handling gets the `\X2\` escapes.
 * Face colours and layers in the preview and in the GLB. They need a triangle-to-face mapping (`nativeShapeTriangles`

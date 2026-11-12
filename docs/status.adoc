@@ -402,7 +402,7 @@ this writing:
   to kSTEP and a box written by FreeCAD 1.1.4 were checked on 2026-10-22 (see
   xref:usage-import.adoc#import-usage[Reading a STEP file back]); since Welle R (ADR-0038) it also reports colours and
   layers (part, body, face), the file's length unit (inch, centimetre and metre files are converted and reported) and
-  checks product-structure depth before the transfer; other CAD tools, PMI, instance colours and structure-only files
+  checks product-structure depth before the transfer; since Welle U (ADR-0042) it also reports alpha and edge colours; other CAD tools, PMI, instance colours and structure-only files
   are not covered.
 * (M1 Welle 6) The semantic model now captures `DERIVE`, `INVERSE`, and
   `UNIQUE` entity-body clauses — a gap flagged across three separate
@@ -684,9 +684,14 @@ scan before either lands.
   `styleFaces(...)` annotate a part or single faces; a styled part is written through `STEPCAFControl_Writer` and the style
   entities are merged into the Part 21 file, an unstyled part keeps the old writer and stays byte-identical (three
   goldens generated before the change). New codes `KSTEP-S-012` to `KSTEP-S-015`. Verified with `kstep import`, OCCT's
-  own XCAF reader and FreeCAD (geometry; colours are not readable in headless FreeCAD). Not covered: transparency,
-  Unicode layer names, instance colours, curve and edge colours, face colours in the preview. A part colour combined
+  own XCAF reader and FreeCAD (geometry; colours are not readable in headless FreeCAD). Not covered: Unicode layer
+  names, instance colours, face colours in the preview (transparency and edge colours since Welle U, ADR-0042). A part colour combined
   with a face colour (an `OVER_RIDING_STYLED_ITEM`) is merged fail-closed since the S2 fix.
+* Welle U (ADR-0042): transparency and edge colours in the STEP export. `StepColour.rgba(...)`, `hex("#RRGGBBAA")` and
+  `styleEdges(...)`; an opaque colour is written by the unchanged path (byte-identical goldens), a translucent one as
+  `SURFACE_STYLE_TRANSPARENT`; the style merge allows `CURVE_STYLE` only on edges. `kstep import` reports `alpha` and
+  `edgeStyles`. Verified with `kstep import`, OCCT's XCAF reader and FreeCAD (geometry). Not covered: colours on assembly
+  instances (measured, the next wave), opacity in `kstep render`, layers and widths on edges.
 * Release v0.3.0 (2026-10-24, pre-release) contains everything above. Its zip has no native bridges, like v0.1.1 and
   v0.2.0; geometry, sketches and `kstep import` need a build from source on Linux x86-64 or macOS arm64.
 

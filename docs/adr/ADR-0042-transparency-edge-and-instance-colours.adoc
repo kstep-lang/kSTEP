@@ -1,0 +1,142 @@
+= ADR-0042: Transparency and edge colours in the STEP export (Welle U); instance colours measured
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle U): transparency (alpha) on part and face colours, and colours on single edges.
+Instance colours (one part used twice, each in its own colour) were measured but are *not built*; they are the
+follow-up of this wave (see "Follow-up: instance colours"). Builds on ADR-0038 (import of colours and layers) and
+ADR-0039 (export of colours and layers); it supersedes decision D5 of ADR-0039 in part (transparency is now supported).
+Every number below comes from `scripts/interop/spike_export_styles.cpp` and `scripts/interop/dump_xcaf_tree.cpp styles`
+(OCCT 7.9.3, macOS arm64; reproduce with `scripts/interop/verify-export-alpha-edge-instance.sh --spike`).
+
+== Context
+
+ADR-0039 D5 wrote that `Quantity_ColorRGBA(..., 0.5)` is stored as `SURFACE_STYLE_RENDERING_WITH_PROPERTIES` with a
+`SURFACE_STYLE_TRANSPARENT`, but refused the feature because the readers of that time returned only RGB. The cause was in
+our reader code, not in OCCT: `labelColor()` of the native bridge and `printColour()` of `dump_xcaf_tree` used the
+`GetColor(label, type, Quantity_Color&)` overload; the `Quantity_ColorRGBA&` overload returns the alpha as well.
+Edge colours (`CURVE_STYLE`) and instance colours were listed as "not covered".
+
+== Measurements
+
+All scenarios use a 10 x 20 x 30 box; "top face" is the face at z = 30 (index 5), "top edges" are the four edges at z = 30
+(indices 3, 7, 9, 11). Both `write.step.assembly` modes 0 and 2 give the same result unless noted.
+
+[cols="2,4,3",options="header"]
+|===
+| Scenario | Entities OCCT writes | OCCT XCAF read back
+| part, alpha 0.5
+| `STYLED_ITEM` on the solid; `SURFACE_SIDE_STYLE` lists `SURFACE_STYLE_FILL_AREA` and
+`SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING., #colour, (#t))` with `#t = SURFACE_STYLE_TRANSPARENT(0.5)`; the
+colour entity is shared
+| RGB (1, 0.5, 0), alpha 0.500000 (RGBA overload)
+| top face, alpha 0.25
+| the same chain on the `ADVANCED_FACE`; `SURFACE_STYLE_TRANSPARENT(0.75)`, so `t = 1 - alpha`; a pure blue is
+`DRAUGHTING_PRE_DEFINED_COLOUR('blue')`
+| face 5, alpha 0.250000
+| part alpha 0.5 and face alpha 0.25
+| `STYLED_ITEM` on the solid plus `OVER_RIDING_STYLED_ITEM('overriding color', ..., #face, #partStyled)`; each carries its own
+rendering and transparency
+| part 0.5 and face 0.25
+| alpha 1.0 through the RGBA overload
+| no `SURFACE_STYLE_RENDERING_WITH_PROPERTIES` is written for an opaque part colour (only for alpha < 1); kSTEP does not use
+the RGBA setter for alpha 1.0 anyway (D2)
+| unchanged
+| four top edges, no other colour
+| one plain `STYLED_ITEM('color', (#psa), #EDGE_CURVE)` per edge; `PRESENTATION_STYLE_ASSIGNMENT((#cs))`;
+`CURVE_STYLE('', #font, POSITIVE_LENGTH_MEASURE(0.1), #colour)`; `#font = DRAUGHTING_PRE_DEFINED_CURVE_FONT('continuous')`;
+red is `DRAUGHTING_PRE_DEFINED_COLOUR('red')`. No dummy `STYLED_ITEM` on the solid. The width is a typed parameter, not an
+instance.
+| edges 3, 7, 9, 11 (mid z = 30), `ColorCurv` red, alpha 1
+| part colour and four top edges
+| the part `STYLED_ITEM` on the solid, and one `OVER_RIDING_STYLED_ITEM('overriding color', (#psa), #EDGE_CURVE, #partStyled)`
+per edge with the same `CURVE_STYLE` chain
+| part orange and the four edges red
+| top face colour and four top edges
+| as above, face and edges each with their own items
+| face 5 blue, edges red
+| edge colour with alpha 0.5
+| identical to the opaque edge: `CURVE_STYLE` has no transparency
+| edges red, alpha 1.0
+|===
+
+The edge order of `TopExp::MapShapes(TopAbs_EDGE)` was the same after the round trip in every scenario above, but this is
+only noted, not relied on: the tests identify an edge by its geometry (the mid point read from the re-imported shape).
+
+== Decisions
+
+D1:: *Alpha is part of `StepColour`.* `StepColour(r, g, b, a = 1.0)`, `StepColour.rgba(r, g, b, a)` and
+`StepColour.hex("#RRGGBBAA")` (a = AA / 255; `#RRGGBB` stays opaque). `a` must be finite in 0..1, otherwise `KSTEP-S-012`
+with a message naming alpha. `toArray()` stays three values (existing callers), `toRgbaArray()` returns four. The old test
+"a hex colour with an alpha channel is rejected as unsupported transparency" is replaced by the new semantics, not relaxed.
+
+D2:: *Opaque colours take the unchanged path.* In the native writer an alpha of exactly `1.0` calls the same
+`SetColor(label, Quantity_Color, ...)` as before; only `a < 1` uses `Quantity_ColorRGBA`. Byte-identity of every file without
+transparency is therefore structural: `StepColour.rgba(1.0, 0.5, 0.0, 1.0)` writes exactly `export-golden-part-colour.step`
+(a test compares byte for byte; the other goldens are unchanged).
+
+D3:: *The reader returns alpha.* `labelColor()` of the bridge reads through the RGBA overload; the transport array of
+colours has seven values per record (node, target, sub-index, r, g, b, alpha). `RgbColor` gets `alpha: Double = 1.0`. The
+float precision of OCCT's alpha is 6e-8 and thus within the 1e-6 the tests demand (0.3, 0.25, 0.5, 0.0 and 192/255 checked).
+
+D4:: *Edge colours are opaque and have their own API.* `EdgeStyle(edgeIndex, colour)` (colour must be opaque, otherwise
+`KSTEP-S-012`), `ShapeStyle.edges` (sorted, unique, at most 10000) and `styleEdges(pd, selector, colour, expected)` in the
+script. The selector is an `EdgeSelector` and resolves immediately against the registered shape, like `styleFaces` (empty
+or wrongly sized selection is `KSTEP-S-011`, a second colour for an edge is `KSTEP-S-014`, no shape yet is `KSTEP-S-015`).
+No new error code is needed. Edge layers, edge width and line style are not supported (the writer uses OCCT's defaults,
+`continuous`, 0.1).
+
+D5:: *Allow-list and target checks (fail closed).* `STYLE_ENTITY_NAMES` gains exactly the measured names
+`SURFACE_STYLE_RENDERING_WITH_PROPERTIES`, `SURFACE_STYLE_TRANSPARENT`, `CURVE_STYLE` and
+`DRAUGHTING_PRE_DEFINED_CURVE_FONT`; nothing else (not `CURVE_STYLE_FONT`, not `CURVE_STYLE_FONT_PATTERN`). The kind of a
+styled item is decided from its style tree: a `CURVE_STYLE` below it makes it a curve style, which may be attached only to an
+`EDGE_CURVE` of the exported geometry; anything else is a surface style, which may be attached only to a solid or a face
+(as before). A tree with both kinds is refused. An over-riding item on an edge must end, through the bounded acyclic chain
+of ADR-0039, at a plain `STYLED_ITEM` on a solid that contains the edge. Shape checks of the new entities:
+`SURFACE_STYLE_TRANSPARENT` is a simple instance with exactly one finite real in 0..1;
+`SURFACE_STYLE_RENDERING_WITH_PROPERTIES` has three arguments and lists only transparencies; `CURVE_STYLE` has four
+arguments, a predefined font, a typed `POSITIVE_LENGTH_MEASURE` greater than 0 and a `COLOUR_RGB` or
+`DRAUGHTING_PRE_DEFINED_COLOUR`. `PRESENTATION_LAYER_ASSIGNMENT` still accepts only solids and faces. The closure, depth and
+chain limits of ADR-0039 apply unchanged.
+
+D6:: *Import reports edge colours and alpha.* The native collector maps a `ColorCurv` on an edge sub-shape to the edge index
+of the part (new target `EDGE`, appended to the enum); an edge with a surface colour or a layer stays "unattached" as before.
+`ImportedPart.edgeStyles` and the JSON key `edgeStyles` (`[{"edge", "colour"}]`) are new; the colour object of the JSON gets
+`alpha` (always present, `1.0` when opaque). The text report adds ` alpha 0.5` only below 1.0, so the text of every file
+without transparency is byte-identical, and one `edge N  colour (r, g, b)` line per coloured edge. Behaviour change for
+foreign files: a file with edge colours now shows them as `edgeStyles` and its `presentation.unattached` drops accordingly;
+`coloredTargets` counts the edges. The JSON has no format version field; new keys are additive.
+
+D7:: *Native hardening.* Every new argument of `nativeWriteStepStyled` is copied and validated before the lock: part and face
+colour arrays have four values, the face colour array four per face, the edge arrays three per edge, at most 10000 edges,
+no negative or duplicate edge index, colour and alpha finite in 0..1, edge indices below the edge count (checked under the
+lock against the `TopExp::MapShapes` map). Invalid input is an `IllegalArgumentException`, a null sub-label is `RetFail`.
+The pre-transfer caps of the import (`kMaxTransparencyDefinitions`, `kMaxRenderingPropertyRecords`, ADR-0038) already cover
+the new entities.
+
+== Follow-up: instance colours (Welle V)
+
+Measured, not built. In assembly mode 2 OCCT writes an instance colour (`SetColor` on a component label) as a
+`STYLED_ITEM('color', (#presentationStyleByContext), #MANIFOLD_SOLID_BREP)` in the `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION`
+whose style is `PRESENTATION_STYLE_BY_CONTEXT((#usage), #SHAPE_REPRESENTATION)`, where the context is a one-item
+`SHAPE_REPRESENTATION('', (#placementAxis), #context)` that is tied to the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` through its own
+`PRODUCT_DEFINITION_SHAPE('Placement', ...)` and `SHAPE_DEFINITION_REPRESENTATION`. The XCAF reader returns it as a colour on
+the component label ("component 2 blue"). OCCT writes the style twice for one usage (two identical `STYLED_ITEM`s with
+different context representations), and in assembly mode 0 (the mode kSTEP's writer uses for several solids) it writes no
+instance colour at all, not even the product colour, so the native writer cannot simply be asked. kSTEP builds the assembly
+itself (`Ap242PlacementBridge`: `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`, `NEXT_ASSEMBLY_USAGE_OCCURRENCE`,
+`REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION`; no `MAPPED_ITEM`), so an instance colour would have to be appended there
+as the entities above, behind the existing ones so that the ids of files without an instance colour do not move, with its own
+allow-list for `PRESENTATION_STYLE_BY_CONTEXT`. The gate for building it is a C++ mini test that the OCCT reader reads a
+hand-written pattern as an instance colour; that test was not run in this wave. The importer already counts such styles in
+`presentation.instanceStylesIgnored`.
+
+== Not built / follow-ups
+
+* Instance colours, see above.
+* Rendering of the opacity in `kstep render` (GLB, SVG, PNG): `GlbWriter` has one material and colours per vertex
+  (`COLOR_0`); alpha needs a `VEC4` attribute, `alphaMode BLEND` for the whole material (sorting artefacts with mixed opaque
+  and translucent parts) and blending in the software rasteriser. The preview stays opaque and ignores alpha.
+* Layers on edges, edge width and line style (`CURVE_STYLE` carries both), colours on vertices.
+* Transparent edge colours cannot exist in STEP (`CURVE_STYLE` has no transparency).

@@ -42,6 +42,11 @@
 #include <Bnd_Box.hxx>
 #include <Interface_InterfaceModel.hxx>
 #include <Quantity_Color.hxx>
+#include <Quantity_ColorRGBA.hxx>
+#include <BRep_Tool.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopoDS_Edge.hxx>
 #include <STEPConstruct_UnitContext.hxx>
 #include <StepGeom_GeomRepContextAndGlobUnitAssCtxAndGlobUncertaintyAssCtx.hxx>
 #include <StepGeom_GeometricRepresentationContextAndGlobalUnitAssignedContext.hxx>
@@ -258,12 +263,12 @@ static bool readFile(const char* path, STEPCAFControl_Reader& reader, bool style
 }
 
 static void printColour(const Handle(XCAFDoc_ColorTool)& ct, const TDF_Label& l, const char* what) {
-  Quantity_Color c;
+  Quantity_ColorRGBA c;  // RGBA overload: also reads the transparency (ADR-0042)
   for (int t = 0; t < 3; ++t) {
     if (ct->GetColor(l, (XCAFDoc_ColorType)t, c)) {
       double r, g, b;
-      c.Values(r, g, b, Quantity_TOC_sRGB);
-      std::printf("%s colour type=%d srgb=(%.6f, %.6f, %.6f)\n", what, t, r, g, b);
+      c.GetRGB().Values(r, g, b, Quantity_TOC_sRGB);
+      std::printf("%s colour type=%d srgb=(%.6f, %.6f, %.6f) alpha=%.6f\n", what, t, r, g, b, (double)c.Alpha());
     }
   }
 }
@@ -296,6 +301,13 @@ static int styles(const char* path) {
     std::printf("part %s faces=%d solids=%d\n", nameOf(l).c_str(), faces.Extent(), solids.Extent());
     printColour(ct, l, "part");
     printLayers(lt, l, "part");
+    TDF_LabelSequence comps;
+    XCAFDoc_ShapeTool::GetComponents(l, comps);
+    for (int k = 1; k <= comps.Length(); ++k) {
+      char what[96];
+      std::snprintf(what, sizeof what, "component %d", k);
+      printColour(ct, comps.Value(k), what);
+    }
     TDF_LabelSequence subs;
     XCAFDoc_ShapeTool::GetSubShapes(l, subs);
     for (int k = 1; k <= subs.Length(); ++k) {
@@ -303,6 +315,12 @@ static int styles(const char* path) {
       char what[96];
       if (ss.ShapeType() == TopAbs_FACE) std::snprintf(what, sizeof what, "face %d", faces.FindIndex(ss) - 1);
       else if (ss.ShapeType() == TopAbs_SOLID) std::snprintf(what, sizeof what, "solid %d", solids.FindIndex(ss) - 1);
+      else if (ss.ShapeType() == TopAbs_EDGE) {
+        TopTools_IndexedMapOfShape edges; TopExp::MapShapes(sh, TopAbs_EDGE, edges);
+        TopoDS_Vertex v1, v2; TopExp::Vertices(TopoDS::Edge(ss), v1, v2);
+        gp_Pnt a = BRep_Tool::Pnt(v1), b = BRep_Tool::Pnt(v2);
+        std::snprintf(what, sizeof what, "edge %d (mid z=%.3f)", edges.FindIndex(ss) - 1, (a.Z() + b.Z()) / 2.0);
+      }
       else std::snprintf(what, sizeof what, "sub-shape type %d", (int)ss.ShapeType());
       printColour(ct, subs.Value(k), what);
       printLayers(lt, subs.Value(k), what);

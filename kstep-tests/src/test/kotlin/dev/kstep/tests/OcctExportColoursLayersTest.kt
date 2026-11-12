@@ -427,6 +427,8 @@ class OcctExportColoursLayersTest :
                         indices: IntArray = IntArray(0),
                         colours: DoubleArray = DoubleArray(0),
                         layers: Array<String?> = emptyArray(),
+                        edgeIndices: IntArray = IntArray(0),
+                        edgeColours: DoubleArray = DoubleArray(0),
                     ) = OcctBridge.nativeWriteStepStyled(
                         handle,
                         path,
@@ -436,10 +438,51 @@ class OcctExportColoursLayersTest :
                         indices,
                         colours,
                         layers,
+                        edgeIndices,
+                        edgeColours,
                     )
                     shouldThrow<IllegalArgumentException> { call(partColour = doubleArrayOf(1.0, 0.0)) }
-                    shouldThrow<IllegalArgumentException> { call(partColour = doubleArrayOf(1.0, 0.0, 1.5)) }
-                    shouldThrow<IllegalArgumentException> { call(partColour = doubleArrayOf(Double.NaN, 0.0, 0.0)) }
+                    shouldThrow<IllegalArgumentException> { call(partColour = doubleArrayOf(1.0, 0.0, 0.0)) }
+                    shouldThrow<IllegalArgumentException> { call(partColour = doubleArrayOf(1.0, 0.0, 1.5, 1.0)) }
+                    shouldThrow<IllegalArgumentException> {
+                        call(
+                            partColour = doubleArrayOf(Double.NaN, 0.0, 0.0, 1.0),
+                        )
+                    }
+                    shouldThrow<IllegalArgumentException> { call(partColour = doubleArrayOf(1.0, 0.0, 0.0, 1.5)) }
+                    shouldThrow<IllegalArgumentException> {
+                        call(
+                            partColour = doubleArrayOf(1.0, 0.0, 0.0, Double.NaN),
+                        )
+                    }
+                    shouldThrow<IllegalArgumentException> { call(partColour = doubleArrayOf(1.0, 0.0, 0.0, -0.1)) }
+                    shouldThrow<IllegalArgumentException> {
+                        call(
+                            edgeIndices = intArrayOf(0),
+                            edgeColours = DoubleArray(0),
+                        )
+                    }
+                    shouldThrow<IllegalArgumentException> {
+                        call(edgeIndices = intArrayOf(0, 0), edgeColours = DoubleArray(6) { 0.5 })
+                    }
+                    shouldThrow<IllegalArgumentException> {
+                        call(edgeIndices = intArrayOf(-1), edgeColours = doubleArrayOf(1.0, 0.0, 0.0))
+                    }
+                    shouldThrow<IllegalArgumentException> {
+                        call(edgeIndices = intArrayOf(0), edgeColours = doubleArrayOf(1.0, 0.0, 1.5))
+                    }
+                    shouldThrow<IllegalArgumentException> {
+                        call(edgeIndices = intArrayOf(0), edgeColours = doubleArrayOf(Double.NaN, 0.0, 0.0))
+                    }
+                    shouldThrow<IllegalArgumentException> {
+                        call(edgeIndices = intArrayOf(9999), edgeColours = doubleArrayOf(1.0, 0.0, 0.0))
+                    }
+                    shouldThrow<IllegalArgumentException> {
+                        call(
+                            edgeIndices = IntArray(10_001) { it },
+                            edgeColours = DoubleArray(30_003) { 0.5 },
+                        )
+                    }
                     shouldThrow<IllegalArgumentException> { call(partLayer = "") }
                     shouldThrow<IllegalArgumentException> { call(partLayer = "bad\u0000name") }
                     shouldThrow<IllegalArgumentException> { call(partLayer = "y".repeat(129)) }
@@ -449,26 +492,37 @@ class OcctExportColoursLayersTest :
                     shouldThrow<IllegalArgumentException> {
                         call(
                             indices = intArrayOf(1, 1),
-                            colours = DoubleArray(6) { Double.NaN },
+                            colours = DoubleArray(8) { Double.NaN },
                             layers = arrayOf("a", "b"),
                         )
                     }
                     shouldThrow<IllegalArgumentException> {
                         call(
                             indices = intArrayOf(-1),
-                            colours = doubleArrayOf(Double.NaN, 0.0, 0.0),
+                            colours = doubleArrayOf(Double.NaN, 0.0, 0.0, 1.0),
                             layers = arrayOf("a"),
                         )
                     }
                     shouldThrow<IllegalArgumentException> {
                         call(
                             indices = intArrayOf(99),
-                            colours = doubleArrayOf(Double.NaN, 0.0, 0.0),
+                            colours = doubleArrayOf(Double.NaN, 0.0, 0.0, 1.0),
                             layers = arrayOf("a"),
                         )
                     }
                     shouldThrow<IllegalArgumentException> {
-                        call(indices = intArrayOf(0), colours = doubleArrayOf(0.5, 2.0, 0.5), layers = arrayOf(null))
+                        call(
+                            indices = intArrayOf(0),
+                            colours = doubleArrayOf(0.5, 2.0, 0.5, 1.0),
+                            layers = arrayOf(null),
+                        )
+                    }
+                    shouldThrow<IllegalArgumentException> {
+                        call(
+                            indices = intArrayOf(0),
+                            colours = doubleArrayOf(0.5, 0.5, 0.5, 2.0),
+                            layers = arrayOf(null),
+                        )
                     }
                     Files.exists(dir.resolve("h.step")) shouldBe false
                     // The shape stays usable afterwards.

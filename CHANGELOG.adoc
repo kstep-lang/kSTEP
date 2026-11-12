@@ -9,6 +9,19 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Welle U (ADR-0042): transparency and edge colours in the STEP export. `StepColour` gets an opacity: `StepColour.rgba(r, g,
+  b, a)`, `StepColour.hex("#RRGGBBAA")`, `StepColour.a` and `isOpaque`; an alpha outside 0..1 or not a number is
+  `KSTEP-S-012`. A translucent part or face colour is written with `SURFACE_STYLE_TRANSPARENT(1 - a)` and read back by OCCT
+  and by `kstep import`. New `styleEdges(pd, edgeSelector, colour, expected)` colours single edges (`CURVE_STYLE`, opaque
+  only: a translucent edge colour is `KSTEP-S-012`; no match or wrong count `KSTEP-S-011`, a second colour `KSTEP-S-014`),
+  with the types `EdgeStyle` and `ShapeStyle.edges`. `kstep import` reports `alpha` in every colour object (JSON; text only
+  below 1.0), a new `edgeStyles` list per part and `edge N  colour (r, g, b)` lines. The writer entry `nativeWriteStepStyled`
+  has two more arguments (edge indices and colours) and four-value colours; the allow-list of the style merge gets
+  `SURFACE_STYLE_RENDERING_WITH_PROPERTIES`, `SURFACE_STYLE_TRANSPARENT`, `CURVE_STYLE` and
+  `DRAUGHTING_PRE_DEFINED_CURVE_FONT`, with curve styles allowed only on edges and surface styles only on solids and faces.
+  An opaque colour is written by the unchanged code path, so every file without transparency stays byte-identical
+  (`StepColour.rgba(1.0, 0.5, 0.0, 1.0)` equals the existing golden). `scripts/interop/verify-export-alpha-edge-instance.sh`
+  (with `--spike`) re-checks the exports with OCCT and FreeCAD.
 * Welle T (ADR-0041): persistent names for the inner wall of an INWARD shell. New sources `ShellInnerEdges(selector)` and
   `ShellInnerFaces(selector)` with the new role `GeneratedRole.CAVITY` (appended at the end of the enum): the inner copy of
   the input edge, or the edges of the inner copy of the input face, that the selector names on the shell's INPUT. A
@@ -35,8 +48,18 @@ minor versions may contain breaking changes.
 * `scripts/interop/verify-face-ops-2.sh` (with `--spike` and `--baseline`) re-checks the six example exports with OCCT and
   FreeCAD and compares the pre-Q2 examples byte for byte with the previous commit.
 
+=== Changed
+
+* Behaviour change for foreign files read with `kstep import` (Welle U, ADR-0042): a `ColorCurv` on an edge is now reported
+  as an edge style instead of being counted as `presentation.unattached`; `presentation.coloredTargets` counts it. The
+  JSON colour object always has an `alpha` key and every part an `edgeStyles` list (additive keys, there is no format
+  version field). Text output of files without transparency or edge colours is unchanged. `StepColour.hex("#RRGGBBAA")` is no
+  longer an error; the earlier "transparency is not supported" entries of Welle S below remain as history.
+
 === Notes
 
+* Not built in Welle U (ADR-0042): colours on assembly instances (measured, planned as Welle V), showing the opacity in
+  `kstep render`, layers and widths on edges.
 * Not built (ADR-0040, with the measurement behind each): names for pocket walls and drafted or offset faces, a rotated
   pocket rectangle, pockets that reach the rim, pockets on curved faces, draft of non-planar faces, negative thickening
   and thickening a sheet face into a solid. No new native toolkit: `BRepFeat_MakePrism` (`TKFeat`) is not used.

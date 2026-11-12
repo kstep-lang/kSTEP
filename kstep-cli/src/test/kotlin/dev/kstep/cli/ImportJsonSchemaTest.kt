@@ -7,6 +7,7 @@ import dev.kstep.geometry.StepReadStats
 import dev.kstep.geometry.XcafNodeKind
 import dev.kstep.shape.importer.ImportPresentation
 import dev.kstep.shape.importer.ImportedBody
+import dev.kstep.shape.importer.ImportedEdgeStyle
 import dev.kstep.shape.importer.ImportedFaceStyle
 import dev.kstep.shape.importer.ImportedOccurrence
 import dev.kstep.shape.importer.ImportedPart
@@ -91,7 +92,7 @@ class ImportJsonSchemaTest :
             ignored["colours"]!!.jsonPrimitive.content shouldBe "0"
         }
 
-        "the part key set is the pre-Welle-R set plus colour, layers and faceStyles" {
+        "the part key set is the pre-Welle-R set plus colour, layers, faceStyles and (ADR-0042) edgeStyles" {
             json(model(plain))["parts"]!!.jsonArray[0].jsonObject.keys shouldBe
                 setOf(
                     "index",
@@ -103,14 +104,16 @@ class ImportJsonSchemaTest :
                     "colour",
                     "layers",
                     "faceStyles",
+                    "edgeStyles",
                 )
         }
 
-        "without styles colour is null and layers and faceStyles are empty" {
+        "without styles colour is null and layers, faceStyles and edgeStyles are empty" {
             val part = json(model(plain))["parts"]!!.jsonArray[0].jsonObject
             part["colour"] shouldBe JsonNull
             part["layers"] shouldBe JsonArray(emptyList())
             part["faceStyles"] shouldBe JsonArray(emptyList())
+            part["edgeStyles"] shouldBe JsonArray(emptyList())
             json(model(plain))["sourceLengthUnit"] shouldBe JsonNull
             json(model(plain))["presentation"] shouldBe JsonNull
         }
@@ -133,6 +136,11 @@ class ImportJsonSchemaTest :
                             ImportedFaceStyle(2, RgbColor(0.0, 0.0, 1.0), listOf("F")),
                             ImportedFaceStyle(5, null, listOf("G")),
                         ),
+                    edgeStyles =
+                        listOf(
+                            ImportedEdgeStyle(3, RgbColor(1.0, 0.0, 0.0)),
+                            ImportedEdgeStyle(7, RgbColor(0.0, 0.5, 0.0)),
+                        ),
                     surfaceTypes = mapOf("plane" to 5, "bsplineSurface" to 1),
                 )
             val unit = StepLengthUnitInfo(LengthUnitState.DECLARED, listOf("INCH"), 25.4)
@@ -147,6 +155,13 @@ class ImportJsonSchemaTest :
             val faces = part["faceStyles"]!!.jsonArray.map { it.jsonObject }
             faces.map { it["face"]!!.jsonPrimitive.content } shouldBe listOf("2", "5")
             faces[1]["colour"] shouldBe JsonNull
+            val edges = part["edgeStyles"]!!.jsonArray.map { it.jsonObject }
+            edges.map { it.keys } shouldBe listOf(setOf("edge", "colour"), setOf("edge", "colour"))
+            edges.map { it["edge"]!!.jsonPrimitive.content } shouldBe listOf("3", "7")
+            edges[1]["colour"]!!
+                .jsonObject["g"]!!
+                .jsonPrimitive.content
+                .toDouble() shouldBe (0.5 plusOrMinus 1e-12)
             part["surfaceTypes"]!!.jsonObject.keys shouldBe setOf("plane", "bsplineSurface")
             val body = part["bodies"]!!.jsonArray[0].jsonObject
             body.keys shouldBe setOf("volume", "faces", "colour", "layers")
@@ -163,6 +178,38 @@ class ImportJsonSchemaTest :
                     "instanceStylesIgnored",
                     "truncated",
                 )
+        }
+
+        "the colour object carries alpha, 1.0 for an opaque colour and the opacity otherwise (ADR-0042)" {
+            fun colourOf(c: RgbColor): JsonObject {
+                val part = ImportedPart(0, "A", null, null, 1.0, null, null, color = c)
+                return json(model(part))["parts"]!!.jsonArray[0].jsonObject["colour"]!!.jsonObject
+            }
+            colourOf(RgbColor(1.0, 0.5, 0.0)).keys shouldBe setOf("r", "g", "b", "alpha")
+            colourOf(RgbColor(1.0, 0.5, 0.0))["alpha"]!!.jsonPrimitive.content.toDouble() shouldBe 1.0
+            colourOf(RgbColor(1.0, 0.5, 0.0, 0.25))["alpha"]!!.jsonPrimitive.content.toDouble() shouldBe 0.25
+        }
+
+        "the text report prints alpha only below 1.0 and one line per coloured edge (ADR-0042)" {
+            val styled =
+                ImportedPart(
+                    0,
+                    "Styled",
+                    null,
+                    null,
+                    1000.0,
+                    null,
+                    null,
+                    color = RgbColor(1.0, 0.5, 0.0, 0.5),
+                    faceStyles = listOf(ImportedFaceStyle(3, RgbColor(0.0, 0.0, 1.0), emptyList())),
+                    edgeStyles = listOf(ImportedEdgeStyle(4, RgbColor(1.0, 0.0, 0.0))),
+                )
+            val text = importText(command, model(styled), null, null)
+            text.contains("    colour (1, 0.5, 0) alpha 0.5") shouldBe true
+            text.contains("    face 3  colour (0, 0, 1)") shouldBe true
+            text.contains("    face 3  colour (0, 0, 1) alpha") shouldBe false
+            text.contains("    edge 4  colour (1, 0, 0)") shouldBe true
+            text.contains("    edge 4  colour (1, 0, 0) alpha") shouldBe false
         }
 
         "a missing unit reports state missing with a null factor" {

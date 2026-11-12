@@ -49,7 +49,7 @@ object KStepScriptOutcomeCodes {
      * `EDGE_SELECTION_FAILED` although it now covers faces and vertices as well. */
     const val EDGE_SELECTION_FAILED = "KSTEP-S-011"
 
-    /** A colour is invalid: not a finite number in 0..1 per component, not `#RRGGBB`, or transparency (ADR-0039). */
+    /** A colour is invalid: a component or the opacity is not a finite number in 0..1, not `#RRGGBB[AA]`, or an edge colour is transparent (ADR-0039, ADR-0042). */
     const val STYLE_INVALID_COLOUR = "KSTEP-S-012"
 
     /** A layer name is invalid: blank, longer than 128 characters, or containing a control character (ADR-0039). */

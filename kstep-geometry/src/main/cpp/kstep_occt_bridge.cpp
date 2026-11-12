@@ -289,6 +289,7 @@ struct ImportNode {
 constexpr int kStyleTargetPart = 0;
 constexpr int kStyleTargetSolid = 1;
 constexpr int kStyleTargetFace = 2;
+constexpr int kStyleTargetEdge = 3;  // ADR-0042: ColorCurv on an edge sub-shape
 constexpr int kMaxLayerNames = 1024;      // distinct layer names per file
 constexpr int kMaxLayersPerTarget = 16;   // layer names reported per part / body / face
 constexpr int kMaxStyleRecords = 250000;  // colour records and layer references, each; bounded by the face limit
@@ -353,6 +354,7 @@ struct ImportColor {
     int target;
     int sub;  // 0-based face / solid index within the part, 0 for the part itself
     double r, g, b;
+    double a;  // opacity 0..1 (ADR-0042); 1.0 for edge colours (CURVE_STYLE has no transparency)
 };
 
 struct ImportLayerRef {
@@ -1930,28 +1932,40 @@ int internLayerName(ImportSession& out, const std::u16string& name) {
 
 bool labelColor(
     const Handle(XCAFDoc_ColorTool)& colorTool, const TDF_Label& label, bool& curveOnly, double& r, double& g,
-    double& b) {
-    Quantity_Color c;
+    double& b, double& a) {
+    // The RGBA overload reads the transparency too (SURFACE_STYLE_TRANSPARENT, ADR-0042); the Quantity_Color overload
+    // used before silently dropped it.
+    Quantity_ColorRGBA c;
     curveOnly = false;
     if (colorTool->GetColor(label, XCAFDoc_ColorSurf, c) || colorTool->GetColor(label, XCAFDoc_ColorGen, c)) {
         // Quantity_Color stores LINEAR RGB since OCCT 7.5; the file value (COLOUR_RGB) is sRGB (ADR-0038).
-        c.Values(r, g, b, Quantity_TOC_sRGB);
+        c.GetRGB().Values(r, g, b, Quantity_TOC_sRGB);
+        a = static_cast<double>(c.Alpha());
         return true;
     }
-    curveOnly = colorTool->GetColor(label, XCAFDoc_ColorCurv, c);
+    Quantity_Color curve;
+    curveOnly = colorTool->GetColor(label, XCAFDoc_ColorCurv, curve);
     return false;
+}
+
+/** The ColorCurv colour of a label (sRGB); false if it has none. Opaque by construction (CURVE_STYLE). */
+bool labelCurveColor(const Handle(XCAFDoc_ColorTool)& colorTool, const TDF_Label& label, double& r, double& g, double& b) {
+    Quantity_Color c;
+    if (!colorTool->GetColor(label, XCAFDoc_ColorCurv, c)) return false;
+    c.Values(r, g, b, Quantity_TOC_sRGB);
+    return true;
 }
 
 void recordStyle(
     ImportSession& out, const Handle(XCAFDoc_ColorTool)& colorTool, const Handle(XCAFDoc_LayerTool)& layerTool,
     const TDF_Label& label, int node, int target, int sub, int maxName) {
-    double r = 0, g = 0, b = 0;
+    double r = 0, g = 0, b = 0, a = 1;
     bool curveOnly = false;
-    if (labelColor(colorTool, label, curveOnly, r, g, b)) {
+    if (labelColor(colorTool, label, curveOnly, r, g, b, a)) {
         if (static_cast<int>(out.colors.size()) >= kMaxStyleRecords) {
             out.styleTruncated++;
         } else {
-            out.colors.push_back(ImportColor{node, target, sub, r, g, b});
+            out.colors.push_back(ImportColor{node, target, sub, r, g, b, a});
         }
     } else if (curveOnly) {
         out.styleUnattached++;
@@ -1984,9 +1998,10 @@ void collectPartStyles(
     TDF_LabelSequence subs;
     XCAFDoc_ShapeTool::GetSubShapes(label, subs);
     if (subs.Length() == 0) return;
-    TopTools_IndexedMapOfShape faces, solids;
+    TopTools_IndexedMapOfShape faces, solids, edges;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
     TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
     TopTools_IndexedDataMapOfShapeListOfShape shellToSolids;
     TopExp::MapShapesAndAncestors(shape, TopAbs_SHELL, TopAbs_SOLID, shellToSolids);
     for (int k = 1; k <= subs.Length(); ++k) {
@@ -2001,6 +2016,26 @@ void collectPartStyles(
         } else if (ss.ShapeType() == TopAbs_SOLID) {
             index = solids.FindIndex(ss);
             target = kStyleTargetSolid;
+        } else if (ss.ShapeType() == TopAbs_EDGE) {
+            // ADR-0042: a ColorCurv on an edge is reported as an edge colour; an edge with anything else
+            // (a surface colour, a layer) stays unattached, as before.
+            const int edgeIdx = edges.FindIndex(ss);
+            double r = 0, g = 0, b = 0;
+            Handle(TColStd_HSequenceOfExtendedString) edgeLayers;
+            const bool hasLayers = layerTool->GetLayers(sub, edgeLayers) && !edgeLayers.IsNull() && edgeLayers->Length() > 0;
+            double sr, sg, sb, sa;
+            bool sCurve;
+            const bool hasSurface = labelColor(colorTool, sub, sCurve, sr, sg, sb, sa);
+            if (edgeIdx > 0 && !hasSurface && !hasLayers && labelCurveColor(colorTool, sub, r, g, b)) {
+                if (static_cast<int>(out.colors.size()) >= kMaxStyleRecords) {
+                    out.styleTruncated++;
+                } else {
+                    out.colors.push_back(ImportColor{node, kStyleTargetEdge, edgeIdx - 1, r, g, b, 1.0});
+                }
+            } else if (hasSurface || hasLayers || labelCurveColor(colorTool, sub, r, g, b)) {
+                out.styleUnattached++;
+            }
+            continue;
         } else if (ss.ShapeType() == TopAbs_SHELL) {
             const int shellIdx = shellToSolids.FindIndex(ss);
             if (shellIdx > 0 && shellToSolids.FindFromIndex(shellIdx).Extent() == 1) {
@@ -2010,10 +2045,10 @@ void collectPartStyles(
         }
         if (target < 0 || index <= 0) {
             // edge / vertex style, or a sub-shape that is not in this part's maps (e.g. other Location): never guess
-            double r, g, b;
+            double r, g, b, a;
             bool curveOnly;
             Handle(TColStd_HSequenceOfExtendedString) layers;
-            if (labelColor(colorTool, sub, curveOnly, r, g, b) || curveOnly ||
+            if (labelColor(colorTool, sub, curveOnly, r, g, b, a) || curveOnly ||
                 (layerTool->GetLayers(sub, layers) && !layers.IsNull() && layers->Length() > 0)) {
                 out.styleUnattached++;
             }
@@ -2025,10 +2060,10 @@ void collectPartStyles(
 
 bool hasInstanceStyle(
     const Handle(XCAFDoc_ColorTool)& colorTool, const Handle(XCAFDoc_LayerTool)& layerTool, const TDF_Label& label) {
-    double r, g, b;
+    double r, g, b, a;
     bool curveOnly;
     Handle(TColStd_HSequenceOfExtendedString) layers;
-    return labelColor(colorTool, label, curveOnly, r, g, b) || curveOnly ||
+    return labelColor(colorTool, label, curveOnly, r, g, b, a) || curveOnly ||
            (layerTool->GetLayers(label, layers) && !layers.IsNull() && layers->Length() > 0);
 }
 
@@ -2548,6 +2583,7 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStep(
 // ------------------------------------------------------------------------------------------
 namespace {
 constexpr jsize kMaxStyledFaces = 10000;
+constexpr jsize kMaxStyledEdges = 10000;
 constexpr size_t kMaxStyleLayerNames = 256;
 constexpr jsize kMaxLayerNameUnits = 128;
 
@@ -2581,20 +2617,42 @@ bool colourValid(double r, double g, double b) {
     return std::isfinite(r) && std::isfinite(g) && std::isfinite(b) && r >= 0.0 && r <= 1.0 && g >= 0.0 &&
            g <= 1.0 && b >= 0.0 && b <= 1.0;
 }
+
+/** colourValid plus a finite opacity in 0..1 (ADR-0042). */
+bool colourValid(double r, double g, double b, double a) {
+    return colourValid(r, g, b) && std::isfinite(a) && a >= 0.0 && a <= 1.0;
+}
+
+/**
+ * Sets a surface colour on a label. An opaque colour (a == 1.0) goes through the unchanged Quantity_Color overload, so
+ * files without transparency stay byte-identical to the pre-ADR-0042 output (structurally, not by luck); only a < 1
+ * uses the RGBA overload, which makes OCCT write SURFACE_STYLE_TRANSPARENT(1 - a).
+ */
+void setSurfaceColour(
+    const Handle(XCAFDoc_ColorTool)& colorTool, const TDF_Label& label, double r, double g, double b, double a) {
+    const Quantity_Color colour(r, g, b, Quantity_TOC_sRGB);
+    if (a == 1.0) {
+        colorTool->SetColor(label, colour, XCAFDoc_ColorSurf);
+    } else {
+        colorTool->SetColor(label, Quantity_ColorRGBA(colour, static_cast<float>(a)), XCAFDoc_ColorSurf);
+    }
+}
 }  // extern "C++"
 }  // namespace
 
 /**
  * Writes the shape as STEP through STEPCAFControl_Writer with colours and layers attached to the part and to
- * individual faces (ADR-0039). partColour: null or [r,g,b] (sRGB, 0..1); faceColours: 3 doubles per face, NaN in
- * the first component = no colour for that face; faceLayers: one entry per face, null = no layer. Returns the
+ * individual faces and edges (ADR-0039, ADR-0042). partColour: null or [r,g,b,a] (sRGB, 0..1, a = opacity);
+ * faceColours: 4 doubles per face, NaN in the first component = no colour for that face; faceLayers: one entry per
+ * face, null = no layer; edgeColours: 3 doubles per edge (opaque only). Returns the
  * IFSelect_ReturnStatus as nativeWriteStep does. Invalid arguments throw IllegalArgumentException.
  */
 JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepStyled(
     JNIEnv* env, jobject /*self*/, jlong handle, jstring absolutePath, jstring schema, jdoubleArray partColour,
-    jstring partLayer, jintArray faceIndices, jdoubleArray faceColours, jobjectArray faceLayers) {
+    jstring partLayer, jintArray faceIndices, jdoubleArray faceColours, jobjectArray faceLayers,
+    jintArray edgeIndices, jdoubleArray edgeColours) {
     if (absolutePath == nullptr || schema == nullptr || faceIndices == nullptr || faceColours == nullptr ||
-        faceLayers == nullptr) {
+        faceLayers == nullptr || edgeIndices == nullptr || edgeColours == nullptr) {
         throwJava(env, "java/lang/NullPointerException", "nativeWriteStepStyled: null argument");
         return 0;
     }
@@ -2609,20 +2667,25 @@ JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepSt
 
     // Copy and validate every argument BEFORE taking the lock.
     const jsize nFaces = env->GetArrayLength(faceIndices);
-    if (nFaces > kMaxStyledFaces || env->GetArrayLength(faceColours) != nFaces * 3 ||
+    if (nFaces > kMaxStyledFaces || env->GetArrayLength(faceColours) != nFaces * 4 ||
         env->GetArrayLength(faceLayers) != nFaces) {
         throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: inconsistent face style arrays");
         return 0;
     }
+    const jsize nEdges = env->GetArrayLength(edgeIndices);
+    if (nEdges > kMaxStyledEdges || env->GetArrayLength(edgeColours) != nEdges * 3) {
+        throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: inconsistent edge style arrays");
+        return 0;
+    }
     bool hasPartColour = false;
-    double pc[3] = {0, 0, 0};
+    double pc[4] = {0, 0, 0, 1};
     if (partColour != nullptr) {
-        if (env->GetArrayLength(partColour) != 3) {
-            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: partColour needs 3 values");
+        if (env->GetArrayLength(partColour) != 4) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: partColour needs 4 values");
             return 0;
         }
-        env->GetDoubleArrayRegion(partColour, 0, 3, pc);
-        if (!colourValid(pc[0], pc[1], pc[2])) {
+        env->GetDoubleArrayRegion(partColour, 0, 4, pc);
+        if (!colourValid(pc[0], pc[1], pc[2], pc[3])) {
             throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: invalid part colour");
             return 0;
         }
@@ -2639,10 +2702,31 @@ JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepSt
         hasPartLayer = true;
     }
     std::vector<jint> indices(static_cast<size_t>(nFaces));
-    std::vector<double> colours(static_cast<size_t>(nFaces) * 3);
+    std::vector<double> colours(static_cast<size_t>(nFaces) * 4);
     if (nFaces > 0) {
         env->GetIntArrayRegion(faceIndices, 0, nFaces, indices.data());
-        env->GetDoubleArrayRegion(faceColours, 0, nFaces * 3, colours.data());
+        env->GetDoubleArrayRegion(faceColours, 0, nFaces * 4, colours.data());
+    }
+    std::vector<jint> edgeIdx(static_cast<size_t>(nEdges));
+    std::vector<double> edgeCol(static_cast<size_t>(nEdges) * 3);
+    if (nEdges > 0) {
+        env->GetIntArrayRegion(edgeIndices, 0, nEdges, edgeIdx.data());
+        env->GetDoubleArrayRegion(edgeColours, 0, nEdges * 3, edgeCol.data());
+    }
+    {
+        std::set<jint> seenEdges;
+        for (jsize i = 0; i < nEdges; ++i) {
+            const size_t k = static_cast<size_t>(i);
+            if (edgeIdx[k] < 0 || !seenEdges.insert(edgeIdx[k]).second) {
+                throwJava(
+                    env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: duplicate or negative edge index");
+                return 0;
+            }
+            if (!colourValid(edgeCol[k * 3], edgeCol[k * 3 + 1], edgeCol[k * 3 + 2])) {
+                throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: invalid edge colour");
+                return 0;
+            }
+        }
     }
     std::vector<std::u16string> layers(static_cast<size_t>(nFaces));
     std::vector<char> hasLayer(static_cast<size_t>(nFaces), 0);
@@ -2655,12 +2739,12 @@ JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepSt
             throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: duplicate or negative face index");
             return 0;
         }
-        const bool hasColour = !std::isnan(colours[k * 3]);
-        if (hasColour && !colourValid(colours[k * 3], colours[k * 3 + 1], colours[k * 3 + 2])) {
+        const bool hasColour = !std::isnan(colours[k * 4]);
+        if (hasColour && !colourValid(colours[k * 4], colours[k * 4 + 1], colours[k * 4 + 2], colours[k * 4 + 3])) {
             throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: invalid face colour");
             return 0;
         }
-        if (!hasColour) colours[k * 3] = std::nan("");
+        if (!hasColour) colours[k * 4] = std::nan("");
         jstring ls = static_cast<jstring>(env->GetObjectArrayElement(faceLayers, i));
         if (env->ExceptionCheck()) return 0;
         if (ls != nullptr) {
@@ -2684,6 +2768,7 @@ JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepSt
         bool found = false;
         bool schemaAccepted = false;
         bool faceOutOfRange = false;
+        bool edgeOutOfRange = false;
         jint result = 0;
         {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -2695,7 +2780,12 @@ JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepSt
                 for (jsize i = 0; i < nFaces; ++i) {
                     if (indices[static_cast<size_t>(i)] >= faceMap.Extent()) faceOutOfRange = true;
                 }
-                if (!faceOutOfRange) {
+                TopTools_IndexedMapOfShape edgeMap;
+                TopExp::MapShapes(*shape, TopAbs_EDGE, edgeMap);
+                for (jsize i = 0; i < nEdges; ++i) {
+                    if (edgeIdx[static_cast<size_t>(i)] >= edgeMap.Extent()) edgeOutOfRange = true;
+                }
+                if (!faceOutOfRange && !edgeOutOfRange) {
                     // The writer is constructed before SetCVal (see nativeWriteStep for why) and the printers are
                     // detached for the whole call: stdout is a JSON or MCP stream.
                     STEPCAFControl_Writer writer;
@@ -2712,15 +2802,14 @@ JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepSt
                         Handle(XCAFDoc_LayerTool) layerTool = XCAFDoc_DocumentTool::LayerTool(guard.doc->Main());
                         TDF_Label part = shapeTool->AddShape(*shape, Standard_False);
                         if (hasPartColour) {
-                            colorTool->SetColor(
-                                part, Quantity_Color(pc[0], pc[1], pc[2], Quantity_TOC_sRGB), XCAFDoc_ColorSurf);
+                            setSurfaceColour(colorTool, part, pc[0], pc[1], pc[2], pc[3]);
                         }
                         if (hasPartLayer) {
                             layerTool->SetLayer(part, toExtendedString(partLayerName), Standard_False);
                         }
                         for (jsize i = 0; i < nFaces; ++i) {
                             const size_t k = static_cast<size_t>(i);
-                            const bool hasColour = !std::isnan(colours[k * 3]);
+                            const bool hasColour = !std::isnan(colours[k * 4]);
                             if (!hasColour && !hasLayer[k]) continue;
                             TDF_Label sub = shapeTool->AddSubShape(part, faceMap.FindKey(indices[k] + 1));
                             if (sub.IsNull()) {
@@ -2728,14 +2817,24 @@ JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepSt
                                 break;
                             }
                             if (hasColour) {
-                                colorTool->SetColor(
-                                    sub,
-                                    Quantity_Color(colours[k * 3], colours[k * 3 + 1], colours[k * 3 + 2], Quantity_TOC_sRGB),
-                                    XCAFDoc_ColorSurf);
+                                setSurfaceColour(
+                                    colorTool, sub, colours[k * 4], colours[k * 4 + 1], colours[k * 4 + 2],
+                                    colours[k * 4 + 3]);
                             }
                             if (hasLayer[k]) {
                                 layerTool->SetLayer(sub, toExtendedString(layers[k]), Standard_False);
                             }
+                        }
+                        for (jsize i = 0; i < nEdges && result == 0; ++i) {
+                            const size_t k = static_cast<size_t>(i);
+                            TDF_Label sub = shapeTool->AddSubShape(part, edgeMap.FindKey(edgeIdx[k] + 1));
+                            if (sub.IsNull()) {
+                                result = static_cast<jint>(IFSelect_RetFail);
+                                break;
+                            }
+                            colorTool->SetColor(
+                                sub, Quantity_Color(edgeCol[k * 3], edgeCol[k * 3 + 1], edgeCol[k * 3 + 2], Quantity_TOC_sRGB),
+                                XCAFDoc_ColorCurv);
                         }
                         if (result == 0) {
                             writer.SetColorMode(Standard_True);
@@ -2756,6 +2855,10 @@ JNIEXPORT jint JNICALL Java_dev_kstep_geometry_occt_OcctBridge_nativeWriteStepSt
         }
         if (faceOutOfRange) {
             throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: face index out of range");
+            return 0;
+        }
+        if (edgeOutOfRange) {
+            throwJava(env, "java/lang/IllegalArgumentException", "nativeWriteStepStyled: edge index out of range");
             return 0;
         }
         if (!schemaAccepted) {
@@ -4581,6 +4684,7 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeImportColors(JNIEnv* env, jobject 
                 out.push_back(c.r);
                 out.push_back(c.g);
                 out.push_back(c.b);
+                out.push_back(c.a);
             }
         }
     } catch (...) {

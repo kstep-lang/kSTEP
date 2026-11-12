@@ -222,6 +222,12 @@ object StepImporter {
                 (faceColors.keys + faceLayers.keys).sorted().map {
                     ImportedFaceStyle(it, faceColors[it], faceLayers[it].orEmpty())
                 }
+            val edgeStyles =
+                colors
+                    .filter { it.target == XcafStyleTarget.EDGE }
+                    .associate { it.subIndex to it.color }
+                    .toSortedMap()
+                    .map { (index, c) -> ImportedEdgeStyle(index, c) }
             parts.add(
                 ImportedPart(
                     index = parts.size,
@@ -235,6 +241,7 @@ object StepImporter {
                     color = partColor,
                     layers = partLayers,
                     faceStyles = faceStyles,
+                    edgeStyles = edgeStyles,
                     surfaceTypes = shape?.let { OcctKernel.surfaceTypeCounts(it) },
                 ),
             )

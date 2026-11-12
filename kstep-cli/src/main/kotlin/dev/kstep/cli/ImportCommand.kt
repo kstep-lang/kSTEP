@@ -19,6 +19,7 @@ import dev.kstep.render.RenderLimits
 import dev.kstep.render.gltf.GlbExtras
 import dev.kstep.shape.importer.ImportPresentation
 import dev.kstep.shape.importer.ImportValidationOutcome
+import dev.kstep.shape.importer.ImportedEdgeStyle
 import dev.kstep.shape.importer.ImportedFaceStyle
 import dev.kstep.shape.importer.ImportedPart
 import dev.kstep.shape.importer.ImportedPlacement
@@ -389,7 +390,8 @@ private fun rotationLabel(m: DoubleArray): String? {
     return "R"
 }
 
-private fun colourText(c: RgbColor): String = "(${num(c.red)}, ${num(c.green)}, ${num(c.blue)})"
+private fun colourText(c: RgbColor): String =
+    "(${num(c.red)}, ${num(c.green)}, ${num(c.blue)})" + if (c.alpha < 1.0) " alpha ${num(c.alpha)}" else ""
 
 private fun layersText(layers: List<String>): String? =
     if (layers.isEmpty()) null else "layers [${layers.joinToString(", ")}]"
@@ -474,6 +476,9 @@ internal fun importText(
             val parts = listOfNotNull(f.color?.let { "colour ${colourText(it)}" }, layersText(f.layers))
             sb.appendLine("    face ${f.faceIndex}  ${parts.joinToString("  ")}")
         }
+        for (e in p.edgeStyles) {
+            sb.appendLine("    edge ${e.edgeIndex}  colour ${colourText(e.color)}")
+        }
     }
     sb.appendLine("Occurrences:")
     for (o in model.occurrences) {
@@ -545,7 +550,7 @@ private fun jsonPlacement(p: ImportedPlacement): JsonObject =
         }
     }
 
-/** Colour as `{"r","g","b"}` (sRGB 0..1), or `null`. */
+/** Colour as `{"r","g","b","alpha"}` (sRGB 0..1, alpha = opacity, 1.0 when opaque), or `null`. */
 private fun jsonColour(c: RgbColor?): JsonElement =
     if (c == null) {
         JsonNull
@@ -554,6 +559,7 @@ private fun jsonColour(c: RgbColor?): JsonElement =
             put("r", jsonNum(c.red))
             put("g", jsonNum(c.green))
             put("b", jsonNum(c.blue))
+            put("alpha", jsonNum(c.alpha))
         }
     }
 
@@ -567,6 +573,18 @@ private fun jsonFaceStyles(styles: List<ImportedFaceStyle>): JsonArray =
                     put("face", f.faceIndex)
                     put("colour", jsonColour(f.color))
                     put("layers", jsonLayers(f.layers))
+                },
+            )
+        }
+    }
+
+private fun jsonEdgeStyles(styles: List<ImportedEdgeStyle>): JsonArray =
+    buildJsonArray {
+        for (e in styles) {
+            add(
+                buildJsonObject {
+                    put("edge", e.edgeIndex)
+                    put("colour", jsonColour(e.color))
                 },
             )
         }
@@ -677,6 +695,7 @@ internal fun importJson(
                             put("colour", jsonColour(p.color))
                             put("layers", jsonLayers(p.layers))
                             put("faceStyles", jsonFaceStyles(p.faceStyles))
+                            put("edgeStyles", jsonEdgeStyles(p.edgeStyles))
                             p.surfaceTypes?.let { types ->
                                 put("surfaceTypes", buildJsonObject { types.forEach { (k, v) -> put(k, v) } })
                             }

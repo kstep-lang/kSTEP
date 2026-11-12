@@ -6,7 +6,9 @@ import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctShape
+import dev.kstep.geometry.select.EdgeSelector
 import dev.kstep.geometry.select.FaceSelector
+import dev.kstep.geometry.style.EdgeStyle
 import dev.kstep.geometry.style.FaceStyle
 import dev.kstep.geometry.style.LayerNames
 import dev.kstep.geometry.style.ShapeStyle
@@ -88,6 +90,7 @@ class KStepModelBuilder internal constructor() {
         var colour: StepColour? = null
         var layer: String? = null
         val faces = java.util.TreeMap<Int, Pair<StepColour?, String?>>()
+        val edges = java.util.TreeMap<Int, StepColour>()
     }
 
     /** Registers an already-validated entity (typically the result of a builder's `getOrThrow()`). */
@@ -179,6 +182,38 @@ class KStepModelBuilder internal constructor() {
         }
     }
 
+    /**
+     * Gives the edges of the shape of [productDefinition] that match [edges] an (opaque) colour (ADR-0042). The
+     * selector resolves geometrically, like for [styleFaces]; an empty result or a count different from [expected]
+     * fails with `KSTEP-S-011` listing the candidates. An edge can get a colour once (`KSTEP-S-014`); a transparent
+     * colour is refused with `KSTEP-S-012` because the STEP curve style has no transparency.
+     */
+    fun styleEdges(
+        productDefinition: ProductDefinition,
+        edges: EdgeSelector,
+        colour: StepColour,
+        expected: Int? = null,
+    ) {
+        if (!colour.isOpaque) {
+            throw StyleException(
+                StyleErrorKind.INVALID_COLOUR,
+                "styleEdges: edge colours cannot be transparent (CURVE_STYLE has no transparency), alpha was ${colour.a}",
+            )
+        }
+        val assignment =
+            registeredShapes.lastOrNull { it.productDefinition === productDefinition }
+                ?: throw StyleException(
+                    StyleErrorKind.TARGET,
+                    "styleEdges: product definition '${productDefinition.id}' has no shape yet; call shape(...) first",
+                )
+        val indices = OcctKernel.selectEdges(assignment.shape, edges, expected)
+        val acc = styles.getOrPut(productDefinition) { StyleAccumulator() }
+        for (index in indices) {
+            if (acc.edges.containsKey(index)) throw conflict("edge $index already has a colour")
+            acc.edges[index] = colour
+        }
+    }
+
     private fun conflict(message: String) = StyleException(StyleErrorKind.CONFLICT, message)
 
     private fun applyStyle(
@@ -193,6 +228,11 @@ class KStepModelBuilder internal constructor() {
             if (face.colour != null && oldColour != null) throw conflict("face ${face.faceIndex} already has a colour")
             if (face.layer != null && oldLayer != null) throw conflict("face ${face.faceIndex} already has a layer")
             acc.faces[face.faceIndex] = (face.colour ?: oldColour) to (face.layer ?: oldLayer)
+        }
+        for (edge in style.edges) {
+            val acc = styles.getOrPut(productDefinition) { StyleAccumulator() }
+            if (acc.edges.containsKey(edge.edgeIndex)) throw conflict("edge ${edge.edgeIndex} already has a colour")
+            acc.edges[edge.edgeIndex] = edge.colour
         }
     }
 
@@ -287,6 +327,7 @@ class KStepModelBuilder internal constructor() {
                         colour = acc.colour,
                         layer = acc.layer,
                         faces = acc.faces.map { (index, v) -> FaceStyle(index, v.first, v.second) },
+                        edges = acc.edges.map { (index, c) -> EdgeStyle(index, c) },
                     ),
             )
         }

@@ -32,11 +32,11 @@ data class StepReadStats(
     val freeRootCount: Int,
 )
 
-/** What a colour or layer assignment refers to inside a PART. */
-enum class XcafStyleTarget { PART, SOLID, FACE }
+/** What a colour or layer assignment refers to inside a PART. [EDGE] (ADR-0042) only ever carries a colour. */
+enum class XcafStyleTarget { PART, SOLID, FACE, EDGE }
 
 /**
- * A colour on [target] of the PART node [nodeIndex]. [subIndex] is the 0-based position in OCCT's face / solid
+ * A colour on [target] of the PART node [nodeIndex]. [subIndex] is the 0-based position in OCCT's face / solid / edge
  * enumeration of the part (the same order as `OcctShape.faces[i].index - 1` and the solid summaries); 0 for
  * the part itself.
  */
@@ -58,7 +58,7 @@ class XcafLayerAssignment(
 /**
  * Style counters of one read.
  *
- * @property unattached styles on edges, vertices or sub-shapes that could not be matched to a face or solid
+ * @property unattached styles on vertices, on edges other than a plain curve colour, or on sub-shapes that could not be matched to a face or solid
  * @property instanceStylesIgnored colours / layers on assembly component instances (not reported yet)
  * @property truncated styles dropped because a native cap was reached
  */

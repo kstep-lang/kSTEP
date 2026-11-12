@@ -236,9 +236,10 @@ class OcctShape internal constructor(
      *   [StepSchema.AP242DIS], matching the rest of kSTEP's AP242 focus.
      * @param style colours and layers (ADR-0039). An empty style takes the unchanged `STEPControl_Writer` path
      *   (byte-identical to earlier versions); a non-empty one writes through `STEPCAFControl_Writer`. Face indices
-     *   refer to [faces].
+     *   refer to [faces]; edge indices to [edges]. Colours may carry an opacity (ADR-0042; an opaque colour takes the
+     *   unchanged pre-ADR-0042 path), edge colours must be opaque.
      * @return `target`, resolved to the same absolute/normalized path actually written.
-     * @throws StyleException if a face index of [style] does not exist.
+     * @throws StyleException if a face or edge index of [style] does not exist.
      * @throws IllegalStateException if this shape is already [close]d.
      * @throws IllegalArgumentException if `target`'s parent directory does not exist or is not a
      *   directory.
@@ -263,6 +264,13 @@ class OcctShape internal constructor(
                     "face index ${it.faceIndex} is outside 0..${faceCount - 1}",
                 )
             }
+            val edgeCount = edges.size
+            style.edges.firstOrNull { it.edgeIndex >= edgeCount }?.let {
+                throw StyleException(
+                    StyleErrorKind.TARGET,
+                    "edge index ${it.edgeIndex} is outside 0..${edgeCount - 1}",
+                )
+            }
         }
         val status =
             try {
@@ -274,13 +282,15 @@ class OcctShape internal constructor(
                         handle,
                         absolute.toString(),
                         schema.occtValue,
-                        style.colour?.toArray(),
+                        style.colour?.toRgbaArray(),
                         style.layer,
                         IntArray(styled.size) { styled[it].faceIndex },
-                        DoubleArray(styled.size * 3) { i ->
-                            styled[i / 3].colour?.toArray()?.get(i % 3) ?: Double.NaN
+                        DoubleArray(styled.size * 4) { i ->
+                            styled[i / 4].colour?.toRgbaArray()?.get(i % 4) ?: Double.NaN
                         },
                         Array(styled.size) { styled[it].layer },
+                        IntArray(style.edges.size) { style.edges[it].edgeIndex },
+                        DoubleArray(style.edges.size * 3) { i -> style.edges[i / 3].colour.toArray()[i % 3] },
                     )
                 }
             } catch (e: RuntimeException) {

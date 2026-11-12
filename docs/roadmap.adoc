@@ -365,10 +365,11 @@ xref:status.adoc#status[Status] for `KSTEP-M-002`'s scope):
   **(Welle R and S, done)** Colours (sRGB) and layers of parts and faces are
   written by `kstep export` and read back by `kstep import`, which also reports
   the length unit, bounds the known OCCT worst cases before the transfer and
-  runs in a supervised worker process -- see ADR-0038 and ADR-0039; open:
-  transparency, colours and layers on assembly instances, edge colours, face
-  colours in the preview, PMI, and a time/memory bound for library callers of
-  the importer.
+  runs in a supervised worker process -- see ADR-0038 and ADR-0039.
+  **(Welle U, done)** Transparency (alpha) and edge colours, written and read
+  back -- see ADR-0042; open: colours and layers on assembly instances
+  (measured in ADR-0042), the opacity in the preview, face colours in the
+  preview, PMI, and a time/memory bound for library callers of the importer.
   Still open across the geometry layer: multi-platform distribution of the
   native bridges, viewer and CLI beyond Linux x86-64 and macOS arm64 (Windows
   and Intel Macs are not supported).

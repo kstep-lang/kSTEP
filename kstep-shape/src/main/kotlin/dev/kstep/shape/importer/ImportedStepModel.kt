@@ -45,6 +45,8 @@ class ImportedPart(
     val layers: List<String> = emptyList(),
     /** Faces with their own colour or layer, sorted by [ImportedFaceStyle.faceIndex]. */
     val faceStyles: List<ImportedFaceStyle> = emptyList(),
+    /** Edges with their own colour (ADR-0042), sorted by [ImportedEdgeStyle.edgeIndex]. */
+    val edgeStyles: List<ImportedEdgeStyle> = emptyList(),
     /** Count of faces per surface kind (`plane`, `cylinder`, `bsplineSurface`, ...), `null` if not computed. */
     val surfaceTypes: Map<String, Int>? = null,
 )
@@ -65,6 +67,12 @@ class ImportedFaceStyle(
     val faceIndex: Int,
     val color: RgbColor?,
     val layers: List<String>,
+)
+
+/** Colour of one edge. [edgeIndex] is 0-based in OCCT's edge enumeration of the part, i.e. `OcctShape.edges[edgeIndex]`. */
+class ImportedEdgeStyle(
+    val edgeIndex: Int,
+    val color: RgbColor,
 )
 
 /** Totals of the colour and layer data of a file (ADR-0038). */

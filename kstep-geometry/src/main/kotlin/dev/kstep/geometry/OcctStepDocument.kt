@@ -102,24 +102,25 @@ class OcctStepDocument internal constructor(
             layerNames = uniqueNames
             val rawColors = OcctBridge.nativeImportColors(handle)
             val rawRefs = OcctBridge.nativeImportLayerRefs(handle)
-            check(rawColors.size % 6 == 0 && rawRefs.size % 4 == 0) { "inconsistent native style payload" }
+            check(rawColors.size % 7 == 0 && rawRefs.size % 4 == 0) { "inconsistent native style payload" }
             val targets = XcafStyleTarget.entries
             colors =
-                List(rawColors.size / 6) { i ->
-                    val node = rawColors[i * 6].toInt()
-                    val target = rawColors[i * 6 + 1].toInt()
+                List(rawColors.size / 7) { i ->
+                    val node = rawColors[i * 7].toInt()
+                    val target = rawColors[i * 7 + 1].toInt()
                     check(
                         node in 0 until nodeCount && target in targets.indices,
                     ) { "native colour record out of range" }
-                    check(rawColors.slice(i * 6 + 3..i * 6 + 5).all { it.isFinite() }) { "native colour is not finite" }
+                    check(rawColors.slice(i * 7 + 3..i * 7 + 6).all { it.isFinite() }) { "native colour is not finite" }
                     XcafColorAssignment(
                         node,
                         targets[target],
-                        rawColors[i * 6 + 2].toInt(),
+                        rawColors[i * 7 + 2].toInt(),
                         RgbColor(
-                            rawColors[i * 6 + 3].coerceIn(0.0, 1.0),
-                            rawColors[i * 6 + 4].coerceIn(0.0, 1.0),
-                            rawColors[i * 6 + 5].coerceIn(0.0, 1.0),
+                            rawColors[i * 7 + 3].coerceIn(0.0, 1.0),
+                            rawColors[i * 7 + 4].coerceIn(0.0, 1.0),
+                            rawColors[i * 7 + 5].coerceIn(0.0, 1.0),
+                            rawColors[i * 7 + 6].coerceIn(0.0, 1.0),
                         ),
                     )
                 }

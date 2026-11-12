@@ -9,11 +9,15 @@ class StyleException(
     message: String,
 ) : IllegalArgumentException(message)
 
-/** An sRGB colour with components in 0..1. Transparency is deliberately not supported (ADR-0039 D5). */
+/**
+ * An sRGB colour with components in 0..1 and an opacity [a] (alpha, 1.0 = opaque, the default). Transparency is
+ * supported on part and face colours since ADR-0042; edge colours must be opaque (`CURVE_STYLE` has no transparency).
+ */
 data class StepColour(
     val r: Double,
     val g: Double,
     val b: Double,
+    val a: Double = 1.0,
 ) {
     init {
         for ((name, v) in listOf("r" to r, "g" to g, "b" to b)) {
@@ -24,10 +28,22 @@ data class StepColour(
                 )
             }
         }
+        if (!a.isFinite() || a < 0.0 || a > 1.0) {
+            throw StyleException(
+                StyleErrorKind.INVALID_COLOUR,
+                "colour component a (alpha) must be a finite number in 0..1, was $a",
+            )
+        }
     }
 
-    /** The three components as an array, in r, g, b order. */
+    /** True if the colour is fully opaque (alpha 1.0), the only kind that takes the unchanged pre-ADR-0042 path. */
+    val isOpaque: Boolean get() = a == 1.0
+
+    /** The three colour components as an array, in r, g, b order (alpha is not included). */
     fun toArray(): DoubleArray = doubleArrayOf(r, g, b)
+
+    /** The four components as an array, in r, g, b, a order. */
+    fun toRgbaArray(): DoubleArray = doubleArrayOf(r, g, b, a)
 
     companion object {
         fun rgb(
@@ -36,24 +52,28 @@ data class StepColour(
             b: Double,
         ): StepColour = StepColour(r, g, b)
 
-        /** Parses `#RRGGBB` (case-insensitive). */
+        fun rgba(
+            r: Double,
+            g: Double,
+            b: Double,
+            a: Double,
+        ): StepColour = StepColour(r, g, b, a)
+
+        /** Parses `#RRGGBB` or `#RRGGBBAA` (case-insensitive; the last pair is the opacity, `FF` = opaque). */
         fun hex(text: String): StepColour {
-            if (HEX_WITH_ALPHA.matches(text)) {
+            if (!HEX.matches(text)) {
                 throw StyleException(
                     StyleErrorKind.INVALID_COLOUR,
-                    "transparency is not supported (ADR-0039); write the colour as #RRGGBB, was '$text'",
+                    "colour must be written #RRGGBB or #RRGGBBAA, was '$text'",
                 )
-            }
-            if (!HEX.matches(text)) {
-                throw StyleException(StyleErrorKind.INVALID_COLOUR, "colour must be written #RRGGBB, was '$text'")
             }
 
             fun part(from: Int) = text.substring(from, from + 2).toInt(16) / 255.0
-            return StepColour(part(1), part(3), part(5))
+            val alpha = if (text.length == 9) part(7) else 1.0
+            return StepColour(part(1), part(3), part(5), alpha)
         }
 
-        private val HEX = Regex("#[0-9a-fA-F]{6}")
-        private val HEX_WITH_ALPHA = Regex("#[0-9a-fA-F]{8}")
+        private val HEX = Regex("#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?")
     }
 }
 
@@ -111,17 +131,49 @@ data class FaceStyle(
     }
 }
 
+/** Colour of one edge; [edgeIndex] is the index in the shape's edge order (`OcctShape.edges[i].index`). Opaque only. */
+data class EdgeStyle(
+    val edgeIndex: Int,
+    val colour: StepColour,
+) {
+    init {
+        if (edgeIndex < 0) throw StyleException(StyleErrorKind.TARGET, "edge index must not be negative: $edgeIndex")
+        if (!colour.isOpaque) {
+            throw StyleException(
+                StyleErrorKind.INVALID_COLOUR,
+                "edge colours cannot be transparent (CURVE_STYLE has no transparency), alpha was ${colour.a}",
+            )
+        }
+    }
+}
+
 /**
  * Colour and layers attached to a part or to some of its faces (ADR-0039). An annotation on the result: no shape
- * operation, no effect on the feature history. [faces] is sorted by face index and holds each index at most once.
+ * operation, no effect on the feature history. [faces] and [edges] are sorted by index and hold each index at most
+ * once. Edge colours are opaque.
  */
 data class ShapeStyle(
     val colour: StepColour? = null,
     val layer: String? = null,
     val faces: List<FaceStyle> = emptyList(),
+    val edges: List<EdgeStyle> = emptyList(),
 ) {
     init {
         layer?.let { LayerNames.require(it) }
+        if (edges.size > MAX_STYLED_EDGES) {
+            throw StyleException(
+                StyleErrorKind.TARGET,
+                "too many styled edges: ${edges.size} (limit $MAX_STYLED_EDGES)",
+            )
+        }
+        for (i in 1 until edges.size) {
+            if (edges[i].edgeIndex <= edges[i - 1].edgeIndex) {
+                throw StyleException(
+                    StyleErrorKind.CONFLICT,
+                    "edge styles must be sorted by edge index and unique, index ${edges[i].edgeIndex} breaks that",
+                )
+            }
+        }
         if (faces.size > MAX_STYLED_FACES) {
             throw StyleException(
                 StyleErrorKind.TARGET,
@@ -145,11 +197,17 @@ data class ShapeStyle(
         }
     }
 
-    val isEmpty: Boolean get() = colour == null && layer == null && faces.none { it.colour != null || it.layer != null }
+    val isEmpty: Boolean
+        get() =
+            colour == null &&
+                layer == null &&
+                edges.isEmpty() &&
+                faces.none { it.colour != null || it.layer != null }
 
     companion object {
         val NONE = ShapeStyle()
         const val MAX_STYLED_FACES: Int = 10_000
+        const val MAX_STYLED_EDGES: Int = 10_000
         const val MAX_LAYER_NAMES: Int = 256
     }
 }

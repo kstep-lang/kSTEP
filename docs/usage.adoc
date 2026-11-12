@@ -679,8 +679,8 @@ stepFile(fileName = "bracket.step") {
   The example above is the file `kstep-tests/src/test/resources/export-docs-colours-layers.kstep.kts`
   (`bracket` is a part, `body` an `OcctKernel` shape), exported and read back by a test that also compares it with this block.
 * Colours are sRGB with components in 0..1: `StepColour.rgb(r, g, b)`, `StepColour.hex("#RRGGBB")` or the small
-  palette `StepColours` (`RED`, `GREEN`, `BLUE`, `ORANGE`, `YELLOW`, `GREY`, `BLACK`, `WHITE`). Transparency is not supported
-  (`#RRGGBBAA` is refused).
+  palette `StepColours` (`RED`, `GREEN`, `BLUE`, `ORANGE`, `YELLOW`, `GREY`, `BLACK`, `WHITE`). Since ADR-0042 a colour
+  can also be translucent, see <<alpha-edge-colours>>.
 * A layer name has 1 to 128 printable ASCII characters (no backslash, not blank). At most 10000 styled faces and 256
   distinct layer names per part. A part with several solids (`OcctKernel.compound`) gives every solid the part colour and
   layer.
@@ -690,13 +690,47 @@ stepFile(fileName = "bracket.step") {
 |===
 |Code |Meaning
 
-|`KSTEP-S-012` |Invalid colour: not a finite number in 0..1, not `#RRGGBB`, or transparency.
+|`KSTEP-S-012` |Invalid colour: a component or the alpha is not a finite number in 0..1, not `#RRGGBB` or `#RRGGBBAA`, or an edge colour is transparent.
 |`KSTEP-S-013` |Invalid layer name: blank, longer than 128 characters, or a character outside printable ASCII or a backslash.
 |`KSTEP-S-014` |A second colour or layer for the same part or face.
 |`KSTEP-S-015` |Unknown target: a style for a part without a shape, or a face index outside the shape.
 |===
 
-`kstep render` shows the part colour (SVG, PNG and GLB with a `COLOR_0` attribute); face colours and layers appear only in
+`kstep render` shows the part colour (SVG, PNG and GLB with a `COLOR_0` attribute; the opacity is ignored, the preview is always opaque); face colours, edge colours, transparency and layers appear only in
 the STEP file. `kstep import` reads the result back, see xref:usage-import.adoc#import-usage[Reading a STEP file back].
 `scripts/interop/verify-export-colours-layers.sh` re-checks the example exports with kSTEP, OCCT and FreeCAD. See
 docs/adr/ADR-0039-export-colours-and-layers.adoc.
+
+[[alpha-edge-colours]]
+=== Transparency and edge colours
+
+Since ADR-0042 a part or face colour can be translucent, and single edges can get a colour of their own.
+
+[source,kotlin]
+----
+val block = part("BLOCK", "Glass block")
+val body = OcctKernel.makeBox(10.0, 20.0, 30.0)
+
+stepFile(fileName = "glass-block.step") {
+    root(block)
+    shape(block, body, colour = StepColour.rgba(0.2, 0.6, 1.0, 0.4))                                 // a translucent part
+    styleFaces(block, Faces.atMax(Direction3.Z), colour = StepColour.hex("#FF8000C0"), expected = 1)  // an opaque-ish top face
+    styleEdges(block, Edges.atMax(Direction3.Z), StepColours.RED, expected = 4)                     // the four top edges
+}
+----
+
+* `StepColour.rgba(r, g, b, a)` and `StepColour.hex("#RRGGBBAA")` carry an opacity `a` in 0..1 (`1.0` and `FF` are
+  opaque, `0.0` is fully transparent). An opaque colour is written exactly as before: a script that never uses a
+  translucent colour exports byte for byte as in earlier versions. In the STEP file the opacity is a
+  `SURFACE_STYLE_TRANSPARENT(1 - a)` next to the colour. Transparency applies to part and face colours.
+* `styleEdges(pd, selector, colour, expected)` colours the edges an edge selector resolves to (the same selectors as for
+  `fillet`, resolved right away against the registered shape, `KSTEP-S-011` on an empty or wrongly sized selection). An
+  edge can get one colour (`KSTEP-S-014`). Edge colours are always opaque: the STEP curve style has no transparency, so a
+  translucent edge colour is `KSTEP-S-012`.
+* The example above is the file `kstep-tests/src/test/resources/export-docs-alpha-edges.kstep.kts` (`part(...)` is a
+  small helper that builds a part), exported and read back by a test that also compares it with this block.
+* Not covered: colours on assembly instances (one part used twice in different colours), layers on edges, edge width and
+  line style, and showing the opacity in `kstep render`. See docs/adr/ADR-0042-transparency-edge-and-instance-colours.adoc.
+
+`scripts/interop/verify-export-alpha-edge-instance.sh` re-checks the example exports with kSTEP and OCCT, and FreeCAD
+reads the files as geometry.

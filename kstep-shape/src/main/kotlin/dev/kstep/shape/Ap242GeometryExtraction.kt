@@ -5,6 +5,7 @@ import dev.kstep.step21.Part21EntityInstance
 import dev.kstep.step21.Part21RawDocument
 import dev.kstep.step21.Part21SimpleInstance
 import dev.kstep.step21.Part21Value
+import dev.kstep.step21.referencedIds
 
 /**
  * The geometry-only subgraph extracted from a Part-21 document [OcctShape.writeStepFile] wrote,
@@ -68,6 +69,11 @@ internal object Ap242GeometryExtraction {
             "COLOUR_RGB",
             "DRAUGHTING_PRE_DEFINED_COLOUR",
             "PRESENTATION_LAYER_ASSIGNMENT",
+            // ADR-0042 (measured with OCCT 7.9.3): transparency and edge colours.
+            "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
+            "SURFACE_STYLE_TRANSPARENT",
+            "CURVE_STYLE",
+            "DRAUGHTING_PRE_DEFINED_CURVE_FONT",
         )
 
     private val STYLE_ROOT_NAMES: Set<String> =
@@ -84,8 +90,13 @@ internal object Ap242GeometryExtraction {
     private const val MAX_OVERRIDE_CHAIN = 16
     private val FACE_NAMES: Set<String> = setOf("ADVANCED_FACE", "FACE_SURFACE")
 
-    /** What a `STYLED_ITEM` or a `PRESENTATION_LAYER_ASSIGNMENT` may be attached to. */
+    /** What a surface-styled `STYLED_ITEM` or a `PRESENTATION_LAYER_ASSIGNMENT` may be attached to. */
     private val STYLE_TARGET_NAMES: Set<String> = setOf("MANIFOLD_SOLID_BREP", "ADVANCED_FACE", "FACE_SURFACE")
+
+    /** What a curve-styled `STYLED_ITEM` (an edge colour, ADR-0042) may be attached to. */
+    private val CURVE_TARGET_NAMES: Set<String> = setOf("EDGE_CURVE")
+    private const val STYLE_SURFACE = "SURFACE_STYLE_USAGE"
+    private const val STYLE_CURVE = "CURVE_STYLE"
 
     /**
      * Like [extract], plus the colour and layer entities of the document. Fails closed: every style entity must be on
@@ -135,13 +146,21 @@ internal object Ap242GeometryExtraction {
         val geometryById = base.instances.associateBy { it.id }
         val styleById = styleInstances.associateBy { it.id }
         val facesBySolid = HashMap<Int, Set<Int>>()
+        val edgesBySolid = HashMap<Int, Set<Int>>()
         for (instance in styleInstances) {
             val names = entityNamesOf(instance)
             when {
                 names.any { it in STYLED_ITEM_NAMES } ->
-                    checkStyledItem(instance, geometryById, styleById) { solidId ->
-                        facesBySolid.getOrPut(solidId) { facesBelow(solidId, geometryById) }
+                    checkStyledItem(instance, geometryById, styleById) { solidId, curve ->
+                        if (curve) {
+                            edgesBySolid.getOrPut(solidId) { subShapesBelow(solidId, geometryById, CURVE_TARGET_NAMES) }
+                        } else {
+                            facesBySolid.getOrPut(solidId) { subShapesBelow(solidId, geometryById, FACE_NAMES) }
+                        }
                     }
+                "SURFACE_STYLE_TRANSPARENT" in names -> checkTransparency(instance)
+                "SURFACE_STYLE_RENDERING_WITH_PROPERTIES" in names -> checkRendering(instance, styleById)
+                STYLE_CURVE in names -> checkCurveStyle(instance, styleById)
                 "PRESENTATION_LAYER_ASSIGNMENT" in names -> checkLayerAssignment(instance, geometryById)
                 "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" in names ->
                     checkPresentationRepresentation(instance, geometryIds, styleById)
@@ -164,7 +183,7 @@ internal object Ap242GeometryExtraction {
         instance: Part21EntityInstance,
         geometryById: Map<Int, Part21EntityInstance>,
         styleById: Map<Int, Part21EntityInstance>,
-        facesOf: (Int) -> Set<Int>,
+        subShapesOf: (solidId: Int, curve: Boolean) -> Set<Int>,
     ) {
         val simple = instance as? Part21SimpleInstance
         if (simple == null || entityNamesOf(instance).size != 1) {
@@ -178,23 +197,142 @@ internal object Ap242GeometryExtraction {
             )
         }
         val target = refId(simple.args[2])
-        if (!isTargetOf(target, geometryById, STYLE_TARGET_NAMES)) {
+        // The kind of the style decides what it may be attached to: a curve style only to an edge, a surface style only
+        // to a solid or a face (ADR-0042). Mixed or unrecognisable styles are refused.
+        val curve = styleKindIsCurve(simple, styleById)
+        if (curve) {
+            if (!isTargetOf(target, geometryById, CURVE_TARGET_NAMES)) {
+                throw ShapeExportException(
+                    "#${instance.id} carries a curve style but is not attached to an edge of the exported shape",
+                )
+            }
+        } else if (!isTargetOf(target, geometryById, STYLE_TARGET_NAMES)) {
             throw ShapeExportException(
                 "#${instance.id} is attached to something that is neither a solid nor a face of the exported shape",
             )
         }
         if (overriding) {
-            if (!isTargetOf(target, geometryById, FACE_NAMES)) {
+            if (!curve && !isTargetOf(target, geometryById, FACE_NAMES)) {
                 throw ShapeExportException(
                     "#${instance.id} is an over-riding styled item that is not attached to a face",
                 )
             }
             val solid = overriddenSolid(simple, styleById, geometryById)
-            if (target !in facesOf(solid)) {
+            if (target !in subShapesOf(solid, curve)) {
                 throw ShapeExportException(
-                    "#${instance.id} overrides the style of a solid that does not contain its face #$target",
+                    "#${instance.id} overrides the style of a solid that does not contain its " +
+                        "${if (curve) "edge" else "face"} #$target",
                 )
             }
+        }
+    }
+
+    /**
+     * True if the styles of [item] are curve styles, false if they are surface styles. Walks the style tree below the
+     * item iteratively (bounded by the number of style instances) and refuses an item that mixes both kinds. Anything
+     * without a `CURVE_STYLE` counts as a surface style, exactly as before ADR-0042; the caller then restricts curve
+     * styles to edges and surface styles to solids and faces, so neither can be smuggled onto the other's target.
+     */
+    private fun styleKindIsCurve(
+        item: Part21SimpleInstance,
+        styleById: Map<Int, Part21EntityInstance>,
+    ): Boolean {
+        var hasCurve = false
+        var hasSurface = false
+        val seen = HashSet<Int>()
+        val stack = ArrayDeque<Int>()
+        // Only the style list (argument 1) is walked; the target (argument 2) and the over-ridden item (argument 3) are
+        // checked separately and must not be followed here.
+        for (ref in item.args
+            .getOrNull(1)
+            ?.referencedIds()
+            .orEmpty()) {
+            stack.addLast(ref)
+        }
+        while (stack.isNotEmpty()) {
+            val id = stack.removeLast()
+            if (!seen.add(id)) continue
+            val instance = styleById[id] ?: continue
+            val names = entityNamesOf(instance)
+            if (STYLE_CURVE in names) hasCurve = true
+            if (STYLE_SURFACE in names) hasSurface = true
+            for (ref in instance.referencedIds()) stack.addLast(ref)
+        }
+        if (hasCurve && hasSurface) {
+            throw ShapeExportException("#${item.id} ${item.entityName} mixes curve and surface styles")
+        }
+        return hasCurve
+    }
+
+    /** `SURFACE_STYLE_TRANSPARENT(transparency)`: one finite real in 0..1, nothing else. */
+    private fun checkTransparency(instance: Part21EntityInstance) {
+        val simple = instance as? Part21SimpleInstance
+        val value = (simple?.args?.singleOrNull() as? Part21Value.Num)?.lexeme?.toDoubleOrNull()
+        if (simple == null ||
+            entityNamesOf(instance).size != 1 ||
+            value == null ||
+            !value.isFinite() ||
+            value < 0.0 ||
+            value > 1.0
+        ) {
+            throw ShapeExportException(
+                "#${instance.id} SURFACE_STYLE_TRANSPARENT must be a simple instance with one real argument in 0..1",
+            )
+        }
+    }
+
+    /** `SURFACE_STYLE_RENDERING_WITH_PROPERTIES(method, colour, (properties))`: properties are transparencies only. */
+    private fun checkRendering(
+        instance: Part21EntityInstance,
+        styleById: Map<Int, Part21EntityInstance>,
+    ) {
+        val args = (instance as? Part21SimpleInstance)?.args
+        val properties = (args?.getOrNull(2) as? Part21Value.ListValue)?.items
+        if (args == null ||
+            args.size != 3 ||
+            entityNamesOf(instance).size != 1 ||
+            properties == null ||
+            args[0] !is Part21Value.Enumeration ||
+            refId(args[1])?.let { styleById[it] } == null
+        ) {
+            throw ShapeExportException(
+                "#${instance.id} SURFACE_STYLE_RENDERING_WITH_PROPERTIES does not have the measured shape",
+            )
+        }
+        for (property in properties) {
+            val target = refId(property)?.let { styleById[it] }
+            if (target == null || entityNamesOf(target) != setOf("SURFACE_STYLE_TRANSPARENT")) {
+                throw ShapeExportException(
+                    "#${instance.id} SURFACE_STYLE_RENDERING_WITH_PROPERTIES lists a property that is not " +
+                        "SURFACE_STYLE_TRANSPARENT",
+                )
+            }
+        }
+    }
+
+    /** `CURVE_STYLE(name, font, width, colour)`: a predefined font, a typed positive length, a colour entity. */
+    private fun checkCurveStyle(
+        instance: Part21EntityInstance,
+        styleById: Map<Int, Part21EntityInstance>,
+    ) {
+        val args = (instance as? Part21SimpleInstance)?.args
+        val font = args?.getOrNull(1)?.let { refId(it) }?.let { styleById[it] }
+        val colour = args?.getOrNull(3)?.let { refId(it) }?.let { styleById[it] }
+        val width = args?.getOrNull(2) as? Part21Value.Typed
+        val widthValue = (width?.args?.singleOrNull() as? Part21Value.Num)?.lexeme?.toDoubleOrNull()
+        val colourNames = colour?.let { entityNamesOf(it) }.orEmpty()
+        if (args == null ||
+            args.size != 4 ||
+            entityNamesOf(instance).size != 1 ||
+            font == null ||
+            entityNamesOf(font) != setOf("DRAUGHTING_PRE_DEFINED_CURVE_FONT") ||
+            width?.keyword != "POSITIVE_LENGTH_MEASURE" ||
+            widthValue == null ||
+            !widthValue.isFinite() ||
+            widthValue <= 0.0 ||
+            (colourNames != setOf("COLOUR_RGB") && colourNames != setOf("DRAUGHTING_PRE_DEFINED_COLOUR"))
+        ) {
+            throw ShapeExportException("#${instance.id} CURVE_STYLE does not have the measured shape")
         }
     }
 
@@ -231,10 +369,14 @@ internal object Ap242GeometryExtraction {
         return solid
     }
 
-    /** All faces below a solid; iterative, bounded by [MAX_CLOSURE_SIZE], computed once per solid by the caller. */
-    private fun facesBelow(
+    /**
+     * All sub-shapes named in [names] (faces or edge curves) below a solid; iterative, bounded by [MAX_CLOSURE_SIZE],
+     * computed once per solid and kind by the caller.
+     */
+    private fun subShapesBelow(
         solidId: Int,
         geometryById: Map<Int, Part21EntityInstance>,
+        names: Set<String>,
     ): Set<Int> {
         val seen = HashSet<Int>()
         val faces = HashSet<Int>()
@@ -247,7 +389,7 @@ internal object Ap242GeometryExtraction {
                 throw ShapeExportException("solid #$solidId exceeds the maximum supported size of $MAX_CLOSURE_SIZE")
             }
             val instance = geometryById[id] ?: continue
-            if (entityNamesOf(instance).any { it in FACE_NAMES }) faces.add(id)
+            if (entityNamesOf(instance).any { it in names }) faces.add(id)
             for (ref in instance.referencedIds()) stack.addLast(ref)
         }
         return faces

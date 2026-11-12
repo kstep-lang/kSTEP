@@ -3,6 +3,7 @@ package dev.kstep.tests
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctUnavailableException
+import dev.kstep.geometry.style.EdgeStyle
 import dev.kstep.geometry.style.FaceStyle
 import dev.kstep.geometry.style.LayerNames
 import dev.kstep.geometry.style.ShapeStyle
@@ -38,13 +39,54 @@ class ExportStyleTypesTest :
             c.g shouldBe (128.0 / 255.0 plusOrMinus 1e-12)
             c.b shouldBe 0.0
             StepColour.hex("#ff8000") shouldBe c
-            for (bad in listOf("FF8000", "#FF80", "#GG0000", "#FF800000", "", " #FF8000")) {
+            for (bad in listOf("FF8000", "#FF80", "#GG0000", "#FF80000", "#FF800080FF", "", " #FF8000")) {
                 shouldThrow<StyleException> { StepColour.hex(bad) }.kind shouldBe StyleErrorKind.INVALID_COLOUR
             }
         }
 
-        "a hex colour with an alpha channel is rejected as unsupported transparency" {
-            shouldThrow<StyleException> { StepColour.hex("#FF800080") }.message!!.contains("transparency") shouldBe true
+        "a hex colour with an alpha channel carries the opacity (ADR-0042, replaces the old rejection)" {
+            val c = StepColour.hex("#FF800080")
+            c.r shouldBe 1.0
+            c.a shouldBe (128.0 / 255.0 plusOrMinus 1e-12)
+            c.isOpaque shouldBe false
+            StepColour.hex("#FF8000FF") shouldBe StepColour.hex("#FF8000")
+            StepColour.hex("#FF800000").a shouldBe 0.0
+        }
+
+        "alpha must be a finite number in 0..1 and defaults to opaque" {
+            for (bad in listOf(Double.NaN, Double.POSITIVE_INFINITY, -0.1, 1.5)) {
+                val e = shouldThrow<StyleException> { StepColour.rgba(1.0, 0.5, 0.0, bad) }
+                e.kind shouldBe StyleErrorKind.INVALID_COLOUR
+                e.message!!.contains("alpha") shouldBe true
+            }
+            StepColour(1.0, 0.5, 0.0) shouldBe StepColour.rgba(1.0, 0.5, 0.0, 1.0)
+            StepColour.rgba(1.0, 0.5, 0.0, 0.5).isOpaque shouldBe false
+            StepColour.rgba(1.0, 0.5, 0.0, 0.5).toArray().size shouldBe 3
+            StepColour.rgba(1.0, 0.5, 0.0, 0.5).toRgbaArray().toList() shouldBe listOf(1.0, 0.5, 0.0, 0.5)
+        }
+
+        "edge styles: opaque colours only, non-negative sorted unique indices, a limit, isEmpty counts them" {
+            val red = StepColour.rgb(1.0, 0.0, 0.0)
+            shouldThrow<StyleException> { EdgeStyle(-1, red) }.kind shouldBe StyleErrorKind.TARGET
+            val transparent = shouldThrow<StyleException> { EdgeStyle(0, StepColour.rgba(1.0, 0.0, 0.0, 0.5)) }
+            transparent.kind shouldBe StyleErrorKind.INVALID_COLOUR
+            ShapeStyle(edges = listOf(EdgeStyle(1, red), EdgeStyle(4, red))).isEmpty shouldBe false
+            ShapeStyle().isEmpty shouldBe true
+            shouldThrow<StyleException> {
+                ShapeStyle(
+                    edges = listOf(EdgeStyle(4, red), EdgeStyle(1, red)),
+                )
+            }.kind shouldBe
+                StyleErrorKind.CONFLICT
+            shouldThrow<StyleException> {
+                ShapeStyle(
+                    edges = listOf(EdgeStyle(1, red), EdgeStyle(1, red)),
+                )
+            }.kind shouldBe
+                StyleErrorKind.CONFLICT
+            shouldThrow<StyleException> {
+                ShapeStyle(edges = List(ShapeStyle.MAX_STYLED_EDGES + 1) { EdgeStyle(it, red) })
+            }.kind shouldBe StyleErrorKind.TARGET
         }
 
         "layer names: 1 to 128 printable ASCII characters, not blank, no backslash" {
@@ -113,6 +155,41 @@ class ExportStyleTypesTest :
         "a script with an invalid hex colour fails with KSTEP-S-012" {
             val outcome = KStepScriptHost.eval("StepColour.hex(\"red\")\n")
             outcome.shouldBeInstanceOf<KStepScriptOutcome.RuntimeError>().code shouldBe "KSTEP-S-012"
+        }
+
+        "a script with an invalid alpha fails with KSTEP-S-012 and a message naming alpha" {
+            for (bad in listOf("Double.NaN", "-0.1", "1.5")) {
+                val outcome = KStepScriptHost.eval("StepColour.rgba(1.0, 0.0, 0.0, $bad)\n")
+                val error = outcome.shouldBeInstanceOf<KStepScriptOutcome.RuntimeError>()
+                error.code shouldBe "KSTEP-S-012"
+                error.message.contains("alpha") shouldBe true
+            }
+        }
+
+        "styleEdges refuses a transparent colour with KSTEP-S-012 and a missing shape with KSTEP-S-015" {
+            val prelude =
+                """
+                val appCtx = applicationContext { application = "configuration control" }.getOrThrow()
+                val defCtx = productDefinitionContext { name = "engineering"; frameOfReference = appCtx; lifeCycleStage = "design" }.getOrThrow()
+                val prodCtx = productContext { name = "engineering"; frameOfReference = appCtx; disciplineType = "mechanical" }.getOrThrow()
+                val p = product("P") { name = "P"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+                val f = productDefinitionFormation("P-F") { ofProduct = p }.getOrThrow()
+                val pd = productDefinition("P-D") { formation = f; frameOfReference = defCtx }.getOrThrow()
+                """.trimIndent()
+            val transparent =
+                KStepScriptHost.eval(
+                    "$prelude\nstepFile(fileName = \"s.step\") { styleEdges(pd, Edges.atMax(Direction3.Z), " +
+                        "StepColour.rgba(1.0, 0.0, 0.0, 0.5)) }\n",
+                )
+            val transparentError = transparent.shouldBeInstanceOf<KStepScriptOutcome.RuntimeError>()
+            transparentError.code shouldBe "KSTEP-S-012"
+            transparentError.message.contains("transparent") shouldBe true
+            val noShape =
+                KStepScriptHost.eval(
+                    "$prelude\nstepFile(fileName = \"s.step\") { styleEdges(pd, Edges.atMax(Direction3.Z), " +
+                        "StepColours.RED) }\n",
+                )
+            noShape.shouldBeInstanceOf<KStepScriptOutcome.RuntimeError>().code shouldBe "KSTEP-S-015"
         }
 
         "styled export fails predictably when the native bridge is unavailable".config(enabled = !available) {

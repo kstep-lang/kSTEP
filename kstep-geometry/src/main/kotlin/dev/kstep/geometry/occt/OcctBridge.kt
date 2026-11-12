@@ -38,11 +38,12 @@ object OcctBridge {
     ): Int
 
     /**
-     * Writes the shape through `STEPCAFControl_Writer` with colours and layers (ADR-0039): [partColour] is null or
-     * `[r, g, b]` (sRGB 0..1), [partLayer] the layer of the whole part. Per styled face, [faceIndices] holds the index
-     * (`TopExp::MapShapes(FACE)` order), [faceColours] three values (NaN in the first = no colour) and [faceLayers] the
-     * layer or null. Returns the `IFSelect_ReturnStatus` (1 = done); invalid arguments throw
-     * `IllegalArgumentException`.
+     * Writes the shape through `STEPCAFControl_Writer` with colours and layers (ADR-0039, ADR-0042): [partColour] is
+     * null or `[r, g, b, a]` (sRGB 0..1, a = opacity), [partLayer] the layer of the whole part. Per styled face,
+     * [faceIndices] holds the index (`TopExp::MapShapes(FACE)` order), [faceColours] four values `r, g, b, a` (NaN in
+     * the first = no colour) and [faceLayers] the layer or null. Per coloured edge, [edgeIndices] holds the index
+     * (`TopExp::MapShapes(EDGE)` order) and [edgeColours] three values `r, g, b` (edge colours are opaque). Returns
+     * the `IFSelect_ReturnStatus` (1 = done); invalid arguments throw `IllegalArgumentException`.
      */
     external fun nativeWriteStepStyled(
         handle: Long,
@@ -53,6 +54,8 @@ object OcctBridge {
         faceIndices: IntArray,
         faceColours: DoubleArray,
         faceLayers: Array<String?>,
+        edgeIndices: IntArray,
+        edgeColours: DoubleArray,
     ): Int
 
     /** Number of XCAF documents currently open in the process (test-only: leak detection). */
@@ -248,7 +251,10 @@ object OcctBridge {
     /** Distinct unknown entity type names, `\n`-joined, ASCII `[A-Z0-9_]` only. */
     external fun nativeImportUnknownTypes(session: Long): String
 
-    /** 6 doubles per record: node, target (0 part, 1 solid, 2 face), sub-index (0-based), r, g, b in sRGB 0..1. */
+    /**
+     * 7 doubles per record: node, target (0 part, 1 solid, 2 face, 3 edge), sub-index (0-based), r, g, b in sRGB 0..1,
+     * alpha (opacity, 1.0 = opaque; ADR-0042).
+     */
     external fun nativeImportColors(session: Long): DoubleArray
 
     /** 4 ints per record: node, target (0 part, 1 solid, 2 face), sub-index (0-based), index into the layer names. */
