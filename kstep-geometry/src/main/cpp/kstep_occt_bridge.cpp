@@ -5643,7 +5643,7 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeDistances(
  */
 static jlong shellShapeImpl(
     JNIEnv* env, jlong handle, jintArray openFaces, jdouble thickness, jint direction, const char* fn,
-    jobjectArray outHistory) {
+    jobjectArray outHistory, const std::vector<DerivedQuery>* queries = nullptr, jobjectArray outMap = nullptr) {
     const std::string name(fn);
     if (openFaces == nullptr) {
         throwJava(env, "java/lang/NullPointerException", name + ": openFaces must not be null");
@@ -5677,7 +5677,7 @@ static jlong shellShapeImpl(
     }
     enum Failure {
         kOk, kUnknownHandle, kNotSingleSolid, kTooManyFaces, kBadFace, kTooThick, kFailed, kNotOneSolid, kInvalid,
-        kOrientation, kBounds, kHistory
+        kOrientation, kBounds, kHistory, kBadQuery
     };
     try {
         Failure failure = kOk;
@@ -5686,6 +5686,7 @@ static jlong shellShapeImpl(
         jint badFace = 0;
         double minExtent = 0.0;
         std::vector<jint> history;
+        std::vector<jint> map;
         TopoDS_Shape result;
         {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -5701,6 +5702,8 @@ static jlong shellShapeImpl(
                     failure = kNotSingleSolid;
                 } else if (faceCount > kMaxShellInputFaces) {
                     failure = kTooManyFaces;
+                } else if (queries != nullptr && firstBadDerivedQuery(*queries, {shape}) >= 0) {
+                    failure = kBadQuery;
                 } else {
                     std::vector<jint> sorted(open);
                     std::sort(sorted.begin(), sorted.end());
@@ -5784,6 +5787,11 @@ static jlong shellShapeImpl(
                                         !encodeEdgeHistory(maker, {shape}, result, history)) {
                                         failure = kHistory;
                                     }
+                                    // ADR-0041: Generated(edge/face) of the SAME maker, mapped into the unwrapped result.
+                                    if (failure == kOk && queries != nullptr &&
+                                        !encodeDerivedGeneration(maker, {shape}, result, *queries, map)) {
+                                        failure = kHistory;
+                                    }
                                 }
                             }
                         }
@@ -5851,8 +5859,14 @@ static jlong shellShapeImpl(
             case kHistory:
                 throwJava(env, "java/lang/IllegalArgumentException", name + ": edge history exceeds the size limit");
                 return 0;
+            case kBadQuery:
+                throwJava(env, "java/lang/IllegalArgumentException", name + ": a derived query lies outside the shape");
+                return 0;
         }
         if (outHistory != nullptr && !publishHistory(env, outHistory, history)) {
+            return 0;
+        }
+        if (outMap != nullptr && !publishHistory(env, outMap, map)) {
             return 0;
         }
         return registerShape(std::move(result));
@@ -5880,6 +5894,21 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShellShapeTracked(
         return 0;
     }
     return shellShapeImpl(env, handle, openFaces, thickness, direction, "nativeShellShapeTracked", outHistory);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShellShapeNamed(
+    JNIEnv* env, jobject /*self*/, jlong handle, jintArray openFaces, jdouble thickness, jint direction,
+    jintArray queries, jobjectArray outHistory, jobjectArray outMap) {
+    if (!checkHistoryHolder(env, outHistory, "nativeShellShapeNamed") ||
+        !checkHistoryHolder(env, outMap, "nativeShellShapeNamed")) {
+        return 0;
+    }
+    std::vector<DerivedQuery> parsed;
+    if (!readDerivedQueries(env, queries, 1, "nativeShellShapeNamed", parsed)) {
+        return 0;
+    }
+    return shellShapeImpl(env, handle, openFaces, thickness, direction, "nativeShellShapeNamed", outHistory, &parsed, outMap);
 }
 
 

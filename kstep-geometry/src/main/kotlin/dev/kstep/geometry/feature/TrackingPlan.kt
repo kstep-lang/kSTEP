@@ -10,6 +10,8 @@ import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OperandEdges
 import dev.kstep.geometry.OperandFaces
 import dev.kstep.geometry.ShellDirection
+import dev.kstep.geometry.ShellInnerEdges
+import dev.kstep.geometry.ShellInnerFaces
 import dev.kstep.geometry.describe
 import dev.kstep.geometry.select.SelectorTree
 
@@ -79,6 +81,8 @@ internal object TrackingPlanner {
             when (it) {
                 is OperandEdges -> SelectorTree.validate(it.selector)
                 is OperandFaces -> SelectorTree.validate(it.selector)
+                is ShellInnerEdges -> SelectorTree.validate(it.selector)
+                is ShellInnerFaces -> SelectorTree.validate(it.selector)
                 else -> Unit
             }
         }
@@ -93,9 +97,9 @@ internal object TrackingPlanner {
                 if (source is ExtrudeRegionsFeature || source is RevolveRegionsFeature) {
                     "multi-body regions cannot name generated edges yet (ADR-0033)"
                 } else if (source is ShellFeature) {
-                    "a shell generates inner walls but naming them is a follow-up (ADR-0037); name the edges at " +
-                        "their generator before the shell -- GeneratedEdges(featureIndex = <generator>) is " +
-                        "followed through an INWARD shell"
+                    "only an INWARD shell can name its inner wall (ADR-0041): an OUTWARD shell's generated copies " +
+                        "are the new outer skin and the cavity keeps the original edges, so naming them is a " +
+                        "follow-up; use INWARD"
                 } else if (source is PocketFeature || source is DraftFeature || source is ThickenFeature) {
                     "pocket, draft and thicken create new faces and edges, but naming them is a follow-up " +
                         "(ADR-0040); name the edge at its generator before the step -- " +
@@ -105,7 +109,7 @@ internal object TrackingPlanner {
                         "GeneratedEdges(featureIndex = <generator>) is followed through the mirror/scale step"
                 } else {
                     "it generates no named edges (only extrude/revolve of a profile or region, external features " +
-                        "that support naming, fillet, chamfer, boolean and hole can be generators)"
+                        "that support naming, fillet, chamfer, boolean, hole and INWARD shell can be generators)"
                 }
             "feature[$consumer] GeneratedEdges.featureIndex $generator ($name) cannot be a generator: $why"
         }
@@ -121,7 +125,7 @@ internal object TrackingPlanner {
     }
 
     /** What a generator feature produces names for (ADR-0033 sweeps, ADR-0034 derived features). */
-    private enum class GeneratorKind { SWEEP, BLEND, BOOLEAN, HOLE, NONE }
+    private enum class GeneratorKind { SWEEP, BLEND, BOOLEAN, HOLE, SHELL, NONE }
 
     private fun generatorKind(feature: Feature): GeneratorKind =
         when (feature) {
@@ -133,10 +137,13 @@ internal object TrackingPlanner {
                 GeneratorKind.BLEND
             is BooleanFeature -> GeneratorKind.BOOLEAN
             is HoleFeature -> GeneratorKind.HOLE
-            // Mirror/scale copy every edge one-to-one and generate none (ADR-0036). A shell generates inner walls, but
-            // naming them is a follow-up (ADR-0037); until then it is not a generator.
+            // An INWARD shell names its inner wall (ADR-0041); an OUTWARD one keeps the original edges inside the
+            // cavity, so it is not a generator (follow-up).
+            is ShellFeature ->
+                if (feature.direction == ShellDirection.INWARD) GeneratorKind.SHELL else GeneratorKind.NONE
+            // Mirror/scale copy every edge one-to-one and generate none (ADR-0036).
             // Pocket walls and draft/thicken faces are new faces; naming them is a follow-up (ADR-0040).
-            is MirrorFeature, is ScaleFeature, is ShellFeature, is PocketFeature, is DraftFeature, is ThickenFeature ->
+            is MirrorFeature, is ScaleFeature, is PocketFeature, is DraftFeature, is ThickenFeature ->
                 GeneratorKind.NONE
             is BoxFeature,
             is CylinderFeature,
@@ -172,7 +179,7 @@ internal object TrackingPlanner {
         }
         require(reference.sources.all { it is DerivedGenerationSource }) {
             "$where is a derived feature: its sources must be BlendedEdges, OperandEdges, OperandFaces, " +
-                "BooleanSection or HoleWall, not profile sources"
+                "BooleanSection, HoleWall, ShellInnerEdges or ShellInnerFaces, not profile sources"
         }
         reference.sources.forEach { source ->
             val fits =
@@ -185,7 +192,8 @@ internal object TrackingPlanner {
                         source == BooleanSection ||
                             source == HoleWall ||
                             (source is OperandFaces && source.operand in 0..1)
-                    else -> false
+                    GeneratorKind.SHELL -> source is ShellInnerEdges || source is ShellInnerFaces
+                    GeneratorKind.SWEEP, GeneratorKind.NONE -> false
                 }
             require(fits) { "$where cannot be named by ${source.describe()}" }
         }
@@ -193,6 +201,7 @@ internal object TrackingPlanner {
             when (kind) {
                 GeneratorKind.BLEND -> role == GeneratedRole.BOUNDARY
                 GeneratorKind.BOOLEAN -> role == GeneratedRole.SECTION
+                GeneratorKind.SHELL -> role == GeneratedRole.CAVITY
                 GeneratorKind.HOLE ->
                     role == GeneratedRole.SECTION ||
                         (
@@ -206,6 +215,7 @@ internal object TrackingPlanner {
                 when (kind) {
                     GeneratorKind.BLEND -> "BOUNDARY"
                     GeneratorKind.BOOLEAN -> "SECTION"
+                    GeneratorKind.SHELL -> "CAVITY"
                     else -> "SECTION, or RIM_ENTRY / RIM_EXIT with exactly the source HoleWall"
                 }
             "$where does not support role $role; expected $expected"

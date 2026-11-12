@@ -1156,6 +1156,59 @@ object OcctKernel {
         return trackedResult(handle, holder, listOf(shape))
     }
 
+    /**
+     * [shell] that also returns the [EdgeHistory] and a [GenerationMap] for [sources] ([ShellInnerEdges],
+     * [ShellInnerFaces], role [GeneratedRole.CAVITY]), both read from the same `MakeThickSolid` maker. Measured
+     * (ADR-0041): `Generated(edge)` is exactly one inner edge for every input edge that borders at least one closed
+     * face, and `Generated(face)` is exactly one inner face for every closed face. An input edge that borders only
+     * opened faces, and an opened face, have no inner image and fail the name instead of being guessed. The solid is
+     * the one [shell] returns, with the same edge and face indices.
+     *
+     * @throws IllegalArgumentException as [shellWithHistory] (so for [ShellDirection.OUTWARD]: there the generated
+     *   copies are the new outer skin and the cavity keeps the original edges), and for foreign, duplicate,
+     *   mismatching or more than [MAX_NAMING_SOURCES] sources.
+     * @throws dev.kstep.geometry.select.EdgeNamingException if a source selector matches nothing on [shape].
+     */
+    fun shellNamed(
+        shape: OcctShape,
+        openFaceIndices: Collection<Int>,
+        thickness: Double,
+        direction: ShellDirection = ShellDirection.INWARD,
+        sources: List<GenerationSource>,
+    ): DerivedNamedShape {
+        require(direction == ShellDirection.INWARD) {
+            "inner walls cannot be named through an OUTWARD shell: the generated copies are the new outer skin and " +
+                "the cavity keeps the original edges (ADR-0037/0041); use INWARD"
+        }
+        requireShellArguments(openFaceIndices, thickness)
+        requireDerivedSources(sources, DerivedOperation.SHELL)
+        requireAvailable()
+        requireShellOperand(shape, thickness)
+        val queries = shellQueries(shape, sources)
+        val history = arrayOfNulls<IntArray>(1)
+        val map = arrayOfNulls<IntArray>(1)
+        val indices = openFaceIndices.toIntArray()
+        val handle =
+            shape.withHandle { h ->
+                try {
+                    OcctBridge.nativeShellShapeNamed(
+                        h,
+                        indices,
+                        thickness,
+                        direction.nativeCode,
+                        queries.triples,
+                        history,
+                        map,
+                    )
+                } catch (e: IllegalArgumentException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    throw OcctGeometryException("OCCT failed to shell shape (thickness $thickness, $direction)", e)
+                }
+            }
+        return derivedResult(handle, history, map, listOf(shape), queries, sources, DerivedOperation.SHELL, null)
+    }
+
     /** The scalar rules of [shell], checked before any native call. */
     private fun requireShellArguments(
         openFaceIndices: Collection<Int>,
@@ -2192,15 +2245,20 @@ object OcctKernel {
         sources.forEach { source ->
             require(source is DerivedGenerationSource) {
                 "${source.describe()} is a profile source; a ${operationName(operation)} takes only " +
-                    "BlendedEdges, OperandEdges, OperandFaces, BooleanSection or HoleWall"
+                    "BlendedEdges, OperandEdges, OperandFaces, BooleanSection, HoleWall, ShellInnerEdges or " +
+                    "ShellInnerFaces"
             }
             val fits =
                 when (source) {
                     BlendedEdges -> operation == DerivedOperation.BLEND
                     is OperandEdges -> operation == DerivedOperation.BLEND && source.operand == 0
-                    is OperandFaces -> operation != DerivedOperation.BLEND && source.operand in 0..1
-                    BooleanSection -> operation != DerivedOperation.BLEND
+                    is OperandFaces ->
+                        operation != DerivedOperation.BLEND &&
+                            operation != DerivedOperation.SHELL &&
+                            source.operand in 0..1
+                    BooleanSection -> operation != DerivedOperation.BLEND && operation != DerivedOperation.SHELL
                     HoleWall -> operation == DerivedOperation.HOLE
+                    is ShellInnerEdges, is ShellInnerFaces -> operation == DerivedOperation.SHELL
                 }
             require(fits) { "${source.describe()} does not fit a ${operationName(operation)}" }
         }
@@ -2210,6 +2268,8 @@ object OcctKernel {
         when (source) {
             is OperandEdges -> SelectorTree.validate(source.selector)
             is OperandFaces -> SelectorTree.validate(source.selector)
+            is ShellInnerEdges -> SelectorTree.validate(source.selector)
+            is ShellInnerFaces -> SelectorTree.validate(source.selector)
             else -> Unit
         }
     }
@@ -2219,6 +2279,7 @@ object OcctKernel {
             DerivedOperation.BLEND -> "fillet or chamfer"
             DerivedOperation.BOOLEAN -> "boolean"
             DerivedOperation.HOLE -> "hole"
+            DerivedOperation.SHELL -> "shell"
         }
 
     private fun blendQueries(
@@ -2267,6 +2328,61 @@ object OcctKernel {
             }
         }
         return builder.build()
+    }
+
+    private fun shellQueries(
+        shape: OcctShape,
+        sources: List<GenerationSource>,
+    ): DerivedQueries {
+        val b = DerivedQueryBuilder()
+        sources.forEachIndexed { i, source ->
+            when (source) {
+                is ShellInnerEdges ->
+                    resolveSourceEdges(shape, source, source.selector).forEach { b.add(i, 0, DERIVED_KIND_EDGE, it) }
+                is ShellInnerFaces ->
+                    resolveSourceFaces(shape, source, source.selector).forEach { b.add(i, 0, DERIVED_KIND_FACE, it) }
+                else -> error("unreachable: ${source.describe()} was validated")
+            }
+        }
+        return b.build()
+    }
+
+    private fun resolveSourceEdges(
+        shape: OcctShape,
+        source: GenerationSource,
+        selector: EdgeSelector,
+    ): List<Int> =
+        try {
+            EdgeSelection.resolve(shape.edges, shape.faces, selector)
+        } catch (e: EdgeSelectionException) {
+            throw EdgeNamingException(
+                "${source.describe()} matched no edge on the shell input\n" + e.message,
+                null,
+                listOf(source),
+                emptyList(),
+                emptyMap(),
+                e.candidates,
+            )
+        }
+
+    private fun resolveSourceFaces(
+        shape: OcctShape,
+        source: GenerationSource,
+        selector: FaceSelector,
+    ): List<Int> {
+        val faces = EdgeSelection.resolveFaces(shape.edges, shape.faces, selector)
+        if (faces.isEmpty()) {
+            throw EdgeNamingException(
+                "${source.describe()} matched no face on the shell input. Candidate faces:\n" +
+                    describeFaces(shape.faces),
+                null,
+                listOf(source),
+                emptyList(),
+                emptyMap(),
+                shape.edges.filter { !it.seam && !it.degenerated },
+            )
+        }
+        return faces
     }
 
     private fun resolveOperandEdges(
@@ -2359,6 +2475,11 @@ object OcctKernel {
         sources.forEachIndexed { i, source ->
             out[source] =
                 when (operation) {
+                    DerivedOperation.SHELL -> {
+                        val (cavity, error) = cavityEdges(i, source, queries, images, shape)
+                        if (error != null) roleErrors[source] = mapOf(GeneratedRole.CAVITY to error)
+                        mapOf(GeneratedRole.CAVITY to cavity)
+                    }
                     DerivedOperation.BLEND ->
                         mapOf(
                             GeneratedRole.BOUNDARY to boundaryEdges(facesBy[i], allBlendFaces, shape.faces, edgeInfos),
@@ -2413,6 +2534,77 @@ object OcctKernel {
                 }
         }
         return out to roleErrors
+    }
+
+    /**
+     * The inner copy of every input edge or face source number [owner] named (ADR-0041), strictly: an input with no
+     * usable image (an edge that borders only opened faces, an opened face) or with several is an error for the whole
+     * role, never a silent gap. Seam and degenerated images do not count.
+     */
+    private fun cavityEdges(
+        owner: Int,
+        source: GenerationSource,
+        queries: DerivedQueries,
+        images: List<DerivedImages>,
+        shape: OcctShape,
+    ): Pair<List<Int>, EdgeNamingException?> {
+        val edgeInfos = shape.edges
+        val faceInfos = shape.faces
+        val cavity = java.util.TreeSet<Int>()
+        val perInput = LinkedHashMap<String, List<Int>>()
+        var problem: String? = null
+        var anyImage = false
+        var queryCount = 0
+        for (q in 0 until queries.count) {
+            if (queries.owner[q] != owner) continue
+            queryCount++
+            val kind = queries.triples[3 * q + 1]
+            val input = queries.triples[3 * q + 2]
+            val image = images[q]
+            if (kind == DERIVED_KIND_EDGE) {
+                val usable = image.edges.filter { !edgeInfos[it].seam && !edgeInfos[it].degenerated }
+                perInput["input edge $input"] = usable
+                if (usable.isNotEmpty()) anyImage = true
+                if (problem == null && usable.isEmpty()) {
+                    problem =
+                        "input edge $input has no inner image (it borders only opened faces, or OCCT reported none)"
+                } else if (problem == null && usable.size > 1) {
+                    problem = "ambiguous: input edge $input has ${usable.size} inner images $usable"
+                }
+                cavity.addAll(usable)
+            } else {
+                perInput["input face $input"] = image.faces
+                if (image.faces.isNotEmpty()) anyImage = true
+                if (problem == null && image.faces.isEmpty()) {
+                    problem = "input face $input was opened (it became the rim face) or has no inner copy"
+                } else if (problem == null && image.faces.size > 1) {
+                    problem = "ambiguous: input face $input has ${image.faces.size} inner copies ${image.faces}"
+                } else if (image.faces.size == 1) {
+                    faceInfos[image.faces[0]]
+                        .edgeIndices
+                        .filter { !edgeInfos[it].seam && !edgeInfos[it].degenerated }
+                        .forEach { cavity.add(it) }
+                }
+            }
+        }
+        if (problem == null &&
+            queryCount > 0 &&
+            !anyImage
+        ) {
+            problem = "OCCT reported no usable history for ${source.describe()}"
+        }
+        if (problem == null) return cavity.toList() to null
+        val candidates = edgeInfos.filter { !it.seam && !it.degenerated }
+        val detail = EdgeNamingException.detail(perInput, candidates)
+        return emptyList<Int>() to
+            EdgeNamingException(
+                "${source.describe()} (role CAVITY): $problem\n$detail",
+                null,
+                listOf(source),
+                emptyList(),
+                perInput,
+                candidates,
+            )
     }
 
     private fun nativeSweep(

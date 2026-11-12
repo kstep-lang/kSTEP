@@ -91,6 +91,9 @@ enum class GeneratedRole {
 
     /** Derived: the ring at which a hole's drill leaves; empty (a naming error) for a blind hole. */
     RIM_EXIT,
+
+    /** Derived (ADR-0041): the inner copy, in the cavity of an INWARD shell, of the input edge or face a source names. */
+    CAVITY,
 }
 
 /** Convenience builders for lists of [GenerationSource]s. */
@@ -133,6 +136,10 @@ internal fun GenerationSource.describe(): String =
             "OperandFaces($operand, ${dev.kstep.geometry.select.EdgeSelection.describe(
                 selector,
             )})".take(64)
+        is ShellInnerEdges ->
+            "ShellInnerEdges(${dev.kstep.geometry.select.EdgeSelection.describe(selector)})".take(64)
+        is ShellInnerFaces ->
+            "ShellInnerFaces(${dev.kstep.geometry.select.EdgeSelection.describe(selector)})".take(64)
         BlendedEdges -> "BlendedEdges"
         BooleanSection -> "BooleanSection"
         HoleWall -> "HoleWall"

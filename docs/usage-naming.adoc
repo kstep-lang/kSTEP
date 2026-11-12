@@ -93,3 +93,35 @@ image, and a wrong `expected` count is an `EdgeNamingException` with the generat
 not offered for booleans because OCCT reports vertices, not edges, for the edges of a boolean (spike result in
 ADR-0034). Corner blends, persistent history across a change of the source topology and multi-body generators are
 not covered. `scripts/interop/verify-derived-naming.sh` re-checks the example exports with OCCT and FreeCAD.
+
+== The inner wall of a shell (Welle T)
+
+An INWARD shell is a generator too. `ShellInnerEdges(selector)` names the edges `selector` picks on the shell's INPUT; the
+role `CAVITY` is the inner copy of each (the matching edge of the cavity wall). `ShellInnerFaces(selector)` does the same
+for faces: `CAVITY` is every edge that bounds the inner copy of the named face. Because the selector is evaluated on the
+input again at every rebuild, the name survives a parameter change.
+
+[source,kotlin]
+----
+// export-shell-inner-fillet.kstep.kts: round the four INNER vertical edges of a hollowed box
+val history = FeatureHistory()
+history.add(BoxFeature(40.0, 30.0, 20.0))
+history.add(ShellFeature(0, SelectFaces(Faces.atMax(Direction3.Z), expected = 1), 2.0))
+history.add(
+    SelectedFilletFeature(
+        1,
+        GeneratedEdges(1, listOf(ShellInnerEdges(Edges.parallelTo(Direction3.Z))), GeneratedRole.CAVITY, expected = 4),
+        1.0,
+    ),
+)
+// 7152 + 4 (1 - pi/4) 18 = 7167.451, 15 faces;  after history.update(0) { dz = 30.0 }: 9816.035, 15 faces
+----
+
+Nothing is guessed. An input edge that borders only opened faces (for example the edge between an opened top and an opened
+front) has no inner copy, and an opened face has none either: the name fails with an `EdgeNamingException` that lists the
+images per input and the candidate edges (`KSTEP-S-011`, `hello-shell-inner-unresolved.kstep.kts`). A selector that matches
+nothing on the input, or a wrong `expected` count, fails the same way. Only INWARD shells are generators: naming an OUTWARD
+shell is refused before any native call, because there the generated copies are the new outer skin (ADR-0041). `within` on
+`GeneratedEdges` still filters the result by geometry, but that filter is not persistent.
+`scripts/interop/verify-shell-inner-naming.sh` re-checks the example exports with OCCT and FreeCAD (`--spike` runs the
+measurements behind ADR-0041).

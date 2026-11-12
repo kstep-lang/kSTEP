@@ -219,7 +219,7 @@ class DerivedNamingPlanningTest :
                     TranslateFeature(0, 1.0, 0.0, 0.0),
                     fillet(1, section, GeneratedRole.SECTION),
                 ),
-                "fillet, chamfer, boolean and hole",
+                "fillet, chamfer, boolean, hole and INWARD shell",
             )
         }
 

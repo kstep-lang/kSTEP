@@ -563,6 +563,23 @@ object OcctBridge {
         outHistory: Array<IntArray?>,
     ): Long
 
+    /**
+     * Same as [nativeShellShapeTracked] plus the derived generation map in `outMap[0]` for the
+     * `(slot, kind, index)` triples `queries` (slot always 0; kind 0 = edge, 1 = face; ADR-0041), read from the same
+     * maker. Layout as the other `*Named` entry points: `[queryCount, (edgeCount, edgeIdx..., faceCount, faceIdx...)*]`.
+     *
+     * @throws IllegalArgumentException additionally for malformed queries or one that lies outside the shape.
+     */
+    external fun nativeShellShapeNamed(
+        handle: Long,
+        openFaces: IntArray,
+        thickness: Double,
+        direction: Int,
+        queries: IntArray,
+        outHistory: Array<IntArray?>,
+        outMap: Array<IntArray?>,
+    ): Long
+
     // ---------------------------------------------------------------------------------------
     // Welle Q2 (ADR-0040): pocket / hole from a face, draft, thicken
     // ---------------------------------------------------------------------------------------

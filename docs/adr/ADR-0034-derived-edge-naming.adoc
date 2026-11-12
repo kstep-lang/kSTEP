@@ -116,6 +116,8 @@ operation, never its geometry, and are resolved against the operands:
 | hole
 |===
 
+Welle T (ADR-0041) adds `ShellInnerEdges` / `ShellInnerFaces` with the role `CAVITY` for the inner wall of an INWARD shell.
+
 `GeneratedRole` gained four values (source-incompatible for exhaustive `when` in third-party code, noted in the
 CHANGELOG):
 

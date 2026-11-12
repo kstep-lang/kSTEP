@@ -16,7 +16,7 @@ internal const val DERIVED_KIND_EDGE = 0
 internal const val DERIVED_KIND_FACE = 1
 
 /** Which family of operation a derived naming request targets. */
-internal enum class DerivedOperation { BLEND, BOOLEAN, HOLE }
+internal enum class DerivedOperation { BLEND, BOOLEAN, HOLE, SHELL }
 
 /**
  * The `(slot, kind, index)` triples sent to the native side, and the position (in the source list) of the

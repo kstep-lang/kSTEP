@@ -57,6 +57,9 @@ class CliExportDerivedNamingOcctIntegrationTest :
             Triple("export-hole-rim-fillet", 15491.650, 8),
             Triple("export-hole-rim-fillet-rebuild", 23491.650, 8),
             Triple("export-union-section-fillet", 7017.168, 12),
+            // Welle T (ADR-0041): 7152 + 4 (1 - pi/4) 1^2 18 = 7167.451; after the rebuild 9792 + 4 (1 - pi/4) 28 = 9816.035.
+            Triple("export-shell-inner-fillet", 7167.451, 15),
+            Triple("export-shell-inner-fillet-rebuild", 9816.035, 15),
         ).forEach { (name, volume, faces) ->
             "kstep export of $name re-imports with V = $volume and $faces faces".config(enabled = occt) {
                 val part = exportAndImport(name)
@@ -77,5 +80,19 @@ class CliExportDerivedNamingOcctIntegrationTest :
             output shouldContain "candidate edges"
             output shouldNotContain "\tat "
             File(workDir, "never.step").exists() shouldBe false
+        }
+
+        "a shell edge without an inner image exits non-zero with KSTEP-S-011 and the candidates".config(
+            enabled = occt,
+        ) {
+            val script = copyFixture("hello-shell-inner-unresolved.kstep.kts")
+            val result = runner.run("export", script.name, "--out", "never-shell.step")
+            (result.exitCode != 0) shouldBe true
+            val output = result.stdout + result.stderr
+            output shouldContain "KSTEP-S-011"
+            output shouldContain "no inner image"
+            output shouldContain "ShellInnerEdges"
+            output shouldNotContain "\tat "
+            File(workDir, "never-shell.step").exists() shouldBe false
         }
     })

@@ -223,8 +223,221 @@ static void distanceTiming(const char* label, const TopoDS_Shape& s) {
     }
 }
 
-int main() {
+
+// ---------------------------------------------------------------------------------------------------------------
+// ADR-0041 (Welle T): which images does MakeThickSolid report for Generated(edge) / Generated(face) of an INWARD shell?
+// Only run with `--inner-naming`; without the argument the output of this program is unchanged (ADR-0037 stays
+// reproducible). Every list returned by Modified()/Generated() is copied at once: the reference is overwritten by the
+// next call (aliasing, ADR-0037).
+// ---------------------------------------------------------------------------------------------------------------
+static std::vector<TopoDS_Shape> copyList(const TopTools_ListOfShape& l) {
+    std::vector<TopoDS_Shape> v;
+    for (TopTools_ListIteratorOfListOfShape it(l); it.More(); it.Next()) v.push_back(it.Value());
+    return v;
+}
+
+static TopoDS_Shape firstSolid(const TopoDS_Shape& s) {
+    TopExp_Explorer ex(s, TopAbs_SOLID);
+    return ex.More() ? ex.Current() : s;
+}
+
+static std::string edgeText(const TopoDS_Shape& sh) {
+    const TopoDS_Edge& e = TopoDS::Edge(sh);
+    TopoDS_Vertex a, b;
+    TopExp::Vertices(e, a, b);
+    char buf[256];
+    if (a.IsNull() || b.IsNull()) { std::snprintf(buf, sizeof buf, "(no vertices)"); return buf; }
+    gp_Pnt pa = BRep_Tool::Pnt(a), pb = BRep_Tool::Pnt(b);
+    GProp_GProps p;
+    BRepGProp::LinearProperties(e, p);
+    std::snprintf(buf, sizeof buf, "(%.4g,%.4g,%.4g)->(%.4g,%.4g,%.4g) L=%.4f", pa.X(), pa.Y(), pa.Z(), pb.X(), pb.Y(), pb.Z(), p.Mass());
+    return buf;
+}
+
+static bool isSeam(const TopoDS_Shape& edge, const TopoDS_Shape& result) {
+    for (TopExp_Explorer fe(result, TopAbs_FACE); fe.More(); fe.Next()) {
+        int n = 0;
+        for (TopExp_Explorer ee(fe.Current(), TopAbs_EDGE); ee.More(); ee.Next())
+            if (ee.Current().IsSame(edge)) ++n;
+        if (n > 1) return true;
+    }
+    return false;
+}
+
+static const char* typeName(TopAbs_ShapeEnum t) {
+    switch (t) {
+        case TopAbs_EDGE: return "edge";
+        case TopAbs_FACE: return "face";
+        case TopAbs_VERTEX: return "vertex";
+        default: return "other";
+    }
+}
+
+// Full per-input report of Generated/Modified/IsDeleted for every edge and face of `in`.
+static void innerReport(const char* label, BRepOffsetAPI_MakeThickSolid& mk, const TopoDS_Shape& in, const TopoDS_Shape& result) {
+    TopTools_IndexedMapOfShape inEdges, inFaces, resEdges, resFaces;
+    TopExp::MapShapes(in, TopAbs_EDGE, inEdges);
+    TopExp::MapShapes(in, TopAbs_FACE, inFaces);
+    TopExp::MapShapes(result, TopAbs_EDGE, resEdges);
+    TopExp::MapShapes(result, TopAbs_FACE, resFaces);
+    std::printf("   [%s] result: %d faces %d edges V=%.6f\n", label, resFaces.Extent(), resEdges.Extent(), volume(result));
+    for (int pass = 0; pass < 2; ++pass) {
+        const TopTools_IndexedMapOfShape& m = pass == 0 ? inEdges : inFaces;
+        for (int i = 1; i <= m.Extent(); ++i) {
+            const TopoDS_Shape& e = m(i);
+            std::vector<TopoDS_Shape> gen = copyList(mk.Generated(e));
+            std::vector<TopoDS_Shape> mod = copyList(mk.Modified(e));
+            const bool del = mk.IsDeleted(e);
+            std::printf("   [%s] %s %2d: Generated=%zu Modified=%zu IsDeleted=%d\n", label, pass == 0 ? "edge" : "face", i - 1, gen.size(), mod.size(), del ? 1 : 0);
+            for (const TopoDS_Shape& g : gen) {
+                const bool inMap = g.ShapeType() == TopAbs_EDGE ? resEdges.FindIndex(g) > 0 : (g.ShapeType() == TopAbs_FACE ? resFaces.FindIndex(g) > 0 : false);
+                if (g.ShapeType() == TopAbs_EDGE)
+                    std::printf("        gen %s inResult=%d seam=%d %s\n", typeName(g.ShapeType()), inMap ? 1 : 0, isSeam(g, result) ? 1 : 0, edgeText(g).c_str());
+                else
+                    std::printf("        gen %s inResult=%d edges=%d\n", typeName(g.ShapeType()), inMap ? 1 : 0, g.ShapeType() == TopAbs_FACE ? count(g, TopAbs_EDGE) : 0);
+            }
+            for (const TopoDS_Shape& g : mod)
+                std::printf("        mod %s inResult=%d\n", typeName(g.ShapeType()),
+                            (g.ShapeType() == TopAbs_FACE ? resFaces.FindIndex(g) : (g.ShapeType() == TopAbs_EDGE ? resEdges.FindIndex(g) : 0)) > 0 ? 1 : 0);
+        }
+    }
+}
+
+static TopoDS_Shape fillEdges(const TopoDS_Shape& s, const std::vector<TopoDS_Shape>& edges, double r) {
+    BRepFilletAPI_MakeFillet f(s);
+    for (const TopoDS_Shape& e : edges) f.Add(r, TopoDS::Edge(e));
+    f.Build();
+    return f.IsDone() ? f.Shape() : TopoDS_Shape();
+}
+
+static void innerNaming() {
+    const double tol = Precision::Confusion();
+    TopoDS_Shape b = BRepPrimAPI_MakeBox(40, 30, 20).Shape();
+    const int top = topFace(b);
+    std::printf("== inner naming: box 40x30x20, open face %d\n", top - 1);
+    {   // S1/S2/S3/S5/S9
+        BRepOffsetAPI_MakeThickSolid mk;
+        ShellResult r = thick(mk, b, {top}, -2.0, tol, GeomAbs_Intersection, true);
+        describe("S1 box top open t=2", r);
+        TopoDS_Shape res = firstSolid(r.shape);
+        innerReport("S1", mk, b, res);
+        // S8: fillet r=1 on the images of the 4 vertical edges (S2), heights 20 and 30.
+        TopTools_IndexedMapOfShape inEdges;
+        TopExp::MapShapes(b, TopAbs_EDGE, inEdges);
+        std::vector<TopoDS_Shape> imgs;
+        for (int i = 1; i <= inEdges.Extent(); ++i) {
+            std::vector<TopoDS_Shape> g = copyList(mk.Generated(inEdges(i)));
+            TopoDS_Vertex a, c; TopExp::Vertices(TopoDS::Edge(inEdges(i)), a, c);
+            const bool vertical = std::abs(BRep_Tool::Pnt(a).Z() - BRep_Tool::Pnt(c).Z()) > 1e-9;
+            if (vertical && g.size() == 1 && g[0].ShapeType() == TopAbs_EDGE) imgs.push_back(g[0]);
+        }
+        std::printf("S8 vertical images found: %zu\n", imgs.size());
+        TopoDS_Shape f = fillEdges(res, imgs, 1.0);
+        if (!f.IsNull()) {
+            BRepCheck_Analyzer an(f);
+            std::printf("S8 height 20: V=%.4f faces=%d valid=%d (expect 7167.4513, 15)\n", volume(f), count(f, TopAbs_FACE), an.IsValid() ? 1 : 0);
+        } else std::printf("S8 height 20: fillet failed\n");
+    }
+    {   // S8 height 30
+        TopoDS_Shape b30 = BRepPrimAPI_MakeBox(40, 30, 30).Shape();
+        BRepOffsetAPI_MakeThickSolid mk;
+        ShellResult r = thick(mk, b30, {topFace(b30)}, -2.0, tol, GeomAbs_Intersection, true);
+        TopoDS_Shape res = firstSolid(r.shape);
+        TopTools_IndexedMapOfShape inEdges;
+        TopExp::MapShapes(b30, TopAbs_EDGE, inEdges);
+        std::vector<TopoDS_Shape> imgs;
+        for (int i = 1; i <= inEdges.Extent(); ++i) {
+            std::vector<TopoDS_Shape> g = copyList(mk.Generated(inEdges(i)));
+            TopoDS_Vertex a, c; TopExp::Vertices(TopoDS::Edge(inEdges(i)), a, c);
+            const bool vertical = std::abs(BRep_Tool::Pnt(a).Z() - BRep_Tool::Pnt(c).Z()) > 1e-9;
+            if (vertical && g.size() == 1 && g[0].ShapeType() == TopAbs_EDGE) { imgs.push_back(g[0]); std::printf("   S8/30 image %s\n", edgeText(g[0]).c_str()); }
+        }
+        TopoDS_Shape f = fillEdges(res, imgs, 1.0);
+        if (!f.IsNull()) {
+            BRepCheck_Analyzer an(f);
+            std::printf("S8 height 30: V=%.4f faces=%d valid=%d (expect 9816.0354, 15)\n", volume(f), count(f, TopAbs_FACE), an.IsValid() ? 1 : 0);
+        } else std::printf("S8 height 30: fillet failed\n");
+    }
+    {   // S4: top and front (y=0) open.
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(b, TopAbs_FACE, faces);
+        int front = 0;
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            GProp_GProps p; BRepGProp::SurfaceProperties(faces(i), p);
+            if (std::abs(p.CentreOfMass().Y()) < 1e-9) front = i;
+        }
+        BRepOffsetAPI_MakeThickSolid mk;
+        ShellResult r = thick(mk, b, {top, front}, -2.0, tol, GeomAbs_Intersection, true);
+        describe("S4 top+front open t=2", r);
+        if (r.ok) innerReport("S4", mk, b, firstSolid(r.shape));
+        // three open faces: top, front, left
+        int left = 0;
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            GProp_GProps p; BRepGProp::SurfaceProperties(faces(i), p);
+            if (std::abs(p.CentreOfMass().X()) < 1e-9) left = i;
+        }
+        BRepOffsetAPI_MakeThickSolid mk3;
+        ShellResult r3 = thick(mk3, b, {top, front, left}, -2.0, tol, GeomAbs_Intersection, true);
+        describe("S4b top+front+left open t=2", r3);
+        if (r3.ok) innerReport("S4b", mk3, b, firstSolid(r3.shape));
+    }
+    {   // S6: cylinder r=10 h=20, lid open, t=1
+        TopoDS_Shape c = BRepPrimAPI_MakeCylinder(10, 20).Shape();
+        BRepOffsetAPI_MakeThickSolid mk;
+        ShellResult r = thick(mk, c, {topFace(c)}, -1.0, tol, GeomAbs_Intersection, true);
+        describe("S6 cylinder lid open t=1", r);
+        if (r.ok) innerReport("S6", mk, c, firstSolid(r.shape));
+    }
+    {   // S7: box with r=3 rounds on the vertical edges, then shell
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(b, TopAbs_EDGE, edges);
+        std::vector<TopoDS_Shape> vert;
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            TopoDS_Vertex a, c; TopExp::Vertices(TopoDS::Edge(edges(i)), a, c);
+            if (std::abs(BRep_Tool::Pnt(a).Z() - BRep_Tool::Pnt(c).Z()) > 1e-9) vert.push_back(edges(i));
+        }
+        TopoDS_Shape rb = fillEdges(b, vert, 3.0);
+        BRepOffsetAPI_MakeThickSolid mk;
+        ShellResult r = thick(mk, rb, {topFace(rb)}, -1.0, tol, GeomAbs_Intersection, true);
+        describe("S7 rounded box top open t=1", r);
+        if (r.ok) innerReport("S7", mk, rb, firstSolid(r.shape));
+    }
+    {   // S10: 198-gon prism (200 faces), shell + all queries
+        BRepBuilderAPI_MakePolygon poly;
+        const int n = 198;
+        for (int i = 0; i < n; ++i) poly.Add(gp_Pnt(50 * std::cos(2 * M_PI * i / n), 50 * std::sin(2 * M_PI * i / n), 0));
+        poly.Close();
+        TopoDS_Shape prism = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(poly.Wire()).Face(), gp_Vec(0, 0, 20)).Shape();
+        BRepOffsetAPI_MakeThickSolid mk;
+        auto t0 = std::chrono::steady_clock::now();
+        ShellResult r = thick(mk, prism, {topFace(prism)}, -1.0, tol, GeomAbs_Intersection, true);
+        describe("S10 198-gon prism (200 faces) top open t=1", r);
+        if (r.ok) {
+            TopoDS_Shape res = firstSolid(r.shape);
+            TopTools_IndexedMapOfShape inEdges, inFaces, resEdges;
+            TopExp::MapShapes(prism, TopAbs_EDGE, inEdges);
+            TopExp::MapShapes(prism, TopAbs_FACE, inFaces);
+            TopExp::MapShapes(res, TopAbs_EDGE, resEdges);
+            auto t1 = std::chrono::steady_clock::now();
+            int images = 0, empty = 0, multi = 0;
+            for (int i = 1; i <= inEdges.Extent(); ++i) {
+                int n1 = 0;
+                for (const TopoDS_Shape& g : copyList(mk.Generated(inEdges(i))))
+                    if (g.ShapeType() == TopAbs_EDGE && resEdges.FindIndex(g) > 0) ++n1;
+                if (n1 == 0) ++empty; else if (n1 == 1) ++images; else ++multi;
+            }
+            for (int i = 1; i <= inFaces.Extent(); ++i) (void)copyList(mk.Generated(inFaces(i)));
+            auto t2 = std::chrono::steady_clock::now();
+            std::printf("S10 edges: 1 image=%d none=%d several=%d of %d; shell %.1f ms (incl. checks), all %d edge + %d face queries %.1f ms\n",
+                        images, empty, multi, inEdges.Extent(), std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                        inEdges.Extent(), inFaces.Extent(), std::chrono::duration<double, std::milli>(t2 - t1).count());
+        }
+    }
+}
+
+int main(int argc, char** argv) {
     std::printf("OCCT %s\n", OCC_VERSION_COMPLETE);
+    if (argc > 1 && std::string(argv[1]) == "--inner-naming") { innerNaming(); return 0; }
     const double tol = Precision::Confusion();
     TopoDS_Shape b = BRepPrimAPI_MakeBox(40, 30, 20).Shape();
     const int top = topFace(b);

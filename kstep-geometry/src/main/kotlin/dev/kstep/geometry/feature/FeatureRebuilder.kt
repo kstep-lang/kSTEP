@@ -365,7 +365,8 @@ object FeatureRebuilder {
             feature is SelectedFilletFeature ||
             feature is SelectedChamferFeature ||
             feature is BooleanFeature ||
-            feature is HoleFeature
+            feature is HoleFeature ||
+            feature is ShellFeature
 
     /** Builds a derived generator with edge history and the generation map of the sources its consumers name. */
     private fun buildDerivedNamed(
@@ -415,6 +416,14 @@ object FeatureRebuilder {
                     feature.dirX,
                     feature.dirY,
                     feature.dirZ,
+                    list,
+                )
+            is ShellFeature ->
+                OcctKernel.shellNamed(
+                    built[feature.baseIndex],
+                    resolveFaces(feature.openFaces, feature.baseIndex, built),
+                    feature.thickness,
+                    feature.direction,
                     list,
                 )
             else ->

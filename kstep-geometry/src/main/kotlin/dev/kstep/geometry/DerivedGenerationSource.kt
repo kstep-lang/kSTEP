@@ -17,6 +17,7 @@ import dev.kstep.geometry.select.FaceSelector
  * * boolean: [BooleanSection], [OperandFaces] with role [GeneratedRole.SECTION]
  * * hole: [HoleWall], [BooleanSection], [OperandFaces] with role [GeneratedRole.SECTION]; [HoleWall] also with
  *   [GeneratedRole.RIM_ENTRY] and [GeneratedRole.RIM_EXIT]
+ * * shell (INWARD only, ADR-0041): [ShellInnerEdges], [ShellInnerFaces] with role [GeneratedRole.CAVITY]
  */
 sealed interface DerivedGenerationSource : GenerationSource
 
@@ -53,3 +54,22 @@ data object BooleanSection : DerivedGenerationSource
  * the rings are ambiguous; SECTION stays usable then and is the fallback.
  */
 data object HoleWall : DerivedGenerationSource
+
+/**
+ * INWARD shell only (ADR-0041): the edges [selector] picks on the INPUT of the shell. Role CAVITY: the inner copy of
+ * each of them, i.e. the matching edge of the cavity wall. The selector is evaluated on the shell's input at every
+ * rebuild, so `Edges.parallel(Z)` keeps meaning "the inner copies of the vertical edges" when the body grows. An
+ * input edge that borders only opened faces has no inner copy and fails the name instead of being guessed.
+ */
+data class ShellInnerEdges(
+    val selector: EdgeSelector,
+) : DerivedGenerationSource
+
+/**
+ * INWARD shell only (ADR-0041): the faces [selector] picks on the INPUT of the shell. Role CAVITY: every edge that
+ * bounds the inner copy of such a face (the matching wall of the cavity). A face that was opened has no inner copy
+ * (it becomes the rim face) and fails the name instead of being guessed.
+ */
+data class ShellInnerFaces(
+    val selector: FaceSelector,
+) : DerivedGenerationSource

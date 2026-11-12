@@ -106,12 +106,12 @@ class ShellValidationTest :
             g.current.features shouldBe listOf(box, BoxFeature(1.0, 1.0, 1.0), ShellFeature(0, top, 2.0))
         }
 
-        "GeneratedEdges naming the shell as generator is refused with the follow-up hint" {
+        "GeneratedEdges naming an OUTWARD shell is refused with the follow-up hint" {
             val seq =
                 FeatureSequence(
                     listOf(
                         BoxFeature(40.0, 30.0, 20.0),
-                        ShellFeature(0, top, 2.0),
+                        ShellFeature(0, top, 2.0, ShellDirection.OUTWARD),
                         SelectedFilletFeature(1, GeneratedEdges(1, listOf(ProfileVertex(0))), 1.0),
                     ),
                 )

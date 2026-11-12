@@ -1,0 +1,93 @@
+= ADR-0041: Persistent names for the inner wall of an INWARD shell (Welle T)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle T). Builds on ADR-0034 (derived-edge naming), ADR-0037 (shell, face selection) and
+ADR-0040 (face operations). Every number in the table below comes from `scripts/interop/spike_shell_history.cpp --inner-naming`
+(OCCT 7.9.3, macOS arm64; reproduce with `scripts/interop/verify-shell-inner-naming.sh --spike`).
+
+== Context
+
+ADR-0037 measured that `MakeThickSolid` keeps the original outer skin by identity and reports the new inner wall only
+through `Generated()`; it listed "names for the inner wall of a shell" as a follow-up. The motivating case is a box
+(40 x 30 x 20) shelled with the top open and a 2 mm wall, whose four INNER vertical edges are rounded afterwards. Without a
+name the edge can only be picked by geometry (`Edges.parallelTo(Z)` finds eight edges, outer and inner), which does not
+survive a parameter change reliably.
+
+== Measurements
+
+[cols="1,4,3",options="header"]
+|===
+| Spike | Input | Result
+| S1 | box 40x30x20, top open, wall 2, `Generated(edge)` for all 12 input edges
+| 12 of 12 give exactly one edge, in the map of the result after `unwrapSingleSolid`; `Modified` and `IsDeleted` are empty/false.
+Closed faces: `Generated(face)` = one face with 4 edges; the open top face is `Modified` into the rim face (no `Generated`).
+| S2 | the 4 vertical input edges
+| the 4 inner edges x in {2, 38}, y in {2, 28}, z 2..20, L = 18.0000
+| S3 | the 4 top edges (border the open face)
+| inner rim edges at z = 20 (L = 26 and 36): still exactly one image each
+| S4 | top and front (y = 0) open
+| the edge between the two open faces is `IsDeleted`, `Generated` is empty: no image. Every other edge keeps exactly one. With
+three open faces (top, front, left) two more edges are `IsDeleted`; the rest stay 1:1.
+| S5 | `Generated(face)`
+| closed face: exactly one inner face; opened face: none (it is `Modified` into the rim face)
+| S6 | cylinder r = 10, h = 20, lid open, wall 1
+| lid circle and bottom circle: one circle each (r = 9, not a seam); the seam edge has an image that is itself a seam
+(`seam=1`), so it does not count (filtered, like SECTION does)
+| S7 | box with r = 3 rounds on the vertical edges, then the shell
+| every edge of the rounded body (24) and every closed face (9 of 10) has exactly one image, also the round faces and their arcs
+| S8 | round r = 1 on the 4 images of S2
+| height 20: V = 7167.4513, 15 faces, valid; height 30 (images L = 28): V = 9816.0354, 15 faces, valid
+| S9 | does `Generated(edge)` also return faces?
+| no: only edges for edges, only faces for faces
+| S10 | 198-gon prism (200 faces), top open, wall 1
+| shell 0.54 s (incl. validity checks); all 594 edge and 200 face `Generated` queries 0.5 ms; every edge has exactly 1 image
+|===
+
+Hand values. Cavity 36 x 26 x 18 = 16848, outer 24000, wall volume 7152. A round of radius r on a convex 90 degree edge
+of length L removes nothing from the material it is cut from; the inner edges of the cavity are CONCAVE edges of the body, so
+the round ADDS `(1 - pi/4) r^2 L`: 4 (1 - 0.7853982) 18 = 15.451332, so V = 7152 + 15.451332 = *7167.4513*. At height 30 the
+cavity is 36 x 26 x 28: V = 40*30*30 - 36*26*28 = 9792, plus 4 * 0.2146018 * 28 = 24.035406, so V = *9816.0354*.
+(The task text quoted 9816.036; the exact value is 9816.0354, which is 9816.035 to three places.)
+
+== Decisions
+
+D1:: *Two new sources and one role.* `ShellInnerEdges(selector: EdgeSelector)` and `ShellInnerFaces(selector: FaceSelector)`
+(both `DerivedGenerationSource`) with the new role `GeneratedRole.CAVITY`, appended at the END of the enum so ordinals stay
+stable. A shell is a generator for `GeneratedEdges(featureIndex = <shell>, sources, CAVITY)`.
+
+D2:: *The name is the INPUT edge or face.* The measured relation is one inner edge per input edge. The selector is evaluated
+on the shell's input at every rebuild, so `Edges.parallelTo(Z)` keeps meaning "the inner copies of the vertical edges" when
+the body grows. This matches `OperandEdges` / `OperandFaces` (ADR-0034: the INPUT is named). `ShellInnerEdges` role CAVITY is
+the inner copy of each named edge; `ShellInnerFaces` role CAVITY is every edge that bounds the inner copy of each named face.
+A selection on the result (for example `within`) stays available as an additional filter and is not persistent.
+
+D3:: *Strict, per input.* For every input edge of a source: seam and degenerated images do not count; 0 usable images is a
+role error ("input edge e has no inner image (it borders only opened faces, or OCCT reported none)"), more than 1 is ambiguous.
+For a face: 0 inner faces ("face f was opened ... or has no inner copy"), more than 1 is ambiguous. If OCCT reports no usable
+history at all, that has its own text. The error is an `EdgeNamingException` with the images per input and the candidate
+edges, raised when the role is asked for (like RIM_ENTRY); it becomes `KSTEP-S-011`. Nothing is guessed.
+
+D4:: *INWARD only.* For an OUTWARD shell the generated copies are the new outer skin and the cavity keeps the original edges
+(ADR-0037, D6), so "inner copy" would name the wrong wall. `shellNamed` rejects OUTWARD before any native call, and
+`GeneratedEdges` on an OUTWARD shell is refused structurally with the reason; tracking through an OUTWARD shell stays refused.
+
+D5:: *One maker.* `nativeShellShapeNamed` reads the edge history (ADR-0037) and `encodeDerivedGeneration` from the SAME
+`BRepOffsetAPI_MakeThickSolid`, against the result after `unwrapSingleSolid` (the TShapes are shared, measured in S1: every image
+is in the result map). The existing `nativeShellShape` / `nativeShellShapeTracked` share the implementation with unchanged
+behaviour, so every unnamed shell is byte identical (verified by `verify-shell-inner-naming.sh`). A shell that is a generator
+and lies on a `TrackedEdges` path is built once and yields both.
+
+D6:: *Limits.* Input of at most 200 faces, at most 64 open faces, at most `MAX_DERIVED_QUERIES` (4096) queries, at most 1024
+sources, selector trees validated iteratively before hashing, comparing or describing, `describe()` at most 64 characters,
+candidate lists capped. S10 shows the queries are cheap (0.5 ms for 794), so no tighter limit is needed.
+
+D7:: *No new feature field, no remap change.* The new sources are values in `GeneratedEdges.sources`; they carry no feature
+index, so `FeatureIndexRemap`, history and undo/redo needed no change (covered by tests).
+
+== Not in this wave / follow-ups
+
+* OUTWARD shell: a richer name, for example a direction-neutral `ShellOffsetEdges` (the generated copies are the outer skin).
+* `TrackedFaces` / `GeneratedFaces` (face names; needs an `encodeFaceHistory`).
+* Names for shells that follow a pocket or draft (their face and edge history is not recorded, ADR-0040).

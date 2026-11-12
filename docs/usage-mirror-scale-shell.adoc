@@ -69,7 +69,8 @@ val edgesThere = OcctKernel.selectEdges(box, Edges.atVertex(Vertices.nearest(100
 * Errors: an empty or wrongly sized face, edge or vertex selection is `KSTEP-S-011` with the candidates
   (`hello-face-selection-empty.kstep.kts`, `hello-nearest-ambiguous.kstep.kts`); a wall that is too thick is
   `KSTEP-S-003` (`hello-shell-invalid.kstep.kts`).
-* Not covered: names for the inner wall of a shell. See ADR-0037. Pocket, draft and thickening: next section.
+* Names for the inner wall of an INWARD shell: `ShellInnerEdges` / `ShellInnerFaces` (ADR-0041, see `usage-naming.adoc`). Not
+  covered: names for an OUTWARD shell. Pocket, draft and thickening: next section.
 
 `scripts/interop/verify-face-ops.sh` re-checks the five example exports with OCCT and FreeCAD (`--spike` also runs the
 standalone shell spike). This wave adds the OCCT toolkit `TKOffset` (`libocct-modeling-algorithms-dev` on Ubuntu, part of

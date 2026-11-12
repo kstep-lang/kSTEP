@@ -9,6 +9,18 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Welle T (ADR-0041): persistent names for the inner wall of an INWARD shell. New sources `ShellInnerEdges(selector)` and
+  `ShellInnerFaces(selector)` with the new role `GeneratedRole.CAVITY` (appended at the end of the enum): the inner copy of
+  the input edge, or the edges of the inner copy of the input face, that the selector names on the shell's INPUT. A
+  `ShellFeature` with direction INWARD is now a generator for `GeneratedEdges`; `OcctKernel.shellNamed` and the JNI entry
+  `nativeShellShapeNamed` read edge history and generation map from the same `MakeThickSolid` maker. Strict: an input edge
+  that borders only opened faces, an opened face, an ambiguous or missing image ends in an `EdgeNamingException` with the
+  candidates (`KSTEP-S-011`). An OUTWARD shell cannot name its inner wall (the generated copies are the new outer skin) and
+  is refused before any native call. Unnamed shells are unchanged. Example: rounding the four inner vertical edges of a
+  40x30x20 box shelled with a 2 mm wall gives V = 7167.451 and 15 faces, 9816.035 after the box becomes 30 high.
+  `scripts/interop/verify-shell-inner-naming.sh` (with `--spike`) re-checks the exports with OCCT and FreeCAD.
+  Source-incompatible for exhaustive `when` over `GeneratedRole` or `DerivedGenerationSource` in third-party code.
+
 * Welle Q2 (ADR-0040): faces as the input of three more operations. `pocket(shape, faces, profile, depth)` cuts a
   rectangle, circle or polygon (`PocketProfile`) into the one planar face a selector names, blind or through
   (`PocketDepth`); a hole is a circular pocket. A blind depth that would reach through the material under the profile

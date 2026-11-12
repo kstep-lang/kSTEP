@@ -177,16 +177,34 @@ class OcctShellFeatureTest :
             e.message!! shouldContain "half the smallest extent"
         }
 
-        "GeneratedEdges naming the shell itself is refused with the follow-up hint".config(enabled = occt) {
+        "GeneratedEdges naming an OUTWARD shell is refused with the follow-up hint".config(enabled = occt) {
             val seq =
                 FeatureSequence(
                     listOf(
                         BoxFeature(40.0, 30.0, 20.0),
-                        ShellFeature(0, openTop, 2.0),
+                        ShellFeature(0, openTop, 2.0, ShellDirection.OUTWARD),
                         SelectedFilletFeature(1, GeneratedEdges(1, listOf(ProfileVertex(0))), 1.0),
                     ),
                 )
             shouldThrow<IllegalArgumentException> { FeatureRebuilder.validateStructure(seq) }.message!! shouldContain
                 "follow-up"
         }
+
+        "a profile source on an INWARD shell is refused: only ShellInnerEdges / ShellInnerFaces name its inner wall"
+            .config(enabled = occt) {
+                val seq =
+                    FeatureSequence(
+                        listOf(
+                            BoxFeature(40.0, 30.0, 20.0),
+                            ShellFeature(0, openTop, 2.0),
+                            SelectedFilletFeature(1, GeneratedEdges(1, listOf(ProfileVertex(0))), 1.0),
+                        ),
+                    )
+                shouldThrow<IllegalArgumentException> {
+                    FeatureRebuilder.validateStructure(
+                        seq,
+                    )
+                }.message!! shouldContain
+                    "ShellInnerEdges"
+            }
     })

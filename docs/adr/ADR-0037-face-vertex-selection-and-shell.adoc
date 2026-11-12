@@ -68,8 +68,9 @@ in the result, so the existing `encodeEdgeHistory` gives `Kept` one to one. For 
 outer skin, which is what `TrackedEdges` / `GeneratedEdges` named before the shell mean; history is supported. For an
 OUTWARD shell the same identity edges are the INNER edges of the cavity, which is rarely meant, so tracking through an
 outward shell is refused with that explanation (`supportsHistory` is `direction == INWARD`; `shellWithHistory` rejects
-`OUTWARD`). A shell is NOT a generator: the new inner wall has no persistent names yet (`GeneratorKind.NONE`, with a hint
-to name edges at their generator before the shell).
+`OUTWARD`). Welle Q did not make a shell a generator: the new inner wall had no persistent names yet. Since Welle T an INWARD
+shell names its inner wall (`ShellInnerEdges` / `ShellInnerFaces`, role `CAVITY`), see ADR-0041; an OUTWARD shell is still
+not a generator (hint: name the edges at their generator before the shell).
 
 D7:: *One new OCCT toolkit: TKOffset.* `BRepOffsetAPI_MakeThickSolid` lives in `libTKOffset` (verified with `nm -gU
 libTKOffset.dylib | grep MakeThickSolidByJoin` on macOS; `nm -D --defined-only` on Linux). `BRepExtrema_DistShapeShape`
@@ -230,7 +231,7 @@ still is not.
   does for holes).
 * *Draft* (`BRepOffsetAPI_DraftAngle`): different failure characteristics, a neutral plane as parameter; check the toolkit
   with `nm` first. *Thickening a single face* needs the face as its own shape.
-* `TrackedFaces` / `GeneratedFaces` (needs an `encodeFaceHistory`), naming of the inner wall of a shell, a hole at a
+* `TrackedFaces` / `GeneratedFaces` (needs an `encodeFaceHistory`), naming of the inner wall of a shell (INWARD: done in Welle T, ADR-0041; OUTWARD is open), a hole at a
   vertex, `Faces.ofEdge` / `Faces.ofVertex`.
 * `RemoveIntEdges` and the `Arc` join (rounded outward corners) are not exposed.
 

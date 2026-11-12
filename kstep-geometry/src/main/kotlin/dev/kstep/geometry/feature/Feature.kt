@@ -237,7 +237,8 @@ data class TrackedEdges(
  * Since Welle N2 (ADR-0034) [featureIndex] may also point to a DERIVED generator: a fillet or chamfer (sources
  * `BlendedEdges`, `OperandEdges`, role `BOUNDARY`), a boolean (`BooleanSection`, `OperandFaces`, role `SECTION`) or a hole
  * (additionally `HoleWall` with the roles `SECTION`, `RIM_ENTRY`, `RIM_EXIT`). The combination of generator, sources and
- * role is checked before any native call. The signature is unchanged, so `SelectEdges`, `TrackedEdges` and the index
+ * role is checked before any native call. Since Welle T (ADR-0041) an INWARD shell is a generator too: sources
+ * `ShellInnerEdges` / `ShellInnerFaces`, role `CAVITY` (the inner copy of the named INPUT edge or face). The signature is unchanged, so `SelectEdges`, `TrackedEdges` and the index
  * API keep working.
  *
  * [featureIndex] may equal the consuming feature's `baseIndex` (no step in between); otherwise exactly one
