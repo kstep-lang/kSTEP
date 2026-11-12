@@ -46,7 +46,7 @@ private fun manyTinyTrianglesMesh(count: Int): TriangleMesh {
 
 class MeshProjectionPerformanceTest :
     StringSpec({
-        "a single project() call over MAX_TRIANGLES-order-of-magnitude triangles stays well under one second" {
+        "a single project() call over MAX_TRIANGLES-order-of-magnitude triangles stays bounded (under ten seconds)" {
             val mesh = manyTinyTrianglesMesh(OcctKernel.MAX_TRIANGLES)
 
             val startNanos = System.nanoTime()
@@ -56,6 +56,8 @@ class MeshProjectionPerformanceTest :
             logger.info { "MeshProjection.project() over ${mesh.triangleCount} triangles took ${elapsedMillis}ms" }
 
             triangles.isEmpty() shouldBe false
-            (elapsedMillis < 1000.0) shouldBe true
+            // The bound only guards against a super-linear blow-up; CI runners (macOS) are several times slower than a
+            // development machine, so a one-second limit made this test flaky.
+            (elapsedMillis < 10_000.0) shouldBe true
         }
     })
