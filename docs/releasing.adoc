@@ -45,13 +45,14 @@ it builds and verifies but publishes nothing. Re-running a release is idempotent
 release is edited and its assets are replaced.
 
 The zip contains *no* native bridges: OCCT and PlaneGCS functions fall back to their documented
-unavailable path. Not part of the pipeline yet: Maven Central, a Homebrew tap, signatures and
-provenance (follow-up waves).
+unavailable path. Not part of the pipeline yet: a Homebrew tap, signatures and provenance for the
+zip (follow-up waves). The library modules go to Maven Central, see below.
 
 == Publishing to Maven Central
 
-See link:adr/ADR-0043-maven-central-publishing.adoc[ADR-0043]. Nothing has been uploaded yet; the
-pipeline is prepared and stays inactive until the secrets below exist.
+See link:adr/ADR-0043-maven-central-publishing.adoc[ADR-0043]. v0.4.0 is the first version published
+this way; no earlier version is on Maven Central. The job skips with a notice while any of the secrets
+below is missing.
 
 === What is published
 
@@ -63,10 +64,11 @@ Not published: `kstep-cli`, `kstep-viewer`, `kstep-tests` and the `kstep-docs` p
 `./gradlew check` (task `verifyPublicationCoverage`) fails when they differ or a new module is in neither list.
 
 The jars contain *no native libraries*. `kstep-geometry` and `kstep-constraints` ship only the Kotlin API; whoever
-uses them from Maven Central builds the bridges (see _Building_ in the README) and loads them with
+uses them from Maven Central builds the bridges (see link:building.adoc[Building]) and loads them with
 `-Dkstep.occt.bridge.library=/absolute/path/libkstep_occt_bridge.so` and
 `-Dkstep.planegcs.bridge.library=/absolute/path/libkstep_planegcs_bridge.so` (`.dylib` on macOS).
-Without them the geometry and sketch functions report their documented "unavailable" state.
+Without them the geometry and sketch functions report their documented "unavailable" state. Both property values must be
+*absolute* paths to a regular file. The jars target JDK 21 (all modules use the JDK 21 toolchain).
 
 === One-time setup (manual, by the maintainer)
 
@@ -103,18 +105,28 @@ Maven Central is immutable. A published version is never re-tagged or overwritte
 
 * Probe step fails with a partial state: look at the Deployments page in the Central Portal, drop a FAILED deployment,
   publish a VALIDATED one by hand, then re-run.
-* Upload step fails: read the log (it never contains credentials), fix the cause, re-run via `workflow_dispatch` with the
-  `tag` and `dry_run=false`. The GitHub release is updated in place and an existing Central state is skipped.
-* Job skipped for missing secrets: set them, then re-run the same way.
+* Upload step fails: read the log (it never contains credentials) and fix the cause. Before any re-run, look at the
+  Deployments page: if a deployment of this version is PUBLISHING or PUBLISHED, wait until all twelve POMs are on
+  repo1.maven.org (up to about 30 minutes); the probe only sees repo1, so a re-run in that window would try a second
+  upload, which Central refuses.
+* Re-run, preferred: "Re-run failed jobs" on the same Actions run (within 30 days). It repeats only `maven-central` with
+  the outputs of the original `build` job (same tag, same commit check) and leaves the GitHub release untouched.
+* Re-run, alternative: `workflow_dispatch` with the `tag` and `dry_run=false`. It rebuilds and re-tests everything (about
+  45 minutes), edits the GitHub release in place and replaces its zip and checksum with the rebuilt ones (`--clobber`),
+  then probes Central and skips an existing state.
+* Job skipped for missing secrets (the job is green with a notice): set them, then re-run the same way. "Re-run failed
+  jobs" does not apply to a green job; use "Re-run all jobs" or `workflow_dispatch`. Both re-run `build` and `publish` as well and replace the zip and its checksum with a
+  rebuilt one (the build is reproducible, so the hash is expected to be identical).
 * A dry run on a tag from before this configuration (for example v0.3.0) only exercises the path where the Maven steps are
   skipped; the first real test of the Maven path is the next tag.
 
 === Local dry run
 
 ----
-./gradlew clean
-./gradlew publishAllPublicationsToBuildStagingRepository -Pkstep.native.exclude=true
-bash scripts/release/verify-maven-artifacts.sh build/maven-staging 0.3.0
+./gradlew clean publishAllPublicationsToBuildStagingRepository -Pkstep.native.exclude=true \
+  -Pkstep.occt.includeDir=/nonexistent -Pkstep.eigen.includeDir=/nonexistent \
+  -Pkstep.boost.includeDir=/nonexistent --no-configuration-cache
+bash scripts/release/verify-maven-artifacts.sh build/maven-staging X.Y.Z
 ----
 
 Without `-Pkstep.native.exclude=true` the task `verifyNoNativeLibraries` fails the run on a machine that has OCCT, so a

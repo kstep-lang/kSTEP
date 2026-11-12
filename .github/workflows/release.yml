@@ -311,7 +311,7 @@ jobs:
       needs.build.outputs.has_publishing == 'true' &&
       (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     # Last on purpose: the immutable step comes after the idempotent GitHub release (ADR-0043).
     permissions:
       contents: read
@@ -383,6 +383,7 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
+          set -o pipefail  # a failing probe must fail the step even though its output goes through tee
           bash tools/scripts/release/check-maven-central.sh "$VERSION" | tee probe.txt
           grep '^state=' probe.txt >> "$GITHUB_OUTPUT"
           if grep -qx 'state=published' probe.txt; then
@@ -402,6 +403,21 @@ jobs:
         with:
           cache-read-only: true
 
+      - name: Stage and verify the artifacts that will be uploaded (no secrets)
+        if: steps.gate.outputs.ready == 'true' && steps.mc.outputs.state == 'absent'
+        working-directory: src
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # The upload step below reuses these compiled jars (no `clean`), so what is verified here is what is uploaded.
+          ./gradlew clean publishAllPublicationsToBuildStagingRepository \
+            -Pkstep.native.exclude=true \
+            -Pkstep.occt.includeDir=/nonexistent \
+            -Pkstep.eigen.includeDir=/nonexistent \
+            -Pkstep.boost.includeDir=/nonexistent \
+            --no-configuration-cache --stacktrace
+          bash ../tools/scripts/release/verify-maven-artifacts.sh build/maven-staging "$VERSION"
+
       - name: Publish libraries to Maven Central
         if: steps.gate.outputs.ready == 'true' && steps.mc.outputs.state == 'absent'
         working-directory: src
@@ -412,7 +428,7 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           # The secrets exist only in this step. No --info/--debug: never log credentials.
-          ./gradlew clean publishToMavenCentral \
+          ./gradlew publishToMavenCentral \
             -Pkstep.native.exclude=true \
             -Pkstep.occt.includeDir=/nonexistent \
             -Pkstep.eigen.includeDir=/nonexistent \

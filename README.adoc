@@ -10,12 +10,12 @@ image:https://img.shields.io/github/license/kstep-lang/kSTEP[Apache 2.0,link=htt
 image:https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml/badge.svg?branch=master[CI,link=https://github.com/kstep-lang/kSTEP/actions/workflows/ci.yml]
 
 WARNING: kSTEP is in early, pre-release development (M2). The API is
-unstable and nothing is published to Maven Central or Homebrew yet (the Maven Central
-publishing is prepared in the build, see link:docs/releasing.adoc[releasing]); tagged releases
-(https://github.com/kstep-lang/kSTEP/releases[GitHub releases], see
+unstable. Tagged releases (https://github.com/kstep-lang/kSTEP/releases[GitHub releases], see
 link:CHANGELOG.adoc[CHANGELOG]) are pre-releases: v0.1.0 is source-only, from
-v0.1.1 on a JVM-only CLI zip without native bridges is attached. See
-link:docs/status.adoc[Status] for what actually works today.
+v0.1.1 on a JVM-only CLI zip without native bridges is attached. The twelve library
+modules are published to Maven Central (group `dev.kstep`) from v0.4.0 on, without
+native libraries (see link:docs/releasing.adoc[releasing]); nothing is published to
+Homebrew. See link:docs/status.adoc[Status] for what actually works today.
 
 Licensed under the Apache License, Version 2.0. See link:LICENSE[LICENSE].
 
@@ -59,7 +59,7 @@ afterwards as an optional layer.
 
 == Status
 
-The current release is **v0.3.0** (2026-10-24), a pre-release; changes on
+The current release is **v0.4.0** (2026-11-12), a pre-release; changes on
 the `master` branch after it are listed under "Unreleased" in the
 link:CHANGELOG.adoc[CHANGELOG]. What is in place:
 
@@ -68,17 +68,18 @@ link:CHANGELOG.adoc[CHANGELOG]. What is in place:
 * A Kotlin scripting host for `*.kstep.kts` files, the `kstep` command-line
   tool (`export`, `import`, `render`, `asciidoc`, `mcp`) and an MCP server.
 * Optional geometry: an OpenCascade (OCCT) bridge (primitives, booleans, holes,
-  fillet/chamfer, mirror, uniform scale, shell, edge/face/vertex selection,
-  persistent edge names, a feature history with undo/redo), a PlaneGCS sketch
-  solver, placed assemblies, colours and layers in export and import, and
-  headless preview rendering. Both native bridges need system libraries
-  (Linux x86-64 or macOS arm64) and are not part of the release zip.
+  fillet/chamfer, mirror, uniform scale, shell, pocket or hole from a face, draft,
+  thickening, edge/face/vertex selection, persistent edge names including the inner
+  wall of an INWARD shell, a feature history with undo/redo), a PlaneGCS sketch
+  solver, placed assemblies, colours (with transparency, also on edges) and layers
+  in export and import, and headless preview rendering. Both native bridges need
+  system libraries (Linux x86-64 or macOS arm64) and are part of neither the
+  release zip nor the Maven Central jars.
 
-Pocket/hole from a face, draft and thickening are on the unreleased master (Welle Q2, ADR-0040).
-
-Not yet available: PMI, names for the faces these create, Windows
-and Intel Mac support for the native bridges, and interoperability checks
-beyond OpenCascade-based readers (OCCT, FreeCAD).
+Not yet available: PMI, colours on assembly instances, transparency in the
+preview, names for pocket walls and drafted or thickened faces, Windows and
+Intel Mac support for the native bridges, and interoperability checks beyond
+OpenCascade-based readers (OCCT, FreeCAD).
 
 The wave-by-wave log is in link:docs/status.adoc[Status]; open points are in
 the link:docs/roadmap.adoc[Roadmap]. Both say what is and is not verified.
@@ -225,11 +226,13 @@ Details per module: link:docs/modules.adoc[Modules].
 | link:docs/status.adoc[Status] | Wave-by-wave status log of what works and what is verified.
 | link:docs/modules.adoc[Modules] | Per-module reference.
 | link:docs/building.adoc[Building] | Build, CI, and the optional OCCT, PlaneGCS, viewer and validator setups.
-| link:docs/releasing.adoc[Releasing] | How a release is cut.
-| link:docs/usage.adoc[Usage] | Library and CLI usage, MCP server, scripts, colours and layers in the export.
+| link:docs/releasing.adoc[Releasing] | How a release is cut, including Maven Central publishing.
+| link:docs/usage.adoc[Usage] | Library and CLI usage, MCP server, scripts, colours (transparency, edge colours) and
+layers in the export.
 | link:docs/usage-sketches.adoc[Usage: sketches] | Sketches and edge selection.
-| link:docs/usage-naming.adoc[Usage: naming] | Persistent edge naming, undo/redo.
-| link:docs/usage-mirror-scale-shell.adoc[Usage: mirror, scale, shell] | Mirror, scale, face and vertex selection, shell.
+| link:docs/usage-naming.adoc[Usage: naming] | Persistent edge naming (including the inner wall of a shell), undo/redo.
+| link:docs/usage-mirror-scale-shell.adoc[Usage: mirror, scale, shell] | Mirror, scale, face and vertex selection, shell,
+pocket, draft, thicken.
 | link:docs/usage-import.adoc[Usage: import] | Reading a STEP file back.
 | link:docs/roadmap.adoc[Roadmap] | V1 scope and open points.
 | link:CHANGELOG.adoc[CHANGELOG] | Release history.

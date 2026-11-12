@@ -23,6 +23,8 @@ application {
 
 dependencies {
     implementation(project(":kstep-mcp"))
+    // SLF4J backend of the application (kstep-mcp, a published library, deliberately declares none).
+    runtimeOnly(libs.slf4j.simple)
     // kstep-mcp declares this as `implementation`, not `api`, so it isn't exposed on kstep-cli's
     // compile classpath transitively (Gradle's implementation/api split hides implementation deps
     // from downstream consumers even for project(...) dependencies). kstep-cli's Main.kt calls

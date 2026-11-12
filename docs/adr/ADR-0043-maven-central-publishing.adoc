@@ -3,8 +3,8 @@
 
 == Status
 
-Accepted, prepared (build and CI only). No artifact has been uploaded; the namespace verification, the signing key and
-the repository secrets are still to be created by the maintainer. Amends ADR-0025.
+Accepted, prepared (build and CI). Namespace `dev.kstep`, signing key and repository secrets were set up on 2026-11-12;
+the first upload is part of release 0.4.0. Amends ADR-0025. Update this status after the upload has been verified.
 
 == Context
 
@@ -56,7 +56,8 @@ present only in the one upload step; no `--info`/`--debug`.
 
 D7:: *Idempotency by probing all twelve POMs.* `check-maven-central.sh` sends read-only HEAD requests: all 200 means skip, all
 404 means upload, a mix or any other status (including network failure) fails closed. kUML probes one module only, which cannot
-detect a partial state. Re-running goes through `workflow_dispatch` with `dry_run=false`; hence no separate republish workflow,
+detect a partial state. Re-running goes through "Re-run failed jobs" of the same run (only the Central job repeats, with the original build outputs) or,
+for a skipped job, `workflow_dispatch` with `dry_run=false`; hence no separate republish workflow,
 and with `automaticRelease` no staging workflow either (the Central Portal "Publish" button is the manual fallback).
 
 D8:: *Older tags.* A step detects whether the tagged source contains the publishing configuration (`vanniktech-publish` in
@@ -69,11 +70,14 @@ verifies it on every PR in the job without OCCT.
 
 == Consequences
 
-* The first real Central upload is the next tag after the maintainer has verified the namespace `dev.kstep` (DNS TXT on `kstep.dev`),
-  created the key and set the secrets (see `docs/releasing.adoc`). Whether Gradle 9.6.1 plus plugin 0.37.0 bundle the twelve modules
+* The first real Central upload is release 0.4.0 (namespace `dev.kstep` verified, key created and secrets set on 2026-11-12;
+  see `docs/releasing.adoc`). Whether Gradle 9.6.1 plus plugin 0.37.0 bundle the twelve modules
   into one portal deployment or twelve is not known; it only affects how a partial state is resolved by hand.
-* `kstep-mcp` is published as a library although it has a `main()` and a `slf4j-simple` runtime dependency, which forces a logging
-  backend on consumers. Open question for the maintainer (kUML does not publish its MCP module); no behaviour change in this wave.
+* `kstep-mcp` is published as a library. It declares no SLF4J backend (the `slf4j-simple` runtime dependency moved to `kstep-cli`
+  before the first upload), so Central users keep their own logging backend; `kstep-cli` still needs one for `kstep mcp`.
+* The `maven-central` job stages and verifies (`verify-maven-artifacts.sh`) the artifacts it then uploads, in the same Gradle
+  invocation sequence without `clean`, so the verified jars are the uploaded ones (the job rebuilds on a fresh runner, which the
+  `build` job's own verification does not cover).
 * `kstep-express` pulls `antlr4-runtime` and `kotlinpoet` transitively.
 * Users of `kstep-geometry`/`kstep-constraints` from Central do not get OCCT or PlaneGCS.
 

@@ -13,7 +13,8 @@ dependencies {
     implementation(project(":kstep-step21"))
     implementation(libs.mcp.kotlin.sdk.server)
     implementation(libs.kotlin.logging.jvm)
-    runtimeOnly(libs.slf4j.simple)
+    // No SLF4J backend here: this library is published to Maven Central and must not force one on its users.
+    // The application (kstep-cli) brings slf4j-simple.
 }
 
 // The MCP server reports its version to clients; it reads it from the jar manifest so it can never drift

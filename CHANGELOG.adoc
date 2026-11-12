@@ -7,10 +7,57 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+== 0.4.0 — 2026-11-12 (pre-release)
+
+Fifth pre-release. It adds three more face-based shape operations (pocket or hole from a face, draft, thickening),
+persistent names for the inner wall of an INWARD shell, transparency and edge colours in the STEP export and import, and
+a hardened `kstep import` worker. Release 0.4.0 is the first release published to Maven Central (group `dev.kstep`,
+twelve library modules); the jars contain no native libraries. As before, the GitHub release carries a
+platform-independent JVM-only `kstep-cli-0.4.0.zip` (about 87 MB because it bundles the Kotlin compiler for
+`*.kstep.kts` scripts) and a SHA-256 checksum; nothing is published to Homebrew.
+
+**Geometry, sketches and `kstep import` need the native bridges.** Neither the zip nor the Maven Central jars contain
+them, so those features report a clear "unavailable" error there; build the bridges from source with a system
+OpenCascade (Linux x86-64, or macOS arm64 via Homebrew) to use them. Interoperability is verified with
+OpenCascade-based readers (OpenCascade's own readers and FreeCAD), not yet with other CAD/PLM systems.
+
 === Added
 
-* Maven Central publishing configuration for the twelve library modules (`dev.kstep`), signed, without native libraries; the
-  release workflow gets a `maven-central` job gated on secrets and idempotent. Nothing has been published yet (ADR-0043).
+* Maven Central publishing (ADR-0043): the twelve library modules `kstep-core`, `kstep-express`, `kstep-step21`,
+  `kstep-script`, `kstep-shape`, `kstep-geometry`, `kstep-constraints`, `kstep-sketch`, `kstep-render`, `kstep-preview`,
+  `kstep-mcp` and `kstep-asciidoc` are published as `dev.kstep:<module>`, signed, with sources jars and an empty javadoc
+  jar. The jars contain no native libraries: `kstep-geometry` and `kstep-constraints` ship only the Kotlin API, and users
+  build the bridges themselves and load them with `-Dkstep.occt.bridge.library` / `-Dkstep.planegcs.bridge.library` (absolute paths); the jars target JDK 21.
+  `kstep-cli`, `kstep-viewer` and `kstep-tests` are not published. The release workflow gets a `maven-central` job that
+  runs after the GitHub release, gated on four secrets and on the tag still pointing at the built commit, and idempotent
+  (all twelve POMs are probed; a partial state fails closed). An allow-list (`publishedModules`) with the coverage check
+  `verifyPublicationCoverage`, the fail-closed task `verifyNoNativeLibraries` and the release scripts
+  `check-maven-central.sh`, `verify-maven-artifacts.sh` and `published-artifacts.txt`; `ci.yml` stages and verifies the
+  Maven repository on every PR.
+* Welle Q2 (ADR-0040): faces as the input of three more operations. `pocket(shape, face, profile, depth)` cuts a
+  rectangle, circle or polygon (`PocketProfile`) into the one planar face a selector names, blind or through
+  (`PocketDepth`); a hole is a circular pocket. A blind depth that would reach through the material under the profile
+  (stepped body, existing cavity) is refused. The profile lives in a local coordinate system of the face (origin =
+  centroid, `U` = +X projected into the face, `V` = N x U) and must lie strictly inside the face; an ambiguous
+  selection is `KSTEP-S-011`, not a silent first pick. `draft(shape, faces, angleDegrees, NeutralPlane(origin,
+  pullDirection))` tapers planar faces (`BRepOffsetAPI_DraftAngle`; a positive angle narrows the material along the pull
+  direction). `thicken(shape, faces, distance)` pushes planar faces outward and extends their neighbours
+  (`BRepOffset_MakeOffset`). Matching `OcctKernel` functions and the feature types `PocketFeature`, `DraftFeature` and
+  `ThickenFeature`, which rebuild with undo/redo. A tracked edge is followed through a pocket; draft and thicken report
+  no usable edge history, so tracking through them is refused with the reason.
+* `scripts/interop/verify-face-ops-2.sh` (with `--spike` and `--baseline`) re-checks the six example exports with OCCT and
+  FreeCAD and compares the pre-Q2 examples byte for byte with the previous commit.
+* Welle T (ADR-0041): persistent names for the inner wall of an INWARD shell. New sources `ShellInnerEdges(selector)` and
+  `ShellInnerFaces(selector)` with the new role `GeneratedRole.CAVITY` (appended at the end of the enum): the inner copy of
+  the input edge, or the edges of the inner copy of the input face, that the selector names on the shell's INPUT. A
+  `ShellFeature` with direction INWARD is now a generator for `GeneratedEdges`; `OcctKernel.shellNamed` and the JNI entry
+  `nativeShellShapeNamed` read edge history and generation map from the same `MakeThickSolid` maker. Strict: an input edge
+  that borders only opened faces, an opened face, an ambiguous or missing image ends in an `EdgeNamingException` with the
+  candidates (`KSTEP-S-011`). An OUTWARD shell cannot name its inner wall (the generated copies are the new outer skin) and
+  is refused before any native call. Unnamed shells are unchanged. Example: rounding the four inner vertical edges of a
+  40x30x20 box shelled with a 2 mm wall gives V = 7167.451 and 15 faces, 9816.035 after the box becomes 30 high.
+  `scripts/interop/verify-shell-inner-naming.sh` (with `--spike`) re-checks the exports with OCCT and FreeCAD.
+  Source-incompatible for exhaustive `when` over `GeneratedRole` or `DerivedGenerationSource` in third-party code.
 * Welle U (ADR-0042): transparency and edge colours in the STEP export. `StepColour` gets an opacity: `StepColour.rgba(r, g,
   b, a)`, `StepColour.hex("#RRGGBBAA")`, `StepColour.a` and `isOpaque`; an alpha outside 0..1 or not a number is
   `KSTEP-S-012`. A translucent part or face colour is written with `SURFACE_STYLE_TRANSPARENT(1 - a)` and read back by OCCT
@@ -24,70 +71,62 @@ minor versions may contain breaking changes.
   An opaque colour is written by the unchanged code path, so every file without transparency stays byte-identical
   (`StepColour.rgba(1.0, 0.5, 0.0, 1.0)` equals the existing golden). `scripts/interop/verify-export-alpha-edge-instance.sh`
   (with `--spike`) re-checks the exports with OCCT and FreeCAD.
-* Welle T (ADR-0041): persistent names for the inner wall of an INWARD shell. New sources `ShellInnerEdges(selector)` and
-  `ShellInnerFaces(selector)` with the new role `GeneratedRole.CAVITY` (appended at the end of the enum): the inner copy of
-  the input edge, or the edges of the inner copy of the input face, that the selector names on the shell's INPUT. A
-  `ShellFeature` with direction INWARD is now a generator for `GeneratedEdges`; `OcctKernel.shellNamed` and the JNI entry
-  `nativeShellShapeNamed` read edge history and generation map from the same `MakeThickSolid` maker. Strict: an input edge
-  that borders only opened faces, an opened face, an ambiguous or missing image ends in an `EdgeNamingException` with the
-  candidates (`KSTEP-S-011`). An OUTWARD shell cannot name its inner wall (the generated copies are the new outer skin) and
-  is refused before any native call. Unnamed shells are unchanged. Example: rounding the four inner vertical edges of a
-  40x30x20 box shelled with a 2 mm wall gives V = 7167.451 and 15 faces, 9816.035 after the box becomes 30 high.
-  `scripts/interop/verify-shell-inner-naming.sh` (with `--spike`) re-checks the exports with OCCT and FreeCAD.
-  Source-incompatible for exhaustive `when` over `GeneratedRole` or `DerivedGenerationSource` in third-party code.
-
-* Welle Q2 (ADR-0040): faces as the input of three more operations. `pocket(shape, faces, profile, depth)` cuts a
-  rectangle, circle or polygon (`PocketProfile`) into the one planar face a selector names, blind or through
-  (`PocketDepth`); a hole is a circular pocket. A blind depth that would reach through the material under the profile
-  (stepped body, existing cavity) is refused. The profile lives in a local coordinate system of the face (origin =
-  centroid, `U` = +X projected into the face, `V` = N x U) and must lie strictly inside the face; an ambiguous
-  selection is `KSTEP-S-011`, not a silent first pick. `draft(shape, faces, angleDegrees, NeutralPlane(origin,
-  pullDirection))` tapers planar faces (`BRepOffsetAPI_DraftAngle`; a positive angle narrows the material along the pull
-  direction). `thicken(shape, faces, distance)` pushes planar faces outward and extends their neighbours
-  (`BRepOffset_MakeOffset`). Matching `OcctKernel` functions and the feature types `PocketFeature`, `DraftFeature` and
-  `ThickenFeature`, which rebuild with undo/redo. A tracked edge is followed through a pocket; draft and thicken report
-  no usable edge history, so tracking through them is refused with the reason.
-* `scripts/interop/verify-face-ops-2.sh` (with `--spike` and `--baseline`) re-checks the six example exports with OCCT and
-  FreeCAD and compares the pre-Q2 examples byte for byte with the previous commit.
 
 === Changed
 
 * Behaviour change for foreign files read with `kstep import` (Welle U, ADR-0042): a `ColorCurv` on an edge is now reported
   as an edge style instead of being counted as `presentation.unattached`; `presentation.coloredTargets` counts it. The
   JSON colour object always has an `alpha` key and every part an `edgeStyles` list (additive keys, there is no format
-  version field). Text output of files without transparency or edge colours is unchanged. `StepColour.hex("#RRGGBBAA")` is no
-  longer an error; the earlier "transparency is not supported" entries of Welle S below remain as history.
-
-=== Notes
-
-* Not built in Welle U (ADR-0042): colours on assembly instances (measured, planned as Welle V), showing the opacity in
-  `kstep render`, layers and widths on edges.
-* Not built (ADR-0040, with the measurement behind each): names for pocket walls and drafted or offset faces, a rotated
-  pocket rectangle, pockets that reach the rim, pockets on curved faces, draft of non-planar faces, negative thickening
-  and thickening a sheet face into a solid. No new native toolkit: `BRepFeat_MakePrism` (`TKFeat`) is not used.
+  version field). Text output of files without transparency or edge colours is unchanged. `StepColour.hex("#RRGGBBAA")`
+  is no longer an error; the earlier "transparency is not supported" entries of Welle S below remain as history.
+* `kstep import` (Welle R2, ADR-0038): the bound on the worker's stdout is 16 MiB instead of 64 MiB (the largest
+  measured report at the expansion limit is about 7.5 MB).
+* `scripts/release/verify-dist.sh` also imports the exported file and expects the one-line `geometry_unavailable` JSON
+  error of the native-free zip.
+* Documented (ADR-0038): `/dev/fd/N`, `/dev/stdin` and `/proc/self/...` are not resolved; the input must be a regular
+  file, and the structured error is `KSTEP-I-003` or `KSTEP-I-004`.
 
 === Fixed
 
-* `kstep import`: the worker now runs with its own private `java.io.tmpdir` (`kstep-import-*`, mode 0700), which the
-  supervisor removes after the worker is gone on every path (timeout, crash, output overflow, SIGTERM). Before, the
+* `kstep import` (Welle R2, ADR-0038): the worker now runs with its own private `java.io.tmpdir` (`kstep-import-*`,
+  mode 0700), which the supervisor removes after the worker is gone on every path (timeout, crash, output overflow, SIGTERM). Before, the
   extracted native bridge was left in the system temp directory whenever the worker was killed.
 * `kstep import`: the stderr diagnostic line of an abnormal worker end shows the exception or error instead of the
   first SLF4J INFO line ("OCCT JNI bridge loaded ..."); log-only output prints no misleading line.
 * `kstep import`: an incomplete worker output (a descendant holding the pipe) no longer uses exit value `-1`, which could
   collide with a real exit value; it is a distinct outcome and still ends as `read_failed`.
 * Test suite: the worker supervisor tests no longer depend on sleeping forever or on fixed waits (stand-ins end
-  themselves, process death is polled, the PID file is written atomically); the integration test replaces its process-list search (racy, and
-  passing when the worker was never started) by a check of the run's temp directory, and honours
-  `-Pkstep.occt.require=true`.
+  themselves, process death is polled, the PID file is written atomically); the integration test replaces its
+  process-list search (racy, and passing when the worker was never started) by a check of the run's temp directory, and
+  honours `-Pkstep.occt.require=true`.
+* Tests: the wall-clock bound of the `MeshProjection` performance test was relaxed for the slower macOS CI runner; it
+  still guards against a super-linear blow-up.
 
-=== Changed
+=== Notes
 
-* `kstep import`: the bound on the worker's stdout is 16 MiB instead of 64 MiB (the largest measured report at the
-  expansion limit is about 7.5 MB).
-* `scripts/release/verify-dist.sh` also imports the exported file and expects the one-line `geometry_unavailable` JSON
-  error of the native-free zip.
-* Documented (ADR-0038): `/dev/fd/N`, `/dev/stdin` and `/proc/self/...` are not resolved; the input must be a regular
-  file, and the structured error is `KSTEP-I-003` or `KSTEP-I-004`.
+* Not included: PMI (`kstep import` counts it and reports it as ignored, `kstep export` writes none); colours and layers
+  on assembly instances (measured in ADR-0042, planned as Welle V); the opacity in `kstep render` (GLB, SVG and PNG
+  ignore alpha) and face colours in the preview; layers and widths on edges; names for the inner wall of an OUTWARD
+  shell (its generated copies are the new outer skin); names for pocket walls and drafted or offset faces, rotated or
+  open pockets, pockets on curved faces, draft of non-planar faces and negative thickening (ADR-0040; no new native
+  toolkit, `BRepFeat_MakePrism` is not used).
+* Maven Central: the jars carry no OCCT or PlaneGCS library and there are no platform jars with natives; the bridges
+  are built locally (see `docs/building.adoc`). `kstep-mcp` is published as a library although it has a `main()` and a
+  `slf4j-simple` runtime dependency (open question in ADR-0043).
+* Platforms: the native bridges are built and tested on Linux x86-64 and macOS arm64 only. Windows and Intel Macs are
+  not supported and not tested (the bridges report `Unavailable` there); the JVM-only zip has not been tried on Windows.
+* Interoperability: exports and imports are checked with OpenCascade-based readers only (OCCT's typed and XCAF readers,
+  FreeCAD on OCCT). FreeCAD's headless reader does not read colours, so colours, transparency and edge colours were
+  checked with kSTEP and OCCT; FreeCAD was used for geometry. Other CAD/PLM systems and a lossless write-back round
+  trip are unverified.
+* Import bounds: only the `kstep import` command runs the reader in a supervised worker process with a time and memory
+  bound. Library callers of `StepImporter` / `OcctKernel.readStep` still run in-process without such a bound, and
+  `kstep-mcp` has no import tool.
+* Gate (2026-11-12, macOS arm64, OCCT 7.9.3): `clean check -Pkstep.occt.require=true -Pkstep.planegcs.require=true
+  --no-build-cache`, 2255 tests, 0 failures, 0 errors, 18 skipped (16 "native bridge unavailable" negative tests, two
+  gltf-validator tests); release-style build without natives: `verify-dist.sh` green, import, sketch solving
+  (`KSTEP-S-009`) and geometry export report the bridge as unavailable, `kstep mcp` reports version 0.4.0; the Maven
+  staging repository passes `verify-maven-artifacts.sh` (12 artifacts, no native libraries).
 
 == 0.3.0 — 2026-10-24 (pre-release)
 

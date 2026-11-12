@@ -678,21 +678,48 @@ scan before either lands.
   makes `kstep render`, `kstep asciidoc`, the preview and GLB honour assembly placements. Welle P (ADR-0036) adds mirror
   and uniform scale as shape operations and `OcctKernel.compound`. Welle Q (ADR-0037) adds face and vertex selection,
   `nearest(point)` and shell. Waves M, N, N2, P and Q each have an interop script under `scripts/interop/` that
-  re-checks their example exports with OCCT and FreeCAD. Not covered: tangency at arc ends, names for multi-body sketches and for the inner wall
-  of an OUTWARD shell (an INWARD shell names its inner wall since Welle T, ADR-0041), a persisted history, non-uniform scale (Welle Q2, ADR-0040, adds pocket or hole from a face, draft and thickening; its open points are in the ADR).
+  re-checks their example exports with OCCT and FreeCAD. Not covered at v0.3.0: tangency at arc ends, names for
+  multi-body sketches and for the inner wall of a shell, a persisted history, non-uniform scale, pocket or hole from a
+  face, draft and thickening (the inner wall of an INWARD shell, pocket, draft and thickening followed in v0.4.0, see
+  below).
 * Welle S (ADR-0039): colours and layers in the STEP export. `shape(..., colour, layer)`, `style(...)` and
   `styleFaces(...)` annotate a part or single faces; a styled part is written through `STEPCAFControl_Writer` and the style
   entities are merged into the Part 21 file, an unstyled part keeps the old writer and stays byte-identical (three
   goldens generated before the change). New codes `KSTEP-S-012` to `KSTEP-S-015`. Verified with `kstep import`, OCCT's
   own XCAF reader and FreeCAD (geometry; colours are not readable in headless FreeCAD). Not covered: Unicode layer
-  names, instance colours, face colours in the preview (transparency and edge colours since Welle U, ADR-0042). A part colour combined
-  with a face colour (an `OVER_RIDING_STYLED_ITEM`) is merged fail-closed since the S2 fix.
+  names, instance colours, face colours in the preview, transparency and edge colours (the last two followed in Welle
+  U, ADR-0042). A part colour combined with a face colour (an `OVER_RIDING_STYLED_ITEM`) is merged fail-closed since the
+  S2 fix.
+* Release v0.3.0 (2026-10-24, pre-release) contains everything above. Its zip has no native bridges, like v0.1.1 and
+  v0.2.0; geometry, sketches and `kstep import` need a build from source on Linux x86-64 or macOS arm64.
+* Welle R2 (ADR-0038): hardening of the `kstep import` worker. The worker gets a private `java.io.tmpdir` that the
+  supervisor removes on every path (timeout, crash, output overflow, SIGTERM), so an extracted native bridge is no
+  longer left behind; the stdout bound is 16 MiB; the diagnostic line of an abnormal end names the exception; an
+  incomplete output is its own outcome (`read_failed`). The supervisor tests no longer rely on fixed waits. Only the
+  `kstep import` command is bounded; library callers of the importer still run in-process without a time or memory
+  bound.
+* Welle Q2 (ADR-0040): `pocket` (rectangle, circle or polygon on one planar face, blind or through; a hole is a circular
+  pocket), `draft` of planar faces against a neutral plane and `thicken` of planar faces, as `OcctKernel` functions and as
+  feature-history steps. Verified with `scripts/interop/verify-face-ops-2.sh` (OCCT and FreeCAD, pre-Q2 examples byte
+  for byte). Not covered: names for pocket walls and drafted or offset faces, rotated or open pockets, pockets on curved
+  faces, draft of non-planar faces, negative thickening; tracking an edge through draft or thicken is refused.
+* Welle T (ADR-0041): persistent names for the inner wall of an INWARD shell (`ShellInnerEdges`, `ShellInnerFaces`,
+  `GeneratedRole.CAVITY`), strict like the other naming waves. Verified with `scripts/interop/verify-shell-inner-naming.sh`.
+  Not covered: the inner wall of an OUTWARD shell (its generated copies are the new outer skin; refused before any
+  native call).
 * Welle U (ADR-0042): transparency and edge colours in the STEP export. `StepColour.rgba(...)`, `hex("#RRGGBBAA")` and
   `styleEdges(...)`; an opaque colour is written by the unchanged path (byte-identical goldens), a translucent one as
   `SURFACE_STYLE_TRANSPARENT`; the style merge allows `CURVE_STYLE` only on edges. `kstep import` reports `alpha` and
-  `edgeStyles`. Verified with `kstep import`, OCCT's XCAF reader and FreeCAD (geometry). Not covered: colours on assembly
-  instances (measured, the next wave), opacity in `kstep render`, layers and widths on edges.
-* Release v0.3.0 (2026-10-24, pre-release) contains everything above. Its zip has no native bridges, like v0.1.1 and
-  v0.2.0; geometry, sketches and `kstep import` need a build from source on Linux x86-64 or macOS arm64.
+  `edgeStyles`. Verified with `kstep import`, OCCT's XCAF reader and FreeCAD (geometry; headless FreeCAD does not read
+  colours). Not covered: colours on assembly instances (measured in ADR-0042, planned as Welle V), the opacity in
+  `kstep render` (GLB, SVG and PNG stay opaque), layers and widths on edges.
+* Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
+  without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
+  locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;
+  `ci.yml` stages and verifies the artifacts on every PR. `kstep-cli`, `kstep-viewer` and `kstep-tests` are not
+  published.
+* Release v0.4.0 (2026-11-12, pre-release) contains everything above. Its zip has no native bridges, like the earlier
+  releases. Still open: PMI, instance colours (Welle V), the opacity in the preview, Windows and Intel Macs for the
+  native bridges, interoperability beyond OpenCascade-based readers.
 
 See xref:roadmap.adoc#roadmap[Roadmap] for what's planned next.
