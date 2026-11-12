@@ -4,7 +4,9 @@
 == Status
 
 Accepted, prepared (build and CI). Namespace `dev.kstep`, signing key and repository secrets were set up on 2026-11-12;
-the first upload is part of release 0.4.0. Amends ADR-0025. Update this status after the upload has been verified.
+the first upload happened with release 0.4.0 (2026-11-12): one portal deployment for all twelve modules, all twelve
+POMs on repo1 within about 40 minutes, signatures verifiable against the published key, and a foreign Gradle project
+resolves `dev.kstep:*:0.4.0` with transitive dependencies. Amends ADR-0025.
 
 == Context
 
@@ -71,8 +73,8 @@ verifies it on every PR in the job without OCCT.
 == Consequences
 
 * The first real Central upload is release 0.4.0 (namespace `dev.kstep` verified, key created and secrets set on 2026-11-12;
-  see `docs/releasing.adoc`). Whether Gradle 9.6.1 plus plugin 0.37.0 bundle the twelve modules
-  into one portal deployment or twelve is not known; it only affects how a partial state is resolved by hand.
+  see `docs/releasing.adoc`). Gradle 9.6.1 plus plugin 0.37.0 bundle the twelve modules into one
+  portal deployment (observed with 0.4.0).
 * `kstep-mcp` is published as a library. It declares no SLF4J backend (the `slf4j-simple` runtime dependency moved to `kstep-cli`
   before the first upload), so Central users keep their own logging backend; `kstep-cli` still needs one for `kstep mcp`.
 * The `maven-central` job stages and verifies (`verify-maven-artifacts.sh`) the artifacts it then uploads, in the same Gradle
