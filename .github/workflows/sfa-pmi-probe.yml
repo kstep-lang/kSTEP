@@ -53,51 +53,41 @@ jobs:
 
       - name: Prime SFA and install the IFCsvr toolkit
         shell: pwsh
-        continue-on-error: true
         run: |
-          # First run only unpacks the toolkit installer (a .msi in %TEMP%\SFA) and refuses to analyse.
+          # The toolkit installer (.msi in %TEMP%\SFA) is only unpacked when SFA processes a real file.
           $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter 'sfa-cl.exe' | Select-Object -First 1
-          $p = Start-Process -FilePath $cl.FullName -PassThru -NoNewWindow
-          if (-not $p.WaitForExit(120000)) { $p.Kill(); "prime timeout" } else { "prime exit code: " + $p.ExitCode }
-          $msi = Get-ChildItem "$env:TEMP\SFA" -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($msi) {
-            "installing " + $msi.FullName + " sha256 " + (Get-FileHash $msi.FullName -Algorithm SHA256).Hash
-            $i = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
-            "msiexec exit code: " + $i.ExitCode
-          } else { "no toolkit .msi found in $env:TEMP\SFA"; Get-ChildItem $env:TEMP -Recurse -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 5 FullName }
+          $first = Get-ChildItem sfa-work/nist -Recurse -Include *.stp, *.step | Select-Object -First 1
+          $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + $first.FullName + '" nolog noopen') -PassThru -NoNewWindow
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); "prime timeout" } else { "prime exit code: " + $p.ExitCode }
+          $msi = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Temp\SFA') -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $msi) { Get-ChildItem $env:LOCALAPPDATA\Temp -Recurse -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 5 FullName; throw 'no toolkit .msi found' }
+          "installing " + $msi.FullName + " sha256 " + (Get-FileHash $msi.FullName -Algorithm SHA256).Hash
+          $i = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
+          "msiexec exit code: " + $i.ExitCode
+          if ($i.ExitCode -ne 0 -and $i.ExitCode -ne 3010) { throw "toolkit install failed" }
 
-      - name: Run SFA on the NIST PMI files
+      - name: Run SFA on the NIST PMI and kSTEP golden files
         shell: pwsh
-        continue-on-error: true
         run: |
-          $exe = Get-ChildItem sfa-work/sfa -Recurse -Filter '*.exe' | Sort-Object Length | Select-Object -First 5
-          "candidate executables:"; $exe | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
-          $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter '*-CL.exe' | Select-Object -First 1
-          if (-not $cl) { $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter 'STEP-File-Analyzer.exe' | Select-Object -First 1 }
-          if (-not $cl) { throw 'no SFA executable found' }
-          "using: " + $cl.FullName
-          New-Item -ItemType Directory -Force sfa-out/nist | Out-Null
-          $files = Get-ChildItem sfa-work/nist -Recurse -Include *.stp, *.step | Select-Object -First 3
-          foreach ($f in $files) {
-            Copy-Item $f.FullName sfa-out/nist/
-            "analysing " + $f.Name
-            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD "sfa-out/nist/$($f.Name)") + '" csv') -PassThru -NoNewWindow
-            if (-not $p.WaitForExit(240000)) { $p.Kill(); "timeout: " + $f.Name } else { "exit code: " + $p.ExitCode }
-          }
-
-      - name: Run SFA on the kSTEP golden files
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter '*-CL.exe' | Select-Object -First 1
-          if (-not $cl) { $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter 'STEP-File-Analyzer.exe' | Select-Object -First 1 }
-          if (-not $cl) { throw 'no SFA executable found' }
-          New-Item -ItemType Directory -Force sfa-out/kstep | Out-Null
+          $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter 'sfa-cl.exe' | Select-Object -First 1
+          New-Item -ItemType Directory -Force sfa-out/nist, sfa-out/kstep | Out-Null
+          $inputs = @()
+          Get-ChildItem sfa-work/nist -Recurse -Include *.stp, *.step | Select-Object -First 3 | ForEach-Object { Copy-Item $_.FullName sfa-out/nist/; $inputs += "sfa-out/nist/$($_.Name)" }
           foreach ($n in 'export-golden-box', 'export-golden-part-colour', 'export-golden-subassembly-colour') {
-            Copy-Item "kstep-tests/src/test/resources/$n.step" sfa-out/kstep/
-            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD "sfa-out/kstep/$n.step") + '" csv') -PassThru -NoNewWindow
-            if (-not $p.WaitForExit(240000)) { $p.Kill(); "timeout: $n" } else { "$n exit code: " + $p.ExitCode }
+            Copy-Item "kstep-tests/src/test/resources/$n.step" sfa-out/kstep/; $inputs += "sfa-out/kstep/$n.step"
           }
+          $refused = $false
+          foreach ($f in $inputs) {
+            "=== analysing $f"
+            $log = "sfa-out/" + ($f -replace '[/\\]', '_') + ".console.txt"
+            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD $f) + '" csv noopen') -PassThru -NoNewWindow -RedirectStandardOutput $log
+            if (-not $p.WaitForExit(300000)) { $p.Kill(); "timeout: $f" } else { "exit code: " + $p.ExitCode }
+            $text = Get-Content $log -Raw
+            $text
+            if ($text -match 'toolkit must be installed') { $refused = $true }
+          }
+          "--- produced files"; Get-ChildItem sfa-out -Recurse -File | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
+          if ($refused) { throw 'SFA still refuses to analyse: IFCsvr toolkit not usable' }
 
       - name: Collect results
         if: always()
