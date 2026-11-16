@@ -51,6 +51,21 @@ jobs:
           $excel = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\excel.exe' -ErrorAction SilentlyContinue
           if ($excel) { "Excel: " + $excel.'(default)' } else { "Excel: not found" }
 
+      - name: Prime SFA and install the IFCsvr toolkit
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # First run only unpacks the toolkit installer (a .msi in %TEMP%\SFA) and refuses to analyse.
+          $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter 'sfa-cl.exe' | Select-Object -First 1
+          $p = Start-Process -FilePath $cl.FullName -PassThru -NoNewWindow
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); "prime timeout" } else { "prime exit code: " + $p.ExitCode }
+          $msi = Get-ChildItem "$env:TEMP\SFA" -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($msi) {
+            "installing " + $msi.FullName + " sha256 " + (Get-FileHash $msi.FullName -Algorithm SHA256).Hash
+            $i = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
+            "msiexec exit code: " + $i.ExitCode
+          } else { "no toolkit .msi found in $env:TEMP\SFA"; Get-ChildItem $env:TEMP -Recurse -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 5 FullName }
+
       - name: Run SFA on the NIST PMI files
         shell: pwsh
         continue-on-error: true
@@ -66,7 +81,7 @@ jobs:
           foreach ($f in $files) {
             Copy-Item $f.FullName sfa-out/nist/
             "analysing " + $f.Name
-            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD "sfa-out/nist/$($f.Name)") + '"') -PassThru -NoNewWindow
+            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD "sfa-out/nist/$($f.Name)") + '" csv') -PassThru -NoNewWindow
             if (-not $p.WaitForExit(240000)) { $p.Kill(); "timeout: " + $f.Name } else { "exit code: " + $p.ExitCode }
           }
 
@@ -80,7 +95,7 @@ jobs:
           New-Item -ItemType Directory -Force sfa-out/kstep | Out-Null
           foreach ($n in 'export-golden-box', 'export-golden-part-colour', 'export-golden-subassembly-colour') {
             Copy-Item "kstep-tests/src/test/resources/$n.step" sfa-out/kstep/
-            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD "sfa-out/kstep/$n.step") + '"') -PassThru -NoNewWindow
+            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD "sfa-out/kstep/$n.step") + '" csv') -PassThru -NoNewWindow
             if (-not $p.WaitForExit(240000)) { $p.Kill(); "timeout: $n" } else { "$n exit code: " + $p.ExitCode }
           }
 
