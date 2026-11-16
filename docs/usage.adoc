@@ -729,6 +729,7 @@ stepFile(fileName = "glass-block.step") {
   translucent edge colour is `KSTEP-S-012`.
 * The example above is the file `kstep-tests/src/test/resources/export-docs-alpha-edges.kstep.kts` (`part(...)` is a
   small helper that builds a part), exported and read back by a test that also compares it with this block.
+* Layers on assembly instances are not supported (OCCT does not read any usage layer pattern, see docs/adr/ADR-0047-instance-layers.adoc).
 * Not covered: layers on edges, edge width and line style, and showing the opacity in `kstep render`. Colours on
   assembly instances are described below. See docs/adr/ADR-0042-transparency-edge-and-instance-colours.adoc.
 

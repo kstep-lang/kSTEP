@@ -76,7 +76,7 @@ D4:: *Limits, all fail closed (`ShapeExportException`, code `KSTEP-S-008` in the
 child); its child must have a shape of its own, so one occurrence of a sub-assembly cannot be coloured (_partly superseded by ADR-0046_: a sub-assembly occurrence is now coloured through the solids of its leaves; the following wording is the state of Welle V; it would need a
 `SHAPE_REPRESENTATION_RELATIONSHIP` path or a `SHAPE_DEFINITION` chain per leaf, which is not measured); a second colour for one
 usage is `KSTEP-S-014` in the script; at most 4096 instance colours (the cap of geometric usages). Children with several solids
-are supported (G5). No layers on instances (OCCT writes none, the reader returns none), no colours per context path of a
+are supported (G5). No layers on instances (OCCT writes none, the reader returns none; gate failed in Welle Z, see ADR-0047), no colours per context path of a
 nested usage (`SHUO`), no per-face colours on an occurrence.
 
 D5:: *The importer reports them.* The native collector records a surface colour of a component label with the new target
@@ -100,7 +100,7 @@ are implemented since ADR-0045 (Welle W); the render ignored alpha until the Wel
 
 == Not built / follow-ups
 
-* Done in ADR-0046: colours on occurrences of sub-assemblies. Done in the Welle Y amendment below: transparency on instance colours and in the render. Still open: path-exact colours, layers on instances.
+* Done in ADR-0046: colours on occurrences of sub-assemblies. Done in the Welle Y amendment below: transparency on instance colours and in the render. Still open: path-exact colours, layers on instances (gate failed in Welle Z, see ADR-0047).
 * Done in ADR-0045: the effective colour per occurrence in `kstep import` and instance colours in `kstep render`.
 * Interoperability is checked with OCCT's reader and FreeCAD (geometry); other CAD systems are not covered.
 

@@ -718,7 +718,7 @@ scan before either lands.
   else (a file without them is a byte prefix of the file with them), with an own allow-list and a self-check. `kstep import`
   reports `components[].colour`; `instanceStylesIgnored` now counts only layers and curve-only colours on instances. Gate:
   OCCT's XCAF reader reads the hand-written pattern (scenarios G1-G8, `scripts/interop/verify-export-instance-colours.sh`),
-  FreeCAD loads the file as geometry. Not covered: colours on occurrences of sub-assemblies (built in Welle X), transparent instance colours (built in Welle Y), layers on instances. Followed in Welle W (ADR-0045): the effective colour per occurrence in `kstep import`
+  FreeCAD loads the file as geometry. Not covered: colours on occurrences of sub-assemblies (built in Welle X), transparent instance colours (built in Welle Y), layers on instances (gate failed in Welle Z, ADR-0047). Followed in Welle W (ADR-0045): the effective colour per occurrence in `kstep import`
   (`occurrences[].colour`) and instance colours in `kstep render`.
 * Welle X (ADR-0046): instance colours on occurrences of sub-assemblies. `styleInstance` on a usage whose child has no
   shape of its own is accepted when shapes sit below it; the styled items sit on the leaf solids, in a second block with its
@@ -726,13 +726,18 @@ scan before either lands.
   in `kstep import` and `kstep render`: own component, then part, then outer components innermost first (the order OCCT's own
   presentation logic measures; replaces ADR-0045 D2). Gate: scenarios H0-H8 with OCCT 7.9.3
   (`scripts/interop/verify-export-subassembly-colours.sh`), CI test `SubassemblyColourOcctGateTest`; FreeCAD loads the file as
-  geometry. Not covered: path-exact colours (`SHUO`), layers on instances (transparency: Welle Y).
+  geometry. Not covered: path-exact colours (`SHUO`), layers on instances (gate failed in Welle Z, ADR-0047; transparency: Welle Y).
 * Welle Y (amendment of ADR-0044): transparent instance colours. `styleInstance` accepts alpha < 1 (an invalid alpha is still
   `KSTEP-S-012`); the usage block gets `SURFACE_STYLE_RENDERING_WITH_PROPERTIES` and `SURFACE_STYLE_TRANSPARENT` (`t = 1 - alpha`)
   only for translucent colours, so opaque exports stay byte-identical. `kstep render` now draws opacity (SVG `opacity`, PNG blend,
   GLB `VEC4` plus `BLEND`), including part colours with alpha. Gate: scenarios Y0-Y8 with OCCT 7.9.3
   (`scripts/interop/verify-export-instance-transparency.sh`), CI test `InstanceTransparencyOcctGateTest`. Not covered: path-exact
-  colours, layers on instances, opacity in `kstep-viewer`, painter artefacts for penetrating translucent parts.
+  colours, layers on instances (ADR-0047), opacity in `kstep-viewer`, painter artefacts for penetrating translucent parts.
+* Welle Z (ADR-0047): layers on assembly usages. Gate failed, nothing built: OCCT 7.9.3 delivers no schema-valid
+  `PRESENTATION_LAYER_ASSIGNMENT` pattern (placement axis, styled item, presentation representation; sub-assemblies and layer plus
+  colour included) to the component, and a layer on the solids lands on the shared part. Export and import are unchanged; the
+  negative result is pinned by `InstanceLayerOcctGateTest` (`scripts/interop/verify-instance-layer-gate.sh`, scenarios L0-L9).
+  Open: a `MAPPED_ITEM` based assembly could give each occurrence a representation item a layer can name (not measured).
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

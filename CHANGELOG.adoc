@@ -7,6 +7,12 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Documented
+
+* Layers on assembly usages (ADR-0047, Welle Z): the gate failed. With OCCT 7.9.3 no schema-valid `PRESENTATION_LAYER_ASSIGNMENT`
+  pattern reaches one placed occurrence, a layer on the solids lands on the shared part. Nothing was built; export and import
+  behave as before. The result is pinned by `InstanceLayerOcctGateTest` and `scripts/interop/verify-instance-layer-gate.sh`.
+
 === Changed
 
 * `styleInstance` no longer refuses alpha below 1 (it was `KSTEP-S-012`); an alpha outside 0..1 or not finite still is.

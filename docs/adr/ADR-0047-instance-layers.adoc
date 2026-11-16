@@ -1,0 +1,84 @@
+= ADR-0047: Presentation layers on assembly usages (Welle Z)
+:toc:
+
+== Status
+
+Accepted; limit documented, not built (kSTEP Welle Z). The gate of the plan failed: with OCCT 7.9.3 no schema-valid
+`PRESENTATION_LAYER_ASSIGNMENT` pattern that kSTEP can write puts a layer on one placed occurrence (usage) of a part or
+sub-assembly. kSTEP therefore writes no layers on usages (fail closed), keeps counting such layers in files from other tools
+as ignored, and pins the negative measurement in a CI test so that a future OCCT is noticed.
+
+== Context
+
+ADR-0044 D4 and D6 and ADR-0046 left "layers on instances" open; ADR-0044 recorded that OCCT's own writer writes no layer on a
+component (scenario `instance-layer` of `spike_export_styles.cpp` writes no `PRESENTATION_LAYER_ASSIGNMENT`). The only way to a
+layer per usage would be a hand-written pattern like the instance colours, read back by OCCT's `STEPCAFControl_Reader`.
+`kstep import` already counts a component layer it reads in `presentation.instanceStylesIgnored`.
+
+== Measurements
+
+OCCT 7.9.3, macOS arm64, `scripts/interop/verify-instance-layer-gate.sh`; fixtures made by
+`make_instance_layer_fixtures.py`, read by `spike_instance_layer_read.cpp` (layers of every component, of the referred part and
+of the part's sub-shapes). Scene V: a 10 x 20 x 30 box used twice (x = 0 and x = 50); scene X: ASM > SUB x2 > BOX x2.
+Wanted: usage 2 carries the layer, usage 1, the part, its sub-shapes and the assembly do not.
+
+[cols="1,3,3"]
+|===
+| Pattern | `assigned_items` of the `PRESENTATION_LAYER_ASSIGNMENT` | Result (scene V, usage 2)
+
+| P1 | the `STYLED_ITEM` of the usage's colour chain | layer lost (component has the colour, no layer)
+| P2 | the placement axis in a fresh one-item `SHAPE_REPRESENTATION`, bound by `SHAPE_DEFINITION_REPRESENTATION` to the usage's `PRODUCT_DEFINITION_SHAPE('Placement')` | layer lost
+| P2b | as P2 with a dedicated axis copy | layer lost
+| P3 (control) | the `MANIFOLD_SOLID_BREP` of the child | layer lands on the shared part (both usages), never on one usage
+| P4 | the `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION` of the colour chain | layer lost
+| P5 (informative, schema-invalid) | the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` itself | layer lost
+|===
+
+Further scenarios, all with the same result (no layer on any component):
+
+* L0: OCCT's own writer with `SetLayer` on a component writes no `PRESENTATION_LAYER_ASSIGNMENT` at all.
+* L2 (u1 and u2 on different layers), L7 (one layer, two usages), L8 (name with apostrophe, 128 characters), L4 (P2 without the
+  `SHAPE_DEFINITION_REPRESENTATION`): layer lost.
+* L3: with the part on `Layer-P` (P3) and usage 2 on `Layer-I` (P2): `Layer-P` stays on the part, `Layer-I` is lost.
+* L5 (sub-assembly occurrence, P2): layer lost on every level.
+* L6 (layer plus a blue instance colour on usage 2): the colour is read as before, the layer is lost.
+* L9: FreeCAD loads the P2 files (scenes V and X) as geometry; it does not read layers on usages either (not measured further).
+* Not measured: P6, a `MAPPED_ITEM` based assembly (see Follow-ups).
+
+The CI test `InstanceLayerOcctGateTest` reads the committed fixtures `kstep-tests/src/test/resources/instance-layer/gate-*.step`
+with the real importer and pins this result.
+
+== Why
+
+`STEPCAFControl_Reader` assigns a layer to the label of the shape that the transfer binder of an `assigned_item` points to.
+In kSTEP's assembly pattern (`CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`, `NEXT_ASSEMBLY_USAGE_OCCURRENCE`,
+`REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION`, no `MAPPED_ITEM`) the items that are schema-valid in the `LAYERED_ITEM`
+select (`PRESENTATION_REPRESENTATION` or `REPRESENTATION_ITEM`) are either not bound to a placed shape (styled items, placement
+axes, the presentation representation) or bound to the shared, unplaced part (the solids, P3). The only entities that are bound
+to a placed shape are the usage and the context-dependent shape representation, and these are not valid layered items. The
+measurement agrees with that reading (the P3 control puts the layer on the shared part, everything else is dropped).
+
+== Decisions
+
+D1:: *No layer on a usage in the export.* There is no DSL function, no bridge and no change to the exporter or to any golden
+file. All existing exports stay byte-identical.
+
+D2:: *The import is unchanged.* A component layer in a file from another tool is still counted in
+`presentation.instanceStylesIgnored`, and the warning keeps its text. (With OCCT 7.9.3 a layer on a usage written in the
+patterns above is not delivered at all, so the counter stays at its old value for those files.)
+
+D3:: *Tripwire.* `InstanceLayerOcctGateTest` fails predictably when the native bridge is unavailable (skip marker) and otherwise
+pins the negative result. If a future OCCT delivers a usage layer, the test turns red and this ADR is reassessed.
+
+== Follow-ups
+
+* A `MAPPED_ITEM` based assembly (a `REPRESENTATION_MAP` per part, one `MAPPED_ITEM` per usage) would give every placed
+  occurrence a representation item bound to its own placed shape, which a layer could name. It changes the assembly model
+  (and the byte layout of every assembly export), so it is a wave of its own and was not measured here.
+* Re-run `verify-instance-layer-gate.sh` when the OCCT version is raised.
+
+== Limits
+
+* No layer on usages of parts or sub-assemblies, no layer per context path.
+* Measured with OCCT 7.9.3 (macOS arm64); other readers are not verified.
+* Rendering ignores layers (parts and usages alike); there is no layer visibility in `kstep render` or `kstep-viewer`.

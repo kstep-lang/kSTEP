@@ -138,5 +138,6 @@ hand-written pattern as an instance colour; that test was not run in this wave b
 * Rendering of the opacity in `kstep render` (GLB, SVG, PNG): `GlbWriter` has one material and colours per vertex
   (`COLOR_0`); alpha needs a `VEC4` attribute, `alphaMode BLEND` for the whole material (sorting artefacts with mixed opaque
   and translucent parts) and blending in the software rasteriser. The preview stayed opaque in this wave (_built in Welle Y, see the amendment of ADR-0044_).
+* Layers on assembly instances: gate failed, see ADR-0047.
 * Layers on edges, edge width and line style (`CURVE_STYLE` carries both), colours on vertices.
 * Transparent edge colours cannot exist in STEP (`CURVE_STYLE` has no transparency).

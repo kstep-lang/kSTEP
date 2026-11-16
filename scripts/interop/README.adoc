@@ -213,3 +213,13 @@ case without the `SHAPE_DEFINITION_REPRESENTATION`). `--refresh` rewrites the co
 `build/interop/export-instance-transparency/` and warns if `git status` of `scripts/` changed. Prerequisites: OpenCascade
 (Homebrew), python3, `./gradlew :kstep-cli:installDist`; FreeCAD optional (geometry check).
 
+
+== verify-instance-layer-gate.sh (ADR-0047, Welle Z)
+
+Gate for presentation layers on assembly usages (it failed; the result is documented in ADR-0047). It builds
+`spike_instance_layer_read.cpp` (layers of every component, referred part and part sub-shape, plus component colours) and
+`spike_export_styles.cpp` (scenario `instance-layer`, L0), exports the base fixtures with `kstep-cli`, adds the hand-written
+candidates with `make_instance_layer_fixtures.py --layer N[,N]=NAME --pattern p1|p2|p2b|p3|p4|p5 [--no-sdr]` (optionally on top
+of `make_instance_colour_fixtures.py` output) and prints PASS or FAIL per scenario L1-L8 (L9: FreeCAD). `--refresh` rewrites the
+committed fixtures `gate-*.step` of `InstanceLayerOcctGateTest`. It writes only below `build/interop/instance-layer-gate/`.
+Prerequisites: OpenCascade (Homebrew), python3, `./gradlew :kstep-cli:installDist`; FreeCAD optional.

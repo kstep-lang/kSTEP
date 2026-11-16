@@ -50,7 +50,7 @@ without a colour) and as `colour (r, g, b)` on the component line of the text re
 effective colour, `occurrences[].colour` (the instance colour of the own component, then the whole-part colour, then the colours of
 outer sub-assembly components innermost first (ADR-0046), `null` without a colour); the text report appends `  colour (r, g, b)` to the occurrence line only when there is one. Per-face colours
 do not flow into it. Not reported yet: layers and
-curve-only colours on assembly instances (counted in `presentation.instanceStylesIgnored`), vertex colours, layers on edges, and `--render` still uses its own palette and ignores the opacity.
+curve-only colours on assembly instances (counted in `presentation.instanceStylesIgnored`; layers on usages are not read by OCCT, ADR-0047), vertex colours, layers on edges, and `--render` still uses its own palette and ignores the opacity.
 
 `kstep import` is read-only: it writes nothing unless `--render` names a file. It refuses symbolic links,
 non-regular files, files above 50 MB and files that reference other files (`DOCUMENT_FILE` and friends); the
