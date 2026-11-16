@@ -9,6 +9,10 @@ minor versions may contain breaking changes.
 
 === Documented
 
+* Path-exact colours through `SPECIFIED_HIGHER_USAGE_OCCURRENCE` (ADR-0048, Welle AA): the gate failed. OCCT 7.9.3's XCAF reader
+  (SHUO mode on) delivers the colour to exactly one path, but OCCT's own presentation logic ignores it, so nothing was built; export
+  and import behave as before. The result is pinned by `PathColourOcctGateTest` and `scripts/interop/verify-path-colour-gate.sh`.
+  ADR-0030 is corrected: SHUOs are ignored and not counted.
 * Layers on assembly usages (ADR-0047, Welle Z): the gate failed. With OCCT 7.9.3 no schema-valid `PRESENTATION_LAYER_ASSIGNMENT`
   pattern reaches one placed occurrence, a layer on the solids lands on the shared part. Nothing was built; export and import
   behave as before. The result is pinned by `InstanceLayerOcctGateTest` and `scripts/interop/verify-instance-layer-gate.sh`.

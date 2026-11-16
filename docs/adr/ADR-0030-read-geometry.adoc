@@ -173,7 +173,7 @@ existing renderer, not of the import.
 * Product and usage ids need unique names; comments in the file disable enrichment.
 * Units other than millimetres are converted by OCCT; checked and tested since ADR-0038.
 * STEP-XML and compressed stpZ are rejected.
-* PMI, materials and SHUOs are ignored and counted (`ignored.pmi` and so on). Colours and layers were ignored here
+* PMI and materials are ignored and counted (`ignored.pmi` and so on); SHUOs are ignored and not counted (the prescan counts PMI only; corrected in Welle AA, see ADR-0048). Colours and layers were ignored here
   and are imported since ADR-0038.
 * Files without geometry are `no_content`: a structure-only import is follow-up K3.
 * CPU-time DoS by a small but expensive file (see Limits).

@@ -1,0 +1,98 @@
+= ADR-0048: Path-exact colours through SHUO (Welle AA)
+:toc:
+
+== Status
+
+Accepted; limit documented, not built (kSTEP Welle AA). The gate failed on its own rule: OCCT 7.9.3 delivers a colour written
+as a `SPECIFIED_HIGHER_USAGE_OCCURRENCE` (SHUO) to exactly one path of an assembly through its XCAF reader (with the SHUO mode
+on), but OCCT's own presentation logic (`XCAFPrs_DocumentExplorer`) ignores it. kSTEP therefore writes no path colours (fail
+closed), keeps reading with the SHUO mode off, and pins the result in a CI test so that a future OCCT is noticed.
+
+== Context
+
+ADR-0044 D4 and ADR-0046 left "a colour per context path of a nested usage" open. `styleInstance` colours a usage and so every
+occurrence that goes through it; two paths that share a usage (u3 below both SUB occurrences) cannot be told apart. The standard
+way to name one path is a `SPECIFIED_HIGHER_USAGE_OCCURRENCE`. Gate rule (decided with the plan, open question Q1): the gate
+passes only if the XCAF reader and OCCT's presentation logic both give the hand-calculated colours; if the two oracles disagree,
+an OCCT based viewer would show something else than the importer, so kSTEP fails closed.
+
+== Measurements
+
+OCCT 7.9.3, macOS arm64, `scripts/interop/verify-path-colour-gate.sh`; fixtures made by `make_path_colour_fixtures.py`, read by
+`spike_path_colour_read.cpp` with `SetSHUOMode(true)`. Scene X: ASM > SUB x2 (u1 at x=0, u2 at x=100) > BOX x2 (u3 at x=0, u4 at
+x=20); box 10 x 20 x 30 (6000 mm3), four occurrences, total 24000. Leaves are named by their bounding box `minX` (0, 20, 100,
+120 for the leaves under u1/u3, u1/u4, u2/u3, u2/u4). Oracle (reader): `XCAFDoc_ColorTool::GetInstanceColor` on the located leaf
+shape. Oracle (explorer): the effective colour of `XCAFPrs_DocumentExplorer`.
+
+[cols="1,3,3,1,1"]
+|===
+| Id | Build | Hand calculation | Reader | Explorer
+
+| S0 | OCCT's own writer: `SetSHUO([u2, u3])` plus a green colour on the SHUO label, assembly mode 2 (informative) | writes one `SPECIFIED_HIGHER_USAGE_OCCURRENCE(relating = ASM, related = BOX, upper = u2, next = u3)`, a `PRODUCT_DEFINITION_SHAPE('SHUO')` on it, a one-item `SHAPE_REPRESENTATION`, `SHAPE_DEFINITION_REPRESENTATION`, `PRESENTATION_STYLE_BY_CONTEXT` and a `STYLED_ITEM` on the leaf solid | x100 green | not measured
+| P1 | the S0 pattern written by hand, path [u2, u3] green | x100 green, the others none | ok | fails (none)
+| P2 | P1 plus u3 red (per usage) | x0 red, x100 green, x20 and x120 none | ok | fails
+| P3 | P1 plus orange part | x100 green, the others orange | ok | fails
+| P4 | P1 plus u2 blue | x100 green, x120 blue, x0 and x20 none | ok (x100 and component u2) | fails
+| P4b | P1 plus u2 blue, u3 red, orange part | x0 red, x20 orange, x100 green, x120 orange | ok | fails
+| P5, P5b | path colour with alpha 0.5 and 0.25 | x100 (0, 1, 0, alpha) | ok | fails
+| P7 | two paths, [u2, u3] green and [u2, u4] yellow | x100 green, x120 yellow | ok | fails
+| P6 (negative) | P1 without the `SHAPE_DEFINITION_REPRESENTATION` | the shape definition is mandatory | green on all four (lands on the shared part) | not measured
+| S0deep | OCCT's writer, TOP > ASM x2 > SUB x2 > BOX, `SetSHUO([asm2, u2, u3])` (informative) | one of eight leaves | x1100 green, no other | not measured
+|===
+
+The explorer returns "no colour" on every leaf in every scenario: it does not apply SHUO colours. The reader result is correct
+on every measured scenario, so the information is stored in the file and read by the XCAF reader; only the presentation logic
+and therefore OCCT based viewers do not show it.
+
+Nested pattern (S0deep): for a path of three usages OCCT writes two SHUOs, the outer one with `upper_usage` naming the SHUO of
+the prefix chain and `next_usage` the last usage; only the outer one carries the colour chain. The hand-written generator
+writes paths of two usages only; longer paths were read at reader level through OCCT's own output.
+
+Tamper fixtures (all read without crash or hang, exit code 0, under one second each): a SHUO naming itself as `next_usage`
+(cycle), `upper_usage` equal to `next_usage` (selfref), reversed usages (nonchain), a chain of 200 SHUOs, 2000 copies of a SHUO,
+and `SURFACE_STYLE_TRANSPARENT` of -0.5, 1.5 and 1.E400. OCCT 7.9.3 does not clamp: the reader returned alpha 1.5, -0.5 and
+-inf for them. Any future import of path colours must therefore clamp alpha in Kotlin (as the existing import does) and cap
+SHUO count and chain depth before the transfer.
+
+Not measured: P8 as a hand-written file (three levels; only OCCT's own output was read), P9 (a path ending on a sub-assembly
+usage), P10 (a path that does not start at the root), P11 (FreeCAD on P8; FreeCAD loads P1 as geometry, volume 24000, colours
+are not readable headless). The verdict does not depend on them.
+
+The CI test `PathColourOcctGateTest` reads the committed fixtures `kstep-tests/src/test/resources/path-colour/` with the real
+importer and pins what kSTEP does today.
+
+== Why
+
+kSTEP's importer reads with `SetSHUOMode(false)` (`kstep_occt_bridge.cpp`), so a path colour is not delivered at all, and
+building the feature would need native changes (reader mode, SHUO collection, a new JNI getter, caps before the transfer). The
+gate was meant to find out whether that work pays: it would give a colour that kSTEP shows correctly in `kstep import` and
+`kstep render`, but that OCCT's own presentation logic, and so every viewer built on it, does not show. kSTEP would write a file
+that two readers colour differently. The decision (Q1) is to not build that.
+
+== Decisions
+
+D1:: *No path colour in the export.* No DSL function, no bridge, no change to the exporter or to any golden file; every export
+stays byte-identical.
+
+D2:: *The import is unchanged.* The reader keeps `SetSHUOMode(false)`. Files from other tools with SHUO colours are read as
+before; a SHUO is not delivered and not counted separately (ADR-0030 said SHUOs were counted; the code only counts PMI, see the
+correction there).
+
+D3:: *Tripwire.* `PathColourOcctGateTest` fails predictably when the native bridge is unavailable (skip marker) and otherwise pins
+today's behaviour: no path colour on any occurrence, per-usage and part colours as in ADR-0046, tamper files without crash and
+with alpha in 0..1. Because the importer has the SHUO mode off, the test pins kSTEP's behaviour, not OCCT's; the OCCT result is
+re-measured with `verify-path-colour-gate.sh`.
+
+== Follow-ups
+
+* Re-run `verify-path-colour-gate.sh` when the OCCT version is raised. If the explorer starts to apply SHUO colours, the gate
+  passes and the wave can be built: export (SHUO pattern, a third block behind the sub-assembly block), native SHUO reading with
+  caps, effective colour and render with the precedence path colour over own usage over part over outer usages (consistent with
+  P2 to P4b).
+* A `MAPPED_ITEM` based assembly (see ADR-0047) would give every occurrence its own representation item; the SHUO question would
+  then be measured again.
+
+== Limits
+
+* No colour per context path; two occurrences that share a usage cannot be coloured differently.
+* Measured with OCCT 7.9.3 (macOS arm64); other readers are not verified.

@@ -223,3 +223,14 @@ candidates with `make_instance_layer_fixtures.py --layer N[,N]=NAME --pattern p1
 of `make_instance_colour_fixtures.py` output) and prints PASS or FAIL per scenario L1-L8 (L9: FreeCAD). `--refresh` rewrites the
 committed fixtures `gate-*.step` of `InstanceLayerOcctGateTest`. It writes only below `build/interop/instance-layer-gate/`.
 Prerequisites: OpenCascade (Homebrew), python3, `./gradlew :kstep-cli:installDist`; FreeCAD optional.
+
+== verify-path-colour-gate.sh (ADR-0048, Welle AA)
+
+Gate for path-exact colours through `SPECIFIED_HIGHER_USAGE_OCCURRENCE` (it failed; the result is documented in ADR-0048). It builds
+`spike_path_colour_read.cpp` (reads with `SetSHUOMode(true)`; prints every SHUO with its colour, `GetInstanceColor` per located
+leaf and the effective colour of `XCAFPrs_DocumentExplorer`; `--s0` and `--s0-deep` write OCCT's own SHUO pattern), exports the
+base fixtures with `kstep-cli`, adds the hand-written pattern with `make_path_colour_fixtures.py --path u2,u3:r,g,b[,a]`
+(optionally on top of `make_instance_colour_fixtures.py` output; `--no-sdr`, `--axis`, `--tamper cycle|nonchain|selfref|deep:N|count:N`,
+`--raw-t`) and prints the verdict of both oracles per scenario S0, P1-P7, the negative P6 and the tamper fixtures. `--refresh`
+rewrites the committed fixtures of `PathColourOcctGateTest`. It writes only below `build/interop/path-colour/`.
+Prerequisites: OpenCascade (Homebrew), python3, `./gradlew :kstep-cli:installDist`; FreeCAD optional.
