@@ -204,7 +204,11 @@ object GlbWriter {
         val vertexCount = kept.size * VERTICES_PER_TRIANGLE
         val positions = FloatArray(vertexCount * COMPONENTS_PER_VEC3)
         val normals = FloatArray(vertexCount * COMPONENTS_PER_VEC3)
-        val colors = if (includeColor) FloatArray(vertexCount * COMPONENTS_PER_VEC3) else null
+        // Welle Y: COLOR_0 becomes VEC4 and the material BLEND only when some triangle is translucent; otherwise the bytes
+        // are exactly as before (VEC3, no alphaMode).
+        val includeAlpha = includeColor && kept.any { it.color.a < 1.0 }
+        val colorComponents = if (includeAlpha) 4 else COMPONENTS_PER_VEC3
+        val colors = if (includeColor) FloatArray(vertexCount * colorComponents) else null
         var vertex = 0
         for (triangle in kept) {
             for (corner in 0 until VERTICES_PER_TRIANGLE) {
@@ -216,9 +220,11 @@ object GlbWriter {
                 normals[base + 1] = triangle.normals[corner * 3 + 1].toFloat()
                 normals[base + 2] = triangle.normals[corner * 3 + 2].toFloat()
                 if (colors != null) {
-                    colors[base] = triangle.color.r.toFloat()
-                    colors[base + 1] = triangle.color.g.toFloat()
-                    colors[base + 2] = triangle.color.b.toFloat()
+                    val cb = vertex * colorComponents
+                    colors[cb] = triangle.color.r.toFloat()
+                    colors[cb + 1] = triangle.color.g.toFloat()
+                    colors[cb + 2] = triangle.color.b.toFloat()
+                    if (includeAlpha) colors[cb + 3] = triangle.color.a.toFloat()
                 }
                 vertex++
             }
@@ -273,6 +279,7 @@ object GlbWriter {
                             put("roughnessFactor", ROUGHNESS_FACTOR)
                         }
                         put("doubleSided", false)
+                        if (includeAlpha) put("alphaMode", "BLEND")
                     }
                 }
                 putJsonArray("accessors") {
@@ -295,7 +302,7 @@ object GlbWriter {
                             put("bufferView", 2)
                             put("componentType", ACCESSOR_COMPONENT_TYPE_FLOAT)
                             put("count", vertexCount)
-                            put("type", "VEC3")
+                            put("type", if (includeAlpha) "VEC4" else "VEC3")
                         }
                     }
                 }

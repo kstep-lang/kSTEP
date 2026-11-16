@@ -6,6 +6,7 @@ import java.awt.Graphics2D
 import java.awt.RenderingHints
 import java.awt.geom.Path2D
 import java.awt.image.BufferedImage
+import kotlin.math.roundToInt
 
 /**
  * Headless, plain-JDK rasterizer for a projected triangle list. Draws each triangle in list
@@ -47,10 +48,20 @@ object TriangleRasterizer {
                 val red = (t.litR.coerceIn(0.0, 1.0) * 255.0).toInt()
                 val green = (t.litG.coerceIn(0.0, 1.0) * 255.0).toInt()
                 val blue = (t.litB.coerceIn(0.0, 1.0) * 255.0).toInt()
-                val color = Color(red, green, blue)
-                g.color = color
-                g.fill(path)
-                g.draw(path)
+                if (t.color.a < 1.0) {
+                    // Welle Y: no anti-seam stroke and no antialiasing for translucent triangles. A stroke (or an
+                    // antialiased edge) reaches into the neighbour, which then blends over the same strip again and
+                    // draws the triangulation as darker lines. Without antialiasing every pixel belongs to exactly one
+                    // triangle of a shared edge, so it is composited exactly once. The opaque branch stays as before.
+                    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF)
+                    g.color = Color(red, green, blue, (t.color.a * 255.0).roundToInt().coerceIn(0, 255))
+                    g.fill(path)
+                    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                } else {
+                    g.color = Color(red, green, blue)
+                    g.fill(path)
+                    g.draw(path)
+                }
             }
         } finally {
             g.dispose()

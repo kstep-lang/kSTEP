@@ -72,8 +72,7 @@ reference goes to an entity of the same list or to exactly the ids the bridge wa
 the placement axis of the usage, the representation context, the solids of the child); a violation is a
 `ShapeExportException`.
 
-D4:: *Limits, all fail closed (`ShapeExportException`, code `KSTEP-S-008` in the CLI).* Only opaque colours (a translucent one
-is refused already in the script with `KSTEP-S-012`); a usage must be a geometric usage of the plan (a root with a geometric
+D4:: *Limits, all fail closed (`ShapeExportException`, code `KSTEP-S-008` in the CLI).* Only opaque colours (_superseded by the Welle Y amendment below_: a translucent colour is accepted; an invalid alpha is still refused in the script with `KSTEP-S-012`); a usage must be a geometric usage of the plan (a root with a geometric
 child); its child must have a shape of its own, so one occurrence of a sub-assembly cannot be coloured (_partly superseded by ADR-0046_: a sub-assembly occurrence is now coloured through the solids of its leaves; the following wording is the state of Welle V; it would need a
 `SHAPE_REPRESENTATION_RELATIONSHIP` path or a `SHAPE_DEFINITION` chain per leaf, which is not measured); a second colour for one
 usage is `KSTEP-S-014` in the script; at most 4096 instance colours (the cap of geometric usages). Children with several solids
@@ -97,11 +96,66 @@ The native caps are unchanged: an instance colour is one more record under `kMax
 the pre-transfer list-length cap through `IsKind` (ADR-0038).
 
 D7:: *`kstep render` ignores instance colours and the effective colour per occurrence is not computed in this wave.* Both
-are implemented since ADR-0045 (Welle W); the render still ignores alpha (ADR-0042).
+are implemented since ADR-0045 (Welle W); the render ignored alpha until the Welle Y amendment below.
 
 == Not built / follow-ups
 
-* Done in ADR-0046: colours on occurrences of sub-assemblies. Still open: path-exact colours, transparency on instance colours (it needs the rendering
-  chain of ADR-0042 and a gate scenario of its own), layers on instances.
+* Done in ADR-0046: colours on occurrences of sub-assemblies. Done in the Welle Y amendment below: transparency on instance colours and in the render. Still open: path-exact colours, layers on instances.
 * Done in ADR-0045: the effective colour per occurrence in `kstep import` and instance colours in `kstep render`.
 * Interoperability is checked with OCCT's reader and FreeCAD (geometry); other CAD systems are not covered.
+
+== Amendment: transparent instance colours (Welle Y)
+
+Status: accepted, implemented. Closes the follow-up "transparency on instance colours". The gate passed, so no separate ADR
+(planned ADR-0047 for a failed gate) was needed.
+
+*Gate.* OCCT 7.9.3 (macOS arm64), `scripts/interop/verify-export-instance-transparency.sh`, CI test `InstanceTransparencyOcctGateTest`.
+The hand-written chain is the one OCCT's own writer produces for a part alpha (ADR-0042):
+`SURFACE_SIDE_STYLE('', (#fillArea, #rendering))` with `#rendering = SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING.,
+#colourRgb, (#t))` and `#t = SURFACE_STYLE_TRANSPARENT(1 - alpha)`; the rendering refers to the same `COLOUR_RGB` as the fill.
+`make_instance_colour_fixtures.py` writes it for a fourth colour component below 1.
+
+[cols="1,3,3",options="header"]
+|===
+|Scenario |Setup |OCCT reads
+|Y0 (informative) |OCCT's own writer, `SetColor(component, blue alpha 0.5)`, assembly mode 2 |the same chain, one `STYLED_ITEM` and one `PRESENTATION_STYLE_BY_CONTEXT` per component; read back as blue 0.5
+|Y1 |box twice, instance 2 blue alpha 0.5 |component 2 (0,0,1,0.5), component 1, the part and the assembly none, volume 12000; effective leaf 2 blue 0.5, leaf 1 none
+|Y2 |instance 1 red opaque, instance 2 blue alpha 0.25 |alpha 1.0 and 0.25
+|Y3 |orange opaque part plus instance 2 blue 0.5 |part orange alpha 1 (not repainted, no alpha leak), component 2 blue 0.5
+|Y3b |orange part with alpha 0.5 plus instance 2 blue opaque |effective leaf 2 blue 1.0: the winning source supplies its whole colour, alpha included
+|Y4 |ASM > SUB x2 > BOX x2, SUB occurrence 2 blue 0.5 |leaves x=100 and x=120 blue 0.5, x=0 and x=20 none, part none, volume 24000
+|Y5 |SUB occurrence 2 blue 0.25 plus inner usage red opaque |x=0 and x=100 red 1.0, x=20 none, x=120 blue 0.25 (the ADR-0046 hand calculation)
+|Y6 |alpha 0.0, 192/255, 0.3, 0.999999 |all within 1e-6 (OCCT stores alpha as a float, 6e-8). CI: the committed `gate-Y6.step` covers 192/255; all four values are covered by the export and import round trip in `CliExportOcctInstanceColourIntegrationTest`
+|Y7 (negative) |Y1 without the `SHAPE_DEFINITION_REPRESENTATION` |OCCT repaints the shared part, alpha included: the SDR stays mandatory
+|Y8 |FreeCAD loads Y1 and Y4 |as geometry (volume); colours are not readable headless
+|===
+
+*Decisions.*
+
+D1:: *Same chain as OCCT's writer, transparency `t = 1 - alpha`.* The two entities `SURFACE_STYLE_TRANSPARENT` and
+`SURFACE_STYLE_RENDERING_WITH_PROPERTIES` are written only for alpha < 1, after `SURFACE_STYLE_FILL_AREA` and before
+`SURFACE_SIDE_STYLE`. For an opaque colour no id is added and no byte changes, so every earlier export and the prefix chain
+(plain, parts, sub-assemblies) stay byte-identical.
+D2:: *Both allow-lists grow to thirteen names* (the two entities above). They stay two separate sets and are still NOT merged
+into the extraction allow-list `Ap242GeometryExtraction.STYLE_ENTITY_NAMES`, which does not know `PRESENTATION_STYLE_BY_CONTEXT`.
+D3:: *The opacity checks go.* `KStepModel.styleInstance` and `Ap242InstanceStyleBridge.plan` no longer refuse alpha < 1; the old
+tests are replaced, not relaxed. An alpha that is not finite or outside 0..1 is refused by `StepColour` with `KSTEP-S-012`;
+`plan` keeps an unreachable defence-in-depth check. No new error code. `Ap242InstanceStyleReader` accepts a one- or
+two-item side style and checks `NORMAL_SHADING`, the same colour reference and one finite transparency in 0..1, otherwise
+`IllegalArgumentException`.
+D4:: *Precedence is unchanged; alpha belongs to the winning colour* (Y3b, Y5). No mixing of RGB from one source and alpha from
+another. Import needed no code change: the bridge already reads the RGBA overload for component labels, and
+`RgbColor.alpha` is already in the JSON and the text report (` alpha 0.5`). Hostile alpha from a foreign file (`-0.5`, `1.5`,
+`1.E400` in `SURFACE_STYLE_TRANSPARENT`) never leaves 0..1: the existing native-to-Kotlin mapping clamps, and
+`InstanceTransparencyOcctGateTest` pins the invariant.
+D5:: *Opacity in `kstep render` (supersedes "the preview stays opaque" of ADR-0042 and D6 of ADR-0045).* `MeshColor` gets
+`a: Double = 1.0` (source compatible, a binary change of the constructor, as with `PlacedInstance` in ADR-0046). SVG: the
+element `opacity` on a translucent polygon (not `fill-opacity`, which would blend the anti-seam stroke twice). PNG: one
+`Area` composite of fill and stroke for a < 1. GLB: `COLOR_0` as `VEC4` and `alphaMode BLEND` only when some triangle is
+translucent. Everything opaque is byte-identical. Part colours with alpha become translucent in the render too, because
+part and instance colours run through the same path.
+
+*Limits.* No path-exact colours (`SHUO`), no layers on instances. The viewer (`kstep-viewer`) still draws opaque. Translucent
+triangles are painted in the existing back-to-front order without re-sorting, so mutually penetrating translucent parts show
+the usual painter artefacts. `kstep import --render` uses its own fixed palette. Not verified with readers other than
+OpenCascade-based ones and FreeCAD geometry.

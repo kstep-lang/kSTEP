@@ -31,7 +31,7 @@ Parts:
 ----
 
 Colours are sRGB values between 0 and 1, as written in the file. Since ADR-0042 a colour also carries its opacity and a
-coloured edge gets its own line. The text report writes ` alpha 0.5` after a colour only when the opacity is below 1
+coloured edge gets its own line. Instance colours (`components[].colour`, `occurrences[].colour`) carry their alpha in the same way (a translucent instance colour reads as ` alpha 0.5`, Welle Y). The text report writes ` alpha 0.5` after a colour only when the opacity is below 1
 (a file without transparency reads exactly as before) and `edge N  colour (r, g, b)` for each coloured edge (0-based,
 in OCCT's edge order of the part); the JSON colour object always has `alpha` (`1.0` when opaque) and each part has an
 `edgeStyles` list of `{"edge", "colour"}` entries. A colour on an edge counts in `presentation.coloredTargets` and no

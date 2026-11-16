@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Appends the hand-written instance-colour pattern of ADR-0044 to a kSTEP placed-assembly export (gate fixtures).
 
-  make_instance_colour_fixtures.py <base.step> <out.step> [--colour N=r,g,b ...] [--pds new|reuse] [--axis parent|own]
-                                   [--no-sdr] [--per-msb]
+  make_instance_colour_fixtures.py <base.step> <out.step> [--colour N=r,g,b[,a] ...] [--pds new|reuse] [--axis parent|own]
+                                   [--no-sdr] [--per-msb] [--raw-t LEXEME]
+
+Welle Y (ADR-0044 amendment): a fourth component a < 1 in --colour adds SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING.,
+colour,(SURFACE_STYLE_TRANSPARENT(1-a))) to the SURFACE_SIDE_STYLE (the chain OCCT's own writer produces for part alpha);
+with a = 1 (or no fourth component) the output is byte-identical to before. --raw-t LEXEME writes the given text as the
+transparency of every translucent usage (hostile-input fixtures: negative, > 1, 1E400).
 
 N is the 1-based usage index in file order. --pds new writes a second PRODUCT_DEFINITION_SHAPE('Placement', ...) on the
 NAUO (the plan of ADR-0044); --pds reuse hangs the SHAPE_DEFINITION_REPRESENTATION on the existing one (the pattern OCCT
@@ -23,7 +28,7 @@ def fmt(v):
 
 def main(argv):
     base, out = argv[0], argv[1]
-    colours, pds, axis, no_sdr, per_msb, leaf_items = {}, "new", "parent", False, False, None
+    colours, pds, axis, no_sdr, per_msb, leaf_items, raw_t = {}, "new", "parent", False, False, None, None
     i = 2
     while i < len(argv):
         a = argv[i]
@@ -31,6 +36,8 @@ def main(argv):
             n, rgb = argv[i + 1].split("=")
             colours[int(n)] = tuple(float(x) for x in rgb.split(","))
             i += 2
+        elif a == "--raw-t":
+            raw_t = argv[i + 1]; i += 2
         elif a == "--pds":
             pds = argv[i + 1]; i += 2
         elif a == "--axis":
@@ -97,7 +104,8 @@ def main(argv):
     for idx, nauo in enumerate(nauos, start=1):
         if idx not in colours:
             continue
-        r, g, b = colours[idx]
+        r, g, b = colours[idx][:3]
+        alpha = colours[idx][3] if len(colours[idx]) > 3 else 1.0
         pd_ = next(k for k, v in ents.items() if v.startswith("PRODUCT_DEFINITION_SHAPE('Placement'") and v.endswith("#%d)" % nauo))
         cdsr = next(v for v in ents.values() if v.startswith("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(") and v.endswith("#%d);" % pd_) or v.startswith("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(") and v.endswith("#%d)" % pd_))
         rr = int(re.match(r"CONTEXT_DEPENDENT_SHAPE_REPRESENTATION\(#(\d+),", cdsr).group(1))
@@ -121,7 +129,12 @@ def main(argv):
         fasc = add("FILL_AREA_STYLE_COLOUR('',#%d)" % col)
         fas = add("FILL_AREA_STYLE('',(#%d))" % fasc)
         ssfa = add("SURFACE_STYLE_FILL_AREA(#%d)" % fas)
-        sss = add("SURFACE_SIDE_STYLE('',(#%d))" % ssfa)
+        if alpha < 1.0 or (raw_t is not None and len(colours[idx]) > 3):
+            t_ = add("SURFACE_STYLE_TRANSPARENT(%s)" % (raw_t if raw_t is not None else fmt(1.0 - alpha)))
+            rend = add("SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING.,#%d,(#%d))" % (col, t_))
+            sss = add("SURFACE_SIDE_STYLE('',(#%d,#%d))" % (ssfa, rend))
+        else:
+            sss = add("SURFACE_SIDE_STYLE('',(#%d))" % ssfa)
         ssu = add("SURFACE_STYLE_USAGE(.BOTH.,#%d)" % sss)
         if axis == "own":
             pos = ents[parent_axis]

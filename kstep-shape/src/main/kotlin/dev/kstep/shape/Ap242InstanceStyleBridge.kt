@@ -32,7 +32,7 @@ internal object Ap242InstanceStyleBridge {
     const val MAX_INSTANCE_STYLES: Int = AssemblyGeometryGraph.MAX_GEOMETRIC_USAGES
 
     /**
-     * Own allow-list (ADR-0044): exactly the entity names this bridge writes. It is deliberately NOT merged into
+     * Own allow-list (ADR-0044): exactly the entity names this bridge writes (Welle Y: the two entities of a translucent colour are on it, they only appear for alpha < 1). It is deliberately NOT merged into
      * `Ap242GeometryExtraction.STYLE_ENTITY_NAMES`: OCCT never writes `PRESENTATION_STYLE_BY_CONTEXT` for a single part,
      * so the extraction of OCCT's own output stays fail closed against it.
      */
@@ -49,13 +49,15 @@ internal object Ap242InstanceStyleBridge {
             "COLOUR_RGB",
             "SHAPE_REPRESENTATION",
             "SHAPE_DEFINITION_REPRESENTATION",
+            "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
+            "SURFACE_STYLE_TRANSPARENT",
         )
 
     /** DoS guard (ADR-0046): upper bound on the STYLED_ITEMs of all sub-assembly occurrences of one export. */
     const val MAX_SUBASSEMBLY_STYLED_ITEMS: Int = 65_536
 
     /**
-     * Own allow-list of the sub-assembly block (ADR-0046). The same eleven names as [INSTANCE_STYLE_ENTITY_NAMES], but a
+     * Own allow-list of the sub-assembly block (ADR-0046). The same thirteen names as [INSTANCE_STYLE_ENTITY_NAMES], but a
      * separate set on purpose: any later difference between the two blocks has to be a deliberate change.
      */
     val SUBASSEMBLY_STYLE_ENTITY_NAMES: Set<String> =
@@ -71,6 +73,8 @@ internal object Ap242InstanceStyleBridge {
             "COLOUR_RGB",
             "SHAPE_REPRESENTATION",
             "SHAPE_DEFINITION_REPRESENTATION",
+            "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
+            "SURFACE_STYLE_TRANSPARENT",
         )
 
     /**
@@ -80,8 +84,8 @@ internal object Ap242InstanceStyleBridge {
      * A child without a shape of its own is a sub-assembly (ADR-0046, [StyledChildKind.SUBASSEMBLY]); a plan usage is only
      * geometric when something with a shape sits below it, so such a child always has leaves.
      *
-     * @throws ShapeExportException for a usage that is not a geometric usage of the plan, a second colour for one usage, a
-     *   transparent colour, and more than [MAX_INSTANCE_STYLES] colours
+     * @throws ShapeExportException for a usage that is not a geometric usage of the plan, a second colour for one usage, an
+     *   invalid alpha, and more than [MAX_INSTANCE_STYLES] colours
      */
     fun plan(
         styles: List<UsageStyle>,
@@ -109,10 +113,10 @@ internal object Ap242InstanceStyleBridge {
             if (seen.put(s.usage, true) != null) {
                 throw ShapeExportException("assembly usage '$id' has more than one instance colour")
             }
-            if (!s.colour.isOpaque) {
-                throw ShapeExportException(
-                    "instance colours must be opaque (ADR-0044), usage '$id' has alpha ${s.colour.a}",
-                )
+            val alpha = s.colour.a
+            // defence in depth: StepColour already refuses this (KSTEP-S-012), a later constructor path must not smuggle it in
+            if (!(alpha.isFinite() && alpha in 0.0..1.0)) {
+                throw ShapeExportException("instance colour of usage '$id' has an invalid alpha $alpha")
             }
             val kind =
                 if (shaped.containsKey(
@@ -268,6 +272,10 @@ internal object Ap242InstanceStyleBridge {
             val fillColour = alloc.next()
             val fillStyle = alloc.next()
             val fillArea = alloc.next()
+            val translucent = style.colour.a < 1.0
+            // extra ids ONLY for alpha < 1, so every opaque block keeps its exact bytes (ADR-0044 prefix chain)
+            val transparent = if (translucent) alloc.next() else -1
+            val rendering = if (translucent) alloc.next() else -1
             val sideStyle = alloc.next()
             val usageStyle = alloc.next()
             val representation = alloc.next()
@@ -290,11 +298,24 @@ internal object Ap242InstanceStyleBridge {
                 Part21Value.ListValue(listOf(Part21Value.Ref(fillColour))),
             )
             simple(fillArea, "SURFACE_STYLE_FILL_AREA", Part21Value.Ref(fillStyle))
+            if (translucent) {
+                // the chain OCCT's own writer produces for a part alpha (ADR-0042 D3): transparency = 1 - alpha
+                simple(transparent, "SURFACE_STYLE_TRANSPARENT", Part21Value.Num(stepReal(1.0 - c.a)))
+                simple(
+                    rendering,
+                    "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
+                    Part21Value.Enumeration("NORMAL_SHADING"),
+                    Part21Value.Ref(colour),
+                    Part21Value.ListValue(listOf(Part21Value.Ref(transparent))),
+                )
+            }
             simple(
                 sideStyle,
                 "SURFACE_SIDE_STYLE",
                 Part21Value.Str(""),
-                Part21Value.ListValue(listOf(Part21Value.Ref(fillArea))),
+                Part21Value.ListValue(
+                    listOfNotNull(Part21Value.Ref(fillArea), if (translucent) Part21Value.Ref(rendering) else null),
+                ),
             )
             simple(usageStyle, "SURFACE_STYLE_USAGE", Part21Value.Enumeration("BOTH"), Part21Value.Ref(sideStyle))
             simple(
@@ -413,10 +434,28 @@ object Ap242InstanceStyleReader {
         }) {
             val usageStyle = simple(single(psbc.args[0]), "SURFACE_STYLE_USAGE")
             val side = simple(ref(usageStyle.args[1]), "SURFACE_SIDE_STYLE")
-            val fill = simple(ref(simple(single(side.args[1]), "SURFACE_STYLE_FILL_AREA").args[0]), "FILL_AREA_STYLE")
+            val sideItems = (side.args[1] as? Part21Value.ListValue)?.items
+            require(
+                sideItems != null && sideItems.size in 1..2,
+            ) { "expected one or two side style items, got ${side.args[1]}" }
+            val fill = simple(ref(simple(ref(sideItems[0]), "SURFACE_STYLE_FILL_AREA").args[0]), "FILL_AREA_STYLE")
             val fillColour = simple(single(fill.args[1]), "FILL_AREA_STYLE_COLOUR")
-            val rgb = simple(ref(fillColour.args[1]), "COLOUR_RGB")
-            val colour = StepColour(num(rgb.args[1]), num(rgb.args[2]), num(rgb.args[3]))
+            val rgbId = ref(fillColour.args[1])
+            val rgb = simple(rgbId, "COLOUR_RGB")
+            var alpha = 1.0
+            if (sideItems.size == 2) {
+                val rendering = simple(ref(sideItems[1]), "SURFACE_STYLE_RENDERING_WITH_PROPERTIES")
+                require(
+                    (rendering.args[0] as? Part21Value.Enumeration)?.name == "NORMAL_SHADING",
+                ) { "expected NORMAL_SHADING" }
+                require(ref(rendering.args[1]) == rgbId) { "the rendering refers to a different colour than the fill" }
+                val transparent = simple(single(rendering.args[2]), "SURFACE_STYLE_TRANSPARENT")
+                require(transparent.args.size == 1) { "SURFACE_STYLE_TRANSPARENT takes one argument" }
+                val t = num(transparent.args[0])
+                require(t.isFinite() && t in 0.0..1.0) { "transparency $t is outside 0..1" }
+                alpha = 1.0 - t
+            }
+            val colour = StepColour.rgba(num(rgb.args[1]), num(rgb.args[2]), num(rgb.args[3]), alpha)
             val shapeId =
                 usageOfRepresentation[ref(psbc.args[1])]
                     ?: throw IllegalArgumentException(

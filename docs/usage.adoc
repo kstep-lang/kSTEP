@@ -696,7 +696,7 @@ stepFile(fileName = "bracket.step") {
 |`KSTEP-S-015` |Unknown target: a style for a part without a shape, or a face index outside the shape.
 |===
 
-`kstep render` shows the part colour (SVG, PNG and GLB with a `COLOR_0` attribute; the opacity is ignored, the preview is always opaque); face colours, edge colours, transparency and layers appear only in
+`kstep render` shows the part colour (SVG, PNG and GLB with a `COLOR_0` attribute; the opacity is drawn since Welle Y); face colours, edge colours, transparency and layers appear only in
 the STEP file. `kstep import` reads the result back, see xref:usage-import.adoc#import-usage[Reading a STEP file back].
 `scripts/interop/verify-export-colours-layers.sh` re-checks the example exports with kSTEP, OCCT and FreeCAD. See
 docs/adr/ADR-0039-export-colours-and-layers.adoc.
@@ -753,6 +753,7 @@ stepFile(fileName = "two-boxes.step") {
     place(second, translation = vec(50.0, 0.0, 0.0))
     styleInstance(first, StepColour.rgb(1.0, 0.0, 0.0))   // the box at the origin is red
     styleInstance(second, StepColour.rgb(0.0, 0.0, 1.0))  // the box at x = 50 is blue
+    // a translucent instance colour (Welle Y): styleInstance(second, StepColour.rgba(0.0, 0.0, 1.0, 0.5))
 }
 ----
 
@@ -762,12 +763,13 @@ stepFile(fileName = "two-boxes.step") {
   occurrence. Precedence: the colour of the occurrence's own usage, then the colour of the part, then the colours of
   usages on outer sub-assemblies (innermost first). A colour belongs to the usage, so a usage inside a sub-assembly that
   occurs twice colours that part in both occurrences.
-* Only opaque colours: a translucent one is `KSTEP-S-012`. A second colour for the same usage is `KSTEP-S-014`.
+* The colour may be translucent (`StepColour.rgba(0.0, 0.0, 1.0, 0.5)`, Welle Y); an alpha that is not a finite number in 0..1 is
+  `KSTEP-S-012`. An opaque colour is written exactly as before. A second colour for the same usage is `KSTEP-S-014`.
 * An instance colour is written behind everything else. A script without `styleInstance` exports byte for byte as before,
   and with it the file is the same file plus a suffix.
 * `kstep import` reads it back as `components[].colour` (`null` without a colour; the text report appends
   `colour (r, g, b)` to the component line). `kstep import` also reports the effective colour of
-  each occurrence as `occurrences[].colour`. `kstep render` draws instance colours (they win over the part colour; the opacity
-  stays off, ADR-0042). See docs/adr/ADR-0045-effective-occurrence-colour.adoc.
+  each occurrence as `occurrences[].colour`. `kstep render` draws instance colours (they win over the part colour, alpha
+  included: SVG `opacity`, PNG blending, GLB `COLOR_0` as `VEC4` with `alphaMode BLEND`; `kstep-viewer` stays opaque). See docs/adr/ADR-0045-effective-occurrence-colour.adoc.
 * Verified with OCCT's own reader, `kstep import` and FreeCAD (geometry; headless FreeCAD reads no colours):
   `scripts/interop/verify-export-instance-colours.sh`. See docs/adr/ADR-0044-instance-colours.adoc.

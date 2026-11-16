@@ -77,7 +77,8 @@ private sealed interface RenderContent {
 }
 
 // Part colours go straight into the albedo multiplier; reduces to NEUTRAL only for white, which is exact (ADR-0039).
-private fun StepColour.toMeshColor() = MeshColor(r, g, b)
+// Welle Y: the alpha comes along (ADR-0044 amendment); opaque colours (a = 1) take the unchanged render path.
+private fun StepColour.toMeshColor() = MeshColor(r, g, b, a)
 
 // The one exceptionClass value KStepScriptOutcome.RuntimeError carries when
 // OcctKernel.makeBox/extrudeProfile/fillet throws BEFORE stepFile ever runs, on a machine
@@ -354,7 +355,7 @@ object PreviewRenderer {
             }
         }
         // Instance colours (ADR-0045): keyed by usage identity (NAUO ids are not guaranteed unique); they win over the
-        // part colour. Alpha stays off in the render (ADR-0042); instance colours are opaque anyway.
+        // part colour, alpha included (the winning source supplies its whole colour, Welle Y).
         val styleOf = IdentityHashMap<NextAssemblyUsageOccurrence, StepColour>()
         for (style in model.usageStyles) styleOf[style.usage] = style.colour
 

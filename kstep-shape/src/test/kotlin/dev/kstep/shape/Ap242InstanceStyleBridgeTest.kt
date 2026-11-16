@@ -218,15 +218,135 @@ class Ap242InstanceStyleBridgeTest :
             }.message shouldContain "more than one instance colour"
         }
 
-        "a transparent colour is rejected" {
+        "a translucent colour is accepted by the plan, including alpha 0 (Welle Y, replaces the old opacity refusal)" {
             val s = StyleScenario()
-            shouldThrow<ShapeExportException> {
-                Ap242InstanceStyleBridge.plan(
-                    listOf(UsageStyle(s.u1, StepColour.rgba(0.0, 0.0, 1.0, 0.5))),
-                    s.plan,
-                    listOf(s.a),
+            for (a in listOf(0.5, 0.0, 0.25, -0.0)) {
+                Ap242InstanceStyleBridge
+                    .plan(listOf(UsageStyle(s.u1, StepColour.rgba(0.0, 0.0, 1.0, a))), s.plan, listOf(s.a))
+                    .size shouldBe 1
+            }
+        }
+
+        "StepColour refuses an invalid alpha before the bridge is reached" {
+            for (a in listOf(Double.NaN, -0.01, 1.01, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY)) {
+                shouldThrow<dev.kstep.geometry.style.StyleException> { StepColour.rgba(0.0, 0.0, 1.0, a) }
+            }
+        }
+
+        "a translucent usage writes twelve entities, a two-item side style and the verified transparency chain" {
+            val s = StyleScenario()
+            val out = s.build(listOf(UsageStyle(s.u2, StepColour.rgba(0.0, 0.0, 1.0, 0.5))))
+            out.size shouldBe 13
+            val text = Part21Document(styleHeader, out).render()
+            text shouldContain "#2004=SURFACE_STYLE_TRANSPARENT(0.5);"
+            text shouldContain "#2005=SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING.,#2000,(#2004));"
+            text shouldContain "#2006=SURFACE_SIDE_STYLE('',(#2003,#2005));"
+            text shouldContain "#2007=SURFACE_STYLE_USAGE(.BOTH.,#2006);"
+        }
+
+        "alpha 1 writes exactly the bytes of the opaque block and a mixed block keeps the ids of the opaque usage" {
+            val s = StyleScenario()
+            val plain = Part21Document(styleHeader, s.build(listOf(UsageStyle(s.u2, blue)))).render()
+            Part21Document(
+                styleHeader,
+                s.build(listOf(UsageStyle(s.u2, StepColour.rgba(0.0, 0.0, 1.0, 1.0)))),
+            ).render() shouldBe
+                plain
+            val mixed = s.build(listOf(UsageStyle(s.u1, red), UsageStyle(s.u2, StepColour.rgba(0.0, 0.0, 1.0, 0.5))))
+            val opaqueOnly = s.build(listOf(UsageStyle(s.u1, red)))
+            mixed.take(10) shouldBe opaqueOnly.take(10)
+            mixed.size shouldBe 10 + 12 + 1
+        }
+
+        "both allow-lists have thirteen names, the extraction allow-list has no PRESENTATION_STYLE_BY_CONTEXT" {
+            Ap242InstanceStyleBridge.INSTANCE_STYLE_ENTITY_NAMES.size shouldBe 13
+            Ap242InstanceStyleBridge.SUBASSEMBLY_STYLE_ENTITY_NAMES.size shouldBe 13
+            Ap242InstanceStyleBridge.INSTANCE_STYLE_ENTITY_NAMES shouldContain "SURFACE_STYLE_TRANSPARENT"
+            Ap242GeometryExtraction.STYLE_ENTITY_NAMES shouldNotContain "PRESENTATION_STYLE_BY_CONTEXT"
+        }
+
+        "the reader round-trips a translucent colour within 1e-6" {
+            val s = StyleScenario()
+            val c = StepColour.rgba(0.75, 0.3, 0.25, 0.3)
+            val styled = s.build(listOf(UsageStyle(s.u2, c), UsageStyle(s.u1, blue)))
+            val text = Part21Document(styleHeader, s.usageEntities + s.built.added + styled).render()
+            val read = Ap242InstanceStyleReader.read(Part21Reader.readRawDocument(text, Part21ReadMode.TOLERANT))
+            read.getValue("U-1") shouldBe blue
+            (kotlin.math.abs(read.getValue("U-2").a - 0.3) < 1e-6) shouldBe true
+            read.getValue("U-2").r shouldBe 0.75
+        }
+
+        "alpha -0.0 is accepted and writes a transparency of 1" {
+            val s = StyleScenario()
+            val text =
+                Part21Document(
+                    styleHeader,
+                    s.build(listOf(UsageStyle(s.u2, StepColour.rgba(0.0, 0.0, 1.0, -0.0)))),
+                ).render()
+            text shouldContain "SURFACE_STYLE_TRANSPARENT(1.0);"
+        }
+
+        "the reader rejects hostile transparency chains" {
+            val s = StyleScenario()
+            val styled = s.build(listOf(UsageStyle(s.u2, StepColour.rgba(0.0, 0.0, 1.0, 0.5))))
+            val good = Part21Document(styleHeader, s.usageEntities + s.built.added + styled).render()
+
+            fun reads(text: String) =
+                Ap242InstanceStyleReader.read(Part21Reader.readRawDocument(text, Part21ReadMode.TOLERANT))
+            reads(good).getValue("U-2").a shouldBe 0.5
+            val tampered =
+                listOf(
+                    good.replace("TRANSPARENT(0.5)", "TRANSPARENT(-0.5)"),
+                    good.replace("TRANSPARENT(0.5)", "TRANSPARENT(1.5)"),
+                    good.replace("TRANSPARENT(0.5)", "TRANSPARENT(1.E400)"),
+                    good.replace("TRANSPARENT(0.5)", "TRANSPARENT(ABC)"),
+                    good.replace("TRANSPARENT(0.5)", "TRANSPARENT(0.5,0.5)"),
+                    good.replace("(.NORMAL_SHADING.,#2000,(#2004))", "(.NORMAL_SHADING.,#2000,(#2004,#2004))"),
+                    good.replace("(.NORMAL_SHADING.,#2000,(#2004))", "(.NORMAL_SHADING.,#2000,#2004)"),
+                    good.replace("(.NORMAL_SHADING.,#2000,", "(.NORMAL_SHADING.,#999,"),
+                    good.replace("(#2003,#2005)", "(#2003,#2005,#2005)"),
+                    good.replace("(.NORMAL_SHADING.", "(.FLAT_SHADING."),
                 )
-            }.message shouldContain "opaque"
+            for (t in tampered) {
+                shouldThrow<Exception> { reads(t) }
+            }
+        }
+
+        "a manipulated translucent block fails the self-check" {
+            val s = StyleScenario()
+            val out = s.build(listOf(UsageStyle(s.u2, StepColour.rgba(0.0, 0.0, 1.0, 0.5))))
+            val allowed = setOf(s.refs[1].placementShapeId, s.refs[1].placementAxisId, 900, 101)
+            Ap242InstanceStyleBridge.verify(out, allowed)
+            val foreign =
+                out.map {
+                    if ((it as Part21SimpleInstance).entityName == "SURFACE_STYLE_TRANSPARENT") {
+                        Part21SimpleInstance(it.id, "SURFACE_STYLE_RENDERING", listOf(Part21Value.Ref(7777)))
+                    } else {
+                        it
+                    }
+                }
+            shouldThrow<ShapeExportException> { Ap242InstanceStyleBridge.verify(foreign, allowed) }
+            shouldThrow<ShapeExportException> { Ap242InstanceStyleBridge.verify(out + out.first(), allowed) }
+            val dangling =
+                out.map {
+                    if ((it as Part21SimpleInstance).entityName == "SURFACE_STYLE_TRANSPARENT") {
+                        Part21SimpleInstance(it.id, it.entityName, listOf(Part21Value.Ref(7777)))
+                    } else {
+                        it
+                    }
+                }
+            shouldThrow<ShapeExportException> { Ap242InstanceStyleBridge.verify(dangling, allowed) }
+        }
+
+        "more translucent styles than the limit are rejected" {
+            val s = StyleScenario()
+            val many =
+                List(Ap242InstanceStyleBridge.MAX_INSTANCE_STYLES + 1) {
+                    UsageStyle(s.u1, StepColour.rgba(0.0, 0.0, 1.0, 0.5))
+                }
+            shouldThrow<ShapeExportException> {
+                Ap242InstanceStyleBridge.plan(many, s.plan, listOf(s.a))
+            }.message shouldContain "too many instance colours"
         }
 
         "more than the limit of instance colours is rejected" {

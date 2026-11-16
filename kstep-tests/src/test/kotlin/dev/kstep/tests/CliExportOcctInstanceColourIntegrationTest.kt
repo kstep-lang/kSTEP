@@ -19,6 +19,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Subprocess-level coverage of instance colours in `kstep export` and `kstep import` (ADR-0044). The class name carries
@@ -238,8 +239,8 @@ class CliExportOcctInstanceColourIntegrationTest :
                 errorCode(json) shouldBe code
                 out.exists() shouldBe false
             }
-            failure("alpha", "KSTEP-S-012", "opaque") {
-                it.replace("StepColour.rgb(0.0, 0.0, 1.0)", "StepColour.rgba(0.0, 0.0, 1.0, 0.5)")
+            failure("alpha", "KSTEP-S-012", "alpha") {
+                it.replace("StepColour.rgb(0.0, 0.0, 1.0)", "StepColour.rgba(0.0, 0.0, 1.0, 1.5)")
             }
             failure("twice", "KSTEP-S-014", "NAUO-1") {
                 it.replace("styleInstance(u2,", "styleInstance(u1,")
@@ -277,6 +278,109 @@ class CliExportOcctInstanceColourIntegrationTest :
                     .jsonArray[0]
                     .jsonPrimitive.double
                     .toInt() to o["colour"]!!
+            }
+
+        // Welle Y (ADR-0044 amendment): translucent instance colours, export -> import round trip
+        fun JsonElement.shouldBeRgba(
+            r: Double,
+            g: Double,
+            b: Double,
+            a: Double,
+        ) {
+            val c = jsonObject
+            c["r"]!!.jsonPrimitive.double shouldBe (r plusOrMinus 1e-6)
+            c["g"]!!.jsonPrimitive.double shouldBe (g plusOrMinus 1e-6)
+            c["b"]!!.jsonPrimitive.double shouldBe (b plusOrMinus 1e-6)
+            c["alpha"]!!.jsonPrimitive.double shouldBe (a plusOrMinus 1e-6)
+        }
+
+        val transScript = "export-golden-instance-transparency.kstep.kts"
+
+        "a translucent instance colour is exported and read back with its alpha in JSON and text (Welle Y)".config(
+            enabled = available,
+            timeout = 120.seconds,
+        ) {
+            val script = copyFixture(transScript)
+            val out = File(workDir, "trans.step").apply { delete() }
+            runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+            val json = importJson(out)
+            json["parts"]!!.jsonArray.single().jsonObject["colour"] shouldBe JsonNull
+            val comps = components(json)
+            comps[0]["colour"] shouldBe JsonNull
+            comps[1]["colour"]!!.shouldBeRgba(0.0, 0.0, 1.0, 0.5)
+            val colours = occurrenceColours(json)
+            colours.getValue(0) shouldBe JsonNull
+            colours.getValue(50).shouldBeRgba(0.0, 0.0, 1.0, 0.5)
+            json["totals"]!!.jsonObject["volume"]!!.jsonPrimitive.double shouldBe (12000.0 plusOrMinus 1e-6)
+            json["presentation"]!!.jsonObject["instanceStylesIgnored"]!!.jsonPrimitive.int shouldBe 0
+            runner.run("import", out.name).stdout shouldContain "colour (0, 0, 1) alpha 0.5"
+        }
+
+        "alpha 0.0, 192/255, 0.3 and 0.999999 survive the export and import round trip within 1e-6 (Welle Y, Y6)"
+            .config(
+                enabled = available,
+                timeout = 180.seconds,
+            ) {
+                for ((i, alpha) in listOf(0.0, 0xC0 / 255.0, 0.3, 0.999999).withIndex()) {
+                    val script =
+                        copyFixture(transScript) {
+                            it.replace("StepColour.rgba(0.0, 0.0, 1.0, 0.5)", "StepColour.rgba(0.0, 0.0, 1.0, $alpha)")
+                        }
+                    val out = File(workDir, "alpha-$i.step").apply { delete() }
+                    runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+                    components(importJson(out))[1]["colour"]!!.shouldBeRgba(0.0, 0.0, 1.0, alpha)
+                }
+            }
+
+        "a translucent colour on a sub-assembly occurrence is exported and read back with its alpha (ADR-0046)".config(
+            enabled = available,
+            timeout = 120.seconds,
+        ) {
+            val script =
+                copyFixture(subScript) {
+                    it.replace(
+                        "styleInstance(u2, StepColour.rgb(0.0, 0.0, 1.0))",
+                        "styleInstance(u2, StepColour.rgba(0.0, 0.0, 1.0, 0.5))",
+                    )
+                }
+            val out = File(workDir, "sub-trans.step").apply { delete() }
+            runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+            val json = importJson(out)
+            json["totals"]!!.jsonObject["volume"]!!.jsonPrimitive.double shouldBe (24000.0 plusOrMinus 1e-6)
+            val colours = occurrenceColours(json)
+            colours.getValue(0).shouldBeRgb(1.0, 0.0, 0.0) // own component u3 still beats the outer u2
+            colours.getValue(20) shouldBe JsonNull
+            colours.getValue(100).shouldBeRgb(1.0, 0.0, 0.0)
+            colours.getValue(120).shouldBeRgba(0.0, 0.0, 1.0, 0.5) // u4 inside the translucent SUB occurrence
+        }
+
+        "the translucent export matches its golden byte for byte and the plain export is its byte prefix (Welle Y)"
+            .config(enabled = available, timeout = 120.seconds) {
+                fun export(
+                    name: String,
+                    transform: (String) -> String,
+                ): String {
+                    val script =
+                        File(
+                            workDir,
+                            "$name.kstep.kts",
+                        ).also { it.writeText(transform(resourceText(transScript))) }
+                    val out = File(workDir, "$name.step").apply { delete() }
+                    runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+                    return out.readText()
+                }
+                val full = export("trans-full") { it }
+                full shouldBe resourceText("export-golden-instance-transparency.step")
+                val plain = export("trans-plain") { it.replace(Regex("    styleInstance\\(.*\n"), "") }
+                val opaque = export("trans-opaque") { it.replace("rgba(0.0, 0.0, 1.0, 0.5)", "rgb(0.0, 0.0, 1.0)") }
+
+                fun prefixOf(text: String) = text.substring(0, text.lastIndexOf("ENDSEC;"))
+                opaque shouldStartWith prefixOf(plain)
+                full shouldStartWith prefixOf(plain)
+                // two extra entities for the translucent colour, nothing else
+                Regex("SURFACE_STYLE_TRANSPARENT\\(0\\.5\\)").findAll(full).count() shouldBe 1
+                Regex("SURFACE_STYLE_RENDERING_WITH_PROPERTIES").findAll(full).count() shouldBe 1
+                opaque.contains("SURFACE_STYLE_TRANSPARENT") shouldBe false
             }
 
         "an instance colour on a sub-assembly occurrence is exported and read back per occurrence (ADR-0046)".config(

@@ -66,7 +66,22 @@ object TriangleSvgWriter {
             // between adjacent flat-shaded triangles that a fill-only path leaves as a hairline
             // white gap -- see docs/adr/ADR-0011-headless-preview-rendering.adoc's Stolperfallen
             // (mirrors TriangleRasterizer's identical fill-then-stroke choice).
-            sb.append("<polygon points=\"$points\" fill=\"$color\" stroke=\"$color\" stroke-width=\"1\"/>\n")
+            // Welle Y: a translucent polygon gets the element `opacity`, NO stroke and crisp edges. A stroke would reach
+            // 0.5 px into the neighbouring polygon, which is composited on top at its own opacity, so every internal
+            // edge would be drawn at 1-(1-a)^2 and show the triangulation. Opaque triangles are byte-identical.
+            if (t.color.a < 1.0) {
+                val opacity =
+                    String
+                        .format(Locale.ROOT, "%.4f", t.color.a)
+                        .trimEnd('0')
+                        .trimEnd('.')
+                        .ifEmpty { "0" }
+                sb.append(
+                    "<polygon points=\"$points\" fill=\"$color\" shape-rendering=\"crispEdges\" opacity=\"$opacity\"/>\n",
+                )
+            } else {
+                sb.append("<polygon points=\"$points\" fill=\"$color\" stroke=\"$color\" stroke-width=\"1\"/>\n")
+            }
         }
         sb.append("</svg>\n")
         return sb.toString()

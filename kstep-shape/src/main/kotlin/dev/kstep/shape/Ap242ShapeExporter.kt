@@ -65,7 +65,7 @@ object Ap242ShapeExporter {
      * assembly usage, are written exactly as before ADR-0028.
      *
      * @param placements at most one per usage; the usage must be a root with a geometric child
-     * @param usageStyles instance colours (ADR-0044, ADR-0046): at most one opaque colour per usage; the usage must be a
+     * @param usageStyles instance colours (ADR-0044, ADR-0046): at most one colour per usage, which may be translucent (Welle Y); the usage must be a
      *   root whose child has a shape of its own or carries geometry below it (a sub-assembly). They are written at the very
      *   end of the file, behind every other entity: first the block of the parts (ADR-0044), then the block of the
      *   sub-assemblies (ADR-0046). So a file without instance colours is a byte-for-byte prefix of the same file with

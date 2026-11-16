@@ -32,8 +32,8 @@ is also per usage.
 D6:: *No change without instance colours.* The path is chosen exactly as before: `anyColour` is true if a part has a
 colour or an instance has a usage colour; otherwise `colored` stays `null` and the plain merge and projection run. If only
 some instances are coloured, the others use `MeshColor.NEUTRAL` (the same rule as for part colours). SVG, PNG and GLB all
-run through the merged coloured mesh, so the `COLOR_0` vertex colours of the GLB follow without further change. Alpha stays
-off in the render (ADR-0042); instance colours are opaque anyway (ADR-0044 D4).
+run through the merged coloured mesh, so the `COLOR_0` vertex colours of the GLB follow without further change. Alpha stayed
+off in the render in this wave (_superseded by the Welle Y amendment of ADR-0044: the render draws alpha_).
 
 D7:: *Text card.* The text renderer (`TextCardRenderer`, `PreviewSummary`) contains no colour information, so nothing
 changes there.
@@ -47,8 +47,8 @@ The checks live in `CliExportOcctInstanceColourIntegrationTest` (round trip) and
 
 == Limits
 
-* (Colours on sub-assembly components: built in ADR-0046.) No transparency on instance colours, no layers on instances.
-* No opacity in the render (ADR-0042).
+* (Colours on sub-assembly components: built in ADR-0046.) No layers on instances.
+* Transparency and opacity in the render: built in Welle Y (amendment of ADR-0044).
 * No per-face colours in the effective value.
 * The text card shows no colour.
 * Bounded as before: `AssemblyInstanceExpander.MAX_INSTANCES` (4096) bounds the usage map used by the render.

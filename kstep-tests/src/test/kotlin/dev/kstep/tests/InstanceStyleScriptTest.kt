@@ -56,12 +56,18 @@ class InstanceStyleScriptTest :
             error.message.contains("U1") shouldBe true
         }
 
-        "a transparent instance colour fails with KSTEP-S-012" {
+        "a translucent instance colour is accepted (Welle Y)" {
             val outcome =
                 eval("stepFile(fileName = \"s.step\") { styleInstance(u1, StepColour.rgba(1.0, 0.0, 0.0, 0.5)) }")
-            val error = outcome.shouldBeInstanceOf<KStepScriptOutcome.RuntimeError>()
-            error.code shouldBe "KSTEP-S-012"
-            error.message.contains("opaque") shouldBe true
+            outcome.shouldBeInstanceOf<KStepScriptOutcome.Success>()
+        }
+
+        "an instance colour with an invalid alpha still fails with KSTEP-S-012" {
+            for (a in listOf("Double.NaN", "-0.01", "1.01", "Double.POSITIVE_INFINITY")) {
+                val outcome =
+                    eval("stepFile(fileName = \"s.step\") { styleInstance(u1, StepColour.rgba(1.0, 0.0, 0.0, $a)) }")
+                outcome.shouldBeInstanceOf<KStepScriptOutcome.RuntimeError>().code shouldBe "KSTEP-S-012"
+            }
         }
 
         "an invalid usage contributes its violations instead of aborting the script" {

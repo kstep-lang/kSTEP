@@ -16,21 +16,29 @@ package dev.kstep.geometry
  * below roughly `0.40` goes nearly black on a triangle's shadow side (`shade` near `AMBIENT`),
  * making differently-colored parts hard to tell apart in a multi-part scene.
  *
- * @throws IllegalArgumentException if any channel is non-finite or outside `0.0..1.0`.
+ * [a] is the opacity (Welle Y, docs/adr/ADR-0044-instance-colours.adoc, amendment): `1.0` (the default) is opaque and changes
+ * nothing, below `1.0` the renderers draw the triangle translucent. It is the LAST constructor parameter with a default,
+ * so source compatibility holds; the public constructor and `copy`/`componentN` signatures change (a binary break).
+ *
+ * @throws IllegalArgumentException if any channel or [a] is non-finite or outside `0.0..1.0`.
  */
 data class MeshColor(
     val r: Double,
     val g: Double,
     val b: Double,
+    val a: Double = 1.0,
 ) {
     init {
-        require(r.isFinite() && g.isFinite() && b.isFinite()) {
-            "MeshColor components must be finite, got ($r, $g, $b)"
+        require(r.isFinite() && g.isFinite() && b.isFinite() && a.isFinite()) {
+            "MeshColor components must be finite, got ($r, $g, $b, $a)"
         }
-        require(r in 0.0..1.0 && g in 0.0..1.0 && b in 0.0..1.0) {
-            "MeshColor components must be in 0.0..1.0, got ($r, $g, $b)"
+        require(r in 0.0..1.0 && g in 0.0..1.0 && b in 0.0..1.0 && a in 0.0..1.0) {
+            "MeshColor components must be in 0.0..1.0, got ($r, $g, $b, $a)"
         }
     }
+
+    /** `true` for alpha 1.0: every opaque colour takes the unchanged render path. */
+    val isOpaque: Boolean get() = a == 1.0
 
     companion object {
         /** Bit-identical to this codebase's pre-wave, colorless grayscale rendering -- see this

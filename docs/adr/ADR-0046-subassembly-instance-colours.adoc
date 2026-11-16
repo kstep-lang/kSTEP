@@ -95,6 +95,6 @@ Checks: `SubassemblyColourOcctGateTest` (committed gate fixtures H1, H3, H4), `C
 
 == Limits
 
-* No path-exact colours (no `SHUO`), no transparency, no layers on instances, no face or edge colours on occurrences.
+* No path-exact colours (no `SHUO`), no layers on instances (transparency: built in Welle Y, amendment of ADR-0044), no face or edge colours on occurrences.
 * The pattern was measured with OCCT 7.9.3 (macOS arm64 and the Linux CI); other readers are not verified.
 * FreeCAD cannot show the colours headless, so only its geometry is verified.

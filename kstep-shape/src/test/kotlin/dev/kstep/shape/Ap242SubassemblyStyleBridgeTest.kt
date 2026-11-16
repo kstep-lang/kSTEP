@@ -244,12 +244,11 @@ class Ap242SubassemblyStyleBridgeTest :
             }
         }
 
-        "a second colour for one sub-assembly usage, a transparent colour and a foreign usage are rejected" {
+        "a second colour for one sub-assembly usage and a foreign usage are rejected" {
             val s = SubScenario()
             shouldThrow<ShapeExportException> { s.planned(UsageStyle(s.u2, blue), UsageStyle(s.u2, red)) }
                 .message shouldContain "more than one"
-            shouldThrow<ShapeExportException> { s.planned(UsageStyle(s.u2, StepColour.rgba(0.0, 0.0, 1.0, 0.5))) }
-                .message shouldContain "opaque"
+            s.planned(UsageStyle(s.u2, StepColour.rgba(0.0, 0.0, 1.0, 0.5))).size shouldBe 1
             shouldThrow<ShapeExportException> { s.planned(UsageStyle(usage("U-X", s.asm, s.sub), blue)) }
                 .message shouldContain "'U-X'"
         }

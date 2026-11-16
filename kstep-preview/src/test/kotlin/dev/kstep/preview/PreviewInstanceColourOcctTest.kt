@@ -175,6 +175,51 @@ class PreviewInstanceColourOcctTest :
             b.isNotEmpty() shouldBe true
         }
 
+        // Welle Y (ADR-0044 amendment): translucent instance colours are drawn translucent
+        val glassBlue = "    styleInstance(u2, StepColour.rgba(0.0, 0.0, 1.0, 0.5))\n"
+
+        "a translucent instance colour gives opacity 0.5 on the polygons of that instance only (SVG)".config(
+            enabled = available,
+        ) {
+            val svg = String(render(script("", red + glassBlue), RenderFormat.SVG), Charsets.UTF_8)
+            val polygons = svg.lines().filter { it.startsWith("<polygon") }
+            val translucent = polygons.filter { it.contains("opacity=") }
+            translucent.isNotEmpty() shouldBe true
+            translucent.forEach { it.contains("opacity=\"0.5\"") shouldBe true }
+            // the red instance stays opaque, so there are polygons without the attribute
+            (polygons.size - translucent.size > 0) shouldBe true
+        }
+
+        "a translucent instance colour gives a VEC4 COLOR_0 with alpha 0.5 on 12 triangles and BLEND (GLB)".config(
+            enabled = available,
+        ) {
+            val bytes = render(script("", red + glassBlue), RenderFormat.GLB)
+            val text = String(bytes, Charsets.ISO_8859_1)
+            text shouldContain "\"alphaMode\":\"BLEND\""
+            text shouldContain "VEC4"
+            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val binStart = 20 + buf.getInt(12) + 8
+            val vertexCount = 72
+            val colorsStart = binStart + vertexCount * 24
+
+            fun rgba(v: Int) = (0 until 4).map { buf.getFloat(colorsStart + v * 16 + it * 4) }
+            (0 until 36).forEach { rgba(it) shouldBe listOf(1f, 0f, 0f, 1f) }
+            (36 until 72).forEach { rgba(it) shouldBe listOf(0f, 0f, 1f, 0.5f) }
+        }
+
+        "the part colour alpha is drawn translucent as well, and a render without translucency is VEC3 and has no BLEND"
+            .config(enabled = available) {
+                val svg =
+                    String(
+                        render(script(", colour = StepColour.rgba(1.0, 0.5, 0.0, 0.25)", ""), RenderFormat.SVG),
+                        Charsets.UTF_8,
+                    )
+                svg shouldContain "opacity=\"0.25\""
+                val plain = String(render(script("", red + blue), RenderFormat.GLB), Charsets.ISO_8859_1)
+                plain.contains("BLEND") shouldBe false
+                plain.contains("VEC4") shouldBe false
+            }
+
         "the render fails predictably when the native bridge is unavailable".config(enabled = !available) {
             (OcctKernel.availability() is OcctAvailability.Available) shouldBe false
         }
