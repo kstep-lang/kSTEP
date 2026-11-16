@@ -1,5 +1,6 @@
 package dev.kstep.shape.importer
 
+import dev.kstep.geometry.RgbColor
 import dev.kstep.geometry.StepImportLimits
 import dev.kstep.geometry.XcafNode
 import dev.kstep.geometry.XcafNodeKind
@@ -177,5 +178,81 @@ class StepImporterExpansionTest :
                 listOf(occ(rigid)),
                 listOf(ImportedPart(0, "Hollow", null, null, null, null, null)),
             ) shouldBe null
+        }
+
+        val red = RgbColor(1.0, 0.0, 0.0)
+        val blue = RgbColor(0.0, 0.0, 1.0)
+        val green = RgbColor(0.0, 1.0, 0.0)
+
+        fun expandColoured(
+            graph: Graph,
+            instance: Map<Int, RgbColor> = emptyMap(),
+            part: Map<Int, RgbColor> = emptyMap(),
+        ) = StepImporter.expand(
+            graph.nodes,
+            instanceColorOf = { instance[it.index] },
+            partColorOf = { part[it] },
+        ) { _, _ -> null }
+
+        "the instance colour wins over the part colour (ADR-0045)" {
+            val g = Graph()
+            val p = g.part()
+            val a = g.assembly("A", root = true)
+            val c = g.use(a, p)
+            expandColoured(g, mapOf(c to blue), mapOf(0 to red)).occurrences.single().color shouldBe blue
+        }
+
+        "without an instance colour the part colour applies" {
+            val g = Graph()
+            val p = g.part()
+            val a = g.assembly("A", root = true)
+            g.use(a, p)
+            expandColoured(g, part = mapOf(0 to red)).occurrences.single().color shouldBe red
+        }
+
+        "only an instance colour is enough" {
+            val g = Graph()
+            val p = g.part()
+            val a = g.assembly("A", root = true)
+            val c = g.use(a, p)
+            expandColoured(g, mapOf(c to blue)).occurrences.single().color shouldBe blue
+        }
+
+        "no colour at all yields null" {
+            val g = Graph()
+            val p = g.part()
+            val a = g.assembly("A", root = true)
+            g.use(a, p)
+            expandColoured(g).occurrences.single().color shouldBe null
+        }
+
+        "two components of one part keep their own colours" {
+            val g = Graph()
+            val p = g.part()
+            val a = g.assembly("A", root = true)
+            val c1 = g.use(a, p)
+            val c2 = g.use(a, p)
+            val result = expandColoured(g, mapOf(c1 to red, c2 to blue), mapOf(0 to green))
+            result.occurrences.map { it.color } shouldBe listOf(red, blue)
+        }
+
+        "a sub-assembly component colour is ignored, only the leaf component counts" {
+            val g = Graph()
+            val p = g.part()
+            val inner = g.assembly("Inner")
+            val outer = g.assembly("Outer", root = true)
+            val cOuter = g.use(outer, inner)
+            val cLeafColoured = g.use(inner, p)
+            g.use(inner, p)
+            val result = expandColoured(g, mapOf(cOuter to green, cLeafColoured to red), mapOf(0 to blue))
+            result.occurrences.map { it.color } shouldBe listOf(red, blue)
+        }
+
+        "the default call without colour lambdas leaves the colour null" {
+            val g = Graph()
+            val p = g.part()
+            val a = g.assembly("A", root = true)
+            g.use(a, p)
+            expand(g).occurrences.single().color shouldBe null
         }
     })

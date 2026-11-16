@@ -719,7 +719,8 @@ scan before either lands.
   reports `components[].colour`; `instanceStylesIgnored` now counts only layers and curve-only colours on instances. Gate:
   OCCT's XCAF reader reads the hand-written pattern (scenarios G1-G8, `scripts/interop/verify-export-instance-colours.sh`),
   FreeCAD loads the file as geometry. Not covered: colours on occurrences of sub-assemblies, transparent instance colours,
-  layers on instances, the effective colour per occurrence and instance colours in `kstep render`.
+  layers on instances. Followed in Welle W (ADR-0045): the effective colour per occurrence in `kstep import`
+  (`occurrences[].colour`) and instance colours in `kstep render`.
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

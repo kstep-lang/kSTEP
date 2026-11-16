@@ -763,6 +763,8 @@ stepFile(fileName = "two-boxes.step") {
 * An instance colour is written behind everything else. A script without `styleInstance` exports byte for byte as before,
   and with it the file is the same file plus a suffix.
 * `kstep import` reads it back as `components[].colour` (`null` without a colour; the text report appends
-  `colour (r, g, b)` to the component line). `kstep render` ignores instance colours.
+  `colour (r, g, b)` to the component line). `kstep import` also reports the effective colour of
+  each occurrence as `occurrences[].colour`. `kstep render` draws instance colours (they win over the part colour; the opacity
+  stays off, ADR-0042). See docs/adr/ADR-0045-effective-occurrence-colour.adoc.
 * Verified with OCCT's own reader, `kstep import` and FreeCAD (geometry; headless FreeCAD reads no colours):
   `scripts/interop/verify-export-instance-colours.sh`. See docs/adr/ADR-0044-instance-colours.adoc.

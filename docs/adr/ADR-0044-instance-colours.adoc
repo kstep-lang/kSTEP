@@ -96,13 +96,12 @@ The native caps are unchanged: an instance colour is one more record under `kMax
 `PRESENTATION_STYLE_BY_CONTEXT`, a subtype of `STYLED_ITEM`'s style list entity `PresentationStyleAssignment`, is covered by
 the pre-transfer list-length cap through `IsKind` (ADR-0038).
 
-D7:: *`kstep render` ignores instance colours* (the preview has its own palette and, since ADR-0042, ignores alpha). The
-effective colour per occurrence (`ImportedOccurrence`) is not computed in this wave.
+D7:: *`kstep render` ignores instance colours and the effective colour per occurrence is not computed in this wave.* Both
+are implemented since ADR-0045 (Welle W); the render still ignores alpha (ADR-0042).
 
 == Not built / follow-ups
 
 * Colours on occurrences of sub-assemblies (path-exact colours), transparency on instance colours (it needs the rendering
   chain of ADR-0042 and a gate scenario of its own), layers on instances.
-* The effective colour per occurrence in `kstep import` (instance colour over part colour) and instance colours in
-  `kstep render`.
+* Done in ADR-0045: the effective colour per occurrence in `kstep import` and instance colours in `kstep render`.
 * Interoperability is checked with OCCT's reader and FreeCAD (geometry); other CAD systems are not covered.

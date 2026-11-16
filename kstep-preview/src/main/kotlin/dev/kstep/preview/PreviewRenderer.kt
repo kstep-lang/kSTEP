@@ -1,5 +1,6 @@
 package dev.kstep.preview
 
+import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.geometry.ColoredMesh
 import dev.kstep.geometry.MeshColor
@@ -352,16 +353,20 @@ object PreviewRenderer {
                     "(at least $total over ${instances.size} instance(s))"
             }
         }
-        val anyColour = shapeOf.values.any { it.style.colour != null }
+        // Instance colours (ADR-0045): keyed by usage identity (NAUO ids are not guaranteed unique); they win over the
+        // part colour. Alpha stays off in the render (ADR-0042); instance colours are opaque anyway.
+        val styleOf = IdentityHashMap<NextAssemblyUsageOccurrence, StepColour>()
+        for (style in model.usageStyles) styleOf[style.usage] = style.colour
+
+        fun colourOf(instance: PlacedInstance): StepColour? =
+            instance.usage?.let { styleOf[it] } ?: shapeOf.getValue(instance.productDefinition).style.colour
+        val anyColour = shapeOf.values.any { it.style.colour != null } || instances.any { colourOf(it) != null }
         val parts =
             instances.map { instance ->
                 PlacedMesh(
                     meshOf.getValue(instance.productDefinition),
                     instance.placement.toGeometryPlacement(),
-                    shapeOf
-                        .getValue(instance.productDefinition)
-                        .style.colour
-                        ?.toMeshColor() ?: MeshColor.NEUTRAL,
+                    colourOf(instance)?.toMeshColor() ?: MeshColor.NEUTRAL,
                 )
             }
         val colored = if (anyColour) MeshComposition.mergeColored(parts) else null

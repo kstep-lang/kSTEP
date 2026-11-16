@@ -45,6 +45,28 @@ class AssemblyInstanceExpanderTest :
             near(expansion.instances[1].placement.apply(vec(10.0, 10.0, 0.0)), vec(20.0, 10.0, 0.0))
         }
 
+        "each instance carries the usage that placed it; a shaped root carries none (ADR-0045)" {
+            val asm = pd("ASM")
+            val a = pd("A")
+            val uA = usage("U-A", asm, a)
+            val expansion = AssemblyInstanceExpander.expand(listOf(uA), listOf(asm, a), emptyList())
+            (expansion.instances[0].usage == null) shouldBe true
+            (expansion.instances[1].usage === uA) shouldBe true
+        }
+
+        "in a nested assembly the instance usage is the leaf usage, and a repeated parent repeats it" {
+            val top = pd("TOP")
+            val sub = pd("SUB")
+            val leaf = pd("LEAF")
+            val uS1 = usage("U-S1", top, sub)
+            val uS2 = usage("U-S2", top, sub)
+            val uLeaf = usage("U-LEAF", sub, leaf)
+            val expansion = AssemblyInstanceExpander.expand(listOf(uS1, uS2, uLeaf), listOf(leaf), emptyList())
+            expansion.instances.size shouldBe 2
+            expansion.instances.forEach { (it.usage === uLeaf) shouldBe true }
+            expansion.instances.map { it.path } shouldBe listOf(listOf("U-S1", "U-LEAF"), listOf("U-S2", "U-LEAF"))
+        }
+
         "nested placements are composed from the root down (hand-calculated corners)" {
             val top = pd("TOP")
             val sub = pd("SUB")

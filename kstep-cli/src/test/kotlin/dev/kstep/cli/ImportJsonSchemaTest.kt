@@ -85,6 +85,31 @@ class ImportJsonSchemaTest :
                 )
         }
 
+        "the occurrence key set includes colour (ADR-0045), null without a colour" {
+            val occurrence = json(model(plain))["occurrences"]!!.jsonArray[0].jsonObject
+            occurrence.keys shouldBe setOf("path", "part", "placement", "boundingBox", "colour")
+            occurrence["colour"] shouldBe JsonNull
+        }
+
+        "an occurrence colour comes out as r, g, b, alpha" {
+            val m = model(plain)
+            val coloured =
+                ImportedStepModel(
+                    prescan = m.prescan,
+                    stats = m.stats,
+                    lengthUnit = m.lengthUnit,
+                    structureSource = m.structureSource,
+                    parts = m.parts,
+                    assemblies = m.assemblies,
+                    roots = m.roots,
+                    occurrences = listOf(ImportedOccurrence(emptyList(), 0, rigid, null, RgbColor(1.0, 0.0, 0.0))),
+                    totals = m.totals,
+                    warnings = m.warnings,
+                )
+            val colour = json(coloured)["occurrences"]!!.jsonArray[0].jsonObject["colour"]!!.jsonObject
+            colour.keys shouldBe setOf("r", "g", "b", "alpha")
+        }
+
         "the ignored block keeps exactly colours, layers and pmi with their occurrence counts" {
             val ignored = json(model(plain))["ignored"]!!.jsonObject
             ignored.keys shouldBe setOf("colours", "layers", "pmi")

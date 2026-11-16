@@ -486,7 +486,8 @@ internal fun importText(
     sb.appendLine("Occurrences:")
     for (o in model.occurrences) {
         val label = if (o.path.isEmpty()) "(root)" else o.path.joinToString("/")
-        sb.appendLine("  $label  ${model.parts[o.partIndex].name}  bbox ${box(o.boundingBox)}")
+        val colour = o.color?.let { "  colour ${colourText(it)}" }.orEmpty()
+        sb.appendLine("  $label  ${model.parts[o.partIndex].name}  bbox ${box(o.boundingBox)}$colour")
     }
     val volume = model.totals.volume?.let { "volume ${fixed3(it)} mm3, " } ?: ""
     sb.append("Total: ${model.totals.occurrenceCount} occurrences, ${volume}bbox ${box(model.totals.boundingBox)}")
@@ -792,6 +793,7 @@ internal fun importJson(
                             put("part", o.partIndex)
                             put("placement", jsonPlacement(o.global))
                             put("boundingBox", jsonBox(o.boundingBox))
+                            put("colour", jsonColour(o.color))
                         },
                     )
                 }

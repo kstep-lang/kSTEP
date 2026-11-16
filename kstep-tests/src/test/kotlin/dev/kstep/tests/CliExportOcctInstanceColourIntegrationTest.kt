@@ -289,10 +289,48 @@ class CliExportOcctInstanceColourIntegrationTest :
             out.exists() shouldBe false
         }
 
-        "kstep render ignores instance colours".config(enabled = available) {
+        "kstep render draws the instance colours (ADR-0045)".config(enabled = available) {
             val script = copyFixture(boxes)
             runner.run("render", script.name, "-f", "svg", "-o", "boxes.svg").exitCode shouldBe 0
-            File(workDir, "boxes.svg").readText() shouldContain "<svg"
+            val svg = File(workDir, "boxes.svg").readText()
+            svg shouldContain "<svg"
+            val fills = Regex("fill=\"#([0-9a-f]{6})\"").findAll(svg).map { it.groupValues[1] }.toSet()
+            fills.any { it.substring(2) == "0000" && it.substring(0, 2) != "00" } shouldBe true
+            fills.any { it.substring(0, 4) == "0000" && it.substring(4) != "00" } shouldBe true
+        }
+
+        "the effective colour per occurrence round-trips: occurrence 1 red, occurrence 2 blue (ADR-0045)".config(
+            enabled = available,
+        ) {
+            val script = copyFixture(boxes)
+            val out = File(workDir, "effective.step").apply { delete() }
+            runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+            val json = importJson(out)
+            val occurrences = json["occurrences"]!!.jsonArray.map { it.jsonObject }
+            occurrences.size shouldBe 2
+            occurrences[0]["colour"]!!.shouldBeRgb(1.0, 0.0, 0.0)
+            occurrences[1]["colour"]!!.shouldBeRgb(0.0, 0.0, 1.0)
+            // hand calculation: 2 x 6000 mm3 over two occurrences, the second 50 mm to the right
+            json["totals"]!!.jsonObject["volume"]!!.jsonPrimitive.double shouldBe (12000.0 plusOrMinus 1e-6)
+            val text = runner.run("import", out.name).stdout
+            text shouldContain "bbox"
+            text shouldContain "colour (1, 0, 0)"
+        }
+
+        "a file without any colour has occurrences[].colour null and an unchanged occurrence line".config(
+            enabled = available,
+        ) {
+            val script = copyFixture(boxes) { it.replace(Regex("    styleInstance\\(.*\n"), "") }
+            val out = File(workDir, "effective-plain.step").apply { delete() }
+            runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+            importJson(out)["occurrences"]!!.jsonArray.forEach { it.jsonObject["colour"] shouldBe JsonNull }
+            val lines =
+                runner
+                    .run("import", out.name)
+                    .stdout
+                    .lines()
+                    .filter { it.startsWith("  ") && "bbox" in it }
+            lines.forEach { it shouldNotContain "colour" }
         }
 
         "the export fails predictably when the native bridge is unavailable".config(enabled = !available) {

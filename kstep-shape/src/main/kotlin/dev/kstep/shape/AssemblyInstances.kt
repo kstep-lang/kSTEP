@@ -1,5 +1,6 @@
 package dev.kstep.shape
 
+import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
 import dev.kstep.generated.ap242v1.ProductDefinition
 import dev.kstep.geometry.Placement
 import java.util.IdentityHashMap
@@ -17,6 +18,11 @@ data class PlacedInstance(
     val placement: RigidPlacement,
     /** NAUO ids from the root to this instance (empty for a shaped root itself), for messages and tests. */
     val path: List<String>,
+    /**
+     * The assembly usage that placed this instance (ADR-0045); `null` for a shaped root. The same usage object
+     * hangs on every instance of a repeated parent, so colours keyed by usage apply to all of them.
+     */
+    val usage: NextAssemblyUsageOccurrence? = null,
 )
 
 data class InstanceExpansion(
@@ -80,6 +86,7 @@ object AssemblyInstanceExpander {
                 placement: RigidPlacement,
                 depth: Int,
                 path: List<String>,
+                via: NextAssemblyUsageOccurrence?,
             ) {
                 if (depth > MAX_DEPTH) {
                     throw ShapeExportException("assembly nesting deeper than $MAX_DEPTH levels at '${pd.id}'")
@@ -89,7 +96,7 @@ object AssemblyInstanceExpander {
                     throw ShapeExportException("assembly expansion visits more than $MAX_VISITS nodes")
                 }
                 if (shapedSet.containsKey(pd)) {
-                    instances += PlacedInstance(pd, placement, path)
+                    instances += PlacedInstance(pd, placement, path, via)
                     if (instances.size > MAX_INSTANCES) {
                         throw ShapeExportException("assembly expands to more than $MAX_INSTANCES instances")
                     }
@@ -97,7 +104,7 @@ object AssemblyInstanceExpander {
                 stack.addLast(Frame(pd, placement, depth, path, childrenOf[pd].orEmpty().iterator()))
             }
 
-            enter(rootPd, RigidPlacement.IDENTITY, 0, emptyList())
+            enter(rootPd, RigidPlacement.IDENTITY, 0, emptyList(), null)
             while (stack.isNotEmpty()) {
                 val frame = stack.last()
                 if (!frame.children.hasNext()) {
@@ -114,7 +121,7 @@ object AssemblyInstanceExpander {
                             e,
                         )
                     }
-                enter(usage.child, composed, frame.depth + 1, frame.path + usage.usage.id)
+                enter(usage.child, composed, frame.depth + 1, frame.path + usage.usage.id, usage.usage)
             }
         }
         return InstanceExpansion(instances, rootDefinitions.size)

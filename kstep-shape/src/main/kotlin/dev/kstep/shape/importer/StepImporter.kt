@@ -162,6 +162,8 @@ object StepImporter {
         val path: List<String>,
         val chain: List<ImportedPlacement>,
         val depth: Int,
+        /** Instance colour of the component that was pushed last, never inherited from outer components. */
+        val instanceColor: RgbColor? = null,
     )
 
     private fun build(
@@ -187,6 +189,9 @@ object StepImporter {
 
         val colorsByNode = doc.colors.groupBy { it.nodeIndex }
         val layersByNode = doc.layers.groupBy { it.nodeIndex }
+
+        fun instanceColourOf(node: XcafNode): RgbColor? =
+            colorsByNode[node.index]?.firstOrNull { it.target == XcafStyleTarget.INSTANCE }?.color
         val parts = mutableListOf<ImportedPart>()
         for (node in nodes.filter { it.kind == XcafNodeKind.PART }) {
             var shape: OcctShape? = null
@@ -258,7 +263,7 @@ object StepImporter {
                         childKind = referred.kind,
                         childIndex = denseIndex[referred.index],
                         local = localPlacement(comp),
-                        color = colorsByNode[comp.index]?.firstOrNull { it.target == XcafStyleTarget.INSTANCE }?.color,
+                        color = instanceColourOf(comp),
                     )
                 }
             assemblies.add(ImportedAssembly(assemblies.size, node.name, enrichment.productId(node.name), components))
@@ -272,6 +277,8 @@ object StepImporter {
                 nodes,
                 maxDepth,
                 maxOccurrences,
+                instanceColorOf = { instanceColourOf(it) },
+                partColorOf = { parts[it].color },
             ) { partIndex, global -> globalBox(parts[partIndex].shape, global, owned) }
         val occurrences = expansion.occurrences
         if (expansion.nonRigidSeen) {
@@ -381,6 +388,8 @@ object StepImporter {
         nodes: List<XcafNode>,
         maxDepth: Int = StepImportLimits.MAX_ASSEMBLY_DEPTH,
         maxOccurrences: Int = StepImportLimits.MAX_EXPANDED_OCCURRENCES,
+        instanceColorOf: (XcafNode) -> RgbColor? = { null },
+        partColorOf: (partIndex: Int) -> RgbColor? = { null },
         boxOf: (partIndex: Int, global: ImportedPlacement) -> BoundingBox?,
     ): Expansion {
         val denseIndex = denseIndices(nodes)
@@ -410,6 +419,7 @@ object StepImporter {
                             partIndex = partIndex,
                             global = global,
                             boundingBox = boxOf(partIndex, global),
+                            color = frame.instanceColor ?: partColorOf(partIndex),
                         ),
                     )
                 }
@@ -423,6 +433,7 @@ object StepImporter {
                                 frame.path + comp.name,
                                 frame.chain + localPlacement(comp),
                                 frame.depth + 1,
+                                instanceColorOf(comp),
                             ),
                         )
                     }

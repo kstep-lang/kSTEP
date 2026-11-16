@@ -17,6 +17,13 @@ minor versions may contain breaking changes.
   existing exports stay byte-identical. A usage whose child is a sub-assembly is refused (fail closed). Verified with OCCT's
   XCAF reader (`scripts/interop/verify-export-instance-colours.sh`, gate scenarios G1-G8), `kstep import` and FreeCAD
   (geometry; headless FreeCAD reads no colours).
+* Effective colour per occurrence (ADR-0045, Welle W): `kstep import` reports `occurrences[].colour` (instance colour of the
+  last component over the whole-part colour, `null` without a colour; always present in the JSON) and appends
+  `colour (r, g, b)` to the occurrence line of the text report only when there is one, so the report of a file without
+  colours is unchanged. Colours on sub-assembly components and per-face colours do not flow in.
+* `kstep render` draws instance colours (ADR-0045): a part used twice can be red once and blue once in SVG, PNG and GLB.
+  The instance colour wins over the part colour; instances without a colour stay neutral next to coloured ones; a script
+  without `styleInstance` renders as before. Opacity stays off in the render (ADR-0042).
 * `kstep import` reports instance colours: `components[].colour` in the JSON (always present, `null` without a colour) and
   `colour (r, g, b)` on the component line of the text report.
 
@@ -25,7 +32,6 @@ minor versions may contain breaking changes.
 * `presentation.instanceStylesIgnored` now counts only what is still not read (a layer or a curve-only colour on an
   assembly component); surface colours on instances are reported. `presentation.coloredTargets` counts instance colours too.
   The text report of a file without instance colours is unchanged.
-* `kstep render` still ignores instance colours.
 
 == 0.4.0 — 2026-11-12 (pre-release)
 

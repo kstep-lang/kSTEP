@@ -118,6 +118,8 @@ class ImportedOccurrence(
     val partIndex: Int,
     val global: ImportedPlacement,
     val boundingBox: BoundingBox?,
+    /** Effective colour: instance colour over part colour (ADR-0045). */
+    val color: RgbColor? = null,
 )
 
 class ImportedTotals(
