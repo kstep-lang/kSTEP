@@ -1,0 +1,94 @@
+name: SFA PMI probe
+
+# Manual-only experiment (ADR-0039, open PMI decision): run the NIST STEP File Analyzer (SFA)
+# on a clean Windows runner and collect what it reports. Nothing here builds, publishes or
+# changes kSTEP; the result is evidence for the PMI decision, nothing more.
+#
+# Trust notes:
+#  * The SFA archive and the NIST PMI test files come from the official usnistgov/SFA repository,
+#    pinned to one commit. The SHA-256 of each download is printed in the log so it can be pinned
+#    here after the first run (trust on first use).
+#  * The analyzer is an unsigned third-party Windows program; it runs only on this throw-away runner,
+#    with a read-only token and no secrets.
+#  * The SFA command line, and whether Excel exists on the runner, are not verified: every analyzer
+#    step is allowed to fail, and the job always uploads whatever it produced plus the diagnostics.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SFA_COMMIT: 1236017676c0fa1f24f0fb4642fb088437a406f7
+  SFA_BASE: https://raw.githubusercontent.com/usnistgov/SFA/1236017676c0fa1f24f0fb4642fb088437a406f7/Release
+
+jobs:
+  probe:
+    name: SFA on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download SFA and the NIST PMI test files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force sfa-work | Out-Null
+          foreach ($f in 'SFA-5.54.zip', 'NIST-PMI-STEP-Files.zip') {
+            Invoke-WebRequest -Uri "$env:SFA_BASE/$f" -OutFile "sfa-work/$f"
+            "{0}  {1} bytes  sha256 {2}" -f $f, (Get-Item "sfa-work/$f").Length, (Get-FileHash "sfa-work/$f" -Algorithm SHA256).Hash
+          }
+          Expand-Archive sfa-work/SFA-5.54.zip -DestinationPath sfa-work/sfa
+          Expand-Archive sfa-work/NIST-PMI-STEP-Files.zip -DestinationPath sfa-work/nist
+          "--- SFA files"; Get-ChildItem sfa-work/sfa -Recurse -File | Select-Object -First 40 FullName, Length
+          "--- NIST files"; Get-ChildItem sfa-work/nist -Recurse -File | Select-Object -First 40 FullName, Length
+
+      - name: Environment diagnostics (Excel present?)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          "OS: " + [System.Environment]::OSVersion.VersionString
+          $excel = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\excel.exe' -ErrorAction SilentlyContinue
+          if ($excel) { "Excel: " + $excel.'(default)' } else { "Excel: not found" }
+
+      - name: Run SFA on the NIST PMI files
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $exe = Get-ChildItem sfa-work/sfa -Recurse -Filter '*.exe' | Sort-Object Length | Select-Object -First 5
+          "candidate executables:"; $exe | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
+          $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter '*-CL.exe' | Select-Object -First 1
+          if (-not $cl) { $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter 'STEP-File-Analyzer.exe' | Select-Object -First 1 }
+          if (-not $cl) { throw 'no SFA executable found' }
+          "using: " + $cl.FullName
+          New-Item -ItemType Directory -Force sfa-out/nist | Out-Null
+          $files = Get-ChildItem sfa-work/nist -Recurse -Include *.stp, *.step | Select-Object -First 3
+          foreach ($f in $files) {
+            Copy-Item $f.FullName sfa-out/nist/
+            "analysing " + $f.Name
+            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD "sfa-out/nist/$($f.Name)") + '"') -PassThru -NoNewWindow
+            if (-not $p.WaitForExit(240000)) { $p.Kill(); "timeout: " + $f.Name } else { "exit code: " + $p.ExitCode }
+          }
+
+      - name: Run SFA on the kSTEP golden files
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter '*-CL.exe' | Select-Object -First 1
+          if (-not $cl) { $cl = Get-ChildItem sfa-work/sfa -Recurse -Filter 'STEP-File-Analyzer.exe' | Select-Object -First 1 }
+          if (-not $cl) { throw 'no SFA executable found' }
+          New-Item -ItemType Directory -Force sfa-out/kstep | Out-Null
+          foreach ($n in 'export-golden-box', 'export-golden-part-colour', 'export-golden-subassembly-colour') {
+            Copy-Item "kstep-tests/src/test/resources/$n.step" sfa-out/kstep/
+            $p = Start-Process -FilePath $cl.FullName -ArgumentList ('"' + (Join-Path $PWD "sfa-out/kstep/$n.step") + '"') -PassThru -NoNewWindow
+            if (-not $p.WaitForExit(240000)) { $p.Kill(); "timeout: $n" } else { "$n exit code: " + $p.ExitCode }
+          }
+
+      - name: Collect results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sfa-pmi-probe
+          path: sfa-out/
+          if-no-files-found: warn
+          retention-days: 14
