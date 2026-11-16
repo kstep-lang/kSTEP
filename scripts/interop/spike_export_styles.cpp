@@ -5,7 +5,7 @@
 //   spike_export_styles <scenario> <assemblyMode 0|2> <out.step>
 // scenarios: plain (STEPControl_Writer), xcaf-plain, part, face, layer, alpha, multi, unicode and (ADR-0039 S2, part colour
 // together with face colours) part-face, part-face-layer, part-faces-multi, part-face-same, part-face-assembly and
-// (ADR-0042) alpha-face, part-alpha-face-alpha, edge, part-edge, face-edge, edge-alpha, instance, instance-vs-product and (ADR-0044) instance-layer
+// (ADR-0042) alpha-face, part-alpha-face-alpha, edge, part-edge, face-edge, edge-alpha, instance, instance-vs-product and (ADR-0044) instance-layer, (ADR-0046) subassembly-instance, subassembly-instance-part
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -189,6 +189,22 @@ int main(int argc, char** argv) {
     (void)u1;
     ct->SetColor(u2, blue, XCAFDoc_ColorSurf);
     if (sc == "instance-layer") lt->SetLayer(u2, TCollection_ExtendedString("Layer-I", true), Standard_False);
+    st->UpdateAssemblies();
+  }
+  if (sc == "subassembly-instance" || sc == "subassembly-instance-part") {
+    // ADR-0046 H0: ASM holds SUB twice, SUB holds the part twice; colour the second SUB component blue (the sub-assembly
+    // occurrence), for -part additionally the part orange. Prints what OCCT's own writer produces for that pattern.
+    if (sc == "subassembly-instance-part") ct->SetColor(part, orange, XCAFDoc_ColorSurf);
+    TDF_Label sub = st->NewShape();
+    gp_Trsf a1, a2; a2.SetTranslationPart(gp_Vec(20, 0, 0));
+    st->AddComponent(sub, part, TopLoc_Location(a1));
+    st->AddComponent(sub, part, TopLoc_Location(a2));
+    st->UpdateAssemblies();
+    TDF_Label top = st->NewShape();
+    gp_Trsf t1, t2; t2.SetTranslationPart(gp_Vec(100, 0, 0));
+    st->AddComponent(top, sub, TopLoc_Location(t1));
+    TDF_Label u2 = st->AddComponent(top, sub, TopLoc_Location(t2));
+    ct->SetColor(u2, blue, XCAFDoc_ColorSurf);
     st->UpdateAssemblies();
   }
   STEPCAFControl_Writer w;

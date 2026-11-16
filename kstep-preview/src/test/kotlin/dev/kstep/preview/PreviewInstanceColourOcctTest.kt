@@ -118,6 +118,63 @@ class PreviewInstanceColourOcctTest :
             String(render(script("", ""), RenderFormat.GLB), Charsets.ISO_8859_1).contains("COLOR_0") shouldBe false
         }
 
+        // ADR-0046: ASM -> SUB twice (s1 at 0, s2 at x=100), SUB -> BOX twice (b1 at 0, b2 at x=20); only BOX has a shape
+        fun nested(
+            partColour: String,
+            styles: String,
+        ) = prelude +
+            "\nval sub = pd(\"SUB\")\nval s1 = usage(\"S1\", asm, sub); val s2 = usage(\"S2\", asm, sub)\n" +
+            "val b1 = usage(\"B1\", sub, box); val b2 = usage(\"B2\", sub, box)\n" +
+            "stepFile(fileName = \"nested.step\") {\n" +
+            "    roots(s1, s2, b1, b2)\n" +
+            "    shape(box, OcctKernel.makeBox(10.0, 20.0, 30.0)$partColour)\n" +
+            "    place(s2, translation = vec(100.0, 0.0, 0.0))\n" +
+            "    place(b2, translation = vec(20.0, 0.0, 0.0))\n" +
+            styles +
+            "}\n"
+
+        fun vertexColours(bytes: ByteArray): List<List<Float>> {
+            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val binStart = 20 + buf.getInt(12) + 8
+            val vertexCount = 4 * 36
+            val colorsStart = binStart + vertexCount * 24
+            return (0 until vertexCount).map { v -> (0 until 3).map { buf.getFloat(colorsStart + v * 12 + it * 4) } }
+        }
+
+        val blueS2 = "    styleInstance(s2, StepColour.rgb(0.0, 0.0, 1.0))\n"
+        val redB1 = "    styleInstance(b1, StepColour.rgb(1.0, 0.0, 0.0))\n"
+
+        "a colour on a sub-assembly occurrence colours exactly the two boxes of that occurrence (ADR-0046)".config(
+            enabled = available,
+        ) {
+            val colours = vertexColours(render(nested("", blueS2), RenderFormat.GLB))
+            val neutral = colours.first()
+            // instances in order: (s1,b1) (s1,b2) (s2,b1) (s2,b2), 36 vertices each
+            colours.slice(0 until 72).distinct() shouldBe listOf(neutral)
+            colours.slice(72 until 144).distinct() shouldBe listOf(listOf(0f, 0f, 1f))
+            (neutral != listOf(0f, 0f, 1f)) shouldBe true
+        }
+
+        "the part colour beats the colour of the outer sub-assembly occurrence, an inner occurrence colour beats both (ADR-0046)"
+            .config(enabled = available) {
+                val orange = ", colour = StepColour.rgb(1.0, 0.5, 0.0)"
+                val withPart = vertexColours(render(nested(orange, blueS2), RenderFormat.GLB))
+                withPart.distinct() shouldBe listOf(listOf(1f, 0.5f, 0f))
+                // the inner colour b1 (red) applies to the first box of both Sub occurrences
+                val inner = vertexColours(render(nested(orange, blueS2 + redB1), RenderFormat.GLB))
+                inner.slice(0 until 36).distinct() shouldBe listOf(listOf(1f, 0f, 0f))
+                inner.slice(36 until 72).distinct() shouldBe listOf(listOf(1f, 0.5f, 0f))
+                inner.slice(72 until 108).distinct() shouldBe listOf(listOf(1f, 0f, 0f))
+                inner.slice(108 until 144).distinct() shouldBe listOf(listOf(1f, 0.5f, 0f))
+            }
+
+        "without any sub-assembly colour the render does not change (ADR-0046)".config(enabled = available) {
+            val a = render(nested("", ""), RenderFormat.GLB)
+            String(a, Charsets.ISO_8859_1).contains("COLOR_0") shouldBe false
+            val b = render(script("", red + blue), RenderFormat.SVG)
+            b.isNotEmpty() shouldBe true
+        }
+
         "the render fails predictably when the native bridge is unavailable".config(enabled = !available) {
             (OcctKernel.availability() is OcctAvailability.Available) shouldBe false
         }

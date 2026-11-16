@@ -13,7 +13,7 @@ D1:: *Effective colour of an occurrence (import).* Instance colour over part col
 the path (the component that points directly at the part), otherwise the whole-part colour `ImportedPart.color`, otherwise
 `null`. `ImportedOccurrence` gets `color` as its last constructor parameter (default `null`).
 
-D2:: *Colours on intermediate components are ignored.* A colour on a sub-assembly component does not reach the parts below
+D2:: *Colours on intermediate components are ignored (partly superseded by ADR-0046 D5: from Welle X a colour on a sub-assembly component reaches the parts below it, behind the own component and the part colour).* A colour on a sub-assembly component does not reach the parts below
 it; path-exact colours stay unbuilt (ADR-0044 D4). The importer's `Frame` stores the instance colour of the component that
 was pushed last and never inherits it.
 
@@ -47,7 +47,7 @@ The checks live in `CliExportOcctInstanceColourIntegrationTest` (round trip) and
 
 == Limits
 
-* No colours on sub-assembly components, no transparency on instance colours, no layers on instances.
+* (Colours on sub-assembly components: built in ADR-0046.) No transparency on instance colours, no layers on instances.
 * No opacity in the render (ADR-0042).
 * No per-face colours in the effective value.
 * The text card shows no colour.

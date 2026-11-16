@@ -193,20 +193,18 @@ class Ap242InstanceStyleBridgeTest :
             }.message shouldContain "'U-X'"
         }
 
-        "a child without a shape of its own is rejected" {
+        "a child without a shape of its own is a sub-assembly and accepted (ADR-0046)" {
             val top = pd("TOP")
             val sub = pd("SUB")
             val leaf = pd("LEAF")
             val uTop = usage("U-TOP", top, sub)
             val uSub = usage("U-SUB", sub, leaf)
             val plan = AssemblyGeometryGraph.plan(listOf(uTop, uSub), listOf(leaf), emptyList())
-            val e =
-                shouldThrow<ShapeExportException> {
-                    Ap242InstanceStyleBridge.plan(listOf(UsageStyle(uTop, blue)), plan, listOf(leaf))
-                }
-            e.message shouldContain "sub-assembly"
-            // the occurrence of the leaf itself is fine
-            Ap242InstanceStyleBridge.plan(listOf(UsageStyle(uSub, blue)), plan, listOf(leaf)).size shouldBe 1
+            val planned = Ap242InstanceStyleBridge.plan(listOf(UsageStyle(uTop, blue)), plan, listOf(leaf))
+            planned.map { it.kind } shouldBe listOf(StyledChildKind.SUBASSEMBLY)
+            // the occurrence of the leaf itself is a part
+            Ap242InstanceStyleBridge.plan(listOf(UsageStyle(uSub, blue)), plan, listOf(leaf)).map { it.kind } shouldBe
+                listOf(StyledChildKind.PART)
         }
 
         "a second colour for one usage is rejected" {

@@ -7,7 +7,9 @@
 N is the 1-based usage index in file order. --pds new writes a second PRODUCT_DEFINITION_SHAPE('Placement', ...) on the
 NAUO (the plan of ADR-0044); --pds reuse hangs the SHAPE_DEFINITION_REPRESENTATION on the existing one (the pattern OCCT
 writes). --axis own adds a dedicated placement axis to the context SHAPE_REPRESENTATION instead of reusing the parent axis
-of the usage. --no-sdr omits the SHAPE_DEFINITION_REPRESENTATION (negative gate G7). --per-msb writes one STYLED_ITEM per
+of the usage. --leaf-items all|first|axis (ADR-0046, sub-assembly children): all = one STYLED_ITEM per distinct leaf solid
+below the usage, first = only the first leaf solid, axis = the origin axis of the synthetic SHAPE_REPRESENTATION of the
+child. Without it the items of the child itself are used (a part: unchanged). --no-sdr omits the SHAPE_DEFINITION_REPRESENTATION (negative gate G7). --per-msb writes one STYLED_ITEM per
 MANIFOLD_SOLID_BREP of the child. Uses only the standard library; reads and writes only the given files.
 """
 import re
@@ -21,7 +23,7 @@ def fmt(v):
 
 def main(argv):
     base, out = argv[0], argv[1]
-    colours, pds, axis, no_sdr, per_msb = {}, "new", "parent", False, False
+    colours, pds, axis, no_sdr, per_msb, leaf_items = {}, "new", "parent", False, False, None
     i = 2
     while i < len(argv):
         a = argv[i]
@@ -35,6 +37,10 @@ def main(argv):
             axis = argv[i + 1]; i += 2
         elif a == "--no-sdr":
             no_sdr = True; i += 1
+        elif a == "--leaf-items":
+            leaf_items = argv[i + 1]; i += 2
+            if leaf_items not in ("all", "first", "axis"):
+                raise SystemExit("--leaf-items expects all|first|axis")
         elif a == "--per-msb":
             per_msb = True; i += 1
         else:
@@ -56,6 +62,37 @@ def main(argv):
         nonlocal nxt
         new.append((nxt, text_)); nxt += 1; return nxt - 1
 
+    def usages_below(pd):
+        return [(k, int(re.match(r"NEXT_ASSEMBLY_USAGE_OCCURRENCE\('[^']*','[^']*',\$,#(\d+),#(\d+)", v).group(2)))
+                for k, v in ents.items()
+                if v.startswith("NEXT_ASSEMBLY_USAGE_OCCURRENCE(")
+                and int(re.match(r"NEXT_ASSEMBLY_USAGE_OCCURRENCE\('[^']*','[^']*',\$,#(\d+),#(\d+)", v).group(1)) == pd]
+
+    def own_solids(pd):
+        out_ = []
+        for k, v in ents.items():
+            if v.startswith("PRODUCT_DEFINITION_SHAPE('',") and v.endswith("#%d)" % pd):
+                for v2 in ents.values():
+                    m = re.match(r"SHAPE_DEFINITION_REPRESENTATION\(#%d,#(\d+)\)" % k, v2)
+                    if m:
+                        items = re.search(r"\('',\((.*?)\),#\d+\)$", ents[int(m.group(1))])
+                        out_ += [x for x in (int(t) for t in items.group(1).replace("#", "").split(",")) if ents[x].startswith("MANIFOLD_SOLID_BREP(")]
+        return out_
+
+    def leaf_solids(pd):  # iterative, depth first in file order, deduplicated by id
+        found, stack, seen = [], [pd], set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            for s_ in own_solids(cur):
+                if s_ not in found:
+                    found.append(s_)
+            for _, child in reversed(usages_below(cur)):
+                stack.append(child)
+        return found
+
     styled = []
     for idx, nauo in enumerate(nauos, start=1):
         if idx not in colours:
@@ -71,6 +108,15 @@ def main(argv):
         ctx = int(re.search(r",#(\d+)\)$", ents[parent_sr]).group(1))
         child_items = [int(x) for x in re.search(r"\('',\((.*?)\),#\d+\)$", ents[child_sr]).group(1).replace("#", "").split(",")]
         msbs = [k for k in child_items if ents[k].startswith("MANIFOLD_SOLID_BREP(")]
+        child_pd = int(re.match(r"NEXT_ASSEMBLY_USAGE_OCCURRENCE\('[^']*','[^']*',\$,#\d+,#(\d+)", ents[nauo]).group(1))
+        if leaf_items == "all":
+            msbs, per_msb_ = leaf_solids(child_pd), True
+        elif leaf_items == "first":
+            msbs, per_msb_ = leaf_solids(child_pd)[:1], False
+        elif leaf_items == "axis":
+            msbs, per_msb_ = child_items[:1], False
+        else:
+            per_msb_ = per_msb
         col = add("COLOUR_RGB('',%s,%s,%s)" % (fmt(r), fmt(g), fmt(b)))
         fasc = add("FILL_AREA_STYLE_COLOUR('',#%d)" % col)
         fas = add("FILL_AREA_STYLE('',(#%d))" % fasc)
@@ -92,7 +138,7 @@ def main(argv):
         if not no_sdr:
             add("SHAPE_DEFINITION_REPRESENTATION(#%d,#%d)" % (pds_ref, sr))
         psbc = add("PRESENTATION_STYLE_BY_CONTEXT((#%d),#%d)" % (ssu, sr))
-        for msb in (msbs if per_msb else msbs[:1]):
+        for msb in (msbs if per_msb_ else msbs[:1]):
             styled.append(add("STYLED_ITEM('color',(#%d),#%d)" % (psbc, msb)))
         ctx_for_mdgpr = ctx
     if styled:

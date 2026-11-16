@@ -236,7 +236,7 @@ class StepImporterExpansionTest :
             result.occurrences.map { it.color } shouldBe listOf(red, blue)
         }
 
-        "a sub-assembly component colour is ignored, only the leaf component counts" {
+        "the part colour beats an outer sub-assembly component colour, the own component colour beats both (ADR-0046)" {
             val g = Graph()
             val p = g.part()
             val inner = g.assembly("Inner")
@@ -246,6 +246,66 @@ class StepImporterExpansionTest :
             g.use(inner, p)
             val result = expandColoured(g, mapOf(cOuter to green, cLeafColoured to red), mapOf(0 to blue))
             result.occurrences.map { it.color } shouldBe listOf(red, blue)
+        }
+
+        "a colour on a sub-assembly component reaches every part below it that has no colour of its own (ADR-0046)" {
+            val g = Graph()
+            val p = g.part()
+            val q = g.part()
+            val inner = g.assembly("Inner")
+            val outer = g.assembly("Outer", root = true)
+            val cInner1 = g.use(outer, inner)
+            g.use(outer, inner)
+            g.use(inner, p)
+            g.use(inner, q)
+            // only the first of the two occurrences of Inner is coloured; one component object stands for one usage
+            val result = expandColoured(g, mapOf(cInner1 to green))
+            result.occurrences.map { it.color } shouldBe listOf(green, green, null, null)
+        }
+
+        "the inner component colour beats the outer one, hand calculation of the four occurrences (ADR-0046)" {
+            val g = Graph()
+            val box = g.part()
+            val sub = g.assembly("Sub")
+            val asm = g.assembly("Asm", root = true)
+            val u2 = g.use(asm, sub)
+            val u3 = g.use(sub, box)
+            g.use(sub, box)
+            g.use(asm, sub)
+            // u2 is the first Asm component and colours the first Sub occurrence, u3 the first Box component of every Sub
+            val expansion =
+                StepImporter.expand(
+                    g.nodes,
+                    instanceColorOf = { mapOf(u2 to blue, u3 to red)[it.index] },
+                ) { _, _ -> null }
+            // (u2,u3) red, (u2,u4) blue, (second Sub,u3) red, (second Sub,u4) none; u3 belongs to both occurrences of Sub
+            expansion.occurrences.map { it.color } shouldBe listOf(red, blue, red, null)
+        }
+
+        "a part colour between: own component, then part, then outer components innermost first (ADR-0046)" {
+            val g = Graph()
+            val box = g.part()
+            val sub = g.assembly("Sub")
+            val asm = g.assembly("Asm", root = true)
+            val u2 = g.use(asm, sub)
+            val u3 = g.use(sub, box)
+            g.use(sub, box)
+            val withPart =
+                expandColoured(g, mapOf(u2 to blue, u3 to red), mapOf(0 to green))
+            withPart.occurrences.map { it.color } shouldBe listOf(red, green)
+        }
+
+        "three levels: the nearest outer colour wins (ADR-0046)" {
+            val g = Graph()
+            val box = g.part()
+            val sub = g.assembly("Sub")
+            val mid = g.assembly("Mid")
+            val asm = g.assembly("Asm", root = true)
+            val cMid = g.use(asm, mid)
+            val cSub = g.use(mid, sub)
+            g.use(sub, box)
+            expandColoured(g, mapOf(cMid to green, cSub to blue)).occurrences.single().color shouldBe blue
+            expandColoured(g, mapOf(cMid to green)).occurrences.single().color shouldBe green
         }
 
         "the default call without colour lambdas leaves the colour null" {

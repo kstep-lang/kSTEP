@@ -13,6 +13,19 @@ import java.util.IdentityHashMap
 // Instance colours (ADR-0044): one placed occurrence of a part gets its own colour. Handwritten Part-21 entities, like the
 // placement chain of Ap242PlacementBridge, because OCCT's writer cannot be asked for them (ADR-0042). Pure: no OCCT call.
 
+// Welle X (ADR-0046) extends this to occurrences of sub-assemblies: the colour hangs on the usage, the STYLED_ITEMs sit on the
+// solids of the leaves below it.
+
+/** What an instance colour is attached to: a part with a shape of its own (ADR-0044) or a sub-assembly without one (ADR-0046). */
+internal enum class StyledChildKind { PART, SUBASSEMBLY }
+
+/** One validated instance colour: [usageIndex] is the index of its usage in [AssemblyGeometryPlan.usages]. */
+internal data class PlannedUsageStyle(
+    val style: UsageStyle,
+    val usageIndex: Int,
+    val kind: StyledChildKind,
+)
+
 /** Writes the entities of [UsageStyle]s and checks its own output against a fixed allow-list. */
 internal object Ap242InstanceStyleBridge {
     /** DoS guard: upper bound on instance colours per export (one per geometric usage at most). */
@@ -38,19 +51,43 @@ internal object Ap242InstanceStyleBridge {
             "SHAPE_DEFINITION_REPRESENTATION",
         )
 
+    /** DoS guard (ADR-0046): upper bound on the STYLED_ITEMs of all sub-assembly occurrences of one export. */
+    const val MAX_SUBASSEMBLY_STYLED_ITEMS: Int = 65_536
+
+    /**
+     * Own allow-list of the sub-assembly block (ADR-0046). The same eleven names as [INSTANCE_STYLE_ENTITY_NAMES], but a
+     * separate set on purpose: any later difference between the two blocks has to be a deliberate change.
+     */
+    val SUBASSEMBLY_STYLE_ENTITY_NAMES: Set<String> =
+        setOf(
+            "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
+            "STYLED_ITEM",
+            "PRESENTATION_STYLE_BY_CONTEXT",
+            "SURFACE_STYLE_USAGE",
+            "SURFACE_SIDE_STYLE",
+            "SURFACE_STYLE_FILL_AREA",
+            "FILL_AREA_STYLE",
+            "FILL_AREA_STYLE_COLOUR",
+            "COLOUR_RGB",
+            "SHAPE_REPRESENTATION",
+            "SHAPE_DEFINITION_REPRESENTATION",
+        )
+
     /**
      * Validates [styles] against [plan] (fail closed) and returns them with the index of their usage in
      * [AssemblyGeometryPlan.usages], in that order (not in registration order), so the output is deterministic.
      *
-     * @throws ShapeExportException for a usage that is not a geometric usage of the plan, a child without a shape of its
-     *   own (an assembly; colouring one occurrence of a sub-assembly is not supported), a second colour for one usage, a
+     * A child without a shape of its own is a sub-assembly (ADR-0046, [StyledChildKind.SUBASSEMBLY]); a plan usage is only
+     * geometric when something with a shape sits below it, so such a child always has leaves.
+     *
+     * @throws ShapeExportException for a usage that is not a geometric usage of the plan, a second colour for one usage, a
      *   transparent colour, and more than [MAX_INSTANCE_STYLES] colours
      */
     fun plan(
         styles: List<UsageStyle>,
         plan: AssemblyGeometryPlan,
         shapedDefinitions: Collection<ProductDefinition>,
-    ): List<Pair<UsageStyle, Int>> {
+    ): List<PlannedUsageStyle> {
         if (styles.isEmpty()) return emptyList()
         if (styles.size > MAX_INSTANCE_STYLES) {
             throw ShapeExportException("too many instance colours: ${styles.size} (limit $MAX_INSTANCE_STYLES)")
@@ -60,7 +97,7 @@ internal object Ap242InstanceStyleBridge {
         val shaped = IdentityHashMap<ProductDefinition, Boolean>()
         for (d in shapedDefinitions) shaped[d] = true
         val seen = IdentityHashMap<NextAssemblyUsageOccurrence, Boolean>()
-        val planned = mutableListOf<Pair<UsageStyle, Int>>()
+        val planned = mutableListOf<PlannedUsageStyle>()
         for (s in styles) {
             val id = s.usage.id
             val index =
@@ -72,36 +109,129 @@ internal object Ap242InstanceStyleBridge {
             if (seen.put(s.usage, true) != null) {
                 throw ShapeExportException("assembly usage '$id' has more than one instance colour")
             }
-            if (!shaped.containsKey(plan.usages[index].child)) {
-                throw ShapeExportException(
-                    "an instance colour refers to assembly usage '$id', whose child is an assembly without a " +
-                        "shape of its own; colouring one occurrence of a sub-assembly is not supported (ADR-0044)",
-                )
-            }
             if (!s.colour.isOpaque) {
                 throw ShapeExportException(
                     "instance colours must be opaque (ADR-0044), usage '$id' has alpha ${s.colour.a}",
                 )
             }
-            planned += s to index
+            val kind =
+                if (shaped.containsKey(
+                        plan.usages[index].child,
+                    )
+                ) {
+                    StyledChildKind.PART
+                } else {
+                    StyledChildKind.SUBASSEMBLY
+                }
+            planned += PlannedUsageStyle(s, index, kind)
         }
-        return planned.sortedBy { it.second }
+        return planned.sortedBy { it.usageIndex }
     }
 
     /**
-     * Builds the entities of [planned], starting at id [startId]: per coloured usage the colour chain, a one-item
-     * `SHAPE_REPRESENTATION` tied to the usage's existing `PRODUCT_DEFINITION_SHAPE('Placement', ...)` by a
-     * `SHAPE_DEFINITION_REPRESENTATION` (the pattern OCCT's own writer produces), one `PRESENTATION_STYLE_BY_CONTEXT` and one
-     * `STYLED_ITEM` per solid of the child; then one `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION` for all.
-     * The result is verified with [verify] before it is returned.
+     * Builds the entities of the [StyledChildKind.PART] entries of [planned], starting at id [startId]: per coloured usage
+     * the colour chain, a one-item `SHAPE_REPRESENTATION` tied to the usage's existing
+     * `PRODUCT_DEFINITION_SHAPE('Placement', ...)` by a `SHAPE_DEFINITION_REPRESENTATION` (the pattern OCCT's own writer
+     * produces), one `PRESENTATION_STYLE_BY_CONTEXT` and one `STYLED_ITEM` per solid of the child; then one
+     * `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION` for all. The result is verified with [verify] before it is
+     * returned. Entries of another kind are ignored (see [buildSubassembly]); the bytes of the part block do not depend on
+     * them.
      */
     fun build(
-        planned: List<Pair<UsageStyle, Int>>,
+        planned: List<PlannedUsageStyle>,
         refs: List<UsageEntityRefs>,
         startId: Int,
         solidIdsOfChild: (ProductDefinition) -> List<Int>,
         contextIdOf: (representationId: Int) -> Int,
         childOf: (UsageEntityRefs) -> ProductDefinition,
+    ): List<Part21EntityInstance> =
+        buildBlock(
+            planned.filter { it.kind == StyledChildKind.PART },
+            refs,
+            startId,
+            { solidIdsOfChild(it) },
+            contextIdOf,
+            childOf,
+            INSTANCE_STYLE_ENTITY_NAMES,
+            Int.MAX_VALUE,
+            "the child of assembly usage '%s' has no solid to carry an instance colour",
+        )
+
+    /**
+     * Builds the block of the [StyledChildKind.SUBASSEMBLY] entries of [planned] (ADR-0046): the same chain per usage as
+     * [build], but the `STYLED_ITEM`s sit on the solids of the leaves below the usage ([leafSolidsOf]), and the block has
+     * its own `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION`. Verified against
+     * [SUBASSEMBLY_STYLE_ENTITY_NAMES]; the allowed external references are exactly the placement entities, the context and
+     * the collected leaf solids.
+     *
+     * @param maxStyledItems upper bound on the STYLED_ITEMs of the whole block (default
+     *   [MAX_SUBASSEMBLY_STYLED_ITEMS]; injectable so that a test does not need thousands of solids)
+     * @throws ShapeExportException if a sub-assembly has no solid below it or the item bound is exceeded
+     */
+    fun buildSubassembly(
+        planned: List<PlannedUsageStyle>,
+        refs: List<UsageEntityRefs>,
+        startId: Int,
+        leafSolidsOf: (ProductDefinition) -> List<Int>,
+        contextIdOf: (representationId: Int) -> Int,
+        childOf: (UsageEntityRefs) -> ProductDefinition,
+        maxStyledItems: Int = MAX_SUBASSEMBLY_STYLED_ITEMS,
+    ): List<Part21EntityInstance> =
+        buildBlock(
+            planned.filter { it.kind == StyledChildKind.SUBASSEMBLY },
+            refs,
+            startId,
+            leafSolidsOf,
+            contextIdOf,
+            childOf,
+            SUBASSEMBLY_STYLE_ENTITY_NAMES,
+            maxStyledItems,
+            "the sub-assembly of assembly usage '%s' has no solid below it to carry an instance colour",
+        )
+
+    /**
+     * The solids of [child] and of everything below it in [plan], each once, in the order of [AssemblyGeometryPlan.usages]
+     * (depth first, parents before their later siblings' subtrees). Iterative with a visited set, so the work is bounded by
+     * the number of product definitions of the plan and a deep or diamond-shaped assembly cannot blow the stack or repeat
+     * a subtree. [solidsOf] gives the solids of one product definition (empty for one without a shape).
+     *
+     * @throws ShapeExportException if there is no solid at all
+     */
+    internal fun leafSolidsBelow(
+        child: ProductDefinition,
+        plan: AssemblyGeometryPlan,
+        solidsOf: (ProductDefinition) -> List<Int>,
+    ): List<Int> {
+        val childrenOf = IdentityHashMap<ProductDefinition, MutableList<ProductDefinition>>()
+        for (u in plan.usages) childrenOf.getOrPut(u.parent) { mutableListOf() } += u.child
+        val visited = IdentityHashMap<ProductDefinition, Boolean>()
+        val found = LinkedHashSet<Int>()
+        val stack = ArrayDeque<ProductDefinition>()
+        stack.addLast(child)
+        while (stack.isNotEmpty()) {
+            val pd = stack.removeLast()
+            if (visited.put(pd, true) != null) continue
+            found += solidsOf(pd)
+            for (c in childrenOf[pd].orEmpty().asReversed()) stack.addLast(c)
+        }
+        if (found.isEmpty()) {
+            throw ShapeExportException(
+                "the product definition '${child.id}' has no solid below it to carry an instance colour",
+            )
+        }
+        return found.toList()
+    }
+
+    private fun buildBlock(
+        planned: List<PlannedUsageStyle>,
+        refs: List<UsageEntityRefs>,
+        startId: Int,
+        itemSolidsOf: (ProductDefinition) -> List<Int>,
+        contextIdOf: (representationId: Int) -> Int,
+        childOf: (UsageEntityRefs) -> ProductDefinition,
+        allowList: Set<String>,
+        maxStyledItems: Int,
+        noSolidMessage: String,
     ): List<Part21EntityInstance> {
         if (planned.isEmpty()) return emptyList()
         val alloc = IdAllocator(startId)
@@ -118,14 +248,18 @@ internal object Ap242InstanceStyleBridge {
             out += Part21SimpleInstance(id, name, args.toList())
         }
 
-        for ((style, index) in planned) {
+        for ((style, index, _) in planned) {
             val r = refs[index]
             check(r.usage === style.usage) { "usage refs are out of step with the plan" }
-            val solids = solidIdsOfChild(childOf(r))
-            if (solids.isEmpty()) {
-                throw ShapeExportException(
-                    "the child of assembly usage '${style.usage.id}' has no solid to carry an instance colour",
-                )
+            val solids =
+                try {
+                    itemSolidsOf(childOf(r))
+                } catch (e: ShapeExportException) {
+                    throw ShapeExportException(noSolidMessage.format(style.usage.id), e)
+                }
+            if (solids.isEmpty()) throw ShapeExportException(noSolidMessage.format(style.usage.id))
+            if (styledIds.size + solids.size > maxStyledItems) {
+                throw ShapeExportException("too many styled items for instance colours: limit $maxStyledItems")
             }
             val context = contextIdOf(r.parentRepresentationId)
             if (mdgprContext < 0) mdgprContext = context
@@ -201,19 +335,20 @@ internal object Ap242InstanceStyleBridge {
             Part21Value.ListValue(styledIds.map { Part21Value.Ref(it) }),
             Part21Value.Ref(mdgprContext),
         )
-        verify(out, allowedExternal)
+        verify(out, allowedExternal, allowList)
         return out
     }
 
     /**
-     * Self-check of [added]: every entity is a simple instance whose name is on [INSTANCE_STYLE_ENTITY_NAMES], ids are
-     * unique, and every reference points to an entity of [added] itself or to one of the [allowedExternal] ids.
+     * Self-check of [added]: every entity is a simple instance whose name is on [allowList], ids are unique, and every
+     * reference points to an entity of [added] itself or to one of the [allowedExternal] ids.
      *
      * @throws ShapeExportException otherwise
      */
     internal fun verify(
         added: List<Part21EntityInstance>,
         allowedExternal: Set<Int>,
+        allowList: Set<String> = INSTANCE_STYLE_ENTITY_NAMES,
     ) {
         val own = HashSet<Int>()
         for (e in added) {
@@ -221,7 +356,7 @@ internal object Ap242InstanceStyleBridge {
         }
         for (e in added) {
             val name = (e as? Part21SimpleInstance)?.entityName
-            if (name == null || name !in INSTANCE_STYLE_ENTITY_NAMES) {
+            if (name == null || name !in allowList) {
                 throw ShapeExportException(
                     "instance colour entity #${e.id} is not on the allow-list: ${name ?: "complex instance"}",
                 )

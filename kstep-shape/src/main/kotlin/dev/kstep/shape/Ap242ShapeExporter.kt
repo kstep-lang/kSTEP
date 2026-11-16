@@ -65,9 +65,11 @@ object Ap242ShapeExporter {
      * assembly usage, are written exactly as before ADR-0028.
      *
      * @param placements at most one per usage; the usage must be a root with a geometric child
-     * @param usageStyles instance colours (ADR-0044): at most one opaque colour per usage; the usage must be a root whose
-     *   child has a shape of its own. They are written at the very end of the file, behind every other entity, so that
-     *   a file without instance colours is a byte-for-byte prefix of the same file with them.
+     * @param usageStyles instance colours (ADR-0044, ADR-0046): at most one opaque colour per usage; the usage must be a
+     *   root whose child has a shape of its own or carries geometry below it (a sub-assembly). They are written at the very
+     *   end of the file, behind every other entity: first the block of the parts (ADR-0044), then the block of the
+     *   sub-assemblies (ADR-0046). So a file without instance colours is a byte-for-byte prefix of the same file with
+     *   them, and a file with only part colours is a prefix of the same file with sub-assembly colours added.
      *
      * @throws ShapeExportException if [assignments] is empty or exceeds [MAX_SHAPES], two
      *   assignments share one product definition, an assignment's product definition is not
@@ -212,7 +214,7 @@ object Ap242ShapeExporter {
                 structure.idOf(first.productDefinition.formation.ofProduct),
             )
 
-        // Instance colours go behind everything else (ADR-0044); without any, nothing here runs.
+        // Instance colours go behind everything else (ADR-0044, ADR-0046); without any, nothing here runs.
         if (plannedStyles.isNotEmpty()) {
             val everything = (geometryAll + bridge).associateBy { it.id }
             val solidsOfDefinition = java.util.IdentityHashMap<Any, List<Int>>()
@@ -224,16 +226,30 @@ object Ap242ShapeExporter {
                         (everything[it] as? Part21SimpleInstance)?.entityName == "MANIFOLD_SOLID_BREP"
                     }
             }
-            val styleEntities =
+            val childOfRefs = { r: UsageEntityRefs -> plan.usages.first { it.usage === r.usage }.child }
+            // block 1: colours of parts (Welle V, unchanged bytes); block 2: colours of sub-assemblies (Welle X)
+            val partEntities =
                 Ap242InstanceStyleBridge.build(
                     planned = plannedStyles,
                     refs = usageRefs,
                     startId = addExactId(productRelatedProductCategoryId, 1),
                     solidIdsOfChild = { solidsOfDefinition[it].orEmpty() },
                     contextIdOf = { sharedContextOf(everything, it) },
-                    childOf = { r -> plan.usages.first { it.usage === r.usage }.child },
+                    childOf = childOfRefs,
                 )
-            bridge += styleEntities
+            bridge += partEntities
+            val subassemblyEntities =
+                Ap242InstanceStyleBridge.buildSubassembly(
+                    planned = plannedStyles,
+                    refs = usageRefs,
+                    startId = addExactId(partEntities.maxOfOrNull { it.id } ?: productRelatedProductCategoryId, 1),
+                    leafSolidsOf = { child ->
+                        Ap242InstanceStyleBridge.leafSolidsBelow(child, plan) { solidsOfDefinition[it].orEmpty() }
+                    },
+                    contextIdOf = { sharedContextOf(everything, it) },
+                    childOf = childOfRefs,
+                )
+            bridge += subassemblyEntities
         }
 
         // Part21Document.concat's own duplicate-#N guard (Part21WriteException) is real

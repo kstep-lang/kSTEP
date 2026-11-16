@@ -757,8 +757,11 @@ stepFile(fileName = "two-boxes.step") {
 ----
 
 * The colour belongs to the usage, like `place(...)`: `styleInstance(usage, colour)` needs the usage registered with
-  `root(...)` and a child that has a shape of its own, otherwise the export fails closed (`KSTEP-S-008`, nothing written).
-  Colouring one occurrence of a sub-assembly is refused.
+  `root(...)` and a child that has a shape of its own or shapes below it, otherwise the export fails closed (`KSTEP-S-008`,
+  nothing written). The child may be a sub-assembly (ADR-0046): the colour then applies to every part below that
+  occurrence. Precedence: the colour of the occurrence's own usage, then the colour of the part, then the colours of
+  usages on outer sub-assemblies (innermost first). A colour belongs to the usage, so a usage inside a sub-assembly that
+  occurs twice colours that part in both occurrences.
 * Only opaque colours: a translucent one is `KSTEP-S-012`. A second colour for the same usage is `KSTEP-S-014`.
 * An instance colour is written behind everything else. A script without `styleInstance` exports byte for byte as before,
   and with it the file is the same file plus a suffix.

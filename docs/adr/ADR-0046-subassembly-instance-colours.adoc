@@ -1,0 +1,100 @@
+= ADR-0046: Instance colours on occurrences of sub-assemblies (Welle X)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle X). It closes the limit that ADR-0044 D4 and ADR-0045 D2 left open: one placed occurrence
+of a _sub-assembly_ (a product definition without a shape of its own) can get its own colour in the STEP export, and that
+colour reaches the import and the render. The gate of the plan was passed (scenarios H0-H8 below), so the export is built on
+pattern S1 (the STYLED_ITEMs sit on the solids of the leaves). Pattern S2 (a styled item on the origin axis of the synthetic
+placement representation) also works and is kept as a documented fallback; it was not needed.
+
+== Context
+
+ADR-0044 writes an instance colour as a hand-written chain `COLOUR_RGB ... PRESENTATION_STYLE_BY_CONTEXT`, a one-item
+`SHAPE_REPRESENTATION` tied to the usage's `PRODUCT_DEFINITION_SHAPE('Placement')` by a `SHAPE_DEFINITION_REPRESENTATION`, and
+one `STYLED_ITEM` per solid of the child. `Ap242InstanceStyleBridge.plan` refused every usage whose child had no shape of its
+own (`KSTEP-S-008`), because the styled items need a solid. `kstep import` already read the colour of a component on every
+level (`components[].colour`) but ignored it in the effective colour (ADR-0045 D2).
+
+== Measurements
+
+All with OCCT 7.9.3, macOS arm64, `scripts/interop/verify-export-golden-subassembly-colours.sh`. Scene: ASM holds SUB twice (u1 at
+x = 0, u2 at x = 100), SUB holds a 10 x 20 x 30 box twice (u3 at x = 0, u4 at x = 20); only the box has a shape. The effective
+leaf colour is taken from OCCT's own presentation logic (`XCAFPrs_DocumentExplorer`), the independent oracle.
+
+[cols="1,3,4"]
+|===
+|Id |Scenario |Result
+
+|H0 |What `STEPCAFControl_Writer` writes for a colour on a sub-assembly component (informative) |The colour hangs on the component; OCCT writes two `STYLED_ITEM`s on the leaf solid, one `PRESENTATION_STYLE_BY_CONTEXT` per leaf path. The XCAF reader reads it back as the colour of the component of SUB.
+|H1 |u2 blue, items = all leaf solids, SDR on the existing placement `PRODUCT_DEFINITION_SHAPE` |Component 2 blue, all others and both parts none, 1 free shape, 6 components, volume 24000. Effective: leaves below u2 blue, below u1 none. *Passes.*
+|H2 |Two different parts below SUB, items = first leaf solid only |Both leaves of the occurrence are blue; the item set does not matter, no part is recoloured.
+|H3 |BOX part orange plus u2 blue |*The part colour beats the colour of the outer sub-assembly occurrence*: all four leaves orange.
+|H4 |u2 blue plus u3 red |*The inner component beats the outer one*: leaves (u1,u3) and (u2,u3) red, (u1,u4) none, (u2,u4) blue. u3 is one usage inside SUB, so it colours that box in both SUB occurrences.
+|H4b |H4 with the orange part |Own component > part > outer components: red, orange, red, orange.
+|H5 |Colour on a usage one level deeper (three levels) |The nested usage is found; only the leaf below it is coloured.
+|H6 |H1 without the `SHAPE_DEFINITION_REPRESENTATION` (negative) |OCCT paints the shared BOX part, i.e. all four occurrences. *The SDR is mandatory* (the analogue of ADR-0044 G7).
+|H7 |H1 with the origin axis as styled item (pattern S2) |Also correct and without side effects.
+|H8 |A sub-assembly with a shape of its own (the Welle V pattern) |The colour of the occurrence also reaches the children below it. Existing Welle V files therefore already mean "colours everything below", consistent with this ADR.
+|===
+
+FreeCAD loads H1 as geometry (volume 24000 mm3 at the assembly); colours are not readable headless there.
+
+== Decisions
+
+D1:: *Pattern S1.* A coloured sub-assembly usage gets the same entity chain as a coloured part usage. The `STYLED_ITEM`s sit on
+the solids of all leaves below the usage (collected once each, in the order of the usage plan, iteratively with a visited
+set, bounded by the size of the plan). No new entity type, no shared entities between usages.
+
+D2:: *Own allow-list.* `SUBASSEMBLY_STYLE_ENTITY_NAMES` is a separate set (today the same eleven names as
+`INSTANCE_STYLE_ENTITY_NAMES`), checked by `verify(added, allowedExternal, allowList)`. Allowed external references: the
+placement entities, the context and exactly the collected leaf solids. Neither set is merged into the extraction allow-list
+for OCCT's own output.
+
+D3:: *Second block, own MDGPR.* The exporter writes the block of the parts (Welle V, unchanged bytes) first, then the block of
+the sub-assemblies, each with its own `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION` (ADR-0044 G3 shows OCCT reads
+two). Byte-prefix chain: file without colours is a prefix of the file with part colours, which is a prefix of the file with
+sub-assembly colours added. `Ap242InstanceStyleBridge.build` ignores sub-assembly entries and keeps its bytes.
+
+D4:: *Caps and fail closed.* `MAX_INSTANCE_STYLES` and the geometric-usage cap are unchanged; new `MAX_SUBASSEMBLY_STYLED_ITEMS`
+(65 536) bounds the sum of the styled items of all sub-assembly colours. A usage whose child carries no shape at all is not a
+geometric usage and stays `KSTEP-S-008`. No new error codes. Everything not proven here stays a `ShapeExportException`.
+
+D5:: *Precedence of the effective colour (import and render).* The order OCCT's presentation logic measures (H3, H4, H4b): the
+occurrence's own (innermost) component colour, then the colour of the part, then the colours of the components of outer
+sub-assemblies, innermost first. This replaces ADR-0045 D2 (colours on intermediate components were ignored). The rule is the
+same in `StepImporter.expand` (`Frame.instanceColors`) and `PreviewRenderer.colourOf` (`PlacedInstance.usagePath`), so an
+OCCT-based viewer and kSTEP show the same colours.
+
+D6:: *Shaped sub-assemblies unchanged.* A usage whose child has a shape of its own keeps the Welle V pattern (items from its
+own solids only), byte for byte; H8 shows OCCT also applies that colour to the children, which is the same meaning.
+
+D7:: *Colour per usage, not per path.* As in ADR-0044/0045: the colour belongs to the usage object. A usage inside a repeated
+sub-assembly (u3 above) colours the box in every occurrence of the sub-assembly; separate colours per path would need
+`SHUO` entities and stay unbuilt.
+
+== Hand calculation (test oracle)
+
+Box 6000 mm3, four occurrences, total 24000 mm3, x ranges [0,10], [20,30], [100,110], [120,130].
+
+* u2 blue: the occurrences at x = 100 and 120 blue, at 0 and 20 none.
+* u2 blue plus u3 red: x = 0 red, x = 20 none, x = 100 red, x = 120 blue.
+* with the orange part: x = 0 red, x = 20 orange, x = 100 red, x = 120 orange.
+
+Checks: `SubassemblyColourOcctGateTest` (committed gate fixtures H1, H3, H4), `CliExportOcctInstanceColourIntegrationTest`
+(script, export, import, golden `export-golden-subassembly-colour.step`), `PreviewInstanceColourOcctTest` (render),
+`Ap242SubassemblyStyleBridgeTest`, `StepImporterExpansionTest`.
+
+== Consequences
+
+* Behaviour change for foreign files: a colour on a sub-assembly component now reaches the `occurrences[].colour` of the parts
+  below it (it was ignored before).
+* `PlacedInstance` has a new last constructor parameter `usagePath` (default empty): source compatible, but a binary change for
+  callers of the public constructor, as with `usage` in ADR-0045.
+
+== Limits
+
+* No path-exact colours (no `SHUO`), no transparency, no layers on instances, no face or edge colours on occurrences.
+* The pattern was measured with OCCT 7.9.3 (macOS arm64 and the Linux CI); other readers are not verified.
+* FreeCAD cannot show the colours headless, so only its geometry is verified.

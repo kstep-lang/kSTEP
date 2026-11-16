@@ -721,6 +721,13 @@ scan before either lands.
   FreeCAD loads the file as geometry. Not covered: colours on occurrences of sub-assemblies, transparent instance colours,
   layers on instances. Followed in Welle W (ADR-0045): the effective colour per occurrence in `kstep import`
   (`occurrences[].colour`) and instance colours in `kstep render`.
+* Welle X (ADR-0046): instance colours on occurrences of sub-assemblies. `styleInstance` on a usage whose child has no
+  shape of its own is accepted when shapes sit below it; the styled items sit on the leaf solids, in a second block with its
+  own presentation representation behind the block of the parts (prefix chain: plain, parts, sub-assemblies). Effective colour
+  in `kstep import` and `kstep render`: own component, then part, then outer components innermost first (the order OCCT's own
+  presentation logic measures; replaces ADR-0045 D2). Gate: scenarios H0-H8 with OCCT 7.9.3
+  (`scripts/interop/verify-export-subassembly-colours.sh`), CI test `SubassemblyColourOcctGateTest`; FreeCAD loads the file as
+  geometry. Not covered: path-exact colours (`SHUO`), transparency, layers on instances.
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

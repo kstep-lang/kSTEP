@@ -67,6 +67,22 @@ class AssemblyInstanceExpanderTest :
             expansion.instances.map { it.path } shouldBe listOf(listOf("U-S1", "U-LEAF"), listOf("U-S2", "U-LEAF"))
         }
 
+        "every instance carries the usages from the root down, the last one being its own usage (ADR-0046)" {
+            val top = pd("TOP")
+            val sub = pd("SUB")
+            val leaf = pd("LEAF")
+            val uS1 = usage("U-S1", top, sub)
+            val uS2 = usage("U-S2", top, sub)
+            val uLeaf = usage("U-LEAF", sub, leaf)
+            val expansion = AssemblyInstanceExpander.expand(listOf(uS1, uS2, uLeaf), listOf(leaf), emptyList())
+            expansion.instances.map { it.usagePath.map { u -> u.id } } shouldBe
+                listOf(listOf("U-S1", "U-LEAF"), listOf("U-S2", "U-LEAF"))
+            expansion.instances.forEach { (it.usagePath.last() === it.usage) shouldBe true }
+            val flat = AssemblyInstanceExpander.expand(listOf(uLeaf), listOf(sub, leaf), emptyList())
+            flat.instances[0].usagePath shouldBe emptyList()
+            flat.instances[1].usagePath.map { it.id } shouldBe listOf("U-LEAF")
+        }
+
         "nested placements are composed from the root down (hand-calculated corners)" {
             val top = pd("TOP")
             val sub = pd("SUB")

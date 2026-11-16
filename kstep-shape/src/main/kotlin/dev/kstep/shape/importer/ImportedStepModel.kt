@@ -118,7 +118,10 @@ class ImportedOccurrence(
     val partIndex: Int,
     val global: ImportedPlacement,
     val boundingBox: BoundingBox?,
-    /** Effective colour: instance colour over part colour (ADR-0045). */
+    /**
+     * Effective colour (ADR-0045, ADR-0046): the occurrence's own component colour, then the part colour, then the colours of
+     * the components of outer sub-assemblies, innermost first.
+     */
     val color: RgbColor? = null,
 )
 

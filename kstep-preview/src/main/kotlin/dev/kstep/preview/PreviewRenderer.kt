@@ -358,8 +358,17 @@ object PreviewRenderer {
         val styleOf = IdentityHashMap<NextAssemblyUsageOccurrence, StepColour>()
         for (style in model.usageStyles) styleOf[style.usage] = style.colour
 
+        // own occurrence colour > colour of the part > colours of outer sub-assembly occurrences, innermost first
+        // (ADR-0046 D5, the order OCCT's own presentation logic measures)
+        fun outerColour(instance: PlacedInstance): StepColour? {
+            for (i in instance.usagePath.size - 2 downTo 0) styleOf[instance.usagePath[i]]?.let { return it }
+            return null
+        }
+
         fun colourOf(instance: PlacedInstance): StepColour? =
-            instance.usage?.let { styleOf[it] } ?: shapeOf.getValue(instance.productDefinition).style.colour
+            instance.usage?.let { styleOf[it] }
+                ?: shapeOf.getValue(instance.productDefinition).style.colour
+                ?: outerColour(instance)
         val anyColour = shapeOf.values.any { it.style.colour != null } || instances.any { colourOf(it) != null }
         val parts =
             instances.map { instance ->

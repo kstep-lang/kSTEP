@@ -162,8 +162,11 @@ object StepImporter {
         val path: List<String>,
         val chain: List<ImportedPlacement>,
         val depth: Int,
-        /** Instance colour of the component that was pushed last, never inherited from outer components. */
-        val instanceColor: RgbColor? = null,
+        /**
+         * Instance colours of the components on the way from the root, outermost first (ADR-0046); one entry per
+         * component, `null` where the component has none. The last entry is the occurrence's own component.
+         */
+        val instanceColors: List<RgbColor?> = emptyList(),
     )
 
     private fun build(
@@ -419,7 +422,12 @@ object StepImporter {
                             partIndex = partIndex,
                             global = global,
                             boundingBox = boxOf(partIndex, global),
-                            color = frame.instanceColor ?: partColorOf(partIndex),
+                            // own component colour > part colour > colours of outer sub-assembly components, innermost
+                            // first (ADR-0046 D5; the order OCCT's own presentation logic measures)
+                            color =
+                                frame.instanceColors.lastOrNull()
+                                    ?: partColorOf(partIndex)
+                                    ?: frame.instanceColors.dropLast(1).lastOrNull { it != null },
                         ),
                     )
                 }
@@ -433,7 +441,7 @@ object StepImporter {
                                 frame.path + comp.name,
                                 frame.chain + localPlacement(comp),
                                 frame.depth + 1,
-                                instanceColorOf(comp),
+                                frame.instanceColors + instanceColorOf(comp),
                             ),
                         )
                     }

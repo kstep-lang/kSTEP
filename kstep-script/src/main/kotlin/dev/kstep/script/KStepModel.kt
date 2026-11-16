@@ -247,7 +247,9 @@ class KStepModelBuilder internal constructor() {
      * Gives one placed occurrence, the component of [usage], its own [colour] in the exported STEP file (ADR-0044). The
      * colour belongs to the usage, like [place]: one part used twice can be red once and blue once, whatever colour the part
      * itself has. Only opaque colours (`KSTEP-S-012` otherwise); a second colour for the same usage is `KSTEP-S-014`. The
-     * usage must be registered via `root(...)` and its child must have a shape, otherwise the export fails closed. It takes
+     * usage must be registered via `root(...)` and its child must have a shape of its own or carry shapes below it,
+     * otherwise the export fails closed. The child may be a sub-assembly (ADR-0046): the colour then applies to every
+     * part below that occurrence, and the colour of a part or of an inner occurrence wins over it (ADR-0046 D5). It takes
      * effect in `kstep export`; `kstep render` ignores it.
      */
     fun styleInstance(

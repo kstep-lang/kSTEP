@@ -188,3 +188,15 @@ geometry (two objects, volume 12000; colours are not readable headless). `--refr
 `kstep-tests/src/test/resources/instance-colour/gate-G{1,2,3,6}.step`. It writes only below `build/interop/export-instance-colours/`
 and finishes by checking that `git status --ignored scripts` is unchanged. The same scenarios run in CI as
 `InstanceColourOcctGateTest`. `spike_export_styles.cpp instance-layer` shows that OCCT's writer writes no instance layer.
+
+== verify-export-subassembly-colours.sh (ADR-0046, Welle X)
+
+Gate for instance colours on occurrences of sub-assemblies. It builds `spike_subassembly_colour_read.cpp` (OCCT's XCAF reader
+plus the effective leaf colour from `XCAFPrs_DocumentExplorer`, the independent oracle for the precedence rule) and
+`spike_export_styles.cpp` (scenario H0: what OCCT's own writer writes), exports the five nested base fixtures
+`fixtures/instance-colour/nested-*.kstep.kts` with `kstep-cli`, adds the hand-written pattern with
+`make_instance_colour_fixtures.py --leaf-items all|first|axis` and checks scenarios H1-H8 (H6 is the negative case: without the
+`SHAPE_DEFINITION_REPRESENTATION` OCCT paints the shared part). `--refresh` rewrites the committed fixtures
+`kstep-tests/src/test/resources/instance-colour/gate-H{1,3,4}.step` of `SubassemblyColourOcctGateTest`. It writes only below
+`build/interop/export-subassembly-colours/` and checks that nothing is left below `scripts/`. Prerequisites: OpenCascade
+(Homebrew), python3, `./gradlew :kstep-cli:installDist`; FreeCAD optional (geometry check).

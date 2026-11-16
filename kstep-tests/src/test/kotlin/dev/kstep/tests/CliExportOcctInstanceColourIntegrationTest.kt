@@ -267,27 +267,95 @@ class CliExportOcctInstanceColourIntegrationTest :
             }
         }
 
-        "an instance colour on a sub-assembly occurrence is refused".config(enabled = available) {
-            val script =
-                copyFixture(boxes) {
-                    it
-                        .replace(
-                            "val u1 = usage(\"NAUO-1\", assembly, box)",
-                            "val sub = part(\"SUB-001\", \"Sub\")\nval top = part(\"TOP-001\", \"Top\")\n" +
-                                "val u0 = usage(\"NAUO-0\", top, sub)\nval u1 = usage(\"NAUO-1\", sub, box)",
-                        ).replace("val u2 = usage(\"NAUO-2\", assembly, box)", "val u2 = usage(\"NAUO-2\", sub, box)")
-                        .replace("roots(u1, u2)", "roots(u0, u1, u2)")
-                        .replace(
-                            "    styleInstance(u1, StepColour.rgb(1.0, 0.0, 0.0))\n",
-                            "    styleInstance(u0, StepColour.rgb(1.0, 0.0, 0.0))\n",
-                        ).replace("    styleInstance(u2, StepColour.rgb(0.0, 0.0, 1.0))\n", "")
-                }
+        val subScript = "export-golden-subassembly-colour.kstep.kts"
+
+        fun occurrenceColours(json: JsonObject): Map<Int, JsonElement> =
+            json["occurrences"]!!.jsonArray.associate {
+                val o = it.jsonObject
+                o["boundingBox"]!!
+                    .jsonObject["min"]!!
+                    .jsonArray[0]
+                    .jsonPrimitive.double
+                    .toInt() to o["colour"]!!
+            }
+
+        "an instance colour on a sub-assembly occurrence is exported and read back per occurrence (ADR-0046)".config(
+            enabled = available,
+        ) {
+            val script = copyFixture(subScript)
             val out = File(workDir, "sub.step").apply { delete() }
-            val r = runner.run("export", script.name, "--out", out.name)
-            (r.exitCode != 0) shouldBe true
-            (r.stdout + r.stderr) shouldContain "sub-assembly"
-            out.exists() shouldBe false
+            runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+            val json = importJson(out)
+            // hand calculation: four boxes of 6000 mm3 at x = 0, 20, 100, 120
+            json["totals"]!!.jsonObject["occurrenceCount"]!!.jsonPrimitive.int shouldBe 4
+            json["totals"]!!.jsonObject["volume"]!!.jsonPrimitive.double shouldBe (24000.0 plusOrMinus 1e-6)
+            val colours = occurrenceColours(json)
+            colours.keys shouldBe setOf(0, 20, 100, 120)
+            colours.getValue(0).shouldBeRgb(1.0, 0.0, 0.0) // own component u3 beats the outer u2
+            colours.getValue(20) shouldBe JsonNull // inside the first SUB, nothing colours u4
+            colours.getValue(100).shouldBeRgb(1.0, 0.0, 0.0)
+            colours.getValue(120).shouldBeRgb(0.0, 0.0, 1.0) // u4 inside the blue SUB occurrence
+            val presentation = json["presentation"]!!.jsonObject
+            presentation["coloredTargets"]!!.jsonPrimitive.int shouldBe 2
+            presentation["instanceStylesIgnored"]!!.jsonPrimitive.int shouldBe 0
+            json["parts"]!!.jsonArray.forEach { it.jsonObject["colour"] shouldBe JsonNull }
+            val text = runner.run("import", out.name).stdout
+            text shouldContain "colour (0, 0, 1)"
         }
+
+        "the sub-assembly export matches its golden byte for byte, in three prefix stages (ADR-0046)".config(
+            enabled = available,
+        ) {
+            fun export(
+                name: String,
+                transform: (String) -> String,
+            ): String {
+                val script = File(workDir, "$name.kstep.kts").also { it.writeText(transform(resourceText(subScript))) }
+                val out = File(workDir, "$name.step").apply { delete() }
+                runner.run("export", script.name, "--out", out.name).exitCode shouldBe 0
+                return out.readText()
+            }
+            val full = export("sub-full") { it }
+            full shouldBe resourceText("export-golden-subassembly-colour.step")
+            val partsOnly = export("sub-parts") { it.replace(Regex("    styleInstance\\(u2.*\n"), "") }
+            val plain = export("sub-plain") { it.replace(Regex("    styleInstance\\(.*\n"), "") }
+
+            fun prefixOf(text: String) = text.substring(0, text.lastIndexOf("ENDSEC;"))
+            partsOnly shouldStartWith prefixOf(plain)
+            full shouldStartWith prefixOf(partsOnly)
+            // the sub-assembly block has its own presentation representation, behind the block of the parts
+            val addedBySub = full.substring(prefixOf(partsOnly).length, full.lastIndexOf("ENDSEC;"))
+            Regex("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION").findAll(addedBySub).count() shouldBe 1
+            Regex("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION").findAll(full).count() shouldBe 2
+        }
+
+        "an instance colour on a sub-assembly without any shape below it is refused with KSTEP-S-008 and writes no file"
+            .config(enabled = available) {
+                val script =
+                    copyFixture(subScript) {
+                        it
+                            .replace(
+                                "val box = part(\"BOX-001\", \"Box\")",
+                                "val box = part(\"BOX-001\", \"Box\")\nval hollow = part(\"HOL-001\", \"Hollow\")\nval empty = part(\"EMP-001\", \"Empty\")",
+                            ).replace(
+                                "val u4 = usage(\"NAUO-4\", sub, box)",
+                                "val u4 = usage(\"NAUO-4\", sub, box)\nval u5 = usage(\"NAUO-5\", asm, hollow)\nval u6 = usage(\"NAUO-6\", hollow, empty)",
+                            ).replace("roots(u1, u2, u3, u4)", "roots(u1, u2, u3, u4, u5, u6)")
+                            .replace(
+                                "    styleInstance(u3, StepColour.rgb(1.0, 0.0, 0.0))\n",
+                                "    styleInstance(u5, StepColour.rgb(1.0, 0.0, 0.0))\n",
+                            )
+                    }
+                val out = File(workDir, "hollow.step").apply { delete() }
+                val text = runner.run("export", script.name, "--out", out.name)
+                (text.exitCode != 0) shouldBe true
+                (text.stdout + text.stderr) shouldContain "NAUO-5"
+                out.exists() shouldBe false
+                val json = runner.run("export", script.name, "--out", out.name, "--output", "json")
+                json.exitCode shouldBe 1
+                errorCode(json) shouldBe "KSTEP-S-008"
+                out.exists() shouldBe false
+            }
 
         "kstep render draws the instance colours (ADR-0045)".config(enabled = available) {
             val script = copyFixture(boxes)

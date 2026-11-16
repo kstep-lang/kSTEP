@@ -47,9 +47,9 @@ warning (`state` `missing`); a unit that cannot be resolved (for example a conve
 
 Colours on assembly instances (one placed occurrence of a part, ADR-0044) are reported as `components[].colour` (`null`
 without a colour) and as `colour (r, g, b)` on the component line of the text report. Since ADR-0045 each placed occurrence also has an
-effective colour, `occurrences[].colour` (the instance colour of the last component over the whole-part colour, `null` without
-a colour); the text report appends `  colour (r, g, b)` to the occurrence line only when there is one. Colours on
-sub-assembly components and per-face colours do not flow into it. Not reported yet: layers and
+effective colour, `occurrences[].colour` (the instance colour of the own component, then the whole-part colour, then the colours of
+outer sub-assembly components innermost first (ADR-0046), `null` without a colour); the text report appends `  colour (r, g, b)` to the occurrence line only when there is one. Per-face colours
+do not flow into it. Not reported yet: layers and
 curve-only colours on assembly instances (counted in `presentation.instanceStylesIgnored`), vertex colours, layers on edges, and `--render` still uses its own palette and ignores the opacity.
 
 `kstep import` is read-only: it writes nothing unless `--render` names a file. It refuses symbolic links,

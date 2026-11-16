@@ -23,6 +23,11 @@ data class PlacedInstance(
      * hangs on every instance of a repeated parent, so colours keyed by usage apply to all of them.
      */
     val usage: NextAssemblyUsageOccurrence? = null,
+    /**
+     * The assembly usages from the root down to this instance, [usage] being the last one (ADR-0046); empty for a shaped
+     * root. Colours keyed by usage use it to find the colour of an outer sub-assembly occurrence.
+     */
+    val usagePath: List<NextAssemblyUsageOccurrence> = emptyList(),
 )
 
 data class InstanceExpansion(
@@ -46,6 +51,7 @@ object AssemblyInstanceExpander {
         val placement: RigidPlacement,
         val depth: Int,
         val path: List<String>,
+        val usagePath: List<NextAssemblyUsageOccurrence>,
         val children: Iterator<GeometricUsage>,
     )
 
@@ -86,6 +92,7 @@ object AssemblyInstanceExpander {
                 placement: RigidPlacement,
                 depth: Int,
                 path: List<String>,
+                usagePath: List<NextAssemblyUsageOccurrence>,
                 via: NextAssemblyUsageOccurrence?,
             ) {
                 if (depth > MAX_DEPTH) {
@@ -96,15 +103,15 @@ object AssemblyInstanceExpander {
                     throw ShapeExportException("assembly expansion visits more than $MAX_VISITS nodes")
                 }
                 if (shapedSet.containsKey(pd)) {
-                    instances += PlacedInstance(pd, placement, path, via)
+                    instances += PlacedInstance(pd, placement, path, via, usagePath)
                     if (instances.size > MAX_INSTANCES) {
                         throw ShapeExportException("assembly expands to more than $MAX_INSTANCES instances")
                     }
                 }
-                stack.addLast(Frame(pd, placement, depth, path, childrenOf[pd].orEmpty().iterator()))
+                stack.addLast(Frame(pd, placement, depth, path, usagePath, childrenOf[pd].orEmpty().iterator()))
             }
 
-            enter(rootPd, RigidPlacement.IDENTITY, 0, emptyList(), null)
+            enter(rootPd, RigidPlacement.IDENTITY, 0, emptyList(), emptyList(), null)
             while (stack.isNotEmpty()) {
                 val frame = stack.last()
                 if (!frame.children.hasNext()) {
@@ -121,7 +128,14 @@ object AssemblyInstanceExpander {
                             e,
                         )
                     }
-                enter(usage.child, composed, frame.depth + 1, frame.path + usage.usage.id, usage.usage)
+                enter(
+                    usage.child,
+                    composed,
+                    frame.depth + 1,
+                    frame.path + usage.usage.id,
+                    frame.usagePath + usage.usage,
+                    usage.usage,
+                )
             }
         }
         return InstanceExpansion(instances, rootDefinitions.size)
