@@ -402,7 +402,7 @@ this writing:
   to kSTEP and a box written by FreeCAD 1.1.4 were checked on 2026-10-22 (see
   xref:usage-import.adoc#import-usage[Reading a STEP file back]); since Welle R (ADR-0038) it also reports colours and
   layers (part, body, face), the file's length unit (inch, centimetre and metre files are converted and reported) and
-  checks product-structure depth before the transfer; since Welle U (ADR-0042) it also reports alpha and edge colours; other CAD tools, PMI, instance colours and structure-only files
+  checks product-structure depth before the transfer; since Welle U (ADR-0042) it also reports alpha and edge colours, since Welle V (ADR-0044) colours on assembly instances; other CAD tools, PMI and structure-only files
   are not covered.
 * (M1 Welle 6) The semantic model now captures `DERIVE`, `INVERSE`, and
   `UNIQUE` entity-body clauses — a gap flagged across three separate
@@ -711,8 +711,15 @@ scan before either lands.
   `styleEdges(...)`; an opaque colour is written by the unchanged path (byte-identical goldens), a translucent one as
   `SURFACE_STYLE_TRANSPARENT`; the style merge allows `CURVE_STYLE` only on edges. `kstep import` reports `alpha` and
   `edgeStyles`. Verified with `kstep import`, OCCT's XCAF reader and FreeCAD (geometry; headless FreeCAD does not read
-  colours). Not covered: colours on assembly instances (measured in ADR-0042, planned as Welle V), the opacity in
+  colours). Not covered: the opacity in
   `kstep render` (GLB, SVG and PNG stay opaque), layers and widths on edges.
+* Welle V (ADR-0044): instance colours in the STEP export and import. `styleInstance(usage, colour)` gives one placed
+  occurrence of a part its own (opaque) colour; the `PRESENTATION_STYLE_BY_CONTEXT` entities are written behind everything
+  else (a file without them is a byte prefix of the file with them), with an own allow-list and a self-check. `kstep import`
+  reports `components[].colour`; `instanceStylesIgnored` now counts only layers and curve-only colours on instances. Gate:
+  OCCT's XCAF reader reads the hand-written pattern (scenarios G1-G8, `scripts/interop/verify-export-instance-colours.sh`),
+  FreeCAD loads the file as geometry. Not covered: colours on occurrences of sub-assemblies, transparent instance colours,
+  layers on instances, the effective colour per occurrence and instance colours in `kstep render`.
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

@@ -1,6 +1,7 @@
 package dev.kstep.shape
 
 import dev.kstep.generated.ap242v1.NextAssemblyUsageOccurrence
+import dev.kstep.geometry.style.StepColour
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -185,6 +186,12 @@ data class RigidPlacement(
 data class UsagePlacement(
     val usage: NextAssemblyUsageOccurrence,
     val placement: RigidPlacement,
+)
+
+/** An instance colour bound to one assembly usage (ADR-0044); produced by the script DSL's `styleInstance(...)`. */
+data class UsageStyle(
+    val usage: NextAssemblyUsageOccurrence,
+    val colour: StepColour,
 )
 
 /**

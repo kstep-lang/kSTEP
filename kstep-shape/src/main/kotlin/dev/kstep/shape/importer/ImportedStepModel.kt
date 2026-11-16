@@ -96,6 +96,8 @@ class ImportedComponent(
     val childKind: XcafNodeKind,
     val childIndex: Int,
     val local: ImportedPlacement,
+    /** The colour of this placed occurrence (an instance colour, ADR-0044); `null` if the usage carries none. */
+    val color: RgbColor? = null,
 )
 
 class ImportedAssembly(

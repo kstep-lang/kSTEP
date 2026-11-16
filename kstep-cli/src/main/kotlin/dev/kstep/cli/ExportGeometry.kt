@@ -45,6 +45,7 @@ internal fun planExportGeometry(
     requireGeometry: Boolean,
     occt: OcctAvailability,
     placementCount: Int = 0,
+    instanceColourCount: Int = 0,
 ): ExportGeometryPlan =
     when {
         shapeCount == 0 && requireGeometry ->
@@ -56,10 +57,7 @@ internal fun planExportGeometry(
         shapeCount == 0 ->
             ExportGeometryPlan.StructureOnly(
                 ignoredPlacementsNote =
-                    placementCount
-                        .takeIf {
-                            it > 0
-                        }?.let { "$it placement(s) ignored: the script registers no shape(...)" },
+                    ignoredNote(placementCount, instanceColourCount, "the script registers no shape(...)"),
             )
         occt is OcctAvailability.Available -> ExportGeometryPlan.Merge
         requireGeometry ->
@@ -72,11 +70,22 @@ internal fun planExportGeometry(
         else ->
             ExportGeometryPlan.StructureOnly(
                 (occt as OcctAvailability.Unavailable).reason,
-                placementCount.takeIf { it > 0 }?.let {
-                    "$it placement(s) ignored: no geometry was merged (OCCT unavailable)"
-                },
+                ignoredNote(placementCount, instanceColourCount, "no geometry was merged (OCCT unavailable)"),
             )
     }
+
+private fun ignoredNote(
+    placements: Int,
+    instanceColours: Int,
+    reason: String,
+): String? {
+    val parts =
+        listOfNotNull(
+            placements.takeIf { it > 0 }?.let { "$it placement(s)" },
+            instanceColours.takeIf { it > 0 }?.let { "$it instance colour(s)" },
+        )
+    return parts.takeIf { it.isNotEmpty() }?.let { "${it.joinToString(" and ")} ignored: $reason" }
+}
 
 /** Result of the geometry step, for the success report. */
 internal data class GeometryReport(
@@ -97,7 +106,9 @@ internal data class GeometryReport(
  */
 internal fun mergeGeometry(model: KStepModel): Result<String> =
     try {
-        Result.success(Ap242ShapeExporter.export(model.header, model.roots, model.shapes, model.placements))
+        Result.success(
+            Ap242ShapeExporter.export(model.header, model.roots, model.shapes, model.placements, model.usageStyles),
+        )
     } catch (e: ShapeExportException) {
         Result.failure(GeometryExportFailure(e.message ?: "geometry export failed"))
     } catch (e: OcctGeometryException) {

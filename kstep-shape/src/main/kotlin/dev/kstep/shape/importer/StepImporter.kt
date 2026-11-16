@@ -258,6 +258,7 @@ object StepImporter {
                         childKind = referred.kind,
                         childIndex = denseIndex[referred.index],
                         local = localPlacement(comp),
+                        color = colorsByNode[comp.index]?.firstOrNull { it.target == XcafStyleTarget.INSTANCE }?.color,
                     )
                 }
             assemblies.add(ImportedAssembly(assemblies.size, node.name, enrichment.productId(node.name), components))
@@ -310,7 +311,7 @@ object StepImporter {
         }
         if (style.instanceStylesIgnored > 0) {
             warnings.add(
-                "${style.instanceStylesIgnored} colour/layer assignments on assembly instances are not reported",
+                "${style.instanceStylesIgnored} layer/curve-colour assignments on assembly instances are not reported",
             )
         }
         if (style.truncated > 0) warnings.add("presentation data truncated")

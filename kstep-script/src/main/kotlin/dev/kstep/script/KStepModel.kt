@@ -19,6 +19,7 @@ import dev.kstep.shape.RigidPlacement
 import dev.kstep.shape.Rotation
 import dev.kstep.shape.ShapeAssignment
 import dev.kstep.shape.UsagePlacement
+import dev.kstep.shape.UsageStyle
 import dev.kstep.shape.Vec3
 import dev.kstep.step21.Part21Header
 
@@ -51,6 +52,11 @@ data class KStepModel(
      * `kstep export` merges geometry.
      */
     val placements: List<UsagePlacement> = emptyList(),
+    /**
+     * Instance colours registered via [KStepModelBuilder.styleInstance] (ADR-0044): one colour for one placed occurrence.
+     * A separate additive channel like [placements]; only `kstep export` consults it when geometry is merged.
+     */
+    val usageStyles: List<UsageStyle> = emptyList(),
 ) {
     val isValid: Boolean get() = violations.isEmpty()
 
@@ -83,6 +89,7 @@ class KStepModelBuilder internal constructor() {
     private val collectedViolations = mutableListOf<DslViolation>()
     private val registeredShapes = mutableListOf<ShapeAssignment>()
     private val registeredPlacements = mutableListOf<UsagePlacement>()
+    private val registeredUsageStyles = mutableListOf<UsageStyle>()
     private val styles = java.util.IdentityHashMap<ProductDefinition, StyleAccumulator>()
 
     // Colours and layers of one part (ADR-0039), collected in any call order and applied in build().
@@ -237,6 +244,40 @@ class KStepModelBuilder internal constructor() {
     }
 
     /**
+     * Gives one placed occurrence, the component of [usage], its own [colour] in the exported STEP file (ADR-0044). The
+     * colour belongs to the usage, like [place]: one part used twice can be red once and blue once, whatever colour the part
+     * itself has. Only opaque colours (`KSTEP-S-012` otherwise); a second colour for the same usage is `KSTEP-S-014`. The
+     * usage must be registered via `root(...)` and its child must have a shape, otherwise the export fails closed. It takes
+     * effect in `kstep export`; `kstep render` ignores it.
+     */
+    fun styleInstance(
+        usage: NextAssemblyUsageOccurrence,
+        colour: StepColour,
+    ) {
+        if (!colour.isOpaque) {
+            throw StyleException(
+                StyleErrorKind.INVALID_COLOUR,
+                "styleInstance: instance colours must be opaque (ADR-0044), alpha was ${colour.a}",
+            )
+        }
+        if (registeredUsageStyles.any { it.usage === usage }) {
+            throw conflict("assembly usage '${usage.id}' already has an instance colour")
+        }
+        registeredUsageStyles += UsageStyle(usage, colour)
+    }
+
+    /** [styleInstance] for a raw [ValidationResult]: an invalid usage contributes its violations instead of aborting the script. */
+    fun styleInstance(
+        usage: ValidationResult<NextAssemblyUsageOccurrence>,
+        colour: StepColour,
+    ) {
+        when (usage) {
+            is ValidationResult.Valid -> styleInstance(usage.value, colour)
+            is ValidationResult.Invalid -> collectedViolations += usage.violations
+        }
+    }
+
+    /**
      * Positions the component of [usage] relative to its parent assembly: `pParent = R * pChild + t`
      * (translation in millimetres; [rotation] via `Rotation.about(axis, degrees)` or
      * `Rotation.fromAxes`). The placement belongs to the *usage*, not to the part, so one part can be
@@ -340,6 +381,7 @@ class KStepModelBuilder internal constructor() {
             violations = collectedViolations.toList(),
             shapes = styledShapes(),
             placements = registeredPlacements.toList(),
+            usageStyles = registeredUsageStyles.toList(),
         )
 }
 

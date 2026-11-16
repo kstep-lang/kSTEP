@@ -153,6 +153,19 @@ class Ap242PlacementBridgeTest :
             first.max() shouldBe 1000 + first.size - 1
         }
 
+        "build: usageRefs name the ids an instance colour needs, one per usage in plan order" {
+            val sc = Scenario()
+            val refs = sc.result.usageRefs
+            refs.map { it.usage } shouldBe listOf(sc.uA, sc.uB)
+            refs.map { it.childRepresentationId } shouldBe listOf(100, 200)
+            refs.map { it.parentRepresentationId }.distinct().size shouldBe 1
+            val byId = sc.result.added.associateBy { it.id }
+            for (r in refs) {
+                (byId[r.placementShapeId] as Part21SimpleInstance).entityName shouldBe "PRODUCT_DEFINITION_SHAPE"
+                (byId[r.placementAxisId] as Part21SimpleInstance).entityName shouldBe "AXIS2_PLACEMENT_3D"
+            }
+        }
+
         "build: shaped children keep their representation id and gain the placement axes as items" {
             val s = Scenario()
             s.result.replaced.keys shouldBe setOf(100, 200)

@@ -464,7 +464,10 @@ internal fun importText(
                 } else {
                     model.assemblies[c.childIndex].productId
                 }
-            sb.appendLine("      ${c.name} -> $childName${idSuffix(childId)}  at ${placementText(c.local)}")
+            val instanceColour = c.color?.let { "  colour ${colourText(it)}" }.orEmpty()
+            sb.appendLine(
+                "      ${c.name} -> $childName${idSuffix(childId)}  at ${placementText(c.local)}$instanceColour",
+            )
         }
     }
     sb.appendLine("Parts:")
@@ -755,6 +758,7 @@ internal fun importJson(
                                                     },
                                                 )
                                                 put("placement", jsonPlacement(c.local))
+                                                put("colour", jsonColour(c.color))
                                             },
                                         )
                                     }

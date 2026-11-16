@@ -4,8 +4,8 @@
 == Status
 
 Accepted, implemented (kSTEP Welle U): transparency (alpha) on part and face colours, and colours on single edges.
-Instance colours (one part used twice, each in its own colour) were measured but are *not built*; they are the
-follow-up of this wave (see "Follow-up: instance colours"). Builds on ADR-0038 (import of colours and layers) and
+Instance colours (one part used twice, each in its own colour) were measured here and are built in
+ADR-0044 (Welle V; see "Follow-up: instance colours"). Builds on ADR-0038 (import of colours and layers) and
 ADR-0039 (export of colours and layers); it supersedes decision D5 of ADR-0039 in part (transparency is now supported).
 Every number below comes from `scripts/interop/spike_export_styles.cpp` and `scripts/interop/dump_xcaf_tree.cpp styles`
 (OCCT 7.9.3, macOS arm64; reproduce with `scripts/interop/verify-export-alpha-edge-instance.sh --spike`).
@@ -117,7 +117,7 @@ the new entities.
 
 == Follow-up: instance colours (Welle V)
 
-Measured, not built. In assembly mode 2 OCCT writes an instance colour (`SetColor` on a component label) as a
+Built in ADR-0044 (the gate below passed, see there). Measured here: in assembly mode 2 OCCT writes an instance colour (`SetColor` on a component label) as a
 `STYLED_ITEM('color', (#presentationStyleByContext), #MANIFOLD_SOLID_BREP)` in the `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION`
 whose style is `PRESENTATION_STYLE_BY_CONTEXT((#usage), #SHAPE_REPRESENTATION)`, where the context is a one-item
 `SHAPE_REPRESENTATION('', (#placementAxis), #context)` that is tied to the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` through its own
@@ -129,12 +129,12 @@ itself (`Ap242PlacementBridge`: `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`, `NEXT_
 `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION`; no `MAPPED_ITEM`), so an instance colour would have to be appended there
 as the entities above, behind the existing ones so that the ids of files without an instance colour do not move, with its own
 allow-list for `PRESENTATION_STYLE_BY_CONTEXT`. The gate for building it is a C++ mini test that the OCCT reader reads a
-hand-written pattern as an instance colour; that test was not run in this wave. The importer already counts such styles in
+hand-written pattern as an instance colour; that test was not run in this wave but in Welle V (ADR-0044). The importer already counts such styles in
 `presentation.instanceStylesIgnored`.
 
 == Not built / follow-ups
 
-* Instance colours, see above.
+* Instance colours: built in ADR-0044.
 * Rendering of the opacity in `kstep render` (GLB, SVG, PNG): `GlbWriter` has one material and colours per vertex
   (`COLOR_0`); alpha needs a `VEC4` attribute, `alphaMode BLEND` for the whole material (sorting artefacts with mixed opaque
   and translucent parts) and blending in the software rasteriser. The preview stays opaque and ignores alpha.

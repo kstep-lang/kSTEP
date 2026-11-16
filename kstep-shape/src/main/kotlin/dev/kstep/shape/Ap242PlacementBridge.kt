@@ -190,10 +190,23 @@ internal data class AxisInstances(
     val instances: List<Part21SimpleInstance>,
 )
 
+/**
+ * The ids a usage's instance colour (ADR-0044) has to refer to; one per entry of [AssemblyGeometryPlan.usages], same order.
+ * [placementShapeId] is the `PRODUCT_DEFINITION_SHAPE('Placement', ...)` on the usage.
+ */
+internal data class UsageEntityRefs(
+    val usage: NextAssemblyUsageOccurrence,
+    val placementShapeId: Int,
+    val placementAxisId: Int,
+    val parentRepresentationId: Int,
+    val childRepresentationId: Int,
+)
+
 internal data class PlacementBuildResult(
     /** ABSR instances that gained extra items, keyed by their (unchanged) id. */
     val replaced: Map<Int, Part21SimpleInstance>,
     val added: List<Part21EntityInstance>,
+    val usageRefs: List<UsageEntityRefs> = emptyList(),
 )
 
 internal object Ap242PlacementBridge {
@@ -260,6 +273,7 @@ internal object Ap242PlacementBridge {
             }
         }
 
+        val usageRefs = mutableListOf<UsageEntityRefs>()
         for ((i, u) in plan.usages.withIndex()) {
             val pds = alloc.next()
             val idt = alloc.next()
@@ -275,8 +289,16 @@ internal object Ap242PlacementBridge {
                     idt,
                 )
             added += contextDependentShapeRepresentation(cdsr, srr, pds)
+            usageRefs +=
+                UsageEntityRefs(
+                    usage = u.usage,
+                    placementShapeId = pds,
+                    placementAxisId = placementAxisOfUsage[i],
+                    parentRepresentationId = repOf.getValue(u.parent),
+                    childRepresentationId = repOf.getValue(u.child),
+                )
         }
-        return PlacementBuildResult(replaced, added)
+        return PlacementBuildResult(replaced, added, usageRefs)
     }
 
     /**

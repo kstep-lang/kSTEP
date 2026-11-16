@@ -5,7 +5,7 @@
 //   spike_export_styles <scenario> <assemblyMode 0|2> <out.step>
 // scenarios: plain (STEPControl_Writer), xcaf-plain, part, face, layer, alpha, multi, unicode and (ADR-0039 S2, part colour
 // together with face colours) part-face, part-face-layer, part-faces-multi, part-face-same, part-face-assembly and
-// (ADR-0042) alpha-face, part-alpha-face-alpha, edge, part-edge, face-edge, edge-alpha, instance, instance-vs-product
+// (ADR-0042) alpha-face, part-alpha-face-alpha, edge, part-edge, face-edge, edge-alpha, instance, instance-vs-product and (ADR-0044) instance-layer
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
       else ct->SetColor(sub, red, XCAFDoc_ColorCurv);
     }
   }
-  if (sc == "instance" || sc == "instance-vs-product") {
+  if (sc == "instance" || sc == "instance-vs-product" || sc == "instance-layer") {
     // an assembly holding the part twice; colour only component 2 (and, for instance-vs-product, the product too)
     if (sc == "instance-vs-product") ct->SetColor(part, orange, XCAFDoc_ColorSurf);
     TDF_Label top = st->NewShape();
@@ -188,6 +188,7 @@ int main(int argc, char** argv) {
     TDF_Label u2 = st->AddComponent(top, part, TopLoc_Location(t2));
     (void)u1;
     ct->SetColor(u2, blue, XCAFDoc_ColorSurf);
+    if (sc == "instance-layer") lt->SetLayer(u2, TCollection_ExtendedString("Layer-I", true), Standard_False);
     st->UpdateAssemblies();
   }
   STEPCAFControl_Writer w;

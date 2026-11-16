@@ -112,6 +112,13 @@ class OcctStepDocument internal constructor(
                         node in 0 until nodeCount && target in targets.indices,
                     ) { "native colour record out of range" }
                     check(rawColors.slice(i * 7 + 3..i * 7 + 6).all { it.isFinite() }) { "native colour is not finite" }
+                    check(
+                        (targets[target] == XcafStyleTarget.INSTANCE) ==
+                            (nodes[node].kind == XcafNodeKind.COMPONENT),
+                    ) { "native colour record: INSTANCE targets exactly the COMPONENT nodes" }
+                    check(targets[target] != XcafStyleTarget.INSTANCE || rawColors[i * 7 + 2].toInt() == 0) {
+                        "native colour record: INSTANCE colour with a sub-index"
+                    }
                     XcafColorAssignment(
                         node,
                         targets[target],

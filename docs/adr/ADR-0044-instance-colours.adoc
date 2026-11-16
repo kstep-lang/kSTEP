@@ -1,0 +1,108 @@
+= ADR-0044: Instance colours in the STEP export and import (Welle V)
+:toc:
+
+== Status
+
+Accepted, implemented (kSTEP Welle V). It builds the follow-up that ADR-0042 measured but did not build: one placed
+occurrence of a part (one assembly usage) gets a colour of its own, so a part used twice can be red once and blue once.
+The gate that ADR-0042 named (a C++ mini test that OCCT's reader reads a hand-written pattern as an instance colour) was
+run first and passed; every number below comes from `scripts/interop/spike_instance_colour_read.cpp` and
+`scripts/interop/verify-export-instance-colours.sh` (OCCT 7.9.3, macOS arm64, FreeCAD as installed on the same machine).
+
+== Context
+
+kSTEP builds the assembly itself (`Ap242PlacementBridge`: `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`,
+`NEXT_ASSEMBLY_USAGE_OCCURRENCE`, `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION`, no `MAPPED_ITEM`). OCCT's writer cannot be
+asked for an instance colour in that mode (ADR-0042: in assembly mode 0 it writes none at all, and in mode 2 it writes the
+style twice). So the entities are written by hand, and the import has to read them back. The OCCT reader returns such a style
+as a colour of the component label ("component 2 blue"); the importer used to count it in `presentation.instanceStylesIgnored`
+and drop it.
+
+== Measurements (the gate)
+
+The fixtures are a 10 x 20 x 30 box used twice, instance 1 at the origin and instance 2 at x = 50, exported by kSTEP without
+colour, with the pattern appended at the very end by `scripts/interop/make_instance_colour_fixtures.py`. The reader is
+`STEPCAFControl_Reader` with colour mode on; the colours are read through the RGBA overload (`XCAFDoc_ColorSurf`, then
+`XCAFDoc_ColorGen`) of the component label, of the referred part label and of the free shape.
+
+[cols="1,4,5",options="header"]
+|===
+| Id | Scenario | OCCT reads
+| G1 | only instance 2 blue | component 2 blue, component 1 none, part none, assembly none; 2 components, volume 12000
+| G2 | instance 1 red, instance 2 blue | both component colours; part and assembly none
+| G3 | part orange (OCCT's own `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION`) plus instance 2 blue; two such representations in the file | part orange, component 2 blue, component 1 none
+| G4 | a dedicated axis in the style's representation instead of the placement axis of the usage | same as G1, so the shared axis is enough and the four extra entities are not needed
+| G5 | a child with two solids (assembly mode 0): one `STYLED_ITEM` per solid, one shared `PRESENTATION_STYLE_BY_CONTEXT` | component 2 blue, component 1 none, part none (volume 12128)
+| G6 | `COLOUR_RGB` 192/255, 0.3, 0.25 and the mirrored one | both within 1e-6 (the reader converts with `Quantity_TOC_sRGB`; 1.0 comes back as 0.9999999999999999)
+| G7 (negative) | the same pattern without the `SHAPE_DEFINITION_REPRESENTATION` | not an instance colour: component 2 none, *and the shared part turns blue*, so both occurrences would be coloured
+| G8 | a second `PRODUCT_DEFINITION_SHAPE('Placement', ...)` on the usage instead of reusing the existing one | same as G1
+|===
+
+G7 is the reason for the `SHAPE_DEFINITION_REPRESENTATION`: without it OCCT silently repaints the product, a wrong result
+without any warning. G1 and G8 both work; kSTEP reuses the `PRODUCT_DEFINITION_SHAPE('Placement', ...)` that
+`Ap242PlacementBridge` already wrote for the usage, which is also what OCCT's own writer does (the usage then carries one
+`CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` and one `SHAPE_DEFINITION_REPRESENTATION` on the same `PRODUCT_DEFINITION_SHAPE`).
+This is ten entities per coloured usage for a one-solid child (one more `STYLED_ITEM` per further solid) and one
+`MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION` for the file; the plan assumed eleven with a new
+`PRODUCT_DEFINITION_SHAPE`, which G8 shows to be unnecessary.
+
+Also measured: OCCT's writer does not write an instance layer at all (scenario `instance-layer` of
+`spike_export_styles.cpp` writes no `PRESENTATION_LAYER_ASSIGNMENT`), and FreeCAD loads the file with the same two boxes,
+volume 12000 and the same bounding boxes as the file without colour (headless FreeCAD reads no colours; this is noted, not
+counted as a check). Hand calculation for the end-to-end example: one part (volume 6000), two occurrences, total volume 12000,
+the second occurrence 50 mm to the right, two coloured targets.
+
+== Decisions
+
+D1:: *`UsageStyle(usage, colour)`* (kstep-shape, next to `UsagePlacement`) is produced by the script DSL's
+`styleInstance(usage, colour)`, carried in the new additive field `KStepModel.usageStyles` and passed to
+`Ap242ShapeExporter.export(..., usageStyles)` (a new default parameter, so every existing caller is unchanged). The colour
+belongs to the usage, like `place(...)`, and is independent of the colour of the part.
+
+D2:: *The entities come last.* They are appended behind `PRODUCT_RELATED_PRODUCT_CATEGORY`, with the ids after it, so a file
+without instance colours is byte for byte a prefix of the same file with them (a test compares the placed-assembly golden with
+the same script plus two `styleInstance` calls). Without instance colours nothing in the exporter runs differently, so every
+existing golden stays byte-identical.
+
+D3:: *Own allow-list and a self-check.* `Ap242InstanceStyleBridge.INSTANCE_STYLE_ENTITY_NAMES` lists exactly the eleven names
+the bridge writes. It is not merged into `Ap242GeometryExtraction.STYLE_ENTITY_NAMES`: OCCT never writes
+`PRESENTATION_STYLE_BY_CONTEXT` for a single part, so the extraction of OCCT's own output stays fail closed against it (a test
+pins this). After building, `verify` checks that every entity is a simple instance on the allow-list, ids are unique, and every
+reference goes to an entity of the same list or to exactly the ids the bridge was given (the `PRODUCT_DEFINITION_SHAPE` and
+the placement axis of the usage, the representation context, the solids of the child); a violation is a
+`ShapeExportException`.
+
+D4:: *Limits, all fail closed (`ShapeExportException`, code `KSTEP-S-008` in the CLI).* Only opaque colours (a translucent one
+is refused already in the script with `KSTEP-S-012`); a usage must be a geometric usage of the plan (a root with a geometric
+child); its child must have a shape of its own, so one occurrence of a sub-assembly cannot be coloured (it would need a
+`SHAPE_REPRESENTATION_RELATIONSHIP` path or a `SHAPE_DEFINITION` chain per leaf, which is not measured); a second colour for one
+usage is `KSTEP-S-014` in the script; at most 4096 instance colours (the cap of geometric usages). Children with several solids
+are supported (G5). No layers on instances (OCCT writes none, the reader returns none), no colours per context path of a
+nested usage (`SHUO`), no per-face colours on an occurrence.
+
+D5:: *The importer reports them.* The native collector records a surface colour of a component label with the new target
+`INSTANCE` (appended to `XcafStyleTarget` so the ordinals of the others stay stable) on the COMPONENT node, sub-index 0. The
+Kotlin side checks that `INSTANCE` records, and only they, point to COMPONENT nodes with sub-index 0. `ImportedComponent.color`
+is new, the JSON gets `components[].colour` (always present, `null` without a colour, like the other colour keys, so additive;
+there is no format version field) and the text report appends `  colour (r, g, b)` to the component line only when a colour
+exists, so the text of every file without instance colours is byte-identical. The part-, face- and edge-paths filter by target
+and never see `INSTANCE` records.
+
+D6:: *Changed meaning of two counters.* `presentation.instanceStylesIgnored` now counts only what is still not read: a layer on
+a component or a colour that exists only as a curve colour (once per component); surface colours on instances are no longer
+ignored. `presentation.coloredTargets` counts instance colours too (like edge colours in ADR-0042 D6), so it rises for foreign
+files that carry them. The warning "colour/layer assignments on assembly instances are not reported" names only the remainder.
+The native caps are unchanged: an instance colour is one more record under `kMaxStyleRecords` (`styleTruncated` otherwise), and
+`PRESENTATION_STYLE_BY_CONTEXT`, a subtype of `STYLED_ITEM`'s style list entity `PresentationStyleAssignment`, is covered by
+the pre-transfer list-length cap through `IsKind` (ADR-0038).
+
+D7:: *`kstep render` ignores instance colours* (the preview has its own palette and, since ADR-0042, ignores alpha). The
+effective colour per occurrence (`ImportedOccurrence`) is not computed in this wave.
+
+== Not built / follow-ups
+
+* Colours on occurrences of sub-assemblies (path-exact colours), transparency on instance colours (it needs the rendering
+  chain of ADR-0042 and a gate scenario of its own), layers on instances.
+* The effective colour per occurrence in `kstep import` (instance colour over part colour) and instance colours in
+  `kstep render`.
+* Interoperability is checked with OCCT's reader and FreeCAD (geometry); other CAD systems are not covered.

@@ -7,6 +7,26 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Added
+
+* Instance colours (ADR-0044, Welle V): one placed occurrence of a part can have its own colour, so a part used twice can be
+  red once and blue once. `styleInstance(usage, colour)` in the script (opaque colours only; `KSTEP-S-012` for a
+  translucent one, `KSTEP-S-014` for a second colour on the same usage), `UsageStyle` and a `usageStyles` parameter of
+  `Ap242ShapeExporter.export`. The entities (`PRESENTATION_STYLE_BY_CONTEXT` on a one-item representation tied to the usage) are
+  written behind every other entity, so a file without instance colours is a byte prefix of the same file with them and all
+  existing exports stay byte-identical. A usage whose child is a sub-assembly is refused (fail closed). Verified with OCCT's
+  XCAF reader (`scripts/interop/verify-export-instance-colours.sh`, gate scenarios G1-G8), `kstep import` and FreeCAD
+  (geometry; headless FreeCAD reads no colours).
+* `kstep import` reports instance colours: `components[].colour` in the JSON (always present, `null` without a colour) and
+  `colour (r, g, b)` on the component line of the text report.
+
+=== Changed
+
+* `presentation.instanceStylesIgnored` now counts only what is still not read (a layer or a curve-only colour on an
+  assembly component); surface colours on instances are reported. `presentation.coloredTargets` counts instance colours too.
+  The text report of a file without instance colours is unchanged.
+* `kstep render` still ignores instance colours.
+
 == 0.4.0 — 2026-11-12 (pre-release)
 
 Fifth pre-release. It adds three more face-based shape operations (pocket or hole from a face, draft, thickening),

@@ -290,6 +290,7 @@ constexpr int kStyleTargetPart = 0;
 constexpr int kStyleTargetSolid = 1;
 constexpr int kStyleTargetFace = 2;
 constexpr int kStyleTargetEdge = 3;  // ADR-0042: ColorCurv on an edge sub-shape
+constexpr int kStyleTargetInstance = 4;  // ADR-0044: surface colour on an assembly component (node = the COMPONENT node)
 constexpr int kMaxLayerNames = 1024;      // distinct layer names per file
 constexpr int kMaxLayersPerTarget = 16;   // layer names reported per part / body / face
 constexpr int kMaxStyleRecords = 250000;  // colour records and layer references, each; bounded by the face limit
@@ -2058,13 +2059,26 @@ void collectPartStyles(
     }
 }
 
-bool hasInstanceStyle(
-    const Handle(XCAFDoc_ColorTool)& colorTool, const Handle(XCAFDoc_LayerTool)& layerTool, const TDF_Label& label) {
-    double r, g, b, a;
-    bool curveOnly;
+/**
+ * Instance style of one assembly COMPONENT (ADR-0044): its surface colour is recorded with target kStyleTargetInstance
+ * (node = the component node, sub = 0). What is still not read is counted in styleInstanceIgnored, once per component: a
+ * layer on the component, or a colour that exists only as a curve colour.
+ */
+void collectInstanceStyle(
+    ImportSession& out, const Handle(XCAFDoc_ColorTool)& colorTool, const Handle(XCAFDoc_LayerTool)& layerTool,
+    const TDF_Label& label, int node) {
+    double r = 0, g = 0, b = 0, a = 1;
+    bool curveOnly = false;
+    if (labelColor(colorTool, label, curveOnly, r, g, b, a)) {
+        if (static_cast<int>(out.colors.size()) >= kMaxStyleRecords) {
+            out.styleTruncated++;
+        } else {
+            out.colors.push_back(ImportColor{node, kStyleTargetInstance, 0, r, g, b, a});
+        }
+    }
     Handle(TColStd_HSequenceOfExtendedString) layers;
-    return labelColor(colorTool, label, curveOnly, r, g, b, a) || curveOnly ||
-           (layerTool->GetLayers(label, layers) && !layers.IsNull() && layers->Length() > 0);
+    const bool hasLayer = layerTool->GetLayers(label, layers) && !layers.IsNull() && layers->Length() > 0;
+    if (curveOnly || hasLayer) out.styleInstanceIgnored++;
 }
 
 /**
@@ -2269,7 +2283,6 @@ bool readXcafLocked(
             if (static_cast<int>(out.nodes.size()) >= maxNodes) {
                 return fail("node count", static_cast<int>(out.nodes.size()) + 1, maxNodes);
             }
-            if (hasInstanceStyle(colorTool, layerTool, compLabel)) out.styleInstanceIgnored++;
             TDF_Label referred = compLabel;
             if (XCAFDoc_ShapeTool::IsReference(compLabel)) {
                 XCAFDoc_ShapeTool::GetReferredShape(compLabel, referred);
@@ -2290,7 +2303,7 @@ bool readXcafLocked(
             int compIndex = static_cast<int>(out.nodes.size());
             out.nodes.push_back(comp);
             nodeLabels.push_back(compLabel);
-            (void)compIndex;
+            collectInstanceStyle(out, colorTool, layerTool, compLabel, compIndex);
             if (refIndex >= 0) queue.push_back(refIndex);
         }
     }

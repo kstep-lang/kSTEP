@@ -50,7 +50,7 @@ echo "== b2) the docs example (translucent part, translucent face, four red edge
 "$OUT/dump_xcaf_tree" styles "$OUT/docs-alpha-edges.step"
 has_jq && "$KSTEP" import "$OUT/docs-alpha-edges.step" --output json 2>/dev/null | jq -c '.parts[0] | {volume, colour, faceStyles, edgeStyles}'
 
-echo "== c) instance colours: not part of Welle U (ADR-0042, follow-up). Run with --spike for the measured OCCT pattern."
+echo "== c) instance colours: built in Welle V (ADR-0044), see scripts/interop/verify-export-instance-colours.sh; --spike shows the OCCT pattern"
 
 echo "== d) alpha 1.0 and the unstyled goldens are byte-identical to the files generated before ADR-0042"
 for n in box multi-solid placed-assembly part-colour face-colour; do

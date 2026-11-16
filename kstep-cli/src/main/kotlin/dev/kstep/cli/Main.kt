@@ -465,7 +465,7 @@ private fun exportModel(
     val occt =
         if (shapeCount > 0) OcctKernel.availability() else OcctAvailability.Unavailable("not queried")
     val placementCount = model.placements.size
-    val plan = planExportGeometry(shapeCount, command.requireGeometry, occt, placementCount)
+    val plan = planExportGeometry(shapeCount, command.requireGeometry, occt, placementCount, model.usageStyles.size)
     val text: String
     var geometry: GeometryReport? = null
     when (plan) {

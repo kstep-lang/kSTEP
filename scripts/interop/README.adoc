@@ -173,3 +173,18 @@ XCAF reader (`dump_xcaf_tree styles|units`): colours (the sRGB value of the file
 face indices, inch/centimetre/metre/unit-less bounding boxes, and the unresolved-unit and structure-only error codes.
 With FreeCAD installed it also writes a B-spline loft (`freecad_make_loft.py`) and imports it. It writes only below
 `build/interop/import-extras/` and finishes by checking that `git status --ignored scripts` is unchanged.
+
+== verify-export-instance-colours.sh (ADR-0044, Welle V)
+
+The gate and the end-to-end check for instance colours. `make_instance_colour_fixtures.py` appends the hand-written
+`PRESENTATION_STYLE_BY_CONTEXT` pattern to a kSTEP export of one box used twice (scenarios G1-G8: only instance 2, both, together
+with an OCCT part colour, an own axis, a two-solid child, 192/255 colours, without the `SHAPE_DEFINITION_REPRESENTATION` as the
+negative case, a second `PRODUCT_DEFINITION_SHAPE`); `spike_instance_colour_read.cpp` reads each file with OCCT's own
+`STEPCAFControl_Reader` and checks the colour of every component label, of the referred part and of the assembly (tolerance
+1e-6) and prints `GATE PASSED` or `GATE FAILED`. With `kstep-cli` installed (`./gradlew :kstep-cli:installDist`) it then exports
+`export-instance-colour-boxes.kstep.kts`, reads the file back with OCCT and `kstep import`, proves that the placed-assembly golden
+is a byte prefix of the same script with two `styleInstance` calls, checks the error codes and lets FreeCAD load the file as
+geometry (two objects, volume 12000; colours are not readable headless). `--refresh` rewrites the four committed gate fixtures
+`kstep-tests/src/test/resources/instance-colour/gate-G{1,2,3,6}.step`. It writes only below `build/interop/export-instance-colours/`
+and finishes by checking that `git status --ignored scripts` is unchanged. The same scenarios run in CI as
+`InstanceColourOcctGateTest`. `spike_export_styles.cpp instance-layer` shows that OCCT's writer writes no instance layer.

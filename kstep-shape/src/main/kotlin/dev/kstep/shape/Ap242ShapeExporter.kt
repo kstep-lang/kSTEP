@@ -65,6 +65,9 @@ object Ap242ShapeExporter {
      * assembly usage, are written exactly as before ADR-0028.
      *
      * @param placements at most one per usage; the usage must be a root with a geometric child
+     * @param usageStyles instance colours (ADR-0044): at most one opaque colour per usage; the usage must be a root whose
+     *   child has a shape of its own. They are written at the very end of the file, behind every other entity, so that
+     *   a file without instance colours is a byte-for-byte prefix of the same file with them.
      *
      * @throws ShapeExportException if [assignments] is empty or exceeds [MAX_SHAPES], two
      *   assignments share one product definition, an assignment's product definition is not
@@ -78,6 +81,7 @@ object Ap242ShapeExporter {
         roots: List<Any>,
         assignments: List<ShapeAssignment>,
         placements: List<UsagePlacement> = emptyList(),
+        usageStyles: List<UsageStyle> = emptyList(),
     ): String {
         if (assignments.isEmpty()) throw ShapeExportException("at least one shape assignment is required")
         if (assignments.size > MAX_SHAPES) {
@@ -109,6 +113,8 @@ object Ap242ShapeExporter {
             }
 
         val plan = AssemblyGeometryGraph.plan(roots, assignments.map { it.productDefinition }, placements)
+        val plannedStyles =
+            Ap242InstanceStyleBridge.plan(usageStyles, plan, assignments.map { it.productDefinition })
 
         var offset = structure.nextId - 1
         var totalInstances = 0
@@ -116,6 +122,7 @@ object Ap242ShapeExporter {
         // PD (identity) -> id of its already-renumbered shape representation
         val representationOf = java.util.IdentityHashMap<Any, Int>()
         val bridge = mutableListOf<Part21EntityInstance>()
+        var usageRefs: List<UsageEntityRefs> = emptyList()
         for ((index, assignment) in assignments.withIndex()) {
             val occtText = writeOcctStepText(assignment)
             val occtDoc =
@@ -185,6 +192,7 @@ object Ap242ShapeExporter {
                 result.replaced[geometryAll[i].id]?.let { geometryAll[i] = it }
             }
             bridge += result.added
+            usageRefs = result.usageRefs
             offset = result.added.maxOf { it.id }
         }
 
@@ -204,6 +212,30 @@ object Ap242ShapeExporter {
                 structure.idOf(first.productDefinition.formation.ofProduct),
             )
 
+        // Instance colours go behind everything else (ADR-0044); without any, nothing here runs.
+        if (plannedStyles.isNotEmpty()) {
+            val everything = (geometryAll + bridge).associateBy { it.id }
+            val solidsOfDefinition = java.util.IdentityHashMap<Any, List<Int>>()
+            for (assignment in assignments) {
+                val root = everything[representationOf.getValue(assignment.productDefinition)] as? Part21SimpleInstance
+                val items = (root?.args?.getOrNull(1) as? Part21Value.ListValue)?.items.orEmpty()
+                solidsOfDefinition[assignment.productDefinition] =
+                    items.filterIsInstance<Part21Value.Ref>().map { it.id }.filter {
+                        (everything[it] as? Part21SimpleInstance)?.entityName == "MANIFOLD_SOLID_BREP"
+                    }
+            }
+            val styleEntities =
+                Ap242InstanceStyleBridge.build(
+                    planned = plannedStyles,
+                    refs = usageRefs,
+                    startId = addExactId(productRelatedProductCategoryId, 1),
+                    solidIdsOfChild = { solidsOfDefinition[it].orEmpty() },
+                    contextIdOf = { sharedContextOf(everything, it) },
+                    childOf = { r -> plan.usages.first { it.usage === r.usage }.child },
+                )
+            bridge += styleEntities
+        }
+
         // Part21Document.concat's own duplicate-#N guard (Part21WriteException) is real
         // protection against a future change to the offset arithmetic above.
         val structureDoc = Part21Document(header, structure.instances)
@@ -211,6 +243,13 @@ object Ap242ShapeExporter {
         val document = merged.copy(header = header.copy(schemaIdentifiers = listOf(AP242_SCHEMA_IDENTIFIER)))
         return document.render()
     }
+
+    private fun sharedContextOf(
+        byId: Map<Int, Part21EntityInstance>,
+        representationId: Int,
+    ): Int =
+        ((byId[representationId] as? Part21SimpleInstance)?.args?.getOrNull(2) as? Part21Value.Ref)?.id
+            ?: throw ShapeExportException("cannot find the representation context of representation #$representationId")
 
     // The geometric representation context OCCT wrote for the first shape: reused for synthesized
     // representations of parts that have no geometry of their own (all OCCT contexts are millimetres).
@@ -258,8 +297,9 @@ object Ap242ShapeExporter {
         assignments: List<ShapeAssignment>,
         target: Path,
         placements: List<UsagePlacement> = emptyList(),
+        usageStyles: List<UsageStyle> = emptyList(),
     ): Path {
-        val text = export(header, roots, assignments, placements)
+        val text = export(header, roots, assignments, placements, usageStyles)
         val absolute = target.toAbsolutePath().normalize()
         Files.createDirectories(absolute.parent)
         Files.writeString(absolute, text)
