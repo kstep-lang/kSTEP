@@ -132,3 +132,7 @@ bash scripts/release/verify-maven-artifacts.sh build/maven-staging X.Y.Z
 Without `-Pkstep.native.exclude=true` the task `verifyNoNativeLibraries` fails the run on a machine that has OCCT, so a
 local bridge can never end up in a jar. For a signed rehearsal use a throw-away key in a temporary `GNUPGHOME` and pass it
 as `ORG_GRADLE_PROJECT_signingInMemoryKey` (never commit it), then add `--signed` to the verification.
+
+== Native runtime archive
+
+The native runtime archive (ADR-0050) is *not* part of the release pipeline yet; `release.yml` neither builds nor publishes it.

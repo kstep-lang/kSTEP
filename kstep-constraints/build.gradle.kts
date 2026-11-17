@@ -257,8 +257,18 @@ val compilePlaneGcsBridge =
         )
     }
 
+// -Pkstep.native.embedInJar=false (default true): still compiles the bridge but does NOT copy it into this
+// module's jar as a resource. Used by :kstep-cli:nativeRuntimeZip (ADR-0050), which ships the bridge as a plain
+// file under lib/native/<platform>/. Unlike kstep.native.exclude it leaves nativeBuildable untouched.
+val embedNativeInJar =
+    providers
+        .gradleProperty("kstep.native.embedInJar")
+        .map { it != "false" }
+        .orElse(true)
+        .get()
+
 tasks.named<ProcessResources>("processResources") {
-    if (!nativeExclude) {
+    if (!nativeExclude && embedNativeInJar) {
         dependsOn(compilePlaneGcsBridge)
         from(nativeOutputDir) {
             into("dev/kstep/constraints/native/${nativePlatform?.id ?: "unsupported"}")

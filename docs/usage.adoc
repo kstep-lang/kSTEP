@@ -798,3 +798,11 @@ stepFile(fileName = "two-boxes.step") {
   included: SVG `opacity`, PNG blending, GLB `COLOR_0` as `VEC4` with `alphaMode BLEND`; `kstep-viewer` stays opaque). See docs/adr/ADR-0045-effective-occurrence-colour.adoc.
 * Verified with OCCT's own reader, `kstep import` and FreeCAD (geometry; headless FreeCAD reads no colours):
   `scripts/interop/verify-export-instance-colours.sh`. See docs/adr/ADR-0044-instance-colours.adoc.
+
+== Native runtime archive and `kstep --version`
+
+`kstep --version` prints `kstep <version>`. The opt-in native archive (ADR-0050, built locally with
+`:kstep-cli:nativeRuntimeZip`, not part of releases) ships the OCCT and PlaneGCS bridges and a `bin/kstep` launcher; in it
+`--version` also prints `occt:` and `planegcs:` status lines, and when OCCT cannot be loaded a hint is printed to stderr
+(Ubuntu: `sudo apt install libocct-data-exchange-dev libocct-modeling-algorithms-dev`; macOS: `brew install opencascade`).
+The archive needs OCCT 7.9.x at the location it was built against.

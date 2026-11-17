@@ -553,3 +553,9 @@
   `PRODUCT_DEFINITION_SHAPE` -> `ProductDefinition` identity link and
   matching B-Rep element counts, not just that both halves are present)
 |===
+
+== Native runtime archive
+
+`kstep-geometry` and `kstep-constraints` accept `-Pkstep.native.embedInJar=false`: the bridge is still compiled but not
+copied into the module jar. `:kstep-cli:nativeRuntimeZip` requires it and writes `build/distributions/kstep-<version>-<platform>-native.zip`
+(see ADR-0050).

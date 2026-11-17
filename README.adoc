@@ -282,3 +282,9 @@ or source is vendored in this repository, and this product does not
 currently bundle or redistribute any OCCT binary; see link:NOTICE[NOTICE]
 and `docs/adr/ADR-0005-occt-jni-bridge.adoc` for the full license and
 provenance discussion.
+
+== Native runtime archive (opt-in)
+
+`./gradlew :kstep-cli:nativeRuntimeZip -Pkstep.native.embedInJar=false` builds a host-platform archive with the OCCT and
+PlaneGCS bridges as plain files and a `bin/kstep` launcher. OCCT 7.9.x must be installed separately. Not part of releases;
+see ADR-0050 and `docs/building.adoc`.

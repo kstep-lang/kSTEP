@@ -165,6 +165,68 @@ else
   echo "note: zip/unzip missing, skipping verify-dist negative tests" >&2
 fi
 
+# ---- verify-native-dist (negative cases + stub happy path; no Java or real bridge needed) -----
+if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+  ND="$HERE/verify-native-dist.sh"
+  case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64) NP=linux-x86-64; NE=so ;;
+    Darwin/arm64) NP=macos-aarch64; NE=dylib ;;
+    *) NP=""; NE="" ;;
+  esac
+  if [ -n "$NP" ]; then
+    NR="kstep-1.0.0-$NP-native"
+    mknative() { # name -> creates a complete stub archive tree and prints its root
+      local r="$WORK/n-$1/$NR"
+      mkdir -p "$r/bin" "$r/lib/native/$NP"
+      : > "$r/lib/kstep-cli-1.0.0.jar"; : > "$r/NATIVE-README.txt"; : > "$r/LICENSE"; : > "$r/NOTICE"
+      echo x > "$r/lib/native/$NP/libkstep_occt_bridge.$NE"; echo x > "$r/lib/native/$NP/libkstep_planegcs_bridge.$NE"
+      cat > "$r/bin/kstep" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --help) echo "Usage: kstep"; exit 0 ;;
+  --version) echo "kstep 1.0.0"; echo "occt: available 7.9.3"; echo "planegcs: available abc"; exit 0 ;;
+  render)
+    while [ "$#" -gt 0 ]; do [ "$1" = "--out" ] && out="$2"; shift; done
+    printf 'solid x\n' > "$out"; exit 0 ;;
+esac
+exit 3
+STUB
+      echo "$r"
+    }
+    zipnative() { mkdir -p "$WORK/nz-$1"; (cd "$WORK/n-$1" && zip -qr "$WORK/nz-$1/$NR.zip" "$NR"); echo "$WORK/nz-$1/$NR.zip"; }
+    : > "$WORK/nfixture.kts"
+    mknative ok >/dev/null; Z="$(zipnative ok)"
+    expect_rc "verify-native accepts a complete stub archive" 0 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
+    contains "$WORK/out" "OK:"; check "verify-native prints OK" $?
+
+    r="$(mknative nolaunch)"; rm "$r/bin/kstep"; Z="$(zipnative nolaunch)"
+    expect_rc "verify-native rejects missing launcher" 1 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
+    r="$(mknative occt)"; : > "$r/lib/native/$NP/libTKernel.$NE"; Z="$(zipnative occt)"
+    expect_rc "verify-native rejects bundled OCCT libs" 1 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
+    r="$(mknative nogcs)"; rm "$r/lib/native/$NP/libkstep_planegcs_bridge.$NE"; Z="$(zipnative nogcs)"
+    expect_rc "verify-native rejects a missing PlaneGCS bridge" 1 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
+    r="$(mknative jar)"; mkdir -p "$WORK/njarsrc/dev/kstep/geometry/native/$NP"; : > "$WORK/njarsrc/dev/kstep/geometry/native/$NP/x"
+    (cd "$WORK/njarsrc" && zip -qr "$r/lib/kstep-geometry-1.0.0.jar" dev); Z="$(zipnative jar)"
+    expect_rc "verify-native rejects natives embedded in a jar" 1 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
+    contains "$WORK/err" "embeds native bridge"; check "verify-native reports embedded bridge" $?
+    r="$(mknative dup)"; Z="$(zipnative dup)"
+    python3 - "$Z" "$NR/NOTICE" <<'PY' 2>/dev/null
+import sys, zipfile, warnings
+warnings.simplefilter("ignore")
+with zipfile.ZipFile(sys.argv[1], "a") as z:
+    z.writestr(sys.argv[2], b"dup")
+PY
+    expect_rc "verify-native rejects duplicate entries" 1 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
+  fi
+  # Wrong host: an archive for the other platform must be refused with exit 2.
+  case "${NP:-}" in macos-aarch64) OTHER=linux-x86-64 ;; *) OTHER=macos-aarch64 ;; esac
+  mkdir -p "$WORK/nwrong"; : > "$WORK/nwrong/kstep-1.0.0-$OTHER-native.zip"
+  expect_rc "verify-native refuses an archive of another platform" 2 bash "$ND" "$WORK/nwrong/kstep-1.0.0-$OTHER-native.zip" 1.0.0
+  contains "$WORK/err" "wrong host"; check "verify-native reports wrong host" $?
+else
+  echo "note: zip/unzip missing, skipping verify-native-dist tests" >&2
+fi
+
 # ---- check-maven-central (curl stubbed, no network) ----------------------------------
 M="$HERE/check-maven-central.sh"
 MC_LIST="$WORK/mc-artifacts.txt"

@@ -1,0 +1,75 @@
+= ADR-0050: Opt-in native runtime distribution
+:toc:
+
+== Status
+
+Accepted (Welle D0a). Verified on macOS arm64 only; the Linux x86-64 path is implemented but not verified locally and
+has no CI job yet.
+
+== Context
+
+The released CLI zip (ADR-0025/0026) is JVM-only: it ships no JNI bridge, so geometry features and constraint solving
+report "unavailable". Users who want them had to build the bridges themselves. At the same time the library jars of
+`kstep-geometry` and `kstep-constraints` embed the bridge as a resource whenever the host can compile it, so a plain
+`installDist` on such a host already carries natives inside jars, and `-Pkstep.native.exclude=true` is the wrong switch
+to avoid that: it also stops the bridge from being compiled and contradicts `kstep.occt.require=true`.
+
+== Decision
+
+* A separate, opt-in archive `kstep-<version>-<platform>-native.zip` (task `:kstep-cli:nativeRuntimeZip`, host
+  platform only). It is not attached to `assemble`, `check` or the release workflow. The standard `distZip` is unchanged.
+* The two bridge libraries are plain files under `lib/native/<platform>/`, never inside a jar.
+* New Gradle property `kstep.native.embedInJar` (default `true`, behaviour unchanged) in `kstep-geometry` and
+  `kstep-constraints`. With `false` the bridge is still compiled but not copied into the module jar. The archive task
+  refuses to run without it. `kstep.native.exclude` semantics (ADR-0043) are untouched, and the publish guards still
+  demand `kstep.native.exclude=true`.
+* `bin/kstep` (POSIX sh, generated from `kstep-cli/src/native-dist/bin/kstep`; JVM options and classpath are taken from the
+  `application` plugin, so they cannot drift) resolves its own location without `readlink -f`, then starts the JVM with
+  `-Dkstep.occt.bridge.library=...` and `-Dkstep.planegcs.bridge.library=...` (absolute paths, the existing override
+  properties) and `-Dkstep.native.dist=true`.
+* `kstep --version` (also in the standard zip) prints `kstep <version>`; in native-dist mode it also prints an `occt:` and
+  a `planegcs:` status line. The version comes from a generated resource, not the manifest.
+* In native-dist mode only, a text hint with the OCCT install commands is printed to stderr when OCCT cannot be loaded.
+  JSON documents and the standard zip's `geometry_unavailable` behaviour are unchanged.
+* `scripts/release/verify-native-dist.sh` verifies layout, absence of bundled OCCT, no natives in jars, the launcher
+  (through a symlink, from another cwd) and a native STL render.
+
+== Licensing (LGPL)
+
+OCCT is LGPL 2.1 with an exception and is linked dynamically by our bridge. It is not redistributed in this archive.
+The bridge sources are kSTEP's own; PlaneGCS is vendored and compiled into its bridge (see ADR-0006 and `NOTICE`).
+
+== Per channel
+
+[cols="2,3"]
+|===
+|Channel |Position
+
+|DEB / Homebrew / RPM
+|Possible later: depend on the distribution's OCCT and build the bridge against it.
+
+|Windows, generic ZIP, DMG
+|Would require bundling OCCT. Out of scope.
+
+|Out of scope
+|Intel Mac, Windows, signing/notarization, Maven Central, a change of `release.yml`.
+|===
+
+== Consequences
+
+The OCCT bridge carries an absolute rpath to the OCCT library directory of the build machine (Linux
+`-Wl,--disable-new-dtags -Wl,-rpath`, macOS `-Wl,-rpath`; PlaneGCS has no external dependency). The archive is therefore
+valid only where OCCT 7.9.x lives at the same location (measured: Homebrew 7.9.3_1); it is not relocatable across OCCT
+installs. The archive README says so. A downloaded unsigned dylib may be blocked by Gatekeeper.
+
+== Rejected alternatives
+
+* Keeping natives embedded in the jars: contradicts "plain files, not in a jar".
+* `java.library.path`: the loaders only use `System.load` with an absolute, real path.
+* Repacking the jars in a Zip task: fragile.
+
+== Measured results
+
+macOS arm64, Homebrew opencascade 7.9.3_1, JDK 21: archive about 88 MB; `verify-native-dist.sh` passes (layout, launcher via
+symlink from another cwd, `--version` reports `occt: available 7.9.3` and `planegcs: available`, STL render of
+`export-box-20x30x40.kstep.kts` non-empty). Linux x86-64 is not verified locally.

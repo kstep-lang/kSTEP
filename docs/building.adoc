@@ -288,3 +288,15 @@ the five entities it successfully generates (`Product`,
 (`ProductContext`, `ProductDefinitionContext`) that themselves cannot
 be code-generated in V1 (see xref:status.adoc#status[Status]), so wiring the output into
 an actual compilation would break it.
+
+== Building — opt-in native runtime archive
+
+[source,bash]
+----
+./gradlew clean :kstep-cli:nativeRuntimeZip -Pkstep.native.embedInJar=false \
+  -Pkstep.occt.require=true -Pkstep.planegcs.require=true --no-build-cache
+scripts/release/verify-native-dist.sh kstep-cli/build/distributions/kstep-<version>-<platform>-native.zip <version>
+----
+
+Host platform only (linux-x86-64, macos-aarch64). The build cache is enabled in `gradle.properties`, so always pass
+`--no-build-cache` for verification. See ADR-0050.

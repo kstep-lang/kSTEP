@@ -9,6 +9,12 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Opt-in native runtime archive (Welle D0a, ADR-0050): `:kstep-cli:nativeRuntimeZip` builds
+  `kstep-<version>-<platform>-native.zip` for the host platform (CLI, `bin/kstep` launcher, OCCT and PlaneGCS bridges as plain
+  files under `lib/native/<platform>/`; OCCT itself is not bundled). New `kstep.native.embedInJar` Gradle property and
+  `scripts/release/verify-native-dist.sh`. Not part of the release pipeline.
+* `kstep --version` prints the version (in the native archive also the bridge status) and an OCCT install hint is printed
+  when the native archive cannot load OCCT.
 * `kstep render -f stl` and `-f 3mf` (Welle AB, ADR-0049): binary STL and 3MF mesh export in millimetres. STL is one merged
   mesh and drops colours explicitly (warning); 3MF keeps colours (alpha as `#RRGGBBAA`), one object per distinct part and one
   build item with a transform per placed instance. No geometry means exit 1 and no file (never a text card inside a printer file).

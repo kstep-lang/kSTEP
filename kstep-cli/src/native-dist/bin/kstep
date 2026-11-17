@@ -1,0 +1,60 @@
+#!/bin/sh
+# kSTEP launcher of the opt-in native runtime archive (ADR-0050). Generated from a template by
+# :kstep-cli:nativeRuntimeZip -- do not edit the copy inside an archive.
+# Points the JVM at the two bridge libraries shipped under lib/native/<platform>/ (plain files,
+# never inside a jar) via the kstep.*.bridge.library override properties.
+
+# Resolve this script's real location without readlink -f (BSD/macOS portable).
+SELF="$0"
+while [ -h "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *) SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+APP_HOME=$(cd "$(dirname "$SELF")/.." >/dev/null 2>&1 && pwd -P) || {
+    echo "kstep: cannot resolve the installation directory" >&2
+    exit 2
+}
+
+OS_NAME=$(uname -s)
+OS_ARCH=$(uname -m)
+case "$OS_NAME/$OS_ARCH" in
+    Linux/x86_64) PLATFORM=linux-x86-64; EXT=so ;;
+    Darwin/arm64) PLATFORM=macos-aarch64; EXT=dylib ;;
+    *)
+        echo "kstep: this native archive supports linux-x86-64 and macos-aarch64 only (host: $OS_NAME/$OS_ARCH)" >&2
+        exit 2
+        ;;
+esac
+if [ "$PLATFORM" != "@PLATFORM@" ]; then
+    echo "kstep: this archive was built for @PLATFORM@, but the host is $PLATFORM" >&2
+    exit 2
+fi
+
+OCCT_LIB="$APP_HOME/lib/native/$PLATFORM/libkstep_occt_bridge.$EXT"
+PGCS_LIB="$APP_HOME/lib/native/$PLATFORM/libkstep_planegcs_bridge.$EXT"
+for f in "$OCCT_LIB" "$PGCS_LIB"; do
+    if [ ! -f "$f" ]; then
+        echo "kstep: bridge library missing: $f" >&2
+        exit 2
+    fi
+done
+
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+    JAVACMD="$JAVA_HOME/bin/java"
+elif command -v java >/dev/null 2>&1; then
+    JAVACMD=java
+else
+    echo "kstep: no Java found (set JAVA_HOME or put java on PATH; JDK 21+ required)" >&2
+    exit 2
+fi
+
+CLASSPATH="@CLASSPATH@"
+
+exec "$JAVACMD" @DEFAULT_JVM_OPTS@ \
+    "-Dkstep.occt.bridge.library=$OCCT_LIB" \
+    "-Dkstep.planegcs.bridge.library=$PGCS_LIB" \
+    -Dkstep.native.dist=true \
+    -cp "$CLASSPATH" @MAIN_CLASS@ "$@"

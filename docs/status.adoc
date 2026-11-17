@@ -278,7 +278,9 @@ this writing:
   the real shape live from `ap242-v1-entities.exp` on every run and
   fails the build on any divergence not explicitly named in its
   allowlist — so the gap is now bounded and guarded, not open-ended.
-  See xref:roadmap.adoc#roadmap[Roadmap] for the full divergence inventory and what
+  An opt-in native runtime archive for the host platform exists (ADR-0050): macOS arm64 verified, Linux x86-64 not yet verified.
+
+See xref:roadmap.adoc#roadmap[Roadmap] for the full divergence inventory and what
   remains deliberately deferred.
 * **(M2 Welle 10 — `kstep-core` rebuilt on the codegen-generated
   types)** The fork M2 Welle 9 left open (extend the hand-authored
@@ -757,5 +759,7 @@ scan before either lands.
   such a value. Release v0.4.0 (2026-11-12, pre-release) contains everything before. The zips have no native bridges, like the earlier
   releases. Still open: PMI, Windows and Intel Macs for the
   native bridges, interoperability beyond OpenCascade-based readers.
+
+An opt-in native runtime archive for the host platform exists (ADR-0050): macOS arm64 verified, Linux x86-64 not yet verified.
 
 See xref:roadmap.adoc#roadmap[Roadmap] for what's planned next.

@@ -75,6 +75,7 @@ Usage:
           --height <px>                    Default image height, 16..4096 (default: 768)
           --require-geometry               Fail instead of embedding a geometry-unavailable card
           --on-error <fail|card>           Invalid script: abort (default) or embed an error card
+  kstep --version                          Print the kSTEP version
   kstep help                                Show this message
 """
 
@@ -123,6 +124,8 @@ sealed interface CliCommand {
     data class ShowUsage(
         val exitCode: Int,
     ) : CliCommand
+
+    data object ShowVersion : CliCommand
 }
 
 /** Exactly one of two modes -- a sealed type makes "single-file XOR tree, never both, never
@@ -147,6 +150,7 @@ fun resolveCommand(args: Array<String>): CliCommand =
     when {
         args.isEmpty() -> CliCommand.ShowUsage(exitCode = 0)
         args.size == 1 && args[0] == "mcp" -> CliCommand.StartMcpServer
+        args.size == 1 && (args[0] == "--version" || args[0] == "version") -> CliCommand.ShowVersion
         args.size == 1 && (args[0] == "help" || args[0] == "--help") -> CliCommand.ShowUsage(exitCode = 0)
         args[0] == "export" -> resolveExportCommand(args.drop(1))
         args[0] == "render" -> resolveRenderCommand(args.drop(1))
@@ -410,12 +414,19 @@ fun main(args: Array<String>) {
     // this process touches KotlinLogging.logger{} (i.e. first thing in main()), or the banner has
     // already printed by the time this assignment runs.
     KotlinLoggingConfiguration.logStartupMessage = false
-    when (val command = resolveCommand(args)) {
+    val command = resolveCommand(args)
+    if (NativeDist.isActive() &&
+        (command is CliCommand.Export || command is CliCommand.Render || command is CliCommand.Import)
+    ) {
+        NativeDist.occtHintOrNull()?.let { System.err.println(it) }
+    }
+    when (command) {
         CliCommand.StartMcpServer -> runBlocking { runStdioServer() }
         is CliCommand.Export -> runExport(command)
         is CliCommand.Render -> runRender(command)
         is CliCommand.Asciidoc -> runAsciidoc(command)
         is CliCommand.Import -> runImport(command)
+        CliCommand.ShowVersion -> printVersion()
         is CliCommand.ShowUsage -> {
             println(USAGE_TEXT)
             if (command.exitCode != 0) exitProcess(command.exitCode)
