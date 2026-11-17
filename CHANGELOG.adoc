@@ -21,11 +21,24 @@ minor versions may contain breaking changes.
 * `--tolerance <mm>` (stl/3mf): absolute chordal deviation, never finer than bounding-box diagonal / 2000.
 * `--require-watertight` (stl/3mf): fail, writing nothing, if a part mesh is not closed and consistently oriented under 1e-6 mm
   welding. Without the flag a non-watertight mesh is written with a warning. `--output json` gains a `meshExport` object.
+* `kstep-desktop` (Welle D1, ADR-0051): live preview of a `*.kstep.kts` script (`./gradlew :kstep-desktop:run`), re-rendered on
+  save in a supervised worker subprocess (new `dev.kstep.cli.DesktopRenderWorker`; timeout, heap and output limits, orphan halt). GLB
+  read-back (`GlbMeshReader`), polling file watcher, generation-based cancellation, last good result with badge, error bar with the
+  new codes `KSTEP-D-001` to `-008`. Not published and not part of the CLI zip (`verify-dist.sh` now fails if desktop, viewer or
+  Compose jars appear in it).
 
 === Changed
 
+* `ShapeCanvas` gains an optional `fitReference` parameter (behaviour unchanged without it); `UnavailableNotice` gains `installHint`.
+* `ImportWorkerSupervisor` (new optional `onStarted` callback), `ImportWorkerLaunch.command` (`classPath`, `extraJvmOptions`),
+  `WorkerTempDir`, `WorkerOutcome` and `diagnosticLine` of the unpublished `kstep-cli` are now public so `kstep-desktop` can use them.
 * The native bridge gains `nativeShapeTrianglesWithTolerance` (bounded tolerance entry point); the default tessellation is
   unchanged. The native library must be rebuilt (the Gradle build does it).
+
+=== Fixed
+
+* The OCCT install hint of `kstep-viewer` showed the apt command on every operating system; on macOS it now shows Homebrew and the
+  native archive.
 
 == 0.5.0 — 2026-11-17 (pre-release)
 

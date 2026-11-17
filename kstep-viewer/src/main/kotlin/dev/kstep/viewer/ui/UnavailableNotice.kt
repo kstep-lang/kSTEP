@@ -12,9 +12,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 
-private const val OCCT_INSTALL_COMMAND =
-    "sudo apt-get install --no-install-recommends libocct-foundation-dev " +
-        "libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev"
+/** The OCCT install hint per operating system (ADR-0051): the apt command is wrong on macOS. Pure, for testing. */
+object OcctInstallHint {
+    private const val LINUX_COMMAND =
+        "sudo apt-get install --no-install-recommends libocct-foundation-dev " +
+            "libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev"
+
+    /** The lines to show for [osName] (`os.name`); the first line is the introduction, the rest are commands/notes. */
+    fun forOs(osName: String?): List<String> {
+        val os = osName.orEmpty().lowercase()
+        return when {
+            os.contains("mac") || os.contains("darwin") ->
+                listOf(
+                    "Install OCCT with Homebrew, then rebuild:",
+                    "brew install opencascade eigen boost",
+                    "./gradlew clean :kstep-desktop:run -Pkstep.occt.require=true -Pkstep.planegcs.require=true",
+                    "Or use the native archive (ADR-0050): " +
+                        "-Pkstep.occt.bridge.library=<abs>/lib/native/macos-aarch64/libkstep_occt_bridge.dylib",
+                )
+            os.contains("linux") -> listOf("Install the OCCT dev packages, then rebuild:", LINUX_COMMAND)
+            else -> listOf("OCCT bridge is only built for Linux x86-64 and macOS arm64")
+        }
+    }
+
+    fun forCurrentOs(): List<String> = forOs(System.getProperty("os.name"))
+}
 
 private const val DEFAULT_HEADING = "kSTEP Viewer cannot show a shape: the native OCCT bridge is unavailable."
 
@@ -36,6 +58,7 @@ fun UnavailableNotice(
     modifier: Modifier = Modifier,
     heading: String = DEFAULT_HEADING,
     showInstallInstructions: Boolean = true,
+    installHint: List<String> = OcctInstallHint.forCurrentOs(),
 ) {
     Column(
         modifier = modifier.fillMaxSize().padding(24.dp),
@@ -45,11 +68,15 @@ fun UnavailableNotice(
         Text(heading, style = MaterialTheme.typography.titleMedium)
         Text(reason, modifier = Modifier.padding(top = 12.dp))
         if (showInstallInstructions) {
-            Text(
-                "Install the OCCT dev packages, then rebuild:",
-                modifier = Modifier.padding(top = 16.dp),
-            )
-            Text(OCCT_INSTALL_COMMAND, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
+            installHint.forEachIndexed { index, line ->
+                if (index == 0 && installHint.size > 1) {
+                    Text(line, modifier = Modifier.padding(top = 16.dp))
+                } else if (installHint.size == 1) {
+                    Text(line, modifier = Modifier.padding(top = 16.dp))
+                } else {
+                    Text(line, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
+                }
+            }
         }
     }
 }

@@ -59,6 +59,38 @@ class ImportWorkerSupervisorTest :
                 tempBase = tempBase,
             ).runWith { dir -> fakeCommand(args, dir) }
 
+        "onStarted receives the started process before waiting" {
+            var seenPid: Long? = null
+            var aliveWhenSeen = false
+            val outcome =
+                ImportWorkerSupervisor(
+                    60_000,
+                    tempBase = newBase(),
+                    onStarted = { p ->
+                        seenPid = p.pid()
+                        aliveWhenSeen = p.isAlive
+                    },
+                ).runWith { dir -> fakeCommand(arrayOf("print-exit", "0", "x"), dir) }
+            val exited = outcome.shouldBeInstanceOf<WorkerOutcome.Exited>()
+            seenPid shouldBe exited.pid
+            aliveWhenSeen shouldBe true
+        }
+
+        "a throwing onStarted kills the process, removes the temp directory and passes the exception on" {
+            val base = newBase()
+            var pid = 0L
+            val thrown =
+                runCatching {
+                    ImportWorkerSupervisor(60_000, tempBase = base, onStarted = { p ->
+                        pid = p.pid()
+                        error("callback failed")
+                    }).runWith { dir -> fakeCommand(arrayOf("sleep"), dir) }
+                }.exceptionOrNull()
+            thrown.shouldBeInstanceOf<IllegalStateException>()
+            ProcessHandle.of(pid).map { it.isAlive }.orElse(false) shouldBe false
+            base.listDirectoryEntries().size shouldBe 0
+        }
+
         fun failureOf(
             outcome: WorkerOutcome,
             json: Boolean = true,

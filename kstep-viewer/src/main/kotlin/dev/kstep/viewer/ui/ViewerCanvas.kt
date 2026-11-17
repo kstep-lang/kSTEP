@@ -77,13 +77,17 @@ private const val HINT_TEXT = "Drag to orbit · Shift-drag to pan · Scroll to z
  *
  * @param state The full camera pose (orbit angles + zoom + pan). Deliberately a raw [MutableState]
  *   rather than this composable owning a private one unconditionally -- see the class doc above.
+ * @param fitReference Optional mesh the auto-fit scale is computed from instead of [mesh] (ADR-0051): a live
+ *   preview passes the first good mesh of a file, so the camera does not jump when the shape changes slightly.
+ *   `null` (the default) keeps the pre-existing behaviour exactly: the scale is fitted to [mesh] itself.
  */
 @Composable
 fun ShapeCanvas(
     mesh: TriangleMesh,
     modifier: Modifier = Modifier,
     state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) },
-) = ShapeCanvasInternal(mesh, coloredMesh = null, modifier, state)
+    fitReference: TriangleMesh? = null,
+) = ShapeCanvasInternal(mesh, coloredMesh = null, modifier, state, fitReference)
 
 /**
  * Overload of [ShapeCanvas] for a [ColoredMesh] (see `dev.kstep.geometry.MeshComposition.
@@ -96,7 +100,8 @@ fun ShapeCanvas(
     coloredMesh: ColoredMesh,
     modifier: Modifier = Modifier,
     state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) },
-) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state)
+    fitReference: TriangleMesh? = null,
+) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference)
 
 @OptIn(ExperimentalComposeUiApi::class) // Modifier.onPointerEvent (scroll-to-zoom) is experimental
 // in this Compose Multiplatform version -- no unstable behavior relied on beyond the API shape
@@ -107,6 +112,7 @@ private fun ShapeCanvasInternal(
     coloredMesh: ColoredMesh?,
     modifier: Modifier,
     state: MutableState<ViewerCameraState>,
+    fitReference: TriangleMesh?,
 ) {
     val focusRequester = remember { FocusRequester() }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
@@ -121,12 +127,12 @@ private fun ShapeCanvasInternal(
     // `homeFitScale`, it never writes anything, so only an actual resize or mesh swap triggers a
     // recomposition of this value; a camera drag/scroll/zoom only invalidates the draw phase.
     val homeFitScale =
-        remember(mesh, canvasSize) {
+        remember(fitReference ?: mesh, canvasSize) {
             if (canvasSize.width <= 0 || canvasSize.height <= 0) {
                 null
             } else {
                 MeshProjection.fitScale(
-                    mesh,
+                    fitReference ?: mesh,
                     canvasSize.width.toDouble(),
                     canvasSize.height.toDouble(),
                     Camera.ISOMETRIC,

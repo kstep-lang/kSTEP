@@ -748,6 +748,12 @@ scan before either lands.
   logic, ignores it, so kSTEP would write a file that two readers colour differently. Export and import are unchanged (the importer
   reads with the SHUO mode off); the behaviour is pinned by `PathColourOcctGateTest` (`scripts/interop/verify-path-colour-gate.sh`,
   scenarios S0-P7). Open: re-measure with a newer OCCT.
+* Welle D1 (ADR-0051): `kstep-desktop`, a Compose Desktop live preview of a `*.kstep.kts` script (`./gradlew :kstep-desktop:run`).
+  The script is evaluated only in a supervised worker subprocess (`DesktopRenderWorker`, timeout 60 s, heap 2g, bounded output, orphan
+  halt); the result is one GLB (`GlbMeshReader`, fail-closed) plus the JSON line of `kstep render`. Polling file watcher, generation
+  based cancellation, last good result with badge, error bar with `KSTEP-D-001` to `-008`. Not in the CLI zip or on Maven Central
+  (`verify-dist.sh` checks the zip). Verified on macOS arm64 with a strict build; Linux CI to follow the push. Open (D1b): drag and drop,
+  recent files, included files, warm worker, packaging, `kstep desktop` launcher.
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

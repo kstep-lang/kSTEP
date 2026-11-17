@@ -30,6 +30,10 @@ DUPES="$(printf '%s\n' "$LIST" | sort | uniq -d)"
 NATIVE="$(printf '%s\n' "$LIST" | grep -E '\.(so|dylib|dll)$' || true)"
 [ -z "$NATIVE" ] || fail "native libraries found in zip: $NATIVE"
 
+# The CLI zip must stay free of the Compose desktop/viewer modules (ADR-0051).
+UI_JARS="$(printf '%s\n' "$LIST" | grep -E "/lib/(kstep-desktop-|kstep-viewer-|skiko|desktop-jvm|org\.jetbrains\.compose)" || true)"
+[ -z "$UI_JARS" ] || fail "desktop/compose jars found in CLI zip: $UI_JARS"
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 unzip -q "$ZIP" -d "$TMP/x"

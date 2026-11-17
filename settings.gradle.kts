@@ -49,6 +49,8 @@ include(
     // Pflicht-Fallback instead of two copies drifting apart -- see ADR-0019.
     "kstep-preview",
     "kstep-viewer",
+    // Compose Desktop application (ADR-0051); kstep-viewer stays a library-like module.
+    "kstep-desktop",
     // Grouping directory mirroring kuml-dev/kUML's own kuml-docs/ layout. `:kstep-docs`
     // itself has no build file -- it is a pure namespace project, not a Kotlin module.
     "kstep-docs:kstep-asciidoc",

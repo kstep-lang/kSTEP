@@ -211,6 +211,10 @@ link:docs/usage.adoc[Usage].
 | `kstep-viewer`
 | Interactive OCCT shape viewer (Compose Desktop).
 
+| `kstep-desktop`
+| Live preview of a `*.kstep.kts` script (Compose Desktop, `./gradlew :kstep-desktop:run`): re-renders on save in a
+  supervised worker process.
+
 | `kstep-tests`
 | Cross-module integration tests (Kotest).
 |===

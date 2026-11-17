@@ -17,8 +17,12 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** How the worker subprocess ended, before it is judged (ADR-0038). */
-internal sealed interface WorkerOutcome {
+/**
+ * How the worker subprocess ended, before it is judged (ADR-0038).
+ *
+ * Not API: kstep-cli is unpublished (ADR-0043); public only for kstep-desktop (ADR-0051).
+ */
+sealed interface WorkerOutcome {
     /** The worker ended on its own within the timeout; [exitCode] is the raw process exit value. */
     class Exited(
         val pid: Long,
@@ -76,13 +80,20 @@ internal sealed interface WorkerVerdict {
  * Starts the worker, collects its stdout and stderr up to a bound, and kills it (and its descendants) after the
  * wall-clock timeout (ADR-0038). [start] is injectable so the supervision logic can be tested with a stand-in process;
  * production always uses [ProcessBuilder].
+ *
+ * [onStarted] is called with the started process before the supervisor waits for it (kstep-desktop uses it to be able
+ * to cancel a run from another thread). If it throws, the process is killed and the exception is passed on.
+ *
+ * Not API: kstep-cli is unpublished (ADR-0043); public only for kstep-desktop (ADR-0051).
  */
-internal class ImportWorkerSupervisor(
+class ImportWorkerSupervisor(
     private val timeoutMillis: Long,
     private val maxStdoutBytes: Int = MAX_STDOUT_BYTES,
     private val maxStderrBytes: Int = MAX_STDERR_BYTES,
     private val streamJoinMillis: Long = STREAM_JOIN_MILLIS,
     private val tempBase: Path = Path.of(System.getProperty("java.io.tmpdir")),
+    // Before `start` on purpose: the trailing-lambda call sites of `start` (the tests) must keep binding to it.
+    private val onStarted: (Process) -> Unit = {},
     private val start: (List<String>) -> Process = { ProcessBuilder(it).start() },
 ) {
     init {
@@ -118,6 +129,13 @@ internal class ImportWorkerSupervisor(
                 WorkerTempDir.deleteRecursively(dir)
                 throw e
             }
+        try {
+            onStarted(process)
+        } catch (e: Throwable) {
+            kill(process)
+            WorkerTempDir.deleteRecursively(dir)
+            throw e
+        }
         val pid = process.pid()
         // The supervisor itself being ended (Ctrl-C, SIGTERM) must not leave the worker or its temp directory behind.
         val hook =
@@ -369,7 +387,7 @@ private val LOG_NOISE = Regex("""^\[[^\]]*]\s+(INFO|DEBUG|TRACE)\b""")
  * The one line of the worker's stderr that best explains an abnormal end: the first exception or error line, else the
  * first line that is not INFO/DEBUG/TRACE log output; `null` if there is only such noise (nothing misleading is printed).
  */
-internal fun diagnosticLine(stderr: String): String? {
+fun diagnosticLine(stderr: String): String? {
     val candidates =
         stderr
             .lineSequence()
@@ -393,8 +411,12 @@ private const val MAX_DETAIL_CHARS = 300
 
 private val logger = KotlinLogging.logger {}
 
-/** The private, per-run `java.io.tmpdir` of one import worker (ADR-0038). */
-internal object WorkerTempDir {
+/**
+ * The private, per-run `java.io.tmpdir` of one import worker (ADR-0038).
+ *
+ * Not API: kstep-cli is unpublished (ADR-0043); public only for kstep-desktop (ADR-0051).
+ */
+object WorkerTempDir {
     private const val PREFIX = "kstep-import-"
 
     /** Creates a fresh, randomly named directory below [base], readable only by the current user where possible. */

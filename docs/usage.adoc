@@ -799,6 +799,50 @@ stepFile(fileName = "two-boxes.step") {
 * Verified with OCCT's own reader, `kstep import` and FreeCAD (geometry; headless FreeCAD reads no colours):
   `scripts/interop/verify-export-instance-colours.sh`. See docs/adr/ADR-0044-instance-colours.adoc.
 
+== Desktop live preview
+
+`kstep-desktop` shows a `*.kstep.kts` script as a 3D shape and updates it when the file is saved (ADR-0051). It is a
+Compose Desktop application of the repository, not part of the CLI zip or of the Maven Central artifacts.
+
+----
+./gradlew :kstep-desktop:run --args="/abs/path/to/part.kstep.kts"
+----
+
+Without an argument, press Ctrl+O (Cmd+O on macOS) or use the Open button. Geometry needs the native OCCT bridge; on a host
+that builds it (Linux x86-64, macOS arm64) it is found as for the other modules. To use a bridge built elsewhere, pass it to
+the run task: `-Pkstep.occt.bridge.library=/abs/path/libkstep_occt_bridge.dylib` (and `-Pkstep.planegcs.bridge.library=...`).
+
+The script runs in a separate, supervised worker process (60 s timeout, 2 GiB heap, bounded output), never in the window's
+process; a script with an endless loop or an error cannot hang or crash the window. After an error the last good shape stays
+visible with a yellow badge and the time of that result; the error bar below shows the code, `line:column` and message
+("+N more" lists all errors, "Copy" copies them).
+
+[cols="1,3",options="header"]
+|===
+| Key | Action
+| Ctrl/Cmd+O | Open a script
+| Ctrl/Cmd+R | Run again now
+| H | Reset camera and fit scale to the current shape
+| Drag, Shift-drag, scroll, double-click | Orbit, pan, zoom, reset camera (as in `kstep-viewer`)
+|===
+
+[cols="1,3",options="header"]
+|===
+| Code | Meaning
+| `KSTEP-S-001` ... | Script errors, as in `kstep render` (compilation error, no model, runtime error)
+| `KSTEP-D-001` | The script ran longer than 60 s and was stopped
+| `KSTEP-D-002` | The script ran out of memory (worker heap limit 2g)
+| `KSTEP-D-003` | The script or its result exceeded the output bounds (16 MiB stdout, 64 MiB GLB)
+| `KSTEP-D-004` | The model has more than 130 000 triangles
+| `KSTEP-D-005` | The file is missing or not a `.kstep.kts` script (the window waits for it to reappear)
+| `KSTEP-D-006` | The worker process could not be started
+| `KSTEP-D-007` | The result could not be read (worker crash or signal, no JSON, invalid GLB)
+| `KSTEP-D-008` | Geometry preview failed (triangulation or placement)
+|===
+
+A script without a `shape(...)` shows "Script has no shape(...)"; without the native bridge the window shows the OCCT notice
+with an install hint for the current operating system.
+
 == Native runtime archive and `kstep --version`
 
 `kstep --version` prints `kstep <version>`. The opt-in native archive (ADR-0050, built locally with

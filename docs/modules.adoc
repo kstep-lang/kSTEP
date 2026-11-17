@@ -377,6 +377,16 @@
   enforced by `AsciidocModuleBoundaryTest`). See
   docs/adr/ADR-0019-kstep-asciidoc.adoc.
 
+| `kstep-desktop`
+| Live preview of a `*.kstep.kts` script (Compose Desktop, not published, `dev.kstep.desktop`) -- Welle D1
+| Working: `./gradlew :kstep-desktop:run --args="<script>"` opens a window that re-renders the script when the file
+  changes. The script is evaluated only in a supervised worker subprocess
+  (`dev.kstep.cli.DesktopRenderWorker`, timeout, heap and output limits, orphan halt); the result comes back as one
+  GLB (read by `GlbMeshReader`) plus one JSON line. Error bar with `KSTEP-S-xxx`/`KSTEP-D-xxx` codes, last good result
+  kept with a badge, polling file watcher (`FileChangeWatcher`). See
+  docs/adr/ADR-0051-desktop-live-preview.adoc. Open (D1b): drag and drop, recent files, included files, warm worker,
+  packaging.
+
 | `kstep-viewer`
 | Interactive OCCT shape viewer -- Viewer-Welle 1
   (`dev.kstep.viewer.ui`, mesh code now in `kstep-render`), camera
@@ -412,7 +422,10 @@
   docs/adr/ADR-0013-multi-shape-composition-and-fill-light.adoc. Depends
   on `kstep-geometry`, `kstep-render`, and Compose Multiplatform
   (`org.jetbrains.compose` 1.11.1) -- see xref:building.adoc[Building] for the scoped
-  `google()` repository this pulls in.
+  `google()` repository this pulls in. (Welle D1, ADR-0051) `ShapeCanvas` has an optional `fitReference` parameter
+  (the auto-fit scale is taken from that mesh instead of the drawn one; without it nothing changes) and
+  `UnavailableNotice` an `installHint` parameter (`OcctInstallHint.forOs`: apt on Linux, Homebrew and the native
+  archive on macOS).
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest)

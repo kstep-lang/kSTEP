@@ -1,0 +1,76 @@
+= ADR-0051: kSTEP Desktop, live preview
+:toc:
+
+== Status
+
+Accepted (Welle D1). Implemented and verified on macOS arm64 (OCCT 7.9.3, strict build). Linux CI verification follows the push.
+
+== Context
+
+`kstep-viewer` shows one hard-coded demo scene. Authors of `*.kstep.kts` scripts want to see the shape of the script they are editing, and see it update when the file is saved. The preview must survive the situations a script editor produces all the time: a half-typed script, a script with an endless loop, a script that allocates without limit, a script that prints a lot. A script is code; it can do anything, so it must never run inside the process that owns the window.
+
+== Decision
+
+D1. Module split. New module `kstep-desktop` (Compose Desktop application, `application` plugin, not published). `kstep-viewer` keeps `ShapeCanvas` and stays library-like. `kstep-cli` gets no Compose dependency and no `kstep desktop` command (D1b). `kstep-desktop` is in `nonPublishedModules`; `scripts/release/published-artifacts.txt` is unchanged, and `verify-dist.sh` fails if the CLI zip ever contains desktop, viewer, Skiko or Compose jars.
+
+D2. The script never runs in the desktop JVM. Each run starts a supervised subprocess through the Welle R mechanism (ADR-0038): `ImportWorkerSupervisor` (wall-clock timeout, bounded stdout and stderr, kill of the whole process tree, private temp directory, shutdown hook) and a new worker main class `dev.kstep.cli.DesktopRenderWorker` that accepts only `kstep render ... --output json` arguments and arms the existing `ImportWatchdog` with the timeout plus the orphan grace period, so a worker whose desktop was killed halts itself. (`MainKt render` would have no orphan guard.) A source test (`DesktopArchitectureTest`) forbids `KStepScriptHost`, `PreviewRenderer`, `KStepScript` and `runRender(` in the desktop sources, and Compose outside the `ui` package.
+
+D3. Worker class path. The Gradle build hands the runtime class path of `:kstep-cli` to the desktop as system property `kstep.desktop.workerClasspath` (an argument provider on `run` and on the tests; a resolvable configuration of the desktop project, no lambda over the build script). `KStepScript` compiles with the whole class path, so a worker started with the desktop's class path would put Compose and Skiko jars into every script compilation and be slower. Without the property the desktop's own class path is used with a WARN log line.
+
+D4. Result hand-over: one GLB file plus one JSON line. The worker runs `kstep render --format glb --out <session>/run-<gen>.glb --output json`. The GLB goes to a session directory of the desktop (`Files.createTempDirectory(base, "kstep-desktop-", rwx------)`, randomly named, never `kstep-desktop-<pid>`), because the supervisor removes its own worker temp directory before it returns. Errors are not parsed from stderr: the stable JSON document of `kstep render` is evaluated (`errorKind`, `code`, `diagnostics`, `violations`, `occt`, `glb.triangleCount`). Only the last non-empty stdout line counts as the document; lines a script printed before it are discarded and shown as "script printed N lines". stderr is used for `kstep render:` warning lines (sanitised, at most five) and as the diagnostic line of an abnormal end.
+`GlbMeshReader` reads exactly what `GlbWriter` writes (one node with the fixed Z-up rotation, one mesh, one non-indexed triangle-list primitive, float `POSITION`/`NORMAL`, optional `COLOR_0` as `VEC3`/`VEC4`, one colour per triangle) into a `ColoredMesh`. The colour is per vertex, not a material factor, and the buffer holds kSTEP's own Z-up coordinates, so nothing is converted.
+
+D5. Cancellation and generations. A pure reducer (`RunStateMachine`) owns the states Idle, Running, Ok, Error and NativeUnavailable and a generation counter. Every change event increments it. A result of an older generation is dropped. `LiveRunController` runs all events through one lock and executes the effects afterwards: runs go to a single-thread executor, so at most one worker exists; a queued run of an outdated generation never starts a process; a started one is killed when its generation is outdated (`ImportWorkerSupervisor.onStarted` closes the race between start and cancel); the kill, which waits for the process, never runs under the lock. The last good model (`lastGood`) of the open file survives Running and Error and is shown with a badge; opening another file clears it.
+
+D6. File watching by polling. `java.nio.file.WatchService` is polling-based on macOS and reacts after seconds. `FileChangeWatcher` polls the one file every 150 ms and compares `(exists, size, modified, fileKey)`; replacing by rename changes the file key. A change must stay unchanged for 250 ms (editors write in steps) and then yields exactly one `CHANGED`; a file gone for 250 ms yields exactly one `MISSING`. Clock and scheduler are injected, so the logic is tested deterministically, plus one real file-system test.
+
+D7. Limits.
+
+[cols="2,3",options="header"]
+|===
+| Limit | Value
+| Wall-clock timeout per run | 60 s (`KSTEP-D-001`)
+| Worker heap | `-Xmx2g`, `ExitOnOutOfMemoryError` (`KSTEP-D-002`)
+| Worker stdout / stderr | 16 MiB / 4 MiB (`KSTEP-D-003`)
+| GLB file | 64 MiB (`KSTEP-D-003`)
+| GLB JSON chunk | 4 MiB, nesting depth 32
+| Triangles | 130 000 (`KSTEP-D-004`); a note from 50 000
+|===
+
+D8. Error codes. Script errors keep their `KSTEP-S-xxx` codes. New desktop codes: `KSTEP-D-001` timeout, `-002` heap exhausted, `-003` output too large, `-004` too many triangles, `-005` file missing or not a `.kstep.kts` script, `-006` worker could not start, `-007` result unreadable (crash, signal, invalid GLB, no JSON), `-008` geometry preview failed (a notice other than `occt_unavailable`: triangulation or placement failed).
+
+D9. UI decisions (design team, final review Steve Jobs).
+
+* Raskin, Tesler: modeless and always live; there is no Run button; Ctrl/Cmd+R only forces a run. One file, one window.
+* Atkinson, Norman: every state is readable, never a blank area: Idle shows "Open a .kstep.kts script", a script without shape shows "Script has no shape(...)", the missing native bridge shows the OCCT notice with an install hint for the current operating system. The error bar shows code, line:column and message, "+N more" expands the list and "Copy" copies all.
+* Zhuo: a wrong result is never shown as a right one: after an error the last good shape stays, with a yellow badge and the time of that result. The status line says "Ok", the duration and the triangle count.
+* Kay, Duarte: the camera does not jump. A re-run keeps the camera and the auto-fit scale; `ShapeCanvas` got an optional `fitReference` mesh for this. `H` or Home resets camera and fit scale. A thin progress line appears only after 300 ms.
+
+== Security
+
+* Hostile input: script, its output and the GLB it writes are untrusted. Subprocess with timeout, heap limit, output bounds, process-tree kill and orphan halt; GLB read fail-closed (lengths in `Long` arithmetic, triangle cap before any allocation, strict subset, finite values, no recursion on deeply nested JSON); the GLB must be a regular file (`NOFOLLOW_LINKS`) of at most 64 MiB.
+* Messages shown in the UI are sanitised (control characters and ANSI removed, 300 characters, at most 20 errors).
+* Nothing sensitive is logged: only generation, outcome kind and duration; never script text, worker output or file contents.
+* Paths: the script path is absolute and normalised, must end in `.kstep.kts`, and is never an option. The session directory is random and mode 0700; it is removed on close.
+* No SSRF, no cryptography, no new external dependency: all libraries are existing catalogue entries.
+
+== Consequences
+
+* The desktop depends on `kstep-cli` (public-for-desktop `ImportWorkerSupervisor`, `ImportWorkerLaunch`, `WorkerTempDir`, `WorkerOutcome`, `diagnosticLine`); `kstep-cli` is not published, so this is not API.
+* The desktop classpath contains the script compiler although no desktop code uses it (guarded by the architecture test).
+* Opening is not instant: every run starts a JVM and compiles the script.
+
+== Rejected alternatives
+
+* Evaluating the script in the desktop JVM: an endless loop or a `System.exit` would take the window down.
+* `WatchService`: seconds of latency on macOS.
+* A custom mesh transfer format: the GLB already exists, is tested and is what other tools read.
+* A `kstep desktop` command in `kstep-cli`: would put Compose into the CLI zip.
+
+== Follow-up wave D1b
+
+Drag and drop, recently opened files, watching included and dependent files, a `kstep desktop` launcher without a Compose dependency in the CLI, a warm worker against cold starts, packaging with jpackage.
+
+== Measured results
+
+On macOS arm64 with OCCT 7.9.3, one `kstep render --format glb` of the two-part colour assembly (JVM start, script compilation, OCCT, GLB) takes about 1.6 s wall-clock; the live end-to-end test (watch, worker, GLB, mesh) runs four such cycles in about 7 s.

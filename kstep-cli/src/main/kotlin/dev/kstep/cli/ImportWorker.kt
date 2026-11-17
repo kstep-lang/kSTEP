@@ -34,8 +34,12 @@ object ImportWorker {
     }
 }
 
-/** How the supervisor starts the worker JVM (ADR-0038). */
-internal object ImportWorkerLaunch {
+/**
+ * How the supervisor starts the worker JVM (ADR-0038).
+ *
+ * Not API: kstep-cli is unpublished (ADR-0043); public only for kstep-desktop (ADR-0051).
+ */
+object ImportWorkerLaunch {
     /** Main class of the worker JVM. */
     const val WORKER_MAIN_CLASS: String = "dev.kstep.cli.ImportWorker"
 
@@ -96,19 +100,26 @@ internal object ImportWorkerLaunch {
         return java.toString()
     }
 
-    /** The full worker command line: same JVM, same class path ([System.getProperty] `java.class.path`). */
+    /**
+     * The full worker command line: same JVM, by default the same class path ([System.getProperty] `java.class.path`).
+     * [extraJvmOptions] are appended after the standard options so that they win over them (a later `-D` overrides an
+     * earlier one).
+     */
     fun command(
         workerArgs: List<String>,
         timeoutMillis: Long,
         mainClass: String = WORKER_MAIN_CLASS,
         maxHeap: String = WORKER_MAX_HEAP,
         tmpDir: Path? = null,
+        classPath: String = System.getProperty("java.class.path"),
+        extraJvmOptions: List<String> = emptyList(),
     ): List<String> =
         buildList {
             add(javaExecutable())
             addAll(jvmOptions(timeoutMillis, maxHeap, tmpDir))
+            addAll(extraJvmOptions)
             add("-cp")
-            add(System.getProperty("java.class.path"))
+            add(classPath)
             add(mainClass)
             addAll(workerArgs)
         }
