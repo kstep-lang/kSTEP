@@ -445,6 +445,16 @@ jobs:
         # is also passed in this job, so its skip-suppression path deserves the same proof
         # that it actually ran rather than silently degrading to a no-op skip.
 
+      # ADR-0050: the opt-in native runtime archive for this host. Built and unpacked in a fresh
+      # directory, then smoke-tested with a real STL render. Not a release step.
+      - name: Build and verify the native runtime archive (ADR-0050)
+        run: |
+          VERSION=$(sed -n 's/^ *version = "\(.*\)"/\1/p' build.gradle.kts | head -1)
+          ./gradlew :kstep-cli:nativeRuntimeZip -Pkstep.native.embedInJar=false \
+            -Pkstep.occt.require=true -Pkstep.planegcs.require=true --stacktrace
+          bash scripts/release/verify-native-dist.sh \
+            "kstep-cli/build/distributions/kstep-${VERSION}-linux-x86-64-native.zip" "$VERSION"
+
       - name: Upload test and ktlint reports
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
