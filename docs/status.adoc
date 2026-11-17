@@ -748,7 +748,10 @@ scan before either lands.
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;
   `ci.yml` stages and verifies the artifacts on every PR. `kstep-cli`, `kstep-viewer` and `kstep-tests` are not
   published.
-* Release v0.4.0 (2026-11-12, pre-release) contains everything above. Its zip has no native bridges, like the earlier
+* Release v0.5.0 (2026-11-17, pre-release) adds Welle V to Y (instance colours, their effective colour in `kstep import` and `kstep render`,
+  sub-assembly colours, transparent instance colours with render opacity) and documents the two failed gates (Welle Z, AA).
+  It also refuses a `SURFACE_STYLE_TRANSPARENT` outside 0..1 before OCCT reads it: OCCT 7.9.2 (Ubuntu 26.04) aborts the process on
+  such a value. Release v0.4.0 (2026-11-12, pre-release) contains everything before. The zips have no native bridges, like the earlier
   releases. Still open: PMI, Windows and Intel Macs for the
   native bridges, interoperability beyond OpenCascade-based readers.
 

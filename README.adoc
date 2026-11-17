@@ -59,7 +59,7 @@ afterwards as an optional layer.
 
 == Status
 
-The current release is **v0.4.0** (2026-11-12), a pre-release; changes on
+The current release is **v0.5.0** (2026-11-17), a pre-release; changes on
 the `master` branch after it are listed under "Unreleased" in the
 link:CHANGELOG.adoc[CHANGELOG]. What is in place:
 
@@ -76,8 +76,8 @@ link:CHANGELOG.adoc[CHANGELOG]. What is in place:
   system libraries (Linux x86-64 or macOS arm64) and are part of neither the
   release zip nor the Maven Central jars.
 
-Not yet available: PMI, transparency in the
-preview, names for pocket walls and drafted or thickened faces, Windows and
+Not yet available: PMI, opacity in the desktop viewer
+(`kstep render` draws it), names for pocket walls and drafted or thickened faces, Windows and
 Intel Mac support for the native bridges, and interoperability checks beyond
 OpenCascade-based readers (OCCT, FreeCAD).
 

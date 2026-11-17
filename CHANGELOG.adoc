@@ -7,6 +7,8 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+== 0.5.0 — 2026-11-17 (pre-release)
+
 === Fixed
 
 * A STEP file whose `SURFACE_STYLE_TRANSPARENT` value is not a finite number in 0..1 is now refused before OCCT reads it
@@ -38,7 +40,8 @@ minor versions may contain breaking changes.
   `InstanceTransparencyOcctGateTest`) and FreeCAD (geometry). `kstep import` reports the alpha of instance colours as before
   (`alpha` in JSON, ` alpha 0.5` in the text); hostile transparencies never leave 0..1.
 * Opacity in `kstep render`: SVG gets the element `opacity` on translucent polygons, PNG blends them, GLB writes `COLOR_0` as `VEC4` and
-  `alphaMode BLEND` when some triangle is translucent. Opaque renders are byte-identical.
+  `alphaMode BLEND` when some triangle is translucent. Opaque renders are byte-identical. Opacity is drawn by `kstep render` only, not
+  in the desktop viewer (`kstep-viewer`), and penetrating translucent parts can show painter artefacts.
 
 * Instance colours on occurrences of sub-assemblies (ADR-0046, Welle X): `styleInstance(usage, colour)` also accepts a usage
   whose child has no shape of its own, when shapes sit below it. The colour reaches every part below that occurrence;
@@ -49,8 +52,8 @@ minor versions may contain breaking changes.
   `SubassemblyColourOcctGateTest`) and FreeCAD (geometry).
 
 * Instance colours (ADR-0044, Welle V): one placed occurrence of a part can have its own colour, so a part used twice can be
-  red once and blue once. `styleInstance(usage, colour)` in the script (opaque colours only; `KSTEP-S-012` for a
-  translucent one, `KSTEP-S-014` for a second colour on the same usage), `UsageStyle` and a `usageStyles` parameter of
+  red once and blue once. `styleInstance(usage, colour)` in the script (opaque colours only in this wave, translucent since Welle Y; `KSTEP-S-012` for a
+  translucent one in this wave, `KSTEP-S-014` for a second colour on the same usage), `UsageStyle` and a `usageStyles` parameter of
   `Ap242ShapeExporter.export`. The entities (`PRESENTATION_STYLE_BY_CONTEXT` on a one-item representation tied to the usage) are
   written behind every other entity, so a file without instance colours is a byte prefix of the same file with them and all
   existing exports stay byte-identical. A usage whose child is a sub-assembly was refused in this wave (accepted since ADR-0046). Verified with OCCT's
@@ -62,7 +65,7 @@ minor versions may contain breaking changes.
   colours is unchanged. Per-face colours do not flow in (colours on sub-assembly components do, since ADR-0046).
 * `kstep render` draws instance colours (ADR-0045): a part used twice can be red once and blue once in SVG, PNG and GLB.
   The instance colour wins over the part colour; instances without a colour stay neutral next to coloured ones; a script
-  without `styleInstance` renders as before. Opacity stays off in the render (ADR-0042).
+  without `styleInstance` renders as before. Opacity was added to the render in Welle Y (see below).
 * `kstep import` reports instance colours: `components[].colour` in the JSON (always present, `null` without a colour) and
   `colour (r, g, b)` on the component line of the text report.
 

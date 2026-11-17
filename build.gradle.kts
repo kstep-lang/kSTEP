@@ -14,7 +14,7 @@ plugins {
 
 allprojects {
     group = "dev.kstep"
-    version = "0.4.0"
+    version = "0.5.0"
 }
 
 // ---- Maven Central publishing (ADR-0043) ----------------------------------------------------

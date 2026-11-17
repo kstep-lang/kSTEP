@@ -369,9 +369,10 @@ xref:status.adoc#status[Status] for `KSTEP-M-002`'s scope):
   **(Welle R2, done, v0.4.0)** The import worker gets a private temp directory
   that is always removed, a smaller output bound and clearer diagnostics -- see
   ADR-0038. **(Welle U, done, v0.4.0)** Transparency (alpha) and edge colours, written and read
-  back -- see ADR-0042; open: colours and layers on assembly instances
-  (measured in ADR-0042, planned as Welle V), the opacity in the preview (GLB, SVG,
-  PNG), face colours in the preview, PMI, and a time/memory bound for library
+  back -- see ADR-0042; **(Welle V to Y, done, v0.5.0)** colours and transparent colours on assembly
+  instances, their effective colour on import and the opacity in the preview (GLB, SVG,
+  PNG) -- see ADR-0044 to ADR-0046; the gates for layers on instances and path-exact
+  colours failed (ADR-0047, ADR-0048); open: face colours in the preview, PMI, and a time/memory bound for library
   callers of the importer.
   **(Maven Central, done, v0.4.0)** The twelve library modules are published as
   `dev.kstep:<module>`, without native libraries -- see ADR-0043; open: platform
