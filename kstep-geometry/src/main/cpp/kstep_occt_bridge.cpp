@@ -1700,6 +1700,16 @@ bool checkStyleRecordCounts(const Handle(Interface_InterfaceModel)& model, std::
                 return false;
             }
         } else if (ent->IsKind(STANDARD_TYPE(StepVisual_SurfaceStyleTransparent))) {
+            // OCCT 7.9.2 (Ubuntu 26.04) aborts the process with "stack smashing detected" while reading a
+            // transparency above 1 (alpha below 0) or a non-finite one, and no release clamps the value. A file whose
+            // transparency lies outside 0..1 is not valid AP242 anyway, so it is refused before Transfer().
+            const double transparency =
+                static_cast<double>(Handle(StepVisual_SurfaceStyleTransparent)::DownCast(ent)->Transparency());
+            if (!std::isfinite(transparency) || transparency < 0.0 || transparency > 1.0) {
+                errClass = "java/lang/IllegalArgumentException";
+                errMsg = "limit: SURFACE_STYLE_TRANSPARENT value is not a finite number in 0..1";
+                return false;
+            }
             if (++transparencies > kMaxTransparencyDefinitions) {
                 errClass = "java/lang/IllegalArgumentException";
                 errMsg = "limit: colour definition count (transparency) exceeds " +

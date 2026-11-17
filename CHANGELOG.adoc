@@ -7,6 +7,12 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Fixed
+
+* A STEP file whose `SURFACE_STYLE_TRANSPARENT` value is not a finite number in 0..1 is now refused before OCCT reads it
+  (`limit:` error, `LIMIT_EXCEEDED`). OCCT 7.9.2 (Ubuntu 26.04) aborts the whole process with a stack-smashing error on such a
+  value; found when the hostile-alpha tests of Welle Y crashed the Linux CI job. Reproduced and verified in an x86-64 Ubuntu 26.04 container.
+
 === Documented
 
 * Path-exact colours through `SPECIFIED_HIGHER_USAGE_OCCURRENCE` (ADR-0048, Welle AA): the gate failed. OCCT 7.9.3's XCAF reader
