@@ -40,7 +40,8 @@ shape. Oracle (explorer): the effective colour of `XCAFPrs_DocumentExplorer`.
 | S0deep | OCCT's writer, TOP > ASM x2 > SUB x2 > BOX, `SetSHUO([asm2, u2, u3])` (informative) | one of eight leaves | x1100 green, no other | not measured
 |===
 
-The explorer returns "no colour" on every leaf in every scenario: it does not apply SHUO colours. The reader result is correct
+The explorer never applies a SHUO colour: it shows no colour from a path colour on any leaf. Where it shows a colour at all, that
+comes from per-usage or part colours (measured: P2 red on usages 1/1 and 2/1, P3 orange on all four leaves). The reader result is correct
 on every measured scenario, so the information is stored in the file and read by the XCAF reader; only the presentation logic
 and therefore OCCT based viewers do not show it.
 
