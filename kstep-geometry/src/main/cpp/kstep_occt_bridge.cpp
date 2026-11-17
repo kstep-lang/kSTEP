@@ -460,6 +460,7 @@ constexpr double kMinNormalLength = 1e-9;
 // Bounding-Box-Diagonale abgeleitet. Ein Aufrufer mit deflection=1e-9 WAERE der DoS.
 constexpr double kMeshDeflectionFactor = 0.005;
 constexpr double kMinMeshDeflection = 1e-5;
+constexpr double kMinRelativeDeflection = 0.0005;  // Welle AB: finest accepted caller tolerance = diagonal / 2000
 constexpr double kMaxMeshDeflection = 1e3;
 constexpr double kMeshAngularDeflection = 0.5;
 
@@ -4154,9 +4155,18 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeChamferEdgesNamed(
 // normal negated (empirically verified: ComputeNormals ignores TopAbs_REVERSED entirely).
 // ------------------------------------------------------------------------------------------
 
-JNIEXPORT jdoubleArray JNICALL
-Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobject /*self*/, jlong handle) {
+static jdoubleArray
+shapeTrianglesImpl(JNIEnv* env, jlong handle, double requestedTolerance) {
     try {
+        // Welle AB (ADR-0049): a requested chordal tolerance is validated BEFORE any OCCT object is
+        // created (hostile values abort the process on some OCCT builds). 0.0 = automatic.
+        if (requestedTolerance != 0.0 && !(requestedTolerance > 0.0 && std::isfinite(requestedTolerance))) {
+            throwJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "nativeShapeTrianglesWithTolerance: tolerance must be finite and > 0");
+            return nullptr;
+        }
         bool found = false;
         bool tooManyTriangles = false;
         bool meshingIncomplete = false;
@@ -4201,6 +4211,20 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobjec
                         deflection = kMinMeshDeflection;
                     } else if (deflection > kMaxMeshDeflection) {
                         deflection = kMaxMeshDeflection;
+                    }
+                    if (requestedTolerance > 0.0) {
+                        // Bounded: never finer than diagonal * kMinRelativeDeflection, never coarser
+                        // than kMaxMeshDeflection (memory/time DoS bound relative to the part).
+                        double lower = diagonal * kMinRelativeDeflection;
+                        if (lower < kMinMeshDeflection) {
+                            lower = kMinMeshDeflection;
+                        }
+                        deflection = requestedTolerance;
+                        if (deflection < lower) {
+                            deflection = lower;
+                        } else if (deflection > kMaxMeshDeflection) {
+                            deflection = kMaxMeshDeflection;
+                        }
                     }
 
                     // isRelative=false, isInParallel=false -- deterministic, reproducible
@@ -4451,6 +4475,22 @@ Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobjec
         throwJava(env, "java/lang/IllegalStateException", "Unknown native error triangulating shape");
     }
     return nullptr;
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTriangles(JNIEnv* env, jobject /*self*/, jlong handle) {
+    return shapeTrianglesImpl(env, handle, 0.0);
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_dev_kstep_geometry_occt_OcctBridge_nativeShapeTrianglesWithTolerance(
+    JNIEnv* env, jobject /*self*/, jlong handle, jdouble toleranceMm) {
+    if (!(toleranceMm > 0.0 && std::isfinite(toleranceMm))) {
+        throwJava(
+            env, "java/lang/IllegalArgumentException", "nativeShapeTrianglesWithTolerance: tolerance must be finite and > 0");
+        return nullptr;
+    }
+    return shapeTrianglesImpl(env, handle, toleranceMm);
 }
 
 // ------------------------------------------------------------------------------------------

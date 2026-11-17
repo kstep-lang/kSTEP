@@ -317,6 +317,10 @@
   JSON document, deliberately not a handwritten escaper (correct JSON
   escaping of script-supplied `asset.extras` text is a security property,
   not a style choice). See docs/adr/ADR-0016-gltf-glb-export.adoc.
+  (Welle AB) `dev.kstep.render.export` holds the STL and 3MF writers
+  (`StlWriter`, `ThreeMfWriter`, plain JDK `java.util.zip`, hand-written XML), the
+  per-part `MeshTopologyCheck` and the `MeshExportScene`/`MeshExportPart` input; hostile
+  meshes fail closed. See docs/adr/ADR-0049-mesh-export-stl-3mf.adoc.
 
 | `kstep-preview`
 | Shared headless-preview pipeline extracted from `kstep-cli`'s former
@@ -324,7 +328,7 @@
 | Working: `PreviewRenderer.render(PreviewRequest): PreviewOutcome` is the ONE
   implementation of ADR-0011's Container-Regel and Pflicht-Fallback -- evaluate
   a `*.kstep.kts` script (from a file or inline source text), detect geometry,
-  resolve the SVG/PNG/text/GLB container, render bytes, close every shape it
+  resolve the SVG/PNG/text/GLB/STL/3MF container, render bytes, close every shape it
   triangulated, all with no file I/O, no `exitProcess`, no `println`. `kstep
   render` (`kstep-cli`) and `kstep asciidoc` (`kstep-docs/kstep-asciidoc`)
   both call it instead of each carrying their own copy -- see

@@ -200,7 +200,7 @@ link:docs/usage.adoc[Usage].
 | AP242 shape assignment: merges product structure with B-Rep solids.
 
 | `kstep-render`
-| Headless mesh projection and SVG/PNG/text/glTF rendering.
+| Headless mesh projection and SVG/PNG/text/glTF rendering, plus STL/3MF mesh export (`kstep render -f stl|3mf`).
 
 | `kstep-preview`
 | Shared headless preview pipeline behind `render` and `asciidoc`.

@@ -318,16 +318,25 @@ class OcctShape internal constructor(
      * just rebuild, for this [OcctShape]'s entire remaining lifetime, the memory `Clean` was
      * meant to give back.
      *
+     * @param toleranceMm optional absolute chordal deviation in mm (Welle AB, ADR-0049); `null` keeps the automatic
+     *   default. Clamped natively, see [dev.kstep.geometry.occt.OcctBridge.nativeShapeTrianglesWithTolerance].
      * @throws IllegalStateException if this shape is already [close]d.
-     * @throws IllegalArgumentException if the shape exceeds the native triangle-count guard
+     * @throws IllegalArgumentException if [toleranceMm] is not finite and > 0, or the shape exceeds the native triangle-count guard
      *   ([OcctKernel.MAX_TRIANGLES]).
      * @throws OcctGeometryException if OCCT itself fails to triangulate the shape.
      */
-    fun triangulate(): TriangleMesh =
-        withHandle { h ->
+    fun triangulate(toleranceMm: Double? = null): TriangleMesh {
+        require(toleranceMm == null || (toleranceMm.isFinite() && toleranceMm > 0.0)) {
+            "toleranceMm must be finite and > 0, got $toleranceMm"
+        }
+        return withHandle { h ->
             val raw =
                 try {
-                    OcctBridge.nativeShapeTriangles(h)
+                    if (toleranceMm == null) {
+                        OcctBridge.nativeShapeTriangles(h)
+                    } else {
+                        OcctBridge.nativeShapeTrianglesWithTolerance(h, toleranceMm)
+                    }
                 } catch (e: IllegalArgumentException) {
                     // Native DoS-/range-check failure must surface as-is, not be reinterpreted as
                     // a geometry failure -- same rule as OcctKernel.fillet's identical ordering.
@@ -339,6 +348,7 @@ class OcctShape internal constructor(
                 }
             decodeTriangles(raw)
         }
+    }
 
     /**
      * Runs [block] with this shape's native handle, with the two invariants every existing native

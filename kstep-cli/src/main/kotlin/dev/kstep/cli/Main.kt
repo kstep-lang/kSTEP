@@ -40,14 +40,20 @@ Usage:
                                             assemblies); exit 1 on violations, nothing is written
       --require-geometry                   Fail (exit 1), writing nothing, unless the script's geometry
                                             is merged into the file
-  kstep render <script.kstep.kts> [opts]   Render a headless SVG/PNG/text/glTF preview of a script
-      -f, --format <auto|svg|png|text|glb> Preview container (default: auto); "gltf" is an alias
-                                            for "glb" -- both write binary glTF 2.0 (.glb)
+  kstep render <script.kstep.kts> [opts]   Render a headless SVG/PNG/text/glTF preview, or export STL/3MF
+      -f, --format <auto|svg|png|text|glb|stl|3mf>
+                                            Container (default: auto); "gltf" is an alias for "glb"
+                                            (binary glTF 2.0); stl = binary STL, 3mf = 3MF, both in mm
+                                            and geometry-only (no geometry = exit 1, no file)
       -o, --out <file>                     Output path (default: derived from the script name)
-      -w, --width <px>                     Image width, 16..4096 (default: 1024) -- ignored for glb
-          --height <px>                    Image height, 16..4096 (default: 768) -- ignored for glb
+      -w, --width <px>                     Image width, 16..4096 (default: 1024) -- ignored for glb/stl/3mf
+          --height <px>                    Image height, 16..4096 (default: 768) -- ignored for glb/stl/3mf
           --with-step                      Include the Part-21 text in the preview (svg/png/text)
           --require-geometry               Fail (exit 1) instead of silently falling back to text
+          --tolerance <mm>                 stl/3mf only: absolute chordal deviation (default: automatic;
+                                            never finer than bounding-box diagonal / 2000)
+          --require-watertight             stl/3mf only: fail (exit 1), writing nothing, if a part mesh is
+                                            not closed and consistently oriented
           --output json                    Emit the result as a JSON document instead of text
   kstep import <file.step> [opts]          Read a STEP file (kSTEP, OCCT, FreeCAD, ...) and report
                                             its product structure and per-part geometry
@@ -92,6 +98,8 @@ sealed interface CliCommand {
         val withStep: Boolean,
         val requireGeometry: Boolean,
         val jsonOutput: Boolean,
+        val toleranceMm: Double? = null,
+        val requireWatertight: Boolean = false,
     ) : CliCommand
 
     data class Import(
@@ -215,9 +223,19 @@ private fun resolveRenderCommand(rest: List<String>): CliCommand {
     var withStep = false
     var requireGeometry = false
     var jsonOutput = false
+    var toleranceMm: Double? = null
+    var requireWatertight = false
     var i = 0
     while (i < rest.size) {
         when (rest[i]) {
+            "--tolerance" -> {
+                toleranceMm = rest.getOrNull(i + 1)?.toDoubleOrNull() ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--require-watertight" -> {
+                requireWatertight = true
+                i += 1
+            }
             "-f", "--format" -> {
                 val value = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
                 format = RenderFormat.parse(value) ?: return CliCommand.ShowUsage(1)
@@ -267,6 +285,8 @@ private fun resolveRenderCommand(rest: List<String>): CliCommand {
         withStep = withStep,
         requireGeometry = requireGeometry,
         jsonOutput = jsonOutput,
+        toleranceMm = toleranceMm,
+        requireWatertight = requireWatertight,
     )
 }
 

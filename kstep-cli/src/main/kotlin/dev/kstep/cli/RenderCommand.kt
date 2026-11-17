@@ -10,12 +10,15 @@ import dev.kstep.preview.PreviewRequest
 import dev.kstep.preview.PreviewSource
 import dev.kstep.preview.PreviewWriter
 import dev.kstep.preview.deriveRenderOutputPath
+import dev.kstep.render.export.MeshExportResult
 import dev.kstep.render.gltf.GlbWriteResult
 import dev.kstep.script.KStepScriptOutcome
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.io.File
 import kotlin.system.exitProcess
@@ -37,6 +40,8 @@ fun runRender(command: CliCommand.Render) {
             height = command.height,
             withStep = command.withStep,
             outPathHint = command.outPath,
+            meshToleranceMm = command.toleranceMm,
+            requireWatertight = command.requireWatertight,
         )
     // ImageIO.write has no registered PNG writer on some stripped-down jlink runtime images (see
     // PreviewEncodingException's own KDoc) -- caught here so that failure mode degrades into the
@@ -48,6 +53,10 @@ fun runRender(command: CliCommand.Render) {
             PreviewRenderer.render(request)
         } catch (e: PreviewEncodingException) {
             reportIoFailure(command, e.message ?: "unknown encoding error")
+            return
+        } catch (e: IllegalArgumentException) {
+            // A hostile/invalid mesh made the STL/3MF writer fail closed (ADR-0049 D8).
+            reportMeshInvalid(command, e.message ?: "invalid mesh")
             return
         }
     when (outcome) {
@@ -77,6 +86,22 @@ private fun handleRendered(
         outcome.warnings.forEach { System.err.println(it) }
     }
 
+    if (outcome.format.isMeshExport && outcome.meshExport == null) {
+        // ADR-0049 D9: no printer file without geometry (never a text card inside .stl/.3mf).
+        reportFailure(
+            command,
+            outcome.occt,
+            outcome.fallbackReason ?: "no_printable_geometry",
+        )
+        return
+    }
+    outcome.meshExport?.let { export ->
+        if (command.requireWatertight && !export.watertight) {
+            reportNotWatertight(command, export)
+            return
+        }
+    }
+
     if (outcome.contentKind == PreviewContentKind.NOTICE && command.requireGeometry) {
         reportFailure(command, outcome.occt, outcome.fallbackReason ?: "unknown")
         return
@@ -98,7 +123,7 @@ private fun reportSuccess(
     outcome: PreviewOutcome.Rendered,
 ) {
     if (command.jsonOutput) {
-        println(successJson(outPath, outcome).toString())
+        println(successJson(outPath, outcome, command.toleranceMm).toString())
     } else {
         println("Wrote $outPath")
     }
@@ -124,6 +149,48 @@ private fun reportFailure(
         // Notice print, which runs before this function is ever reached) -- this is just the
         // --require-geometry-specific verdict on top of it.
         System.err.println("kstep render: --require-geometry set, geometry could not be rendered ($fallbackReason).")
+    }
+    exitProcess(1)
+}
+
+private fun reportNotWatertight(
+    command: CliCommand.Render,
+    export: MeshExportResult,
+) {
+    if (command.jsonOutput) {
+        println(
+            buildJsonObject {
+                put("status", "error")
+                put("errorKind", "mesh_not_watertight")
+                put("command", "render")
+                put("openEdgeCount", export.openEdgeCount)
+                put("nonManifoldEdgeCount", export.nonManifoldEdgeCount)
+            }.toString(),
+        )
+    } else {
+        System.err.println(
+            "kstep render: --require-watertight set, mesh is not watertight " +
+                "(${export.openEdgeCount} open edge(s), ${export.nonManifoldEdgeCount} non-manifold edge(s)); no file written.",
+        )
+    }
+    exitProcess(1)
+}
+
+private fun reportMeshInvalid(
+    command: CliCommand.Render,
+    message: String,
+) {
+    if (command.jsonOutput) {
+        println(
+            buildJsonObject {
+                put("status", "error")
+                put("errorKind", "mesh_export_invalid")
+                put("command", "render")
+                put("message", message)
+            }.toString(),
+        )
+    } else {
+        println("Error: $message")
     }
     exitProcess(1)
 }
@@ -155,12 +222,13 @@ private fun reportIoFailure(
 private fun successJson(
     outPath: String,
     outcome: PreviewOutcome.Rendered,
+    toleranceMm: Double?,
 ): JsonObject =
     buildJsonObject {
         put("status", "success")
         put("command", "render")
         put("outPath", outPath)
-        put("format", outcome.format.name.lowercase())
+        put("format", outcome.format.id)
         put(
             "content",
             when (outcome.contentKind) {
@@ -189,7 +257,30 @@ private fun successJson(
         putOcct(outcome.occt)
         put("rootCount", outcome.model?.rootCount ?: 0)
         outcome.glb?.let { glbResult -> putGlb(glbResult) }
+        outcome.meshExport?.let { export -> putMeshExport(export, toleranceMm) }
     }
+
+private fun JsonObjectBuilder.putMeshExport(
+    export: MeshExportResult,
+    toleranceMm: Double?,
+) {
+    putJsonObject("meshExport") {
+        put("format", export.format)
+        put("unit", "mm")
+        put("triangleCount", export.triangleCount)
+        put("vertexCount", export.vertexCount)
+        put("droppedTriangleCount", export.droppedTriangleCount)
+        put("byteLength", export.byteLength)
+        put("partCount", export.partCount)
+        put("buildItemCount", export.buildItemCount)
+        put("watertight", export.watertight)
+        put("openEdgeCount", export.openEdgeCount)
+        put("nonManifoldEdgeCount", export.nonManifoldEdgeCount)
+        put("colorsDropped", export.colorsDropped)
+        put("toleranceMm", toleranceMm)
+        putJsonArray("warnings") { export.warnings.forEach { add(it) } }
+    }
+}
 
 private fun JsonObjectBuilder.putGlb(glbResult: GlbWriteResult) {
     putJsonObject("glb") {

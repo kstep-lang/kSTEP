@@ -560,6 +560,30 @@ kstep render hello-box.kstep.kts -f glb -o box.glb
 # or a local `<model-viewer>` page) to inspect the model interactively.
 ----
 
+Mesh export for 3D printing (docs/adr/ADR-0049-mesh-export-stl-3mf.adoc): `-f stl` writes a binary STL, `-f 3mf` a 3MF
+package; both in millimetres and geometry only (`-w`/`--height` are ignored):
+
+[source,shell]
+----
+kstep render hello-box.kstep.kts -f stl            # Wrote hello-box.stl
+kstep render hello-box.kstep.kts -f 3mf --tolerance 0.05 --require-watertight
+kstep render hello-box.kstep.kts --out box.3mf     # format from the extension
+----
+
+[cols="1,3"]
+|===
+| Format | Contents
+| `stl` | One merged triangle soup, placements applied, no colours (a warning says how many were dropped), unit mm by convention
+| `3mf` | One object per distinct part and colour (local coordinates), one build item with a transform per instance, colours as base materials (alpha carried as `#RRGGBBAA`, many slicers ignore it)
+|===
+
+`--tolerance <mm>` sets the absolute chordal deviation (default automatic; never finer than the bounding-box diagonal / 2000;
+non-positive or non-finite values are refused). `--require-watertight` exits 1 without writing a file when a part mesh has open
+or non-manifold edges. "Watertight" here means closed and consistently oriented after welding vertices on a 1e-6 mm grid; it is
+not a proof of printability. Without the flag such a mesh is still written, with a warning and `meshExport.watertight: false`
+in `--output json`. A script without geometry, or without OCCT, exits 1 and writes no file. `kstep import --render` and
+`kstep asciidoc` do not accept `stl`/`3mf`.
+
 A script with an assembly structure (`NEXT_ASSEMBLY_USAGE_OCCURRENCE` roots, with or without
 `place(usage, translation, rotation)`) renders every drawn instance at its composed place: SVG, PNG and GLB
 show the whole assembly, the GLB as one merged mesh (ADR-0035, `geometry.instanceCount` in `--output json`).

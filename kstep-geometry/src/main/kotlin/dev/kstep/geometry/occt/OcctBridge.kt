@@ -214,6 +214,20 @@ object OcctBridge {
      */
     external fun nativeShapeTriangles(handle: Long): DoubleArray
 
+    /**
+     * Like [nativeShapeTriangles] (same return layout, same exceptions) but with a caller-chosen
+     * chordal deflection in millimetres (Welle AB, ADR-0049). The effective deflection is clamped
+     * natively to `[max(diagonal * 0.0005, 1e-5), 1e3]`, so a caller can never request a finer mesh
+     * than the part's bounding-box diagonal / 2000; the angular deflection stays 0.5 rad and the
+     * [dev.kstep.geometry.OcctKernel.MAX_TRIANGLES] guard still applies.
+     *
+     * @throws IllegalArgumentException if [toleranceMm] is not finite and > 0.
+     */
+    external fun nativeShapeTrianglesWithTolerance(
+        handle: Long,
+        toleranceMm: Double,
+    ): DoubleArray
+
     // ---------------------------------------------------------------------------------------
     // Welle K: STEP import via XCAF (docs/adr/ADR-0030-read-geometry.adoc)
     // ---------------------------------------------------------------------------------------

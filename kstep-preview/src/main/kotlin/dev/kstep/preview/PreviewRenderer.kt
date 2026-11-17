@@ -10,9 +10,15 @@ import dev.kstep.geometry.OcctGeometryException
 import dev.kstep.geometry.OcctKernel
 import dev.kstep.geometry.OcctUnavailableException
 import dev.kstep.geometry.PlacedMesh
+import dev.kstep.geometry.Placement
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.geometry.style.StepColour
 import dev.kstep.render.RenderLimits
+import dev.kstep.render.export.MeshExportPart
+import dev.kstep.render.export.MeshExportResult
+import dev.kstep.render.export.MeshExportScene
+import dev.kstep.render.export.StlWriter
+import dev.kstep.render.export.ThreeMfWriter
 import dev.kstep.render.gltf.GlbExtras
 import dev.kstep.render.gltf.GlbWriteResult
 import dev.kstep.render.gltf.GlbWriter
@@ -44,6 +50,12 @@ class PreviewEncodingException(
     message: String,
 ) : RuntimeException(message)
 
+private class ProducedBytes(
+    val bytes: ByteArray,
+    val glb: GlbWriteResult? = null,
+    val meshExport: MeshExportResult? = null,
+)
+
 private sealed interface RenderContent {
     /**
      * The UNprojected world-space mesh -- only the `RenderFormat.GLB` branch of [renderBytes]
@@ -63,6 +75,8 @@ private sealed interface RenderContent {
          * colour, in which case every output is byte-identical to the uncoloured rendering.
          */
         val colored: ColoredMesh? = null,
+        /** One entry per distinct (mesh, colour) with its placements -- the input of the STL/3MF writers (ADR-0049). */
+        val exportParts: List<MeshExportPart> = emptyList(),
     ) : RenderContent
 
     // Carries no lines of its own -- renderBytes computes the summary card's text fresh from
@@ -117,6 +131,26 @@ object PreviewRenderer {
             )
         }
 
+        val target =
+            if (request.format != RenderFormat.AUTO) {
+                request.format
+            } else {
+                request.outPathHint?.let { RenderFormat.fromExtension(it) }
+            }
+        request.meshToleranceMm?.let { tol ->
+            if (!(tol.isFinite() && tol > 0.0)) {
+                return PreviewOutcome.InvalidRequest(
+                    "Error: --tolerance must be a finite number greater than 0, got $tol",
+                )
+            }
+            if (target?.isMeshExport != true) {
+                return PreviewOutcome.InvalidRequest("Error: --tolerance is only valid with -f stl or -f 3mf")
+            }
+        }
+        if (request.requireWatertight && target?.isMeshExport != true) {
+            return PreviewOutcome.InvalidRequest("Error: --require-watertight is only valid with -f stl or -f 3mf")
+        }
+
         return when (val outcome = evalSource(request.source)) {
             is KStepScriptOutcome.Success -> renderSuccess(request, outcome.model)
             is KStepScriptOutcome.RuntimeError ->
@@ -143,7 +177,14 @@ object PreviewRenderer {
     ): PreviewOutcome {
         try {
             val occt = OcctKernel.availability()
-            val (content, warnings) = resolveContent(model, occt, request.width, request.height)
+            val (content, warnings) =
+                resolveContent(
+                    model,
+                    occt,
+                    request.width,
+                    request.height,
+                    request.meshToleranceMm,
+                )
             return finishRender(request, content, model, occt, warnings)
         } finally {
             closeShapes(model)
@@ -180,8 +221,11 @@ object PreviewRenderer {
     ): PreviewOutcome {
         val scriptName = request.source.displayName
         val format = resolveFormat(request, content)
-        val (bytes, glbResult) =
+        val produced =
             renderBytes(format, content, scriptName, model, occt, request.withStep, request.width, request.height)
+        val bytes = produced.bytes
+        val glbResult = produced.glb
+        val meshExport = produced.meshExport
 
         val contentKind =
             when (content) {
@@ -214,7 +258,8 @@ object PreviewRenderer {
             model = modelStats,
             geometry = geometryStats,
             glb = glbResult,
-            warnings = warnings,
+            warnings = warnings + (meshExport?.warnings ?: emptyList()),
+            meshExport = meshExport,
         )
     }
 
@@ -226,6 +271,7 @@ object PreviewRenderer {
         occt: OcctAvailability,
         width: Int,
         height: Int,
+        toleranceMm: Double?,
     ): Pair<RenderContent, List<String>> {
         if (!model.hasGeometry) {
             return RenderContent.Summary to emptyList()
@@ -264,14 +310,29 @@ object PreviewRenderer {
                             "kstep render: $unplaced shape(s) are not part of the assembly structure and are " +
                             "not drawn (see docs/adr/ADR-0035-placement-aware-render.adoc)."
                     }
-                    assemblyGeometry(model, expansion.instances, width, height)
+                    assemblyGeometry(model, expansion.instances, width, height, toleranceMm)
                 } else {
                     val first = model.shapes.first()
-                    val mesh = first.shape.triangulate()
+                    val mesh = first.shape.triangulate(toleranceMm)
                     val colour = first.style.colour
+                    val singlePart =
+                        listOf(
+                            MeshExportPart(
+                                "${first.productDefinition.id}",
+                                mesh,
+                                colour?.toMeshColor() ?: MeshColor.NEUTRAL,
+                                listOf(Placement.IDENTITY),
+                            ),
+                        )
                     if (colour == null) {
                         val triangles = MeshProjection.project(mesh, width.toDouble(), height.toDouble())
-                        RenderContent.Geometry(mesh, triangles, model.shapes.size, previewedShapeIndex = 0)
+                        RenderContent.Geometry(
+                            mesh,
+                            triangles,
+                            model.shapes.size,
+                            previewedShapeIndex = 0,
+                            exportParts = singlePart,
+                        )
                     } else {
                         val colored =
                             MeshComposition.mergeColored(
@@ -284,6 +345,7 @@ object PreviewRenderer {
                             model.shapes.size,
                             previewedShapeIndex = 0,
                             colored = colored,
+                            exportParts = singlePart,
                         )
                     }
                 }
@@ -323,6 +385,7 @@ object PreviewRenderer {
         instances: List<PlacedInstance>,
         width: Int,
         height: Int,
+        toleranceMm: Double?,
     ): RenderContent.Geometry {
         val shapeOf = IdentityHashMap<ProductDefinition, ShapeAssignment>()
         for (assignment in model.shapes) {
@@ -346,7 +409,7 @@ object PreviewRenderer {
         var total = 0L
         for (pd in distinctInOrder) {
             val count = instanceCountOf.getValue(pd)
-            val mesh = shapeOf.getValue(pd).shape.triangulate()
+            val mesh = shapeOf.getValue(pd).shape.triangulate(toleranceMm)
             meshOf[pd] = mesh
             total += mesh.triangleCount.toLong() * count
             require(total <= OcctKernel.MAX_TRIANGLES) {
@@ -381,6 +444,24 @@ object PreviewRenderer {
             }
         val colored = if (anyColour) MeshComposition.mergeColored(parts) else null
         val merged = colored?.mesh ?: MeshComposition.merge(parts)
+        // Export parts (ADR-0049): one per distinct (mesh identity, colour), first-seen order, all placements.
+        val exportOrder = mutableListOf<Triple<ProductDefinition, MeshColor, MutableList<Placement>>>()
+        for ((i, instance) in instances.withIndex()) {
+            val part = parts[i]
+            val existing =
+                exportOrder.firstOrNull {
+                    it.first === instance.productDefinition && it.second == part.color
+                }
+            if (existing != null) {
+                existing.third += part.placement
+            } else {
+                exportOrder += Triple(instance.productDefinition, part.color, mutableListOf(part.placement))
+            }
+        }
+        val exportParts =
+            exportOrder.map { (pd, colour, placements) ->
+                MeshExportPart("${pd.id}", meshOf.getValue(pd), colour, placements)
+            }
         val triangles =
             if (colored != null) {
                 MeshProjection.project(colored, width.toDouble(), height.toDouble())
@@ -395,6 +476,7 @@ object PreviewRenderer {
             instanceCount = instances.size,
             distinctShapeCount = instanceCountOf.size,
             colored = colored,
+            exportParts = exportParts,
         )
     }
 
@@ -418,7 +500,7 @@ object PreviewRenderer {
         withStep: Boolean,
         width: Int,
         height: Int,
-    ): Pair<ByteArray, GlbWriteResult?> {
+    ): ProducedBytes {
         // Lazy for the same reason the pre-extraction writeContainer computed it lazily: a
         // `-f glb --with-step` render on real geometry never reads this at all (the GLB branch
         // sets summaryLines = emptyList() in that case) -- computing it eagerly would pay for a
@@ -460,22 +542,22 @@ object PreviewRenderer {
                     } else {
                         TextCardRenderer.toSvg(lines, width, height).toByteArray(Charsets.UTF_8)
                     }
-                svgBytes to null
+                ProducedBytes(svgBytes)
             }
             RenderFormat.PNG -> {
                 if (content is RenderContent.Geometry) {
-                    MeshPreview.pngBytes(content.triangles, width, height) to null
+                    ProducedBytes(MeshPreview.pngBytes(content.triangles, width, height))
                 } else {
                     val out = ByteArrayOutputStream()
                     val wrote = ImageIO.write(TextCardRenderer.toImage(lines, width, height), "png", out)
                     if (!wrote) {
                         throw PreviewEncodingException("no ImageIO writer available for 'png'")
                     }
-                    out.toByteArray() to null
+                    ProducedBytes(out.toByteArray())
                 }
             }
             RenderFormat.TEXT -> {
-                (lines.joinToString("\n") + "\n").toByteArray(Charsets.UTF_8) to null
+                ProducedBytes((lines.joinToString("\n") + "\n").toByteArray(Charsets.UTF_8))
             }
             RenderFormat.GLB -> {
                 // A full-text summary in `extras` only for the geometry-free case -- mirrors how
@@ -491,7 +573,18 @@ object PreviewRenderer {
                     } else {
                         GlbWriter.writeEmptyScene(extras)
                     }
-                result.bytes to result
+                ProducedBytes(result.bytes, glb = result)
+            }
+            RenderFormat.STL, RenderFormat.THREE_MF -> {
+                // ADR-0049 D9: a printer file is NEVER a text card or an empty model -- no geometry means no bytes.
+                if (content is RenderContent.Geometry) {
+                    val scene = MeshExportScene(scriptName, content.exportParts)
+                    val result =
+                        if (format == RenderFormat.STL) StlWriter.write(scene) else ThreeMfWriter.write(scene)
+                    ProducedBytes(result.bytes, meshExport = result)
+                } else {
+                    ProducedBytes(ByteArray(0))
+                }
             }
             RenderFormat.AUTO -> error("unreachable -- format must be resolved before renderBytes")
         }

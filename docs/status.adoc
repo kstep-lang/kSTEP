@@ -18,6 +18,9 @@ bridging to the PlaneGCS 2D geometric constraint solver via JNI; see the
 `docs/adr/ADR-0006-planegcs-constraint-bridge.adoc`. Concretely, as of
 this writing:
 
+* **Welle AB (ADR-0049):** `kstep render -f stl` / `-f 3mf` export the tessellated geometry for 3D printing (binary STL; 3MF
+  with colours and placed instances; millimetres; `--tolerance`, `--require-watertight`). Verified on macOS arm64 with OCCT
+  7.9.3; the foreign-reader check with FreeCAD is not done on the author's machine (test skips without FreeCAD); CI not yet run.
 * An ANTLR4-based parser for the EXPRESS schema language (ISO 10303-11)
   exists and successfully parses a hand-written AP242-subset fixture in
   `kstep-tests`, plus (M1 Welle 4) a small excerpt of the real, official

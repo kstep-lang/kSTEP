@@ -1,0 +1,96 @@
+= ADR-0049: Mesh export STL and 3MF (Welle AB)
+:toc:
+
+== Status
+
+Accepted; implemented (kSTEP Welle AB). `kstep render` gains the containers `stl` (binary STL) and `3mf` (3MF package), both
+in millimetres, geometry only. External reader check (FreeCAD): not checked on the author's machine (FreeCAD is not
+installed there); `OcctFreeCadMeshExportTest` runs where it is.
+
+== Context
+
+3D printing and slicers consume triangle meshes, not STEP. kSTEP already tessellates for the preview and for GLB (ADR-0016);
+this wave writes the same triangles as STL and 3MF, with an honest statement of what the mesh is: closed and consistently
+oriented under a stated welding tolerance, never "printable".
+
+== Decisions
+
+D1 Surface:: New `RenderFormat.STL` and `RenderFormat.THREE_MF` on the existing `kstep render` (ADR-0011 container rule): `-f stl`,
+`-f 3mf`, or `--out x.stl|x.3mf` with `-f auto`. No new command, no DSL. `RenderFormat.id` (`stl`, `3mf`, others unchanged
+`name.lowercase()`) is used in the JSON `format` field (`name.lowercase()` would print `three_mf`). `auto` never chooses STL/3MF
+from content, only from the `--out` extension. `kstep import --render` and `kstep asciidoc` keep rejecting both (tests).
+
+D2 Unit:: Millimetre, fixed. STL has no unit field (convention mm, stated in the 80 byte header text `kSTEP binary STL, unit mm` and
+in the docs); 3MF `<model unit="millimeter">`. No `--unit` option: a unit option is a second source of truth (non-goal, fail closed).
+
+D3 Tessellation tolerance:: `--tolerance <mm>` (absolute chordal deviation), valid for stl/3mf only (else usage-style error,
+exit 1). Default is unchanged (bounding-box diagonal x 0.005, identical triangle counts as before). A new JNI entry
+`nativeShapeTrianglesWithTolerance` takes the value; the effective deflection is clamped natively to
+`[max(diagonal x 0.0005, 1e-5), 1e3]`, so a caller can never request a finer mesh than the part's diagonal / 2000. The hard
+cap `kMaxTriangles` = 130000 stays. NaN, Inf, 0 and negative values are refused in Kotlin AND at the top of the native
+function, before any OCCT object exists (Linux OCCT 7.9.2 aborts on hostile values). The angular deflection stays 0.5 rad; it
+dominates for small radii (measured below). JSON reports the requested `toleranceMm`; the effective value can be larger/clamped.
+
+D4 Watertightness:: `MeshTopologyCheck` per PART, never on the merged soup (touching parts share vertices). Vertices are welded
+by quantisation to 1e-6 mm; the 3MF writer uses the same grid for its welding and its decimal text, so check and file agree.
+`openEdgeCount` = undirected edges used by one triangle; `nonManifoldEdgeCount` = edges used by more than two triangles or by
+two triangles in the same direction (inconsistent winding). A mesh that fails is still written, with a stderr warning, a
+`warnings` entry in JSON and `watertight:false`. `--require-watertight` fails instead (exit 1, `errorKind mesh_not_watertight`,
+no file). Wording: "closed and consistently oriented under 1e-6 mm welding". Limitation: OCCT face-local nodes on shared edges can
+differ by float noise; the 1e-6 grid absorbs noise of the 1e-9 class, but a vertex that falls exactly on a cell border can in
+theory give a false open edge.
+
+D5 Colours:: STL cannot carry colours: they are dropped explicitly with `kstep render: stl carries no colours; N colour(s) dropped
+(use 3mf or glb)` on stderr and `colorsDropped:true`; the 2 byte attribute field stays 0 (the unofficial attribute-colour
+convention is not used). 3MF writes `<basematerials>` with `displaycolor="#RRGGBB"` (opaque) or `#RRGGBBAA` (alpha < 1, rounded
+`round(a*255)`). Alpha is carried, not enforced: many slicers ignore it. Uncoloured parts get no `pid`/`pindex`.
+
+D6 Assemblies:: STL is ONE merged mesh with the placements applied; overlapping parts are not unioned (warning when more than one
+instance). 3MF writes one `<object type="model">` per distinct (mesh identity, colour) pair (the colour can differ per instance,
+ADR-0045/0046, and `pid` is per object), the mesh in LOCAL coordinates, and one `<build><item objectid transform>` per instance.
+3MF multiplies row vectors, so the transform is the TRANSPOSED rotation followed by the translation
+(`m00 m01 m02 m10 m11 m12 m20 m21 m22 tx ty tz` = `r00 r10 r20 r01 r11 r21 r02 r12 r22 tx ty tz`); identity is omitted. A test with
+a non-symmetric rotation guards the order. Object names are sanitised to `[A-Za-z0-9 _.-]`, at most 64 characters, fallback
+`part-N`, XML escaped.
+
+D7 Caps (`RenderLimits`):: `EXPORT_MAX_TRIANGLES` = 130000 (re-checked in the writer before any allocation; `TriangleMesh` is a public
+type), `EXPORT_MAX_PARTS` = 1000, `EXPORT_MAX_BUILD_ITEMS` = 10000, `EXPORT_MAX_NAME_CHARS` = 64, `EXPORT_WARN_TRIANGLES` = 50000 (signal
+only). STL is at most 130000 x 50 + 84 = 6.5 MB.
+
+D8 Hostile input fails closed:: A non-finite coordinate, a coordinate not representable as float32 (STL) or beyond +-1e9 mm
+(3MF) aborts the whole export with `IllegalArgumentException` (CLI: `errorKind mesh_export_invalid`, exit 1). Unlike GLB,
+triangles are never dropped silently for that reason (dropping would open a printable mesh). Zero-area triangles (also those
+collapsed by float32 narrowing, welding or collinearity on the grid) are dropped, counted (`droppedTriangleCount`) and warned.
+
+D9 No geometry, no file (amendment to ADR-0011's container rule):: For stl/3mf a notice or summary (no geometry, OCCT unavailable,
+placement invalid, triangulation failed) never writes a text card or an empty model into the file: exit 1 through
+`reportFailure` (`geometry_unavailable`, `fallbackReason` or `no_printable_geometry`), nothing written. A text card inside a
+`.stl` is a corrupt printer file.
+
+D10 Determinism:: STL bytes are fully deterministic (no timestamp, no version). 3MF: fixed entry order (`[Content_Types].xml`,
+`_rels/.rels`, `3D/3dmodel.model`), fixed entry timestamps (1980-01-01, local time), deflate level 9, locale independent number text
+(vertices as exact 1e-6 fixed point, transforms with 9 places, no `-0`), objects and items in first-seen order. Same JVM gives
+identical bytes (tested); deflate output can differ between JDK/zlib versions, so cross-platform byte equality is not claimed.
+The XML is hand written (strict escaping, XML 1.0 illegal characters removed), so the runtime image needs no `java.xml` module.
+
+D11 Non-goals (fail closed):: G-code, supports, slicing, material parameters, STL/3MF import, mesh repair, 3MF beam lattice, ASCII
+STL, `kstep import --render x.stl`, asciidoc `format=stl`, a unit option, a Kotlin DSL.
+
+== Measurements
+
+macOS arm64, OCCT 7.9.3, `OcctMeshExportTest`:
+
+* Box 10 x 20 x 30: 12 triangles, STL 684 bytes, volume recomputed from the read-back STL = 6000 mm3 (1e-6), watertight.
+* Cylinder r 10, h 30, default tolerance: 100 triangles, 0 open and 0 non-manifold edges. `--tolerance 0.001` gives 276 triangles,
+  identical to the clamped lower bound (bounding-box diagonal 41.23 mm, bound 0.0206 mm; `--tolerance 1e-12` also 276): the angular
+  deflection of 0.5 rad, not the chordal tolerance, limits refinement here.
+* Box 20 mm with four rounded edges (r 3): 68 triangles, 0 open and 0 non-manifold edges; 3MF 1716 bytes, 36 welded vertices.
+* Placed assembly fixture (3 distinct parts, 4 instances): STL one soup of 48 triangles; 3MF 3 objects, 4 build items.
+* The default tessellation (no `--tolerance`) is byte-for-byte the former code path.
+
+== Consequences
+
+* The native library changed: every platform must rebuild it (the Gradle task does). Both CI OCCT jobs and the skip guard must
+  see only the allowed skip markers; the FreeCAD test carries `skipped when FreeCAD is not installed` in its name.
+* If printing at the default tolerance proves too coarse on small radii, a default change is a follow-up, not part of this wave.
+* Related: ADR-0011 (amended by D9), ADR-0016 (GLB: colour and alpha handling for comparison), ADR-0045/0046 (instance colours).

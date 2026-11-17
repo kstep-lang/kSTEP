@@ -7,6 +7,20 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Added
+
+* `kstep render -f stl` and `-f 3mf` (Welle AB, ADR-0049): binary STL and 3MF mesh export in millimetres. STL is one merged
+  mesh and drops colours explicitly (warning); 3MF keeps colours (alpha as `#RRGGBBAA`), one object per distinct part and one
+  build item with a transform per placed instance. No geometry means exit 1 and no file (never a text card inside a printer file).
+* `--tolerance <mm>` (stl/3mf): absolute chordal deviation, never finer than bounding-box diagonal / 2000.
+* `--require-watertight` (stl/3mf): fail, writing nothing, if a part mesh is not closed and consistently oriented under 1e-6 mm
+  welding. Without the flag a non-watertight mesh is written with a warning. `--output json` gains a `meshExport` object.
+
+=== Changed
+
+* The native bridge gains `nativeShapeTrianglesWithTolerance` (bounded tolerance entry point); the default tessellation is
+  unchanged. The native library must be rebuilt (the Gradle build does it).
+
 == 0.5.0 — 2026-11-17 (pre-release)
 
 === Fixed

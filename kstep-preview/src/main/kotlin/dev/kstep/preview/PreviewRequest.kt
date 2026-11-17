@@ -46,4 +46,8 @@ data class PreviewRequest(
      * [format] and therefore never needs it.
      */
     val outPathHint: String? = null,
+    /** Absolute chordal tolerance in mm for the STL/3MF tessellation (ADR-0049 D3); `null` = automatic. */
+    val meshToleranceMm: Double? = null,
+    /** Fail instead of writing a mesh that is not closed/consistently oriented (ADR-0049 D4). Applied by the caller. */
+    val requireWatertight: Boolean = false,
 )

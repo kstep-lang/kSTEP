@@ -58,4 +58,18 @@ class RenderFormatTest :
         "deriveRenderOutputPath rejects AUTO -- callers must resolve a concrete format first" {
             shouldThrow<IllegalArgumentException> { deriveRenderOutputPath("bracket.kstep.kts", RenderFormat.AUTO) }
         }
+
+        "stl and 3mf parse, resolve from extensions, derive paths and have stable ids (ADR-0049)" {
+            RenderFormat.parse("stl") shouldBe RenderFormat.STL
+            RenderFormat.parse("3MF") shouldBe RenderFormat.THREE_MF
+            RenderFormat.fromExtension("x.STL") shouldBe RenderFormat.STL
+            RenderFormat.fromExtension("x.3mf") shouldBe RenderFormat.THREE_MF
+            deriveRenderOutputPath("a.kstep.kts", RenderFormat.STL) shouldBe "a.stl"
+            deriveRenderOutputPath("a.kstep.kts", RenderFormat.THREE_MF) shouldBe "a.3mf"
+            RenderFormat.THREE_MF.id shouldBe "3mf"
+            RenderFormat.STL.id shouldBe "stl"
+            RenderFormat.SVG.id shouldBe "svg"
+            RenderFormat.GLB.id shouldBe "glb"
+            RenderFormat.fromExtension("x.gltf") shouldBe null
+        }
     })

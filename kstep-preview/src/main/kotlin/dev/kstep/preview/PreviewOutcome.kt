@@ -1,6 +1,7 @@
 package dev.kstep.preview
 
 import dev.kstep.geometry.OcctAvailability
+import dev.kstep.render.export.MeshExportResult
 import dev.kstep.render.gltf.GlbWriteResult
 import dev.kstep.script.KStepScriptOutcome
 
@@ -65,6 +66,8 @@ sealed interface PreviewOutcome {
          * `CliRenderIntegrationTest`'s R21 stderr assertions keep passing verbatim.
          */
         val warnings: List<String>,
+        /** Non-null iff the format is STL/3MF and geometry was exported (ADR-0049). */
+        val meshExport: MeshExportResult? = null,
     ) : PreviewOutcome
 
     /**

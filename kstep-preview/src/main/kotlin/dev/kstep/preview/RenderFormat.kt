@@ -18,7 +18,19 @@ enum class RenderFormat {
      *  (see docs/adr/ADR-0016-gltf-glb-export.adoc's Decision section for why plain-text glTF +
      *  a separate `.bin` is deliberately NOT offered this wave). */
     GLB,
+
+    /** Binary STL, millimetres, geometry only (ADR-0049). Never chosen by `auto` from content. */
+    STL,
+
+    /** 3MF package (ZIP + XML), millimetres, with colours and placed instances (ADR-0049). */
+    THREE_MF,
     ;
+
+    /** Stable CLI/JSON identifier (`name.lowercase()` would print `three_mf`). */
+    val id: String get() = if (this == THREE_MF) "3mf" else name.lowercase()
+
+    /** `true` for the printing mesh formats [STL] and [THREE_MF]. */
+    val isMeshExport: Boolean get() = this == STL || this == THREE_MF
 
     companion object {
         /** Parses a `--format` flag value. `null` for anything unrecognized -- the caller
@@ -33,6 +45,8 @@ enum class RenderFormat {
                 "png" -> PNG
                 "text" -> TEXT
                 "glb", "gltf" -> GLB
+                "stl" -> STL
+                "3mf" -> THREE_MF
                 else -> null
             }
 
@@ -48,6 +62,8 @@ enum class RenderFormat {
                 path.endsWith(".png", ignoreCase = true) -> PNG
                 path.endsWith(".txt", ignoreCase = true) -> TEXT
                 path.endsWith(".glb", ignoreCase = true) -> GLB
+                path.endsWith(".stl", ignoreCase = true) -> STL
+                path.endsWith(".3mf", ignoreCase = true) -> THREE_MF
                 else -> null
             }
     }
@@ -75,6 +91,8 @@ fun deriveRenderOutputPath(
             RenderFormat.PNG -> ".png"
             RenderFormat.TEXT -> ".txt"
             RenderFormat.GLB -> ".glb"
+            RenderFormat.STL -> ".stl"
+            RenderFormat.THREE_MF -> ".3mf"
             RenderFormat.AUTO -> error("unreachable")
         }
     val base = if (scriptPath.endsWith(SCRIPT_EXTENSION)) scriptPath.removeSuffix(SCRIPT_EXTENSION) else scriptPath

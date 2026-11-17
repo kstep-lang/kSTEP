@@ -38,4 +38,19 @@ object RenderLimits {
      *  ceiling of 130 000 triangles produces an 8.93 MiB GLB (see
      *  docs/adr/ADR-0016-gltf-glb-export.adoc). */
     const val GLB_TRIANGLE_WARN_THRESHOLD: Int = 50_000
+
+    /** Hard triangle cap of the STL/3MF writers (ADR-0049 D7) -- mirrors [dev.kstep.geometry.OcctKernel.MAX_TRIANGLES]. */
+    const val EXPORT_MAX_TRIANGLES: Int = 130_000
+
+    /** Maximum distinct (mesh, colour) parts of one mesh export. */
+    const val EXPORT_MAX_PARTS: Int = 1_000
+
+    /** Maximum placed instances (3MF build items) of one mesh export. */
+    const val EXPORT_MAX_BUILD_ITEMS: Int = 10_000
+
+    /** Maximum characters of an exported part name. */
+    const val EXPORT_MAX_NAME_CHARS: Int = 64
+
+    /** Above this many triangles an STL/3MF export is logged as "large" (not a cap). */
+    const val EXPORT_WARN_TRIANGLES: Int = 50_000
 }
