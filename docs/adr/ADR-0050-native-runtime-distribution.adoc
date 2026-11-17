@@ -3,8 +3,7 @@
 
 == Status
 
-Accepted (Welle D0a). Verified on macOS arm64 only; the Linux x86-64 path is implemented but not verified locally and
-has no CI job yet.
+Accepted (Welle D0a). Verified on macOS arm64 locally and on Linux x86-64 (Ubuntu 26.04, OCCT 7.9.2) by a CI step.
 
 == Context
 
@@ -72,4 +71,4 @@ installs. The archive README says so. A downloaded unsigned dylib may be blocked
 
 macOS arm64, Homebrew opencascade 7.9.3_1, JDK 21: archive about 88 MB; `verify-native-dist.sh` passes (layout, launcher via
 symlink from another cwd, `--version` reports `occt: available 7.9.3` and `planegcs: available`, STL render of
-`export-box-20x30x40.kstep.kts` non-empty). Linux x86-64 is not verified locally.
+`export-box-20x30x40.kstep.kts` non-empty). Linux x86-64: the CI job `check (ubuntu-26.04 ...)` builds the archive and `verify-native-dist.sh` passes there (same checks, OCCT 7.9.2).
