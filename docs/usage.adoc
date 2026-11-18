@@ -825,7 +825,12 @@ visible with a yellow badge and the time of that result; the error bar below sho
 | Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, Ctrl+Y | Undo, redo (the editor's own history)
 | Enter, Tab | New line with the indentation of the line (one level deeper after `{`); four spaces
 | Ctrl/Cmd+R | Run again now
-| H | Reset camera and fit scale to the current shape
+| H | Reset camera and fit scale to the current shape (`H` does not hide a part; hiding is `V`)
+| T | Toggle the selected part or sub-assembly transparent (not while the editor has the focus)
+| V | Toggle it hidden
+| I | Isolate it: it stays visible, everything else turns transparent (parts that are hidden stay hidden)
+| Shift+V | Show everything again (the opacity stays)
+| Space | Cycle the selected tree row: visible, transparent, hidden (only with the focus in the tree)
 | Drag, Shift-drag, scroll, double-click | Orbit, pan, zoom, reset camera (as in `kstep-viewer`)
 |===
 
@@ -858,6 +863,16 @@ Selection (ADR-0053): moving over a part tints it, a click selects it and opens 
 triangle count, size, centroid, colour and position. A click on empty space or Escape (while the preview has the focus) clears the
 selection. A press that moves more than 4 dp is an orbit or pan, not a click. After a re-run the selection stays if a part of that name
 still exists; with several parts of the same name the first one is shown.
+
+Visibility (ADR-0055): select a part or a sub-assembly and press `T` (transparent), `V` (hidden) or `I` (isolate), or use the eye
+column in the tree (a click goes visible, transparent, hidden, visible; a group whose parts differ shows a bar and becomes visible on a
+click) and `Show all`, `Isolate`, `Hide` in the toolbar. The slider sets the opacity of transparent parts (5 % to 60 %). Hidden parts are
+not drawn and not picked; a click picks the nearest opaque part, and a transparent one only if no opaque part is hit. A hidden part
+that was selected stays selected, so its panel and tree row remain. The setting survives a re-run of the same file (parts that vanished
+are dropped), is reset when you open another file, and is not saved. It is a view setting only: the script and an export do not change.
+The status line and the tree header count the hidden and transparent parts. Known limit: parts are sorted by the depth of the middle of
+each triangle, so a part inside a transparent hull can show over it when the hull has large slanted triangles; and only the front side of
+a transparent hull is drawn. The colour transparency written in a STEP file is not drawn in the desktop.
 
 A script without a `shape(...)` shows "Script has no shape(...)"; without the native bridge the window shows the OCCT notice
 with an install hint for the current operating system.

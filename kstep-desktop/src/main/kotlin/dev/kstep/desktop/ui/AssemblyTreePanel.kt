@@ -41,6 +41,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -60,17 +61,22 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.pick.AssemblyTree
+import dev.kstep.desktop.pick.PartMode
 import dev.kstep.desktop.pick.SelectionEvent
 import dev.kstep.desktop.pick.SelectionState
 import dev.kstep.desktop.pick.TreeKey
 import dev.kstep.desktop.pick.TreeViewLogic
 import dev.kstep.desktop.pick.TreeViewState
+import dev.kstep.desktop.pick.VisibilityArrays
+import dev.kstep.desktop.pick.VisibilityCounts
+import dev.kstep.desktop.pick.visibilityHeaderText
 
 internal val TREE_WIDTH = 240.dp
 private val LABEL = Color(0xFF8A8A8A)
@@ -78,12 +84,14 @@ private val ROW_HEIGHT = 24.dp
 private val HEADER_HEIGHT = 28.dp
 private val INDENT = 14.dp
 private val ARROW_ZONE = 16.dp
+private val EYE_ZONE = 20.dp
 private val ACCENT_BAR = 2.dp
 private val ROW_PADDING = 8.dp
 private const val MAX_INDENT_LEVEL = 10
 private const val DOUBLE_CLICK_NANOS = 400_000_000L
 private const val SCROLL_MARGIN_ROWS = 2
 private const val DIM_ALPHA = 0.7f
+private const val HIDDEN_TEXT_ALPHA = 0.45f
 private const val SELECT_FOCUS_ALPHA = 0.22f
 private const val SELECT_BLUR_ALPHA = 0.18f
 private const val HOVER_ALPHA = 0.06f
@@ -117,6 +125,10 @@ internal fun AssemblyTreePanel(
     dispatch: (SelectionEvent) -> Unit,
     dark: Boolean,
     background: Color,
+    nodeVisibility: ByteArray?,
+    counts: VisibilityCounts,
+    onCycleNode: (Int) -> Unit,
+    onCycleSelected: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val accent = if (dark) ACCENT_DARK else ACCENT_LIGHT
@@ -170,6 +182,14 @@ internal fun AssemblyTreePanel(
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 if (event.isMetaPressed || event.isCtrlPressed || event.isAltPressed) return@onPreviewKeyEvent false
+                // Spacebar cycles the visibility of the selection; without one the key stays free
+                if (visibilityAction(event.key, event.isShiftPressed, false, false, false, true) ==
+                    VisibilityAction.Cycle
+                ) {
+                    if (selectedNode < 0) return@onPreviewKeyEvent false
+                    onCycleSelected()
+                    return@onPreviewKeyEvent true
+                }
                 val key =
                     when (event.key) {
                         Key.DirectionUp -> TreeKey.Up
@@ -198,8 +218,25 @@ internal fun AssemblyTreePanel(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Assembly", color = LABEL, fontSize = 11.sp, modifier = Modifier.semantics { heading() })
-            Box(Modifier.weight(1f))
-            Text("${table.parts.size} parts", color = LABEL.copy(alpha = DIM_ALPHA), fontSize = 11.sp)
+            val headerText = visibilityHeaderText(table.parts.size, counts)
+            TooltipArea(
+                tooltip = {
+                    Box(Modifier.background(Color.Black.copy(alpha = 0.8f)).padding(6.dp)) {
+                        Text(headerText, color = Color.White, fontSize = 12.sp)
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(
+                    headerText,
+                    color = LABEL.copy(alpha = DIM_ALPHA),
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.fillMaxWidth().padding(start = 8.dp),
+                )
+            }
         }
         LazyColumn(
             state = listState,
@@ -218,10 +255,15 @@ internal fun AssemblyTreePanel(
                     panelFocused = focused,
                     accent = accent,
                     dark = dark,
+                    visibility = nodeVisibility?.getOrNull(node) ?: PartMode.VISIBLE,
                     onToggle = { onView(TreeViewLogic.toggle(tree, view, node)) },
-                    onPress = { onArrow, now ->
+                    onEye = { onCycleNode(node) },
+                    onPress = { zone, now ->
                         focusRequester.requestFocus()
-                        if (onArrow) {
+                        if (zone == PressZone.Eye) {
+                            // the eye changes the visibility only: no selection, no group toggle
+                            onCycleNode(node)
+                        } else if (zone == PressZone.Arrow) {
                             onView(TreeViewLogic.toggle(tree, view, node))
                         } else {
                             val doubleClick = lastPressNode == node && now - lastPressAt < DOUBLE_CLICK_NANOS
@@ -254,8 +296,10 @@ private fun TreeRow(
     panelFocused: Boolean,
     accent: Color,
     dark: Boolean,
+    visibility: Byte,
     onToggle: () -> Unit,
-    onPress: (onArrow: Boolean, nowNanos: Long) -> Unit,
+    onEye: () -> Unit,
+    onPress: (zone: PressZone, nowNanos: Long) -> Unit,
     onHover: (Boolean) -> Unit,
 ) {
     var hovered by remember { mutableStateOf(false) }
@@ -264,8 +308,11 @@ private fun TreeRow(
     val indent = INDENT * minOf(level, MAX_INDENT_LEVEL)
     val textColor = if (dark) Color(0xFFE6E6E6) else Color(0xFF1B1B1B)
     val density = LocalDensity.current
-    val arrowStartPx = with(density) { (ACCENT_BAR + ROW_PADDING + indent).toPx() }
-    val arrowEndPx = with(density) { (ACCENT_BAR + ROW_PADDING + indent + ARROW_ZONE).toPx() }
+    val eyeStartPx = with(density) { ACCENT_BAR.toPx() }
+    val eyeEndPx = with(density) { (ACCENT_BAR + EYE_ZONE).toPx() }
+    val arrowStartPx = with(density) { (ACCENT_BAR + EYE_ZONE + ROW_PADDING + indent).toPx() }
+    val arrowEndPx = with(density) { (ACCENT_BAR + EYE_ZONE + ROW_PADDING + indent + ARROW_ZONE).toPx() }
+    val visibilityName = visibilityName(visibility)
     val rowBackground =
         when {
             selected && panelFocused -> accent.copy(alpha = SELECT_FOCUS_ALPHA)
@@ -300,15 +347,31 @@ private fun TreeRow(
                         .firstOrNull()
                         ?.position
                         ?.x ?: return@onPointerEvent
-                onPress(isGroup && x >= arrowStartPx && x < arrowEndPx, System.nanoTime())
+                onPress(pressZone(x, eyeStartPx, eyeEndPx, arrowStartPx, arrowEndPx, isGroup), System.nanoTime())
             }.semantics(mergeDescendants = true) {
-                contentDescription = description
+                contentDescription = "$description, $visibilityName"
                 this.selected = selected
                 if (isGroup) stateDescription = if (expanded) "expanded" else "collapsed"
             },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width(ACCENT_BAR).fillMaxHeight().background(if (selected) accent else Color.Transparent))
+        Box(
+            Modifier
+                .size(EYE_ZONE)
+                .semantics {
+                    role = Role.Button
+                    contentDescription = "Visibility"
+                    stateDescription = visibilityName
+                    onClick(label = "Change visibility") {
+                        onEye()
+                        true
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            EyeGlyph(visibility, textColor)
+        }
         Spacer(Modifier.width(ROW_PADDING + indent))
         Box(
             Modifier
@@ -328,6 +391,7 @@ private fun TreeRow(
             if (isGroup) DisclosureTriangle(expanded, textColor.copy(alpha = DIM_ALPHA))
         }
         val label = rowLabel(tree, node, textColor)
+        val hiddenRow = visibility == PartMode.HIDDEN
         TooltipArea(
             tooltip = {
                 Box(Modifier.background(Color.Black.copy(alpha = 0.8f)).padding(6.dp)) {
@@ -338,6 +402,7 @@ private fun TreeRow(
         ) {
             Text(
                 label,
+                color = if (hiddenRow) textColor.copy(alpha = HIDDEN_TEXT_ALPHA) else Color.Unspecified,
                 fontSize = 12.sp,
                 fontWeight = if (isGroup) FontWeight.Medium else FontWeight.Normal,
                 maxLines = 1,
@@ -385,3 +450,11 @@ private fun DisclosureTriangle(
         drawPath(path, color)
     }
 }
+
+private fun visibilityName(state: Byte): String =
+    when (state) {
+        PartMode.TRANSPARENT -> "transparent"
+        PartMode.HIDDEN -> "hidden"
+        VisibilityArrays.MIXED -> "mixed visibility"
+        else -> "visible"
+    }

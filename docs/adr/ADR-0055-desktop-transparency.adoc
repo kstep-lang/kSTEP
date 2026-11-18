@@ -1,0 +1,84 @@
+= ADR-0055: kSTEP Desktop, transparency and hiding of parts
+:toc:
+
+== Status
+
+Accepted (Welle D5). The state machine, the derived arrays, the picking rules and both draw paths are covered by tests (pure logic in the `pick` package; the draw paths end to end through `ImageComposeScene`). The look of the toolbar controls and the tree eye column was seen in one screenshot of the running window; clicking and key handling in the live window was not exercised by hand in this wave, the key mapping and the click zones are tested as pure functions.
+
+== Context
+
+An assembly hides its inner parts behind the outer ones. D3 and D4 can select any part, but the user cannot look at one. D5 lets the user make a part or a whole sub-assembly transparent or hidden, from the tree, the toolbar and the keyboard. The visibility is a view setting of the session: it never changes the script, the part list or the exported file.
+
+== Decision
+
+D1. Three states per part: `Visible`, `Transparent`, `Hidden`. The state machine (`VisibilityMachine`, `pick` package, pure, no Compose) works on part index ranges (`IntRange`), not on tree nodes. The tree guarantees that every group covers one contiguous part range (`firstPart..lastPart`, ADR-0054), so a group is a range and a single part is a one-element range; without a tree everything still works for single parts. `SelectionMachine.highlightRange` already yields exactly the target range of the selection (a group, a part, or `-1..-1`) and is reused. Every operation that changes nothing returns the very same instance (`===`).
+
+D2. Identity across re-runs. The state is kept in a `VisibilityState` as a sparse map from a part key to its state (only non-visible parts are stored) plus the opacity. The key of a part is the key of its tree leaf (the digest of ADR-0054, which already tells apart same-named siblings by occurrence). A part the tree does not cover, and every part of a scene without a tree, uses `"n:" + name + NUL + occurrence`. The occurrence is counted in one pass in `VisibilityScene.of` (the O(n) `PartTable.occurrenceOf` per part would be O(n^2)). A run from tree to no tree makes the stored keys unknown and drops them: rare, accepted.
+
+D3. Re-run and file change. After a re-run of the same file, keys that no longer exist are dropped, the others stay, the opacity stays (`onRerun`). If the new part list is invalid (no scene), nothing is dropped. Opening another file resets everything (`openCount` changes), because the model is a different one. The reset happens in the existing effect before `shownOpenCount` is updated.
+
+D4. Operations. `cycle` (Visible, Transparent, Hidden, Visible; a mixed range becomes Visible), `toggleTransparent` (Transparent back to Visible, anything else to Transparent), `toggleHidden` (Hidden back to Visible, anything else to Hidden), `hide`, `showAll` (clears the map, keeps the opacity), `isolate` (the range becomes Visible, everything else Transparent except parts that are already Hidden, which stay hidden). Ranges are clipped to the scene; the empty range is a no-op.
+
+D5. Opacity of transparent parts is stored as an integer step 1..12 (5 % steps, 5 % to 60 %, default 25 %). `withAlpha(Float)` clamps and rounds; NaN and infinities give the default. An integer, so the label "Opacity 25 %" never drifts through float arithmetic.
+
+D6. Derived data is built once per change, never per frame and never per hover: `VisibilityArrays.build` gives `partMode` (one byte per part), `nodeState` (per tree node, group states computed bottom-up in one pass from the back, because the nodes are in pre-order with `parent < child`; a group whose parts differ is `Mixed`) and the counts. The desktop keeps them in a `derivedStateOf` that depends on the state, the scene and the tree only. The viewer receives `CanvasVisibility(triangleToPart, partMode, alpha)` as a `State` and reads it in the draw phase only (ADR-0012, ADR-0053), so dragging the opacity slider invalidates the draw phase, not the composition of the canvas.
+
+D7. Drawing. The viewer draws with a painter's algorithm and no depth buffer. Drawing "all opaque first, then all transparent" would paint a transparent triangle over a nearer opaque one. So there is one global back-to-front order, as before. A hidden triangle is left out of the batch (no fill, no tint, no outline). A transparent one stays at its place in the order and carries its alpha. Skia test (`SkiaVertexAlphaProbeTest`, against the pinned Skiko 0.144.6): `drawVertices` with `BlendMode.DST` takes the per-vertex alpha, so one batch can mix opaque and translucent triangles; the probe drew a 50 % blue square over white and read back red 127, green 127, blue 255, alpha 255, a correct blend. Therefore no splitting into runs was needed. An opaque triangle in front of a transparent one covers it completely; a transparent one in front of an opaque one blends with it.
+
+D8. The flat path (no vertex normals) fills transparent triangles with the alpha colour and draws no 1 px outline: an outline in the same alpha over the fill would blend twice along every shared edge and draw a grid. The seams the outline normally closes are the lesser evil. The desktop always takes the smooth path (the GLB carries normals), so this only concerns the standalone viewer.
+
+D9. The selection tint stays on a transparent part (the tint changes the colour, the alpha is untouched) and does not apply to a hidden one, which is not drawn.
+
+D10. Picking. `PickIndex.pick(ray, mode)`: first the nearest OPAQUE part along the whole ray; only if there is none, the nearest transparent part; a hidden part is never touched (no box test, no triangle test). `mode == null` is exactly the previous behaviour; a `mode` of the wrong size is ignored instead of throwing. The pick cache key knows pixel, screen mapping and scene, not the visibility, so `PickCache.invalidate()` is called whenever the derived visibility instance changes. When a hidden part was hovered and the pointer rests, the hover is cleared.
+
+D11. A hidden part that is selected stays selected: the inspection panel still describes it and the tree row shows the selection, the viewer shows nothing for it. This is deliberate: hiding must not lose the selection that was used to hide.
+
+D12. Keys (all only when the script editor does not have the focus, never with Meta, Ctrl or Alt): `T` toggles transparent, `V` toggles hidden, `I` isolates, `Shift+V` shows all, `Space` cycles the selected row (only with the focus in the tree). `Shift+T` and `Shift+I` are not assigned. `H` stays the camera reset (it was taken before this wave), so "hide" is `V`, not `H`. A key that has nothing to act on (no selection, nothing to show) is not consumed. The keys also work with the focus in the viewer or any other widget but the editor; a widget that wants these letters itself has to consume them first. The mapping is the pure function `visibilityAction`.
+
+D13. The tree row has an eye column at the left, right after the 2 dp accent bar, 20 dp wide with a 14 dp glyph, not indented. It is drawn on a canvas (no icon font) from the theme colours. A click on it changes the visibility only: it does not select the row and does not open or close a group. The press zones (eye, disclosure arrow, rest of the row) are decided by the pure function `pressZone`; the arrow zone moved right by the width of the eye column. The row exposes the eye as a button with a state description and its name carries the state in the content description. A hidden row dims its text to 0.45.
+
+[cols="1,3",options="header"]
+|===
+| State | Glyph and meaning
+| Visible | Open eye, dimmed to 0.35 (the normal case stays quiet)
+| Transparent | Dashed outline, half-filled pupil
+| Hidden | Eye crossed out; the row text is dimmed
+| Mixed (a group whose parts differ) | Bar instead of the pupil; a click or `Space` makes all parts visible
+|===
+
+D14. Toolbar. `Show all` (disabled when nothing is hidden or transparent), `Isolate` and `Hide` (disabled without a selection, tooltip "Select a part first"), and a slider "Opacity n %" (96 dp, disabled without a transparent part, tooltip "No transparent parts"). The counts also appear in the status line ("2 hidden · 5 transparent") and in the tree header ("12 parts · 2 hidden · 5 transparent", one line with an ellipsis and the full text as tooltip). The controls are shown only while a valid part list exists.
+
+== Known limits
+
+* The painter's algorithm sorts triangles by the depth of their centre. A large slanted triangle of a transparent shell can have its centre deeper than a small triangle of a part inside it; that inner part then shows over the transparent shell. That is the ordinary painter's error, and a two-pass partition would not repair it (it would make it worse for opaque parts), so it is not attempted.
+* Back faces are culled as before, so a transparent hull shows only its front side; you do not see the inner side of the far wall through it.
+* There is no undo for visibility changes and nothing is saved over an application restart. Visibility is per session, per open file.
+* The camera does not refit when parts are hidden: the fit scale belongs to the first good mesh of the file (ADR-0051), so the view never jumps.
+* The colour transparency of a STEP part (alpha in the colour, ADR-0042/0044) is still not drawn in the desktop; this wave adds a manual per-part visibility only.
+* The 1 px outline is missing on transparent triangles of the flat path (D8).
+
+== Deviations from the request text
+
+* Drawing: there is no "opaque first, then transparent" pass; one global back-to-front order with per-vertex alpha is used instead (D7).
+* Picking: opaque parts win over the whole ray, transparent ones only if nothing opaque is hit (D10).
+* Hide is `V`, not `H`, because `H` already resets the camera (D12).
+* The state machine works on part ranges, not on tree nodes (D1).
+
+== Security
+
+* No new input path. The visibility is derived from the validated part list and tree (ADR-0053, ADR-0054); the parts limit and the tree limits (4096 parts, 8192 nodes) bound every pass: building the arrays, the counting pass in the draw loop and the isolate operation are O(parts + nodes + triangles).
+* Index bounds: ranges are clipped to the scene; `-1..-1` and ranges outside are a no-op; `partMode` is checked against the part table size in `PickIndex.pick` and `CanvasVisibility.modeOf` checks the triangle index and the part index, so a stale array can neither crash nor hide a wrong part.
+* Allocation: the canvas allocates two arrays per frame sized by the triangle count (as before); there is no allocation per triangle.
+* Logging: nothing is logged; no names and no script text.
+* The script is still evaluated only in the worker; `DesktopArchitectureTest` still holds (Compose only in `ui`, `pick` free of Compose).
+
+== Rejected alternatives
+
+* Two passes, opaque then transparent: wrong over a nearer opaque triangle without a depth buffer (D7).
+* Storing the state per tree node: no tree for a flat scene, and repeated parts would be split across nodes.
+* Float alpha in the state: drift in the label and in equality.
+* A 1 px outline in the same alpha on transparent flat triangles: draws a grid (D8).
+
+== Not in this wave
+
+Undo and redo of visibility, saving it with the file, per-part opacity, `Alt`-click to isolate, hiding by colour or by name pattern, refitting the camera, drawing the STEP colour transparency in the desktop, sorting by triangle instead of by centre depth.

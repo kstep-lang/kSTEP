@@ -145,13 +145,29 @@ class PickIndex(
         eps = 1e-9 * max(1.0, extent)
     }
 
-    /** Index of the nearest part hit by [ray], or `null`. */
-    fun pick(ray: Ray): Int? {
+    /**
+     * Index of the nearest part hit by [ray], or `null`. With a visibility [mode] (one [PartMode] code per part; ignored
+     * when its size does not match the table) the nearest OPAQUE part wins over the whole ray, a transparent one is only
+     * taken when no opaque part is hit, and a hidden part is never touched (ADR-0055). Without [mode] every part counts.
+     */
+    fun pick(
+        ray: Ray,
+        mode: ByteArray? = null,
+    ): Int? {
+        if (mode == null || mode.size != table.parts.size) return nearest(ray) { true }
+        return nearest(ray) { mode[it] == PartMode.VISIBLE } ?: nearest(ray) { mode[it] == PartMode.TRANSPARENT }
+    }
+
+    private fun nearest(
+        ray: Ray,
+        accept: (Int) -> Boolean,
+    ): Int? {
         val n = table.parts.size
         if (n == 0) return null
         val enter = DoubleArray(n) { Double.NaN }
         var candidates = 0
         for (i in 0 until n) {
+            if (!accept(i)) continue
             val t = TrianglePicker.slab(ray, boxMin[i], boxMax[i])
             if (t != null) {
                 enter[i] = t
@@ -222,6 +238,11 @@ class PickCache {
     private var frame: ScreenFrame? = null
     private var sceneGeneration = -1L
     private var value = -1
+
+    /** Forgets the cached pick, e.g. when the visibility changed: the key knows pixel, mapping and scene only. */
+    fun invalidate() {
+        frame = null
+    }
 
     /** The part index at the pixel (`-1` for none); [compute] runs only on a cache miss. */
     fun lookup(

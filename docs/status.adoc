@@ -770,6 +770,11 @@ scan before either lands.
   depth-first instance order by usage identity, re-indexed after the GLB mapping); the desktop validates it as hostile input
   (`KSTEP-D-013` warning on a bad tree, flat selection unaffected), shows it beside the canvas and selects groups with a range highlight
   and a group inspection. `kstep render --output json` is unchanged. The panel look and feel was not exercised by hand.
+* Welle D5 (ADR-0055): transparency and hiding of parts in `kstep-desktop`. A pure state machine over part ranges (kept over re-runs by tree
+  key, reset for another file), an eye column in the tree, toolbar controls with an opacity slider, the keys `T`, `V`, `I`, `Shift+V` and
+  Space. The viewer draws hidden parts not at all and transparent ones in one global back-to-front order with per-vertex alpha (probe test
+  against Skiko 0.144.6); picking prefers opaque parts. Additive API `CanvasVisibility` and `PickIndex.pick(ray, mode)`. The STEP colour
+  transparency is still not drawn in the desktop. Clicking and keys in the live window were not exercised by hand.
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

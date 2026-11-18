@@ -1,6 +1,7 @@
 package dev.kstep.desktop.ui
 
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.pick.HoverThrottle
 import dev.kstep.desktop.pick.PickCache
@@ -22,11 +23,13 @@ internal class DesktopPicking(
     private val table: PartTable,
     private val sceneGeneration: Long,
     private val selection: MutableState<SelectionState>,
+    private val visibility: State<VisibilityView?>? = null,
     clock: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
 ) : CanvasPicking {
     private val throttle = HoverThrottle(clock)
     private val cache = PickCache()
     private var lastFrame: ScreenFrame? = null
+    private var lastView: VisibilityView? = null
 
     private fun dispatch(event: SelectionEvent) {
         selection.value = SelectionMachine.reduce(selection.value, event)
@@ -36,10 +39,17 @@ internal class DesktopPicking(
         x: Float,
         y: Float,
         frame: ScreenFrame,
-    ): Int =
-        cache.lookup(x, y, frame, sceneGeneration) {
-            index.pick(rayFor(frame, x.toDouble(), y.toDouble(), index.sceneRadius)) ?: -1
+    ): Int {
+        // the cache key knows pixel, mapping and scene, not the visibility: forget it when that changed
+        val view = visibility?.value
+        if (view !== lastView) {
+            cache.invalidate()
+            lastView = view
         }
+        return cache.lookup(x, y, frame, sceneGeneration) {
+            index.pick(rayFor(frame, x.toDouble(), y.toDouble(), index.sceneRadius), view?.arrays?.partMode) ?: -1
+        }
+    }
 
     /** Releases a pending hover point if its interval has passed; called from a ticker so the last point is not lost. */
     fun tick() {

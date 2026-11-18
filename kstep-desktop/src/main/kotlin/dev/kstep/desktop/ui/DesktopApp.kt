@@ -41,14 +41,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.desktop.edit.CaretMapper
@@ -59,12 +62,18 @@ import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.pick.AssemblyTree
 import dev.kstep.desktop.pick.GroupInspection
 import dev.kstep.desktop.pick.HoverThrottle
+import dev.kstep.desktop.pick.PartMode
 import dev.kstep.desktop.pick.PickIndex
 import dev.kstep.desktop.pick.SelectionEvent
 import dev.kstep.desktop.pick.SelectionMachine
 import dev.kstep.desktop.pick.SelectionState
 import dev.kstep.desktop.pick.TreeViewLogic
 import dev.kstep.desktop.pick.TreeViewState
+import dev.kstep.desktop.pick.VisibilityCounts
+import dev.kstep.desktop.pick.VisibilityMachine
+import dev.kstep.desktop.pick.VisibilityScene
+import dev.kstep.desktop.pick.VisibilityState
+import dev.kstep.desktop.pick.visibilityStatusText
 import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.DesktopState
@@ -74,6 +83,7 @@ import dev.kstep.geometry.TriangleMesh
 import dev.kstep.viewer.camera.ViewerCameraState
 import dev.kstep.viewer.ui.CanvasHighlight
 import dev.kstep.viewer.ui.CanvasPicking
+import dev.kstep.viewer.ui.CanvasVisibility
 import dev.kstep.viewer.ui.ShapeCanvas
 import dev.kstep.viewer.ui.UnavailableNotice
 import kotlinx.coroutines.delay
@@ -132,6 +142,20 @@ fun DesktopApp(
     var shownTree by remember { mutableStateOf<AssemblyTree?>(null) }
     var shownOpenCount by remember { mutableStateOf(openCount) }
     var treeVisible by remember { mutableStateOf(true) }
+    // Visibility (ADR-0055): lives here, per session. A re-run of the same file keeps it (vanished parts are dropped),
+    // another file starts clean. Derived arrays are built once per change, never per frame or per hover.
+    var visibilityState by remember { mutableStateOf(VisibilityState()) }
+    val visibilityScene = remember(parts, tree) { parts?.let { VisibilityScene.of(it, tree) } }
+    val visibilityView: State<VisibilityView?> =
+        remember(visibilityScene, tree, parts) {
+            derivedStateOf {
+                visibilityScene?.let { sc ->
+                    parts?.let { VisibilityView.of(visibilityState, sc, tree, it) }
+                }
+            }
+        }
+    val canvasVisibility: State<CanvasVisibility?> =
+        remember(visibilityView) { derivedStateOf { visibilityView.value?.canvas } }
     LaunchedEffect(display?.generation, openCount) {
         selection.value = SelectionMachine.reduce(selection.value, SelectionEvent.SceneReplaced(parts, tree))
         // a different file starts from the first-sight state, a re-run carries the open groups over
@@ -139,12 +163,19 @@ fun DesktopApp(
         treeView =
             tree?.let { TreeViewLogic.onTreeReplaced(previous, it, treeView ?: TreeViewState(emptySet(), emptySet())) }
         shownTree = tree
+        // before shownOpenCount is updated, or a new file would never reset
+        visibilityState =
+            if (shownOpenCount != openCount) {
+                VisibilityState()
+            } else {
+                VisibilityMachine.onRerun(visibilityState, visibilityScene)
+            }
         shownOpenCount = openCount
     }
     val picking =
         remember(pickIndex) {
             if (pickIndex != null && parts != null) {
-                DesktopPicking(pickIndex, parts, display?.generation ?: -1L, selection)
+                DesktopPicking(pickIndex, parts, display?.generation ?: -1L, selection, visibilityView)
             } else {
                 null
             }
@@ -153,6 +184,14 @@ fun DesktopApp(
         while (picking != null) {
             delay(HoverThrottle.DEFAULT_INTERVAL_MS)
             picking.tick()
+        }
+    }
+    // a part that was just hidden must not stay "hovered" while the pointer rests
+    LaunchedEffect(visibilityView.value) {
+        val mode = visibilityView.value?.arrays?.partMode ?: return@LaunchedEffect
+        val over = selection.value.hovered ?: return@LaunchedEffect
+        if (over in mode.indices && mode[over] == PartMode.HIDDEN) {
+            selection.value = SelectionMachine.reduce(selection.value, SelectionEvent.HoverAt(null))
         }
     }
     val accent = if (dark) ACCENT_DARK else ACCENT_LIGHT
@@ -195,6 +234,14 @@ fun DesktopApp(
             null
         }
     val treeAvailable = tree != null && tree.leafCount(0) >= 2
+
+    // Visibility actions work on the part range of the selection (a group, a part, or nothing).
+    val target = SelectionMachine.highlightRange(selection.value, tree, parts)
+    val hasTarget = target != SelectionMachine.NONE
+    val applyVisibility: (IntRange, (VisibilityState, VisibilityScene, IntRange) -> VisibilityState) -> Unit =
+        { range, f -> visibilityScene?.let { visibilityState = f(visibilityState, it, range) } }
+    val counts = visibilityView.value?.arrays?.counts
+    val somethingChanged = counts != null && (counts.hidden > 0 || counts.transparent > 0)
 
     // The camera and the fit scale belong to the OPEN file: a re-run keeps both, so the view never jumps.
     LaunchedEffect(openCount) { camera.value = ViewerCameraState.HOME }
@@ -260,7 +307,33 @@ fun DesktopApp(
                         home()
                         true
                     }
-                    else -> false
+                    else ->
+                        when (
+                            visibilityAction(
+                                event.key,
+                                event.isShiftPressed,
+                                command,
+                                event.isAltPressed,
+                                editorFocused,
+                                inTree = false,
+                            )
+                        ) {
+                            // a key that has no selection to act on is not consumed
+                            VisibilityAction.ToggleTransparent ->
+                                hasTarget.also { if (it) applyVisibility(target, VisibilityMachine::toggleTransparent) }
+                            VisibilityAction.ToggleHidden ->
+                                hasTarget.also { if (it) applyVisibility(target, VisibilityMachine::toggleHidden) }
+                            VisibilityAction.Isolate ->
+                                hasTarget.also { if (it) applyVisibility(target, VisibilityMachine::isolate) }
+                            VisibilityAction.ShowAll ->
+                                somethingChanged.also {
+                                    if (it) {
+                                        visibilityState =
+                                            VisibilityMachine.showAll(visibilityState)
+                                    }
+                                }
+                            else -> false
+                        }
                 }
             },
         ) {
@@ -276,7 +349,16 @@ fun DesktopApp(
                         treeAvailable = treeAvailable,
                         treeOn = treeVisible,
                         onTree = { treeVisible = !treeVisible },
+                        visibilityEnabled = visibilityScene != null,
+                        counts = counts ?: VisibilityCounts(0, 0),
+                        hasSelection = hasTarget,
+                        alphaStep = visibilityState.alphaStep,
+                        onShowAll = { visibilityState = VisibilityMachine.showAll(visibilityState) },
+                        onIsolate = { applyVisibility(target, VisibilityMachine::isolate) },
+                        onHide = { applyVisibility(target, VisibilityMachine::hide) },
+                        onAlpha = { visibilityState = VisibilityMachine.withAlpha(visibilityState, it) },
                     )
+
                     val totalPx = with(LocalDensity.current) { windowWidth.toPx() }
                     val minFraction = (MIN_PANE_DP.dp / windowWidth).coerceIn(0.1f, 0.5f)
                     val errors = (state as? DesktopState.Error)?.errors.orEmpty()
@@ -328,12 +410,18 @@ fun DesktopApp(
                                 dispatch = { selection.value = SelectionMachine.reduce(selection.value, it) },
                                 dark = dark,
                                 background = MaterialTheme.colorScheme.background,
+                                nodeVisibility = visibilityView.value?.arrays?.nodeState,
+                                counts = counts ?: VisibilityCounts(0, 0),
+                                onCycleNode = { node ->
+                                    applyVisibility(tree.firstPart(node)..tree.lastPart(node), VisibilityMachine::cycle)
+                                },
+                                onCycleSelected = { applyVisibility(target, VisibilityMachine::cycle) },
                                 modifier = Modifier.fillMaxHeight(),
                             )
                             Box(Modifier.width(TREE_DIVIDER_DP.dp).fillMaxHeight().background(DIM.copy(alpha = 0.5f)))
                         }
                         Box(Modifier.weight(1f).fillMaxHeight()) {
-                            Canvas(state, display, camera, fitReference, openFile, highlight, picking)
+                            Canvas(state, display, camera, fitReference, openFile, highlight, picking, canvasVisibility)
                             Badge(state)
                             selectedPart?.let {
                                 InspectionPanel(
@@ -377,6 +465,14 @@ private fun Toolbar(
     treeAvailable: Boolean,
     treeOn: Boolean,
     onTree: () -> Unit,
+    visibilityEnabled: Boolean,
+    counts: VisibilityCounts,
+    hasSelection: Boolean,
+    alphaStep: Int,
+    onShowAll: () -> Unit,
+    onIsolate: () -> Unit,
+    onHide: () -> Unit,
+    onAlpha: (Float) -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
@@ -389,9 +485,14 @@ private fun Toolbar(
                 Text("Tree", fontSize = 13.sp, color = if (treeOn) Color.Unspecified else DIM)
             }
         }
+        if (visibilityEnabled) {
+            VisibilityControls(counts, hasSelection, alphaStep, onShowAll, onIsolate, onHide, onAlpha)
+        }
         Text(
             state.file?.fileName?.toString() ?: "No file",
             fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 8.dp),
         )
         Row(
@@ -400,9 +501,15 @@ private fun Toolbar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                statusText(state) + if (editor.dirty) "  ·  unsaved changes  ·  preview shows saved file" else "",
+                listOf(
+                    statusText(state),
+                    visibilityStatusText(counts),
+                ).filter { it.isNotEmpty() }.joinToString("  ·  ") +
+                    if (editor.dirty) "  ·  unsaved changes  ·  preview shows saved file" else "",
                 fontSize = 12.sp,
                 color = DIM,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -431,6 +538,7 @@ private fun Canvas(
     onOpen: () -> Unit,
     highlight: State<CanvasHighlight?>,
     picking: CanvasPicking?,
+    visibility: State<CanvasVisibility?>,
 ) {
     val modifier = Modifier.fillMaxSize()
     when {
@@ -474,7 +582,7 @@ private fun Canvas(
                 heading = "kSTEP Desktop has no geometry to show.",
                 showInstallInstructions = false,
             )
-        else -> ShapeCanvas(display.mesh, modifier, camera, fitReference, highlight, picking)
+        else -> ShapeCanvas(display.mesh, modifier, camera, fitReference, highlight, picking, visibility)
     }
 }
 

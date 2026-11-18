@@ -93,7 +93,7 @@ fun ShapeCanvas(
     modifier: Modifier = Modifier,
     state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) },
     fitReference: TriangleMesh? = null,
-) = ShapeCanvasInternal(mesh, coloredMesh = null, modifier, state, fitReference, null, null)
+) = ShapeCanvasInternal(mesh, coloredMesh = null, modifier, state, fitReference, null, null, null)
 
 /**
  * Overload of [ShapeCanvas] for a [ColoredMesh] (see `dev.kstep.geometry.MeshComposition.
@@ -107,7 +107,7 @@ fun ShapeCanvas(
     modifier: Modifier = Modifier,
     state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) },
     fitReference: TriangleMesh? = null,
-) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference, null, null)
+) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference, null, null, null)
 
 /**
  * Tint instructions for part highlighting (ADR-0053). [triangleToPart] maps a SOURCE mesh triangle to a part index;
@@ -140,6 +140,42 @@ class CanvasHighlight(
     companion object {
         const val DEFAULT_SELECT_T: Double = 0.45
         const val DEFAULT_HOVER_T: Double = 0.20
+    }
+}
+
+/**
+ * Per-part visibility for [ShapeCanvas] (ADR-0055). [triangleToPart] maps a SOURCE mesh triangle to a part index,
+ * [partMode] holds one code per part ([VISIBLE], [TRANSPARENT] or [HIDDEN]), [alpha] (0..1) is the opacity of the
+ * transparent parts. A triangle whose index or part is out of range is drawn in full, so a stale table never hides
+ * anything by accident. Treated as read-only after construction.
+ */
+class CanvasVisibility(
+    val triangleToPart: IntArray,
+    val partMode: ByteArray,
+    val alpha: Float,
+) {
+    /** Whether any part is hidden; known once, so the draw loop can skip the counting pass otherwise. */
+    val hasHidden: Boolean = partMode.any { it.toInt() == HIDDEN }
+
+    internal val alphaByte: Int =
+        (if (alpha.isNaN()) DEFAULT_ALPHA else alpha.coerceIn(0f, 1f)).let { Math.round(it * MAX_CHANNEL) }
+
+    internal fun modeOf(sourceIndex: Int): Int {
+        if (sourceIndex < 0 || sourceIndex >= triangleToPart.size) return VISIBLE
+        val part = triangleToPart[sourceIndex]
+        if (part < 0 || part >= partMode.size) return VISIBLE
+        return when (val mode = partMode[part].toInt()) {
+            TRANSPARENT, HIDDEN -> mode
+            else -> VISIBLE
+        }
+    }
+
+    companion object {
+        const val VISIBLE = 0
+        const val TRANSPARENT = 1
+        const val HIDDEN = 2
+        private const val DEFAULT_ALPHA = 0.25f
+        private const val MAX_CHANNEL = 255f
     }
 }
 
@@ -182,7 +218,22 @@ fun ShapeCanvas(
     fitReference: TriangleMesh?,
     highlight: State<CanvasHighlight?>,
     picking: CanvasPicking?,
-) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference, highlight, picking)
+) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference, highlight, picking, null)
+
+/**
+ * [ShapeCanvas] with part highlighting, picking and per-part visibility (ADR-0055). [visibility] is read in the draw
+ * phase only, like [highlight]; `null` draws every part in full, exactly as the overload without it.
+ */
+@Composable
+fun ShapeCanvas(
+    coloredMesh: ColoredMesh,
+    modifier: Modifier,
+    state: MutableState<ViewerCameraState>,
+    fitReference: TriangleMesh?,
+    highlight: State<CanvasHighlight?>,
+    picking: CanvasPicking?,
+    visibility: State<CanvasVisibility?>?,
+) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference, highlight, picking, visibility)
 
 private fun androidx.compose.ui.input.pointer.PointerButtons.anyPressed(): Boolean =
     isPrimaryPressed || isSecondaryPressed || isTertiaryPressed
@@ -205,6 +256,7 @@ private fun ShapeCanvasInternal(
     fitReference: TriangleMesh?,
     highlight: State<CanvasHighlight?>?,
     picking: CanvasPicking?,
+    visibility: State<CanvasVisibility?>?,
 ) {
     val frameHolder = remember { FrameHolder() }
     val focusRequester = remember { FocusRequester() }
@@ -427,6 +479,8 @@ private fun ShapeCanvasInternal(
             // Read INSIDE the draw lambda: a hover change invalidates only the draw phase, no recomposition.
             val highlightNow = highlight?.value
             val accent = highlightNow?.accentRgb
+            // Read here too, so a visibility change invalidates the draw phase only (ADR-0012, ADR-0055).
+            val visibilityNow = visibility?.value
             // Two DISJOINT draw paths, never mixed within one frame's triangle list -- see
             // docs/adr/ADR-0018-smooth-vertex-normals.adoc. `triangles` is homogeneous by
             // construction: `MeshProjection.projectInternal` sets EVERY triangle's
@@ -447,11 +501,24 @@ private fun ShapeCanvasInternal(
                 // adjacent triangles without an antialiasing seam between them, and adding a
                 // flat-color stroke on top would paint OVER the smooth interpolation right at
                 // every triangle edge.
-                val positions = FloatArray(triangles.size * 6)
-                val colors = IntArray(triangles.size * 3)
+                // Hidden triangles are left out of the batch altogether: no fill, no tint, no outline. A
+                // transparent one stays IN the same batch and keeps its place in the global back-to-front
+                // order, with its alpha in the vertex colours (empirically verified: BlendMode.DST takes the
+                // per-vertex alpha, see SkiaVertexAlphaProbeTest and ADR-0055). Two passes (opaque first, then
+                // transparent) would paint a transparent triangle over a nearer opaque one.
+                var count = triangles.size
+                if (visibilityNow != null && visibilityNow.hasHidden) {
+                    count = 0
+                    for (t in triangles) if (visibilityNow.modeOf(t.sourceIndex) != CanvasVisibility.HIDDEN) count++
+                }
+                val positions = FloatArray(count * 6)
+                val colors = IntArray(count * 3)
                 var pIndex = 0
                 var cIndex = 0
                 for (t in triangles) {
+                    val mode = visibilityNow?.modeOf(t.sourceIndex) ?: CanvasVisibility.VISIBLE
+                    if (mode == CanvasVisibility.HIDDEN) continue
+                    val alphaByte = if (mode == CanvasVisibility.TRANSPARENT) visibilityNow!!.alphaByte else 255
                     positions[pIndex++] = t.ax.toFloat()
                     positions[pIndex++] = t.ay.toFloat()
                     positions[pIndex++] = t.bx.toFloat()
@@ -466,7 +533,7 @@ private fun ShapeCanvasInternal(
                         }
                         colors[cIndex++] =
                             SkiaColor.makeARGB(
-                                255,
+                                alphaByte,
                                 (rgb[0].coerceIn(0.0, 1.0) * 255.0).toInt(),
                                 (rgb[1].coerceIn(0.0, 1.0) * 255.0).toInt(),
                                 (rgb[2].coerceIn(0.0, 1.0) * 255.0).toInt(),
@@ -486,6 +553,8 @@ private fun ShapeCanvasInternal(
                 }
             } else {
                 for (t in triangles) {
+                    val mode = visibilityNow?.modeOf(t.sourceIndex) ?: CanvasVisibility.VISIBLE
+                    if (mode == CanvasVisibility.HIDDEN) continue
                     val path =
                         Path().apply {
                             moveTo(t.ax.toFloat(), t.ay.toFloat())
@@ -509,6 +578,12 @@ private fun ShapeCanvasInternal(
                         } else {
                             Color(t.litR.toFloat(), t.litG.toFloat(), t.litB.toFloat())
                         }
+                    if (mode == CanvasVisibility.TRANSPARENT) {
+                        // Fill only: a 1 px outline in the same alpha would blend twice along every shared edge and
+                        // draw a grid over the part. The seams the outline closes are a lesser evil here.
+                        drawPath(path, color.copy(alpha = visibilityNow!!.alphaByte / 255f), style = Fill)
+                        continue
+                    }
                     drawPath(path, color, style = Fill)
                     // Same color, 1px stroke -- closes the antialiasing seams between coplanar
                     // neighboring triangles (Atkinson's "haarriss" fix, see ADR-0010).

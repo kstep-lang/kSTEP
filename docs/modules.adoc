@@ -387,7 +387,7 @@
   docs/adr/ADR-0051-desktop-live-preview.adoc. Welle D2 adds the script editor (package `dev.kstep.desktop.edit`, Compose-free:
   tokenizer, undo history, atomic saver, conflict rules; UI in `ui`); see docs/adr/ADR-0052-desktop-script-editor.adoc. Welle D3 adds part selection and an inspection panel (package `dev.kstep.desktop.pick`, Compose-free); see
   docs/adr/ADR-0053-desktop-selection-inspection.adoc. Welle D4 adds the assembly tree (hierarchy from the worker, validated in `run`, open state and
-  keyboard model in `pick`, panel in `ui`); see docs/adr/ADR-0054-desktop-assembly-tree.adoc. Open (D1b): drag and drop, recent files, included files, warm worker,
+  keyboard model in `pick`, panel in `ui`); see docs/adr/ADR-0054-desktop-assembly-tree.adoc. Welle D5 adds per-part transparency and hiding (state machine and derived arrays in `pick`, draw path in `kstep-viewer`, controls in `ui`); see docs/adr/ADR-0055-desktop-transparency.adoc. Open (D1b): drag and drop, recent files, included files, warm worker,
   packaging.
 
 | `kstep-viewer`
