@@ -101,4 +101,34 @@ class RunStateMachineTest :
             step(DesktopState.Idle, DesktopEvent.Changed).effects.shouldBeEmpty()
             step(DesktopState.Idle, DesktopEvent.Missing).effects.shouldBeEmpty()
         }
+
+        "Skipped becomes Waiting, keeps the last good model, and a change runs again" {
+            var s: DesktopState = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            s = step(s, DesktopEvent.Finished(1, RunResult.Success(model(1)))).state
+            s = step(s, DesktopEvent.Changed).state
+            s = step(s, DesktopEvent.Finished(2, RunResult.Skipped("Empty block"))).state
+            val waiting = s.shouldBeInstanceOf<DesktopState.Waiting>()
+            waiting.hint shouldBe "Empty block"
+            waiting.lastGood?.generation shouldBe 1
+            val changed = step(s, DesktopEvent.Changed)
+            changed.state.shouldBeInstanceOf<DesktopState.Running>()
+            changed.effects.shouldContain(Effect.StartRun(3, file))
+            step(s, DesktopEvent.ForceRun).state.shouldBeInstanceOf<DesktopState.Running>()
+        }
+
+        "a late Skipped of an old generation is dropped" {
+            var s: DesktopState = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            s = step(s, DesktopEvent.Changed).state
+            step(s, DesktopEvent.Finished(1, RunResult.Skipped("x"))).state.shouldBeInstanceOf<DesktopState.Running>()
+        }
+
+        "Close returns to Idle and cancels; a later Open above the floor never reuses a generation" {
+            var s: DesktopState = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            s = step(s, DesktopEvent.Changed).state // gen 2
+            val closed = step(s, DesktopEvent.Close)
+            closed.state shouldBe DesktopState.Idle
+            closed.effects.shouldContain(Effect.CancelRun)
+            val reopened = step(closed.state, DesktopEvent.Open(file, floor = 2))
+            reopened.state.generation shouldBe 3
+        }
     })

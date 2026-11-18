@@ -43,6 +43,7 @@ class LiveRunController(
     private val closed = AtomicBoolean(false)
 
     private var latestGeneration = 0L
+    private var maxGeneration = 0L // never decreases, so generations stay unique across a clear()
     private var current: Pair<Long, Process>? = null
     private var watcher: AutoCloseable? = null
 
@@ -53,6 +54,13 @@ class LiveRunController(
     @Volatile
     var onDiskSignal: ((WatchSignal) -> Unit)? = null
 
+    /**
+     * Decides whether a `CHANGED` signal starts a run (ADR-0058: a note changed only outside the shown block does not).
+     * Runs AFTER [onDiskSignal], so the editor still sees every change. `MISSING` always runs.
+     */
+    @Volatile
+    var runFilter: ((WatchSignal) -> Boolean)? = null
+
     val state: StateFlow<DesktopState> = mutableState.asStateFlow()
 
     /** Counts `Open` events; the UI resets the camera when it changes. */
@@ -62,7 +70,7 @@ class LiveRunController(
         val normalized = path.toAbsolutePath().normalize()
         val old = synchronized(lock) { watcher.also { watcher = null } }
         old?.close()
-        dispatch(DesktopEvent.Open(normalized))
+        dispatch(DesktopEvent.Open(normalized, synchronized(lock) { maxGeneration }))
         val created = watcherFactory(normalized, ::onSignal)
         synchronized(lock) {
             if (closed.get()) {
@@ -75,13 +83,31 @@ class LiveRunController(
 
     fun forceRun() = dispatch(DesktopEvent.ForceRun)
 
+    /** Stops watching and running and returns to [DesktopState.Idle] (the workspace was closed, ADR-0058). */
+    fun clear() {
+        val old = synchronized(lock) { watcher.also { watcher = null } }
+        old?.close()
+        dispatch(DesktopEvent.Close)
+    }
+
     private fun onSignal(signal: WatchSignal) {
         try {
             onDiskSignal?.invoke(signal)
         } catch (e: Exception) {
             logger.warn { "the disk-signal listener failed (${e::class.simpleName})" }
         }
-        dispatch(if (signal == WatchSignal.CHANGED) DesktopEvent.Changed else DesktopEvent.Missing)
+        if (signal == WatchSignal.CHANGED) {
+            val wanted =
+                try {
+                    runFilter?.invoke(signal) != false
+                } catch (e: Exception) {
+                    logger.warn { "the run filter failed (${e::class.simpleName})" }
+                    true
+                }
+            if (wanted) dispatch(DesktopEvent.Changed)
+        } else {
+            dispatch(DesktopEvent.Missing)
+        }
     }
 
     private fun dispatch(event: DesktopEvent) {
@@ -92,6 +118,7 @@ class LiveRunController(
             val transition = machine.reduce(mutableState.value, event, clock(), wallClock())
             mutableState.value = transition.state
             latestGeneration = transition.state.generation
+            maxGeneration = maxOf(maxGeneration, latestGeneration)
             var cancel = false
             for (effect in transition.effects) {
                 when (effect) {
@@ -196,8 +223,11 @@ class LiveRunController(
                 Files.createTempDirectory(base, "kstep-desktop-")
             }
 
-        /** The production wiring: a real [WorkerRunner] and a polling [FileChangeWatcher]. */
-        fun production(): LiveRunController {
+        /**
+         * The production wiring: a real [WorkerRunner] and a polling [FileChangeWatcher]. [route] may hand a file to
+         * another runner (the knowledge workspace runs a block of a note, ADR-0058); `null` means the default runner.
+         */
+        fun production(route: ((Path) -> ((Path, Long, (Process) -> Unit) -> RunResult)?)? = null): LiveRunController {
             val dir = createSessionDir()
             // A normal close() removes the session directory; this covers SIGTERM/Ctrl-C of the whole application.
             Runtime.getRuntime().addShutdownHook(
@@ -205,7 +235,10 @@ class LiveRunController(
             )
             val runner = WorkerRunner(dir)
             return LiveRunController(
-                runner = { file, gen, started -> runner.run(file, gen, started) },
+                runner = { file, gen, started ->
+                    val routed = route?.invoke(file)
+                    if (routed != null) routed(file, gen, started) else runner.run(file, gen, started)
+                },
                 watcherFactory = { file, onEvent -> FileChangeWatcher(file, onEvent = onEvent) },
                 sessionDir = dir,
             )

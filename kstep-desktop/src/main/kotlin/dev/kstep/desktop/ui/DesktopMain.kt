@@ -11,8 +11,11 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import dev.kstep.cli.WorkerTempDir
 import dev.kstep.desktop.aiwire.AiController
+import dev.kstep.desktop.edit.AtomicSaver
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.export.ExportController
+import dev.kstep.desktop.okf.DisplayName
+import dev.kstep.desktop.okf.KnowledgeWorkspaceController
 import dev.kstep.desktop.run.AiCandidateCompiler
 import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.WorkerRunner
@@ -31,11 +34,28 @@ fun runDesktopApp(args: Array<String>) {
     KotlinLoggingConfiguration.logStartupMessage = false
     val initial = args.firstOrNull()?.let { Path.of(it) }
     application {
-        val controller = remember { LiveRunController.production() }
+        // Knowledge workspace (ADR-0058): own session directory and worker; it routes a note to its block runner.
+        val knowledge = remember { KnowledgeWorkspaceController.production() }
+        val controller =
+            remember {
+                LiveRunController
+                    .production { file -> if (knowledge.isWorkspaceFile(file)) knowledge::runBlock else null }
+                    .also {
+                        it.runFilter = knowledge::runFilter
+                        knowledge.onRunRequested = it::forceRun
+                    }
+            }
         val session =
             remember {
-                // The one watcher of the run controller also tells the editor about disk changes (ADR-0052).
-                EditorSession().also { controller.onDiskSignal = it::onDiskSignal }
+                // The one watcher of the run controller also tells the editor about disk changes (ADR-0052). The saver
+                // refuses a workspace note that became a link or left the workspace (ADR-0058, D13).
+                val atomic = AtomicSaver()
+                EditorSession(
+                    saver = { path, bytes, hash, force ->
+                        knowledge.guardSave(path)?.let { AtomicSaver.Result.Failed(it) }
+                            ?: atomic.save(path, bytes, hash, force)
+                    },
+                ).also { controller.onDiskSignal = it::onDiskSignal }
             }
         val ai =
             remember {
@@ -57,7 +77,9 @@ fun runDesktopApp(args: Array<String>) {
         val windowState = rememberWindowState(size = DpSize(INITIAL_WIDTH.dp, INITIAL_HEIGHT.dp))
         Window(
             title =
-                state.file?.fileName?.let { (if (editor.dirty) "● " else "") + "$it — kSTEP Desktop" }
+                state.file?.fileName?.let {
+                    (if (editor.dirty) "● " else "") + "${DisplayName.escaped(it.toString())} — kSTEP Desktop"
+                }
                     ?: "kSTEP Desktop",
             state = windowState,
             onCloseRequest = {
@@ -67,6 +89,7 @@ fun runDesktopApp(args: Array<String>) {
                     session.close()
                     ai.close()
                     exporter.close()
+                    knowledge.close()
                     exitApplication()
                 }
             },
@@ -84,6 +107,7 @@ fun runDesktopApp(args: Array<String>) {
                 window = window,
                 ai = ai,
                 exporter = exporter,
+                knowledge = knowledge,
             )
         }
     }

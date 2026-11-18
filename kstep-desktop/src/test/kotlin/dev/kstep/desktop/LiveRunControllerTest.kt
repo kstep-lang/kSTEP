@@ -89,4 +89,54 @@ class LiveRunControllerTest :
             h.controller.close()
             h.controller.close()
         }
+
+        "a run filter that says no starts no run but the editor still sees the signal; MISSING always runs".config(
+            timeout = 60.seconds,
+        ) {
+            val h = Harness()
+            try {
+                val seen =
+                    java.util.concurrent.atomic
+                        .AtomicInteger()
+                h.controller.onDiskSignal = { seen.incrementAndGet() }
+                h.controller.runFilter = { false }
+                h.controller.open(file)
+                TestSupport.await(10_000) { h.started.contains(1L) } shouldBe true
+                h.gate(1).countDown()
+                TestSupport.awaitState(h.controller, 10_000) { it is DesktopState.Ok }
+                h.signal(WatchSignal.CHANGED)
+                seen.get() shouldBe 1
+                Thread.sleep(300)
+                h.started.toList() shouldBe listOf(1L)
+                h.controller.state.value.generation shouldBe 1
+                h.signal(WatchSignal.MISSING)
+                seen.get() shouldBe 2
+                h.controller.state.value
+                    .shouldBeInstanceOf<DesktopState.Error>()
+                h.controller.runFilter = { true }
+                h.signal(WatchSignal.CHANGED)
+                TestSupport.await(10_000) { h.started.contains(3L) || h.started.contains(2L) } shouldBe true
+            } finally {
+                h.controller.close()
+            }
+        }
+
+        "clear returns to Idle, drops the late result and the next open gets a fresh generation".config(
+            timeout = 60.seconds,
+        ) {
+            val h = Harness()
+            try {
+                h.controller.open(file) // gen 1, blocked
+                TestSupport.await(10_000) { h.started.contains(1L) } shouldBe true
+                h.controller.clear()
+                h.controller.state.value shouldBe DesktopState.Idle
+                h.gate(1).countDown()
+                Thread.sleep(200)
+                h.controller.state.value shouldBe DesktopState.Idle
+                h.controller.open(file)
+                h.controller.state.value.generation shouldBe 2
+            } finally {
+                h.controller.close()
+            }
+        }
     })

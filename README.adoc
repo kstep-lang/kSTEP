@@ -220,6 +220,8 @@ link:docs/usage.adoc[Usage].
   Parts and sub-assemblies can be made transparent or hidden (eye column in the tree, toolbar, keys `T`, `V`, `I`, `Shift+V`).
   The `Export...` dialog (Cmd/Ctrl+E) writes the saved script as STEP AP242, GLB, STL or 3MF: the script runs in a supervised worker, the
   result is validated and moved to the target atomically, an existing file is replaced only after confirmation (ADR-0057; no new dependency).
+  `Open Folder...` (Cmd/Ctrl+Shift+O) opens a folder of Markdown notes as a knowledge workspace: the fenced `kstep` block under the
+  cursor is previewed live (ADR-0058; export and AI are not available there yet).
   An optional AI panel (toolbar `AI`, Cmd/Ctrl+K) proposes changes from a description as a diff you accept or discard (ADR-0056).
   *Privacy:* nothing is sent before you agree in a dialog; only your prompt and, if you tick it, the current script go to the
   provider (Anthropic, `api.anthropic.com`), never keys, file paths or other files. The API key is kept in the system keychain,

@@ -1,0 +1,97 @@
+= ADR-0058: kSTEP Desktop, knowledge workspace (Welle D8a)
+:toc:
+
+== Status
+
+Accepted (Welle D8a). The pure parts (block extraction, front matter, display names, scanner, path rule, line map, session file, highlight plan), the controller (against a fake worker and against real child processes) and the routing in the run controller are covered by tests; a real run of two blocks of one note runs in `KnowledgeWorkspaceOcctTest` (OCCT). Not done in this wave: the UI (sidebar, header, gutter bars, folder dialog) was compiled, style-checked and started once without an error, but not clicked through by hand in a running window, and the macOS folder dialog (`FileDialog` with `apple.awt.fileDialogForDirectories`) was not driven by an automated test. The statement that a block cannot reach files by a relative path was not verified: the worker is started without a working directory, so a relative path in a block resolves against the desktop's working directory, not against the note (see D8).
+
+== Context
+
+Notes in Markdown (Obsidian vaults and similar) can carry fenced `kstep` blocks, as `kuml` blocks do. The desktop can only open a single script. The user wants to open a folder of notes, edit a note, and see the block under the cursor as geometry, with the same live preview, the same worker and the same limits. A note is untrusted text from a folder the user chose: it can be huge, hostile, contain links out of the folder, names with control characters, or a header that tries to abuse YAML.
+
+== Decision
+
+D1. Entry and mode. Toolbar `Open Folder...` and Cmd/Ctrl+Shift+O choose a folder. The workspace is a mode of the same window: while one is open the toolbar shows `Close Workspace`, the status line starts with `Knowledge · <folder>`, export and the AI panel are disabled with the tooltip "Not available in a knowledge workspace yet (planned)". `Open...` of a script closes the workspace after the unsaved-changes question.
+
+D2. The list. A sidebar of 240 dp lists the notes: title (front matter `title`, else the file name without `.md`), folder in a dimmed line, number of blocks in monospace (`-` for none). Sorted by the lower-cased relative path, code point by code point. A note above the editor limit (1 MiB, `EditorText.MAX_BYTES`) is listed as "Too large (x MB, max. 1.0 MB)" and cannot be opened: the list limit equals the editor limit, so nothing in the list is refused by the editor afterwards.
+
+D3. Editor and colouring. The note is edited in the same editor as a script. Fence lines and other fenced code are dimmed, the Kotlin tokens of `kstep` blocks are coloured as in a script, prose stays plain. The mapping of offsets is the identity; the analysis is cached by text (one entry), so a 1 MiB note is not scanned several times per key.
+
+D4. Gutter. A 2 dp bar per `kstep` block, full strength for the shown block, 40 % for the others. Error marks keep their place.
+
+D5. Block under the cursor. The block containing the caret (fence lines count) becomes the active block; a caret outside every block keeps the shown block and the header says "cursor outside block". The header over the canvas reads `Block 2 of 3 · lines 14-38`, with the buttons and Alt+Cmd+Up/Down (macOS) or Ctrl+Alt+Up/Down for the neighbour block (the caret lands on its first content line). Hints: "No ```kstep blocks in this note.", "Save to preview this block", "Empty block".
+
+D6. When a run starts. A caret move to another block starts the run after 300 ms of quiet (quick moves restart the timer, so at most one run per pause). A change of the note on disk starts a run only if the SHA-256 of the active block's content differs from the one last sent (`runFilter`); a change of prose does not. The filter runs after the editor has seen the disk signal (`onDiskSignal`), so external edits are still detected as conflicts; `MISSING` always runs.
+
+D7. The saved file. The preview runs on the saved note, like for a script. A block that exists only in the buffer (index at or above the number of blocks on disk) waits: the state is `Waiting` with the hint "Save to preview this block", and the last good model stays on screen.
+
+D8. Session file and worker. The block content is written by this code to `block-<generation>.kstep.kts` in a private session directory (0700; file 0600, created with `CREATE_NEW`, never overwritten, removed in `finally`; a file that already existed is never touched). The existing worker and runner are used unchanged (60 s, heap limit, 64 MiB GLB, process-tree kill). The one run controller and its one watcher are reused: the note is opened in the controller, and a router in `LiveRunController.production(route)` hands a workspace note to the block runner. Blocks are self-contained scripts. The session file is not next to the note, so a block does not see the note's folder; whether a relative path in a block resolves against the session directory or the desktop's working directory was not verified, and the worker gets no working directory of its own (adding one would change the shared worker infrastructure and is not part of this wave).
+
+D9. Lines. Errors of the worker carry lines of the block; they are mapped to the line of the note (`BlockLineMap`), so the error bar and the jump to the error land in the note. The path of the session file and its name are replaced by `block K` in every message, note and warning: no temporary path reaches the screen. Pick-to-source (a part to its source line) does not exist in the desktop yet and is not part of this wave.
+
+D10. No export, no AI in the workspace. Both work on one script file and would need a decision about which block they mean; they are disabled until that is designed.
+
+D11. Fence rules (`MarkdownBlockExtractor`). One linear pass over the text, no `split` and no regular expression over a line of any length. CommonMark fences at the top level only: 0 to 3 spaces of indent (a tab is not indent), at least three backticks or tildes, a backtick fence has no backtick in its info string (only the first 64 KiB of an info string are looked at), a closing fence of the same character at least as long followed only by blanks. The first word of the info string must be exactly `kstep` (`kstepx` is no block). Inside an open fence nothing opens: an outer `~~~~` swallows an inner ```` ```kstep ````. Fences inside list items and block quotes are not recognised. A run of fence characters is counted completely but capped at 64 for comparison. CR, CRLF and a BOM are tolerated. Bounds: 200 blocks (the 201st sets `tooManyBlocks`, the scan goes on so the colouring stays right), 1,000 other fences remembered, 256 KiB per block (`TOO_LARGE`, measured in UTF-8), an unclosed block is `UNCLOSED` (`KSTEP-D-028`, with its line), an empty block `EMPTY`.
+
+D12. Front matter (`FrontmatterParser`). Only a header that starts on line 1 with `---` and ends with `---` or `...` within 200 lines and 16 KiB counts. `title` and `tags` are read by hand (plain, single and double quoted scalars; flow and block lists). There is no YAML framework, so anchors, aliases, tags and merge keys are never resolved: a value that starts with `&`, `*` or `!`, `<<`, a block scalar, a map, a nested list, more than 64 keys, a scalar over 1,024 characters, more than 32 tags or nesting deeper than two levels makes the header "ignored" (a dimmed "Frontmatter ignored" in the list). An ignored or unterminated header is not skipped: the whole text is treated as Markdown, so a fence inside it is an ordinary block.
+
+D13. Scan and paths (`WorkspaceScanner`, `WorkspacePaths`). The root is resolved with `toRealPath` (a symbolic root is allowed because the user chose it). Symbolic links are never followed and never listed, only counted ("N links skipped"). Hidden folders and `node_modules` are skipped. Bounds: depth 8, 20,000 entries, 2,000 notes, 64 MiB read in total, 10 s; a bound ends the scan and is shown as a banner ("Showing the first 2,000 Markdown files (limit reached)."). The scan runs on its own executor and can be cancelled. Every open and every save of a note checks that it is a regular file, not a link, and that its real path lies under the root (a link set later in a parent folder is caught); a rejection is `KSTEP-D-026` and, on save, the editor's `PATH_REJECTED`, with the original untouched. The file key is deliberately not compared because the atomic save replaces the file and so changes the inode on every save of our own. Names (files, folders, titles) are shown with control and bidirectional characters as dimmed `‹U+202E›` markers, also in the window title.
+
+D14. Error codes (new): `KSTEP-D-025` the folder cannot be used (not readable, no notes), `-026` path rejected, `-027` a bound was hit (block too large, too many blocks), `-028` block not closed. Script errors keep their `KSTEP-S-xxx` codes. A run with nothing to do is not an error: `RunResult.Skipped` becomes the state `Waiting` (the engineering mode never produces it).
+
+Differences to kUML's Obsidian integration, deliberately left for D8b: no marker file (kUML's `.kuml-workspace.toml`) and no `type:` vocabulary in the front matter; the workspace is any folder with Markdown notes. D8b also carries `kstep convert --to okf/kts`.
+
+The kUML diagram shows one run from a folder to a model.
+
+[kuml, adr-0058-knowledge-flow, svg]
+----
+activityDiagram(name = "Knowledge workspace run") {
+    val start = initialNode()
+    val folder = action(name = "Open Folder")
+    val scan = action(name = "Scan notes within bounds")
+    val note = action(name = "Open note, check path")
+    val cursor = action(name = "Caret enters a block")
+    val wait = decision(name = "block changed on disk?")
+    val file = action(name = "Write block-N.kstep.kts")
+    val worker = action(name = "Run in supervised worker")
+    val model = action(name = "Show model, map lines to note")
+    val done = finalNode()
+
+    edge(from = start, to = folder)
+    edge(from = folder, to = scan)
+    edge(from = scan, to = note)
+    edge(from = note, to = cursor)
+    edge(from = cursor, to = wait, guard = "after 300 ms")
+    edge(from = wait, to = file, guard = "yes")
+    edge(from = wait, to = done, guard = "no, keep model")
+    edge(from = file, to = worker)
+    edge(from = worker, to = model)
+    edge(from = model, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it.
+
+== Threat model
+
+* Hostile note: a huge file, a single line of many megabytes, millions of fence characters, thousands of blocks. The extraction is linear with fixed caps; hostile-input tests run in a bounded time.
+* Hostile front matter (YAML bombs, anchors, aliases, tags): never interpreted, the header is ignored.
+* Links out of the folder, `..`, a link swapped in after the scan: not followed, rechecked on open and on save, the save leaves the original untouched.
+* Names that mislead (right-to-left override, escape sequences): shown as visible markers.
+* The block is arbitrary Kotlin: it runs only in the supervised worker (time, heap, output, process tree), as every script. The worker is not a sandbox; this wave adds no new power (no network, no new process, no new dependency).
+* Logging: only counts, the generation, the index and the result type; never a path, a title or content.
+* Temporary files: private directory, exclusive creation, removed on every path, session directory removed on close and by a shutdown hook.
+
+== Dependencies
+
+None added. kstep-cli and the published modules are untouched, so `kstep render --output json`, the distribution zip and `verify-dist.sh` are unchanged.
+
+== Consequences
+
+* One watcher and one state flow serve scripts and notes. `LiveRunController` gained a run filter, a route and `clear()`; generations stay unique across a clear.
+* A block cannot use the note's folder; blocks must be self-contained until a working directory for the worker is decided.
+* Because the list limit equals the editor limit, a note between 1 and 2 MiB is not editable; raising the editor limit is a separate decision.
+
+== Follow-up (D8b)
+
+`kstep convert --to okf/kts`, the marker file and front-matter vocabulary of the kUML integration, export and AI for a chosen block, pick-to-source, a working directory for the worker.

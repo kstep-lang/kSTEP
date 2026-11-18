@@ -24,6 +24,7 @@ enum class SaveFailure(
     DISK_FULL("the disk is full"),
     ATOMIC_MOVE_UNSUPPORTED("this file system cannot replace the file atomically"),
     IO("the file could not be written"),
+    PATH_REJECTED("the file is outside the workspace or is a link (KSTEP-D-026)"),
 }
 
 /**

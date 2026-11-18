@@ -9,6 +9,18 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop knowledge workspace (Welle D8a, ADR-0058): `Open Folder...` (Cmd/Ctrl+Shift+O) opens a folder of Markdown notes; the
+  fenced `kstep` block under the cursor is previewed with the same supervised worker and live preview (new Compose-free package
+  `dev.kstep.desktop.okf`). A sidebar lists the notes (title, folder, number of blocks), the editor colours fences and `kstep`
+  code and bars each block in the gutter, a header over the canvas says `Block 2 of 3 · lines 14-38`, and Alt+Cmd/Ctrl+Alt+Up/Down
+  jumps between blocks. A caret move runs after 300 ms of quiet; a change of the note on disk runs only if the shown block itself
+  changed. The block is written to a private session file (never next to the note); errors are mapped to the lines of the note and
+  no temporary path is shown. Hostile input is bounded: a linear fence scan (200 blocks, 256 KiB per block), a hand-written
+  front-matter reader without any YAML resolution (anchors, aliases and tags make the header ignored), a scan limited to depth 8,
+  20,000 entries, 2,000 notes, 64 MiB and 10 s, no symbolic link followed or listed, a path rule on every open and save, and names
+  with control or bidirectional characters shown as visible markers. New error codes `KSTEP-D-025` to `KSTEP-D-028`. Not in this
+  wave: export and the AI panel inside a workspace (disabled with a note), pick-to-source, a marker file and `kstep convert`
+  (D8b). No new dependency; kstep-cli and the published modules are unchanged.
 * kSTEP Desktop export dialog (Welle D7, ADR-0057): toolbar `Export...` or Cmd/Ctrl+E writes the open script as STEP AP242, GLB, STL
   or 3MF. Format first, then the target; the export runs on the saved file (`Save and Export` or `Export Saved Version` with unsaved
   changes). The script runs only in a supervised worker (new `DesktopExportWorker` with a strict argument whitelist and its own

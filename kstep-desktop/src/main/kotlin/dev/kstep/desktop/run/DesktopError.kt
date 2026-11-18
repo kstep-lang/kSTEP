@@ -34,4 +34,10 @@ object DesktopErrorCodes {
     const val EXPORT_FAILED = "KSTEP-D-022"
     const val EXPORT_WRITE_FAILED = "KSTEP-D-023"
     const val EXPORT_OUTPUT_INVALID = "KSTEP-D-024"
+
+    // The knowledge workspace (ADR-0058).
+    const val WORKSPACE_UNAVAILABLE = "KSTEP-D-025"
+    const val WORKSPACE_PATH_REJECTED = "KSTEP-D-026"
+    const val WORKSPACE_LIMIT = "KSTEP-D-027"
+    const val BLOCK_NOT_CLOSED = "KSTEP-D-028"
 }

@@ -108,4 +108,27 @@ class DesktopArchitectureTest :
                 }.map { root.relativize(it.first).toString() }
                 .shouldBeEmpty()
         }
+
+        "the okf package is pure logic: no Compose, no UI, no process start, no script evaluation, no network" {
+            val forbidden =
+                listOf(
+                    "dev.kstep.desktop.ui",
+                    "androidx.compose",
+                    "org.jetbrains.compose",
+                    "ProcessBuilder",
+                    "KStepScriptHost",
+                    "PreviewRenderer",
+                    "java.net.http",
+                )
+            sources()
+                .filter { (path, _) ->
+                    root
+                        .relativize(path)
+                        .toString()
+                        .replace('\\', '/')
+                        .startsWith("dev/kstep/desktop/okf/")
+                }.flatMap { (path, text) ->
+                    forbidden.filter { text.contains(it) }.map { "${root.relativize(path)} uses $it" }
+                }.shouldBeEmpty()
+        }
     })

@@ -69,6 +69,11 @@ import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
+import dev.kstep.desktop.okf.DisplayName
+import dev.kstep.desktop.okf.KnowledgeWorkspaceController
+import dev.kstep.desktop.okf.PathCheck
+import dev.kstep.desktop.okf.WorkspaceEntry
+import dev.kstep.desktop.okf.WorkspaceState
 import dev.kstep.desktop.pick.AssemblyTree
 import dev.kstep.desktop.pick.GroupInspection
 import dev.kstep.desktop.pick.HoverThrottle
@@ -126,8 +131,15 @@ fun DesktopApp(
     window: Frame,
     ai: AiController,
     exporter: ExportController,
+    knowledge: KnowledgeWorkspaceController,
 ) {
     val editorView by session.view.collectAsState()
+    // Knowledge workspace (ADR-0058): a folder of notes, one fenced block previewed at a time.
+    val workspace by knowledge.workspace.collectAsState()
+    val blockHeader by knowledge.header.collectAsState()
+    val knowledgeError by knowledge.error.collectAsState()
+    val knowledgeOpen = workspace is WorkspaceState.Open
+    var lastCaret by remember { mutableStateOf(0) }
     // AI panel (ADR-0056): hidden by default; nothing is sent before the user asks and agrees.
     val aiUi by ai.ui.collectAsState()
     val aiRepair by ai.repair.collectAsState()
@@ -291,10 +303,72 @@ fun DesktopApp(
     LaunchedEffect(displayMesh, openCount) {
         if (fitReference == null && displayMesh != null) fitReference = displayMesh
     }
+    // Trust question per folder and session (ADR-0058): a block is arbitrary Kotlin, a note is untrusted text.
+    val openRoot = (workspace as? WorkspaceState.Open)?.scan?.root
+    LaunchedEffect(openRoot) {
+        if (openRoot != null && !knowledge.trusted) {
+            val options = arrayOf("Run blocks", "Don't run")
+            val answer =
+                javax.swing.JOptionPane.showOptionDialog(
+                    window,
+                    "Run kstep blocks from this folder?\n\n" +
+                        "A block is a program that runs with your user rights. " +
+                        "Only allow it for folders you trust.\n" +
+                        DisplayName.escaped(openRoot.toString(), 120),
+                    "kSTEP Desktop",
+                    javax.swing.JOptionPane.DEFAULT_OPTION,
+                    javax.swing.JOptionPane.WARNING_MESSAGE,
+                    null,
+                    options,
+                    options[1],
+                )
+            if (answer == 0) knowledge.trustFolder()
+        }
+    }
     val openPath: (Path) -> Unit = { path ->
         if (confirmUnsaved(window, session)) {
+            // a script replaces the workspace: the editor and the run belong to one mode at a time
+            if (workspace !is WorkspaceState.None) knowledge.closeWorkspace()
             session.open(path)
             controller.open(path)
+        }
+    }
+    val openNote: (WorkspaceEntry) -> Unit = { entry ->
+        if (confirmUnsaved(window, session)) {
+            val checked = knowledge.resolveForOpen(entry.path)
+            if (checked is PathCheck.Ok) {
+                knowledge.clearError()
+                knowledge.onFileOpened(checked.path)
+                session.open(checked.path)
+                controller.open(checked.path)
+            }
+        }
+    }
+    val chooseFolder: () -> Unit = {
+        chooseFolderDialog(window)?.let { dir ->
+            // a new folder replaces the old workspace: the open note of the old one must not stay in the editor or the run
+            if (workspace is WorkspaceState.None) {
+                knowledge.openFolder(dir)
+            } else if (confirmUnsaved(window, session)) {
+                knowledge.closeWorkspace()
+                session.clear()
+                controller.clear()
+                knowledge.openFolder(dir)
+            }
+        }
+    }
+    val closeWorkspace: () -> Unit = {
+        if (confirmUnsaved(window, session)) {
+            knowledge.closeWorkspace()
+            session.clear()
+            controller.clear()
+        }
+    }
+    val jumpBlock: (Boolean) -> Unit = { forward ->
+        knowledge.neighbourCaret(editorView.text, lastCaret, forward)?.let { offset ->
+            session.requestCaret(offset)
+            jumpNonce++
+            jump = EditorJump(CaretMapper.lineColumn(editorView.text, offset).first, jumpNonce)
         }
     }
     LaunchedEffect(Unit) {
@@ -360,6 +434,17 @@ fun DesktopApp(
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val command = event.isMetaPressed || event.isCtrlPressed
                 when {
+                    command && event.isShiftPressed && event.key == Key.O -> {
+                        chooseFolder()
+                        true
+                    }
+                    knowledgeOpen &&
+                        command &&
+                        event.isAltPressed &&
+                        (event.key == Key.DirectionUp || event.key == Key.DirectionDown) -> {
+                        jumpBlock(event.key == Key.DirectionDown)
+                        true
+                    }
                     command && event.key == Key.O -> {
                         openFile()
                         true
@@ -373,12 +458,14 @@ fun DesktopApp(
                         true
                     }
                     command && event.key == Key.E -> {
-                        openExport()
+                        if (!knowledgeOpen) openExport()
                         true
                     }
                     command && event.key == Key.K -> {
-                        aiVisible = true
-                        aiFocus++
+                        if (!knowledgeOpen) {
+                            aiVisible = true
+                            aiFocus++
+                        }
                         true
                     }
                     !command && !editorFocused && event.key == Key.H -> {
@@ -461,7 +548,15 @@ fun DesktopApp(
                         editorView,
                         onOpen = openFile,
                         onExport = openExport,
-                        exportEnabled = exportScript != null && editorView.state is EditorState.Editing,
+                        exportEnabled =
+                            !knowledgeOpen && exportScript != null && editorView.state is EditorState.Editing,
+                        knowledgeOpen = knowledgeOpen,
+                        knowledgeLabel =
+                            (workspace as? WorkspaceState.Open)?.scan?.root?.let {
+                                "Knowledge · " + DisplayName.escaped(it.fileName?.toString() ?: it.toString(), 48)
+                            },
+                        onOpenFolder = chooseFolder,
+                        onCloseWorkspace = closeWorkspace,
                         exportStatus = exportStatus,
                         onShowInFolder = { exportStatus?.let { showInFolder(it.dir) } },
                         onHome = home,
@@ -476,7 +571,7 @@ fun DesktopApp(
                         onIsolate = { applyVisibility(target, VisibilityMachine::isolate) },
                         onHide = { applyVisibility(target, VisibilityMachine::hide) },
                         onAlpha = { visibilityState = VisibilityMachine.withAlpha(visibilityState, it) },
-                        aiOn = aiVisible,
+                        aiOn = aiVisible && !knowledgeOpen,
                         onAi = {
                             aiVisible = !aiVisible
                             if (aiVisible) aiFocus++
@@ -487,7 +582,12 @@ fun DesktopApp(
                     val totalPx = with(LocalDensity.current) { windowWidth.toPx() }
                     val minFraction = (MIN_PANE_DP.dp / windowWidth).coerceIn(0.1f, 0.5f)
                     val errors = (state as? DesktopState.Error)?.errors.orEmpty()
+                    val sidebarWidth = if (workspace is WorkspaceState.None) 0.dp else SIDEBAR_WIDTH + 1.dp
                     Row(Modifier.weight(1f).fillMaxWidth()) {
+                        if (workspace !is WorkspaceState.None) {
+                            WorkspaceSidebar(workspace, state.file, openNote)
+                            Box(Modifier.width(1.dp).fillMaxHeight().background(DIM.copy(alpha = 0.5f)))
+                        }
                         ScriptEditor(
                             session,
                             editorView,
@@ -496,6 +596,17 @@ fun DesktopApp(
                             jump,
                             onFocusChanged = { editorFocused = it },
                             modifier = Modifier.width(windowWidth * editorFraction).fillMaxHeight(),
+                            knowledge = knowledgeOpen && state.file?.let { knowledge.isWorkspaceFile(it) } == true,
+                            activeBlock = blockHeader?.takeIf { it.count > 0 }?.index,
+                            onCaret =
+                                if (knowledgeOpen) {
+                                    { text, caret ->
+                                        lastCaret = caret
+                                        knowledge.onBuffer(text, caret)
+                                    }
+                                } else {
+                                    null
+                                },
                         )
                         Box(
                             Modifier
@@ -519,7 +630,7 @@ fun DesktopApp(
                                 ),
                         )
                         // the tree needs its own width and still leaves the canvas at least the minimum pane width
-                        val viewerWidth = windowWidth * (1f - editorFraction) - EDITOR_DIVIDER_DP.dp
+                        val viewerWidth = windowWidth * (1f - editorFraction) - EDITOR_DIVIDER_DP.dp - sidebarWidth
                         val showTree =
                             treeVisible &&
                                 treeAvailable &&
@@ -545,28 +656,48 @@ fun DesktopApp(
                             )
                             Box(Modifier.width(TREE_DIVIDER_DP.dp).fillMaxHeight().background(DIM.copy(alpha = 0.5f)))
                         }
-                        Box(Modifier.weight(1f).fillMaxHeight()) {
-                            Canvas(state, display, camera, fitReference, openFile, highlight, picking, canvasVisibility)
-                            Badge(state)
-                            selectedPart?.let {
-                                InspectionPanel(
-                                    it,
-                                    MaterialTheme.colorScheme.background,
-                                    Modifier.align(Alignment.TopEnd).padding(12.dp),
+                        Column(Modifier.weight(1f).fillMaxHeight()) {
+                            if (knowledgeOpen) {
+                                BlockPreviewHeader(
+                                    blockHeader,
+                                    onPrevious = { jumpBlock(false) },
+                                    onNext = { jumpBlock(true) },
                                 )
                             }
-                            selectedGroup?.let {
-                                GroupInspectionPanel(
-                                    it,
-                                    MaterialTheme.colorScheme.background,
-                                    Modifier.align(Alignment.TopEnd).padding(12.dp),
+                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                                Canvas(
+                                    state,
+                                    display,
+                                    camera,
+                                    fitReference,
+                                    openFile,
+                                    highlight,
+                                    picking,
+                                    canvasVisibility,
                                 )
-                            }
-                            if (showProgress) {
-                                LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter))
+                                Badge(state)
+                                selectedPart?.let {
+                                    InspectionPanel(
+                                        it,
+                                        MaterialTheme.colorScheme.background,
+                                        Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                    )
+                                }
+                                selectedGroup?.let {
+                                    GroupInspectionPanel(
+                                        it,
+                                        MaterialTheme.colorScheme.background,
+                                        Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                    )
+                                }
+                                if (showProgress) {
+                                    LinearProgressIndicator(
+                                        Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter),
+                                    )
+                                }
                             }
                         }
-                        if (aiVisible && windowWidth >= AI_MIN_WINDOW_DP.dp) {
+                        if (aiVisible && !knowledgeOpen && windowWidth >= AI_MIN_WINDOW_DP.dp) {
                             Box(Modifier.width(1.dp).fillMaxHeight().background(DIM.copy(alpha = 0.5f)))
                             AiPanel(
                                 controller = ai,
@@ -589,6 +720,7 @@ fun DesktopApp(
                     (state as? DesktopState.Error)?.let { error ->
                         ErrorBar(error.errors, dark, maxHeight = errorBarMax, onSelect = selectError)
                     }
+                    knowledgeError?.let { ErrorBar(listOf(it), dark, maxHeight = errorBarMax) }
                     // A non-fatal problem of the shown model, e.g. an invalid part list (KSTEP-D-012): the run stays "ok".
                     val okWarnings = (state as? DesktopState.Ok)?.model?.warnings.orEmpty()
                     if (okWarnings.isNotEmpty()) {
@@ -624,13 +756,29 @@ private fun Toolbar(
     aiOn: Boolean,
     onAi: () -> Unit,
     aiStatus: String,
+    knowledgeOpen: Boolean,
+    knowledgeLabel: String?,
+    onOpenFolder: () -> Unit,
+    onCloseWorkspace: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TextButton(onClick = onOpen) { Text("Open", fontSize = 13.sp) }
-        WithTip(if (exportEnabled) null else "Open a script first") {
+        WithTip(openFolderTip()) { TextButton(onClick = onOpenFolder) { Text("Open Folder…", fontSize = 13.sp) } }
+        if (knowledgeOpen) {
+            TextButton(onClick = onCloseWorkspace) { Text("Close Workspace", fontSize = 13.sp) }
+        }
+        WithTip(
+            if (knowledgeOpen) {
+                KNOWLEDGE_UNAVAILABLE
+            } else if (exportEnabled) {
+                null
+            } else {
+                "Open a script first"
+            },
+        ) {
             TextButton(onClick = onExport, enabled = exportEnabled) { Text("Export…", fontSize = 13.sp) }
         }
         TextButton(onClick = onHome) { Text("Home", fontSize = 13.sp) }
@@ -639,7 +787,11 @@ private fun Toolbar(
                 Text("Tree", fontSize = 13.sp, color = if (treeOn) Color.Unspecified else DIM)
             }
         }
-        TextButton(onClick = onAi) { Text("AI", fontSize = 13.sp, color = if (aiOn) Color.Unspecified else DIM) }
+        WithTip(if (knowledgeOpen) KNOWLEDGE_UNAVAILABLE else null) {
+            TextButton(onClick = onAi, enabled = !knowledgeOpen) {
+                Text("AI", fontSize = 13.sp, color = if (aiOn) Color.Unspecified else DIM)
+            }
+        }
         if (visibilityEnabled) {
             VisibilityControls(counts, hasSelection, alphaStep, onShowAll, onIsolate, onHide, onAlpha)
         }
@@ -660,7 +812,8 @@ private fun Toolbar(
                 TextButton(onClick = onShowInFolder) { Text("Show in Folder", fontSize = 12.sp) }
             }
             Text(
-                listOf(
+                listOfNotNull(
+                    knowledgeLabel,
                     statusText(state),
                     aiStatus,
                     visibilityStatusText(counts),
@@ -687,6 +840,7 @@ private fun statusText(state: DesktopState): String =
             ).joinToString("  ·  ")
         is DesktopState.Error -> "● Error"
         is DesktopState.NativeUnavailable -> "● Geometry unavailable"
+        is DesktopState.Waiting -> state.hint
     }
 
 @Composable
@@ -733,7 +887,14 @@ private fun Canvas(
             )
         display == null ->
             Box(modifier, contentAlignment = Alignment.Center) {
-                Text(if (state is DesktopState.Running) "Running the script…" else "No result yet", color = DIM)
+                Text(
+                    when (state) {
+                        is DesktopState.Running -> "Running the script…"
+                        is DesktopState.Waiting -> state.hint
+                        else -> "No result yet"
+                    },
+                    color = DIM,
+                )
             }
         display.mesh == null ->
             UnavailableNotice(
@@ -764,6 +925,46 @@ private fun Badge(state: DesktopState) {
                 modifier = Modifier.padding(start = 6.dp),
             )
         }
+    }
+}
+
+private const val KNOWLEDGE_UNAVAILABLE = "Not available in a knowledge workspace yet (planned)"
+
+private fun openFolderTip(): String = "Open a folder of Markdown notes (${if (isMac()) "⇧⌘O" else "Ctrl+Shift+O"})"
+
+private fun isMac(): Boolean =
+    System
+        .getProperty("os.name")
+        .orEmpty()
+        .lowercase()
+        .contains("mac")
+
+/**
+ * A native folder dialog; `null` if cancelled. On macOS the AWT file dialog only chooses folders with a system
+ * property, which is reset right after (or Open... would stop choosing scripts); elsewhere a Swing chooser.
+ */
+private fun chooseFolderDialog(parent: Frame): Path? {
+    if (isMac()) {
+        val key = "apple.awt.fileDialogForDirectories"
+        System.setProperty(key, "true")
+        try {
+            val dialog = FileDialog(parent, "Open a folder of notes", FileDialog.LOAD)
+            dialog.isVisible = true
+            val name = dialog.file ?: return null
+            return Path.of(dialog.directory ?: "", name)
+        } finally {
+            System.setProperty(key, "false")
+        }
+    }
+    val chooser = javax.swing.JFileChooser()
+    chooser.fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
+    chooser.dialogTitle = "Open a folder of notes"
+    return if (chooser.showOpenDialog(parent) ==
+        javax.swing.JFileChooser.APPROVE_OPTION
+    ) {
+        chooser.selectedFile.toPath()
+    } else {
+        null
     }
 }
 

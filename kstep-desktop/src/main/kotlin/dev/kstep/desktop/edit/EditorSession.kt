@@ -76,6 +76,17 @@ class EditorSession(
         }
     }
 
+    /** Closes the file (the caller has already handled unsaved changes): the editor shows "No script open". */
+    fun clear() {
+        synchronized(lock) {
+            history.clear()
+            state = EditorState.NoFile
+            revision++
+            caret = 0
+            publish()
+        }
+    }
+
     /** The text field changed the text (typing, paste, cut); [caretAfter] is its caret afterwards. */
     fun onTextChanged(
         newText: String,

@@ -55,6 +55,7 @@ import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.edit.Indent
 import dev.kstep.desktop.edit.LineIndex
+import dev.kstep.desktop.okf.NoteAnalyzer
 import dev.kstep.desktop.run.DesktopError
 import kotlinx.coroutines.delay
 
@@ -83,6 +84,11 @@ internal fun ScriptEditor(
     jump: EditorJump?,
     onFocusChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    /** Knowledge workspace (ADR-0058): colour a Markdown note and bar its `kstep` blocks. */
+    knowledge: Boolean = false,
+    activeBlock: Int? = null,
+    /** Called with the text and caret after every change of either (knowledge mode only). */
+    onCaret: ((String, Int) -> Unit)? = null,
 ) {
     val colors = if (dark) EditorColors.DARK else EditorColors.LIGHT
     val state = view.state
@@ -100,7 +106,10 @@ internal fun ScriptEditor(
         }
     val lineHeightPx = with(density) { (FONT_SIZE_SP * LINE_HEIGHT_FACTOR).sp.toPx() }
     val measurer = rememberTextMeasurer()
-    val transformation = remember(colors) { SyntaxTransformation(colors) }
+    val transformation =
+        remember(colors, knowledge) {
+            if (knowledge) KnowledgeSyntaxTransformation(colors) else SyntaxTransformation(colors)
+        }
     val vScroll = rememberScrollState()
     val hScroll = rememberScrollState()
     val focus = remember { FocusRequester() }
@@ -113,11 +122,20 @@ internal fun ScriptEditor(
     LaunchedEffect(view.revision) {
         val text = view.text
         field = TextFieldValue(text, TextRange(view.caret.coerceIn(0, text.length)))
+        onCaret?.invoke(text, field.selection.end)
     }
 
     val lineCount = remember(field.text) { LineIndex(field.text).lineCount }
     val marks = remember(errors, lineCount) { CaretMapper.markedLines(errors, lineCount) }
     var flashLine by remember { mutableStateOf<Int?>(null) }
+    val blockBars =
+        if (knowledge) {
+            NoteAnalyzer.analyze(field.text).extraction.blocks.map { b ->
+                (b.openLine..(b.closeLine ?: maxOf(b.contentEndLine, b.openLine))) to (b.index == activeBlock)
+            }
+        } else {
+            emptyList()
+        }
 
     Column(modifier) {
         EditorBanner(view, dark, onReload = session::reload, onKeepMine = session::keepMine)
@@ -140,6 +158,7 @@ internal fun ScriptEditor(
                 style = style.copy(color = colors.gutter),
                 measurer = measurer,
                 width = gutterWidth,
+                blockBars = blockBars,
             )
             BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
                 val viewportWidth = maxWidth
@@ -163,6 +182,7 @@ internal fun ScriptEditor(
                         onValueChange = { new ->
                             val changed = new.text != field.text
                             field = new
+                            onCaret?.invoke(new.text, new.selection.end)
                             if (changed) {
                                 session.onTextChanged(
                                     new.text,

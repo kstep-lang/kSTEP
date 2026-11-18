@@ -151,4 +151,36 @@ class EditorSessionIntegrationTest :
                 real.close()
             }
         }
+
+        "a saver with a path guard refuses a link and leaves the original untouched".config(timeout = 60.seconds) {
+            val dir = TestSupport.newDir()
+            try {
+                val target = Files.writeString(dir.resolve("t.md"), "original")
+                val real = AtomicSaver()
+                val session =
+                    EditorSession(
+                        saver = { p, b, hash, force ->
+                            if (p.fileName.toString() == "t.md") {
+                                AtomicSaver.Result.Failed(SaveFailure.PATH_REJECTED)
+                            } else {
+                                real.save(p, b, hash, force)
+                            }
+                        },
+                    )
+                try {
+                    session.open(target)
+                    TestSupport.await(30_000) { session.view.value.state is EditorState.Editing } shouldBe true
+                    session.onTextChanged("changed", 7)
+                    session.save()
+                    TestSupport.await(30_000) {
+                        (session.view.value.state as? EditorState.Editing)?.saveError == SaveFailure.PATH_REJECTED
+                    } shouldBe true
+                    Files.readString(target) shouldBe "original"
+                } finally {
+                    session.close()
+                }
+            } finally {
+                dir.toFile().deleteRecursively()
+            }
+        }
     })

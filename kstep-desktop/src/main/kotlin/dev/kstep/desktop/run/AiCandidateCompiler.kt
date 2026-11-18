@@ -52,6 +52,7 @@ class AiCandidateCompiler(
             return when (val r = run(file, n, onStarted)) {
                 is RunResult.Success -> CompileOutcome.Ok
                 is RunResult.NativeUnavailable -> CompileOutcome.Unverifiable(r.reason)
+                is RunResult.Skipped -> CompileOutcome.Unverifiable(r.hint)
                 is RunResult.Failure ->
                     CompileOutcome.Errors(
                         r.errors.map { e ->

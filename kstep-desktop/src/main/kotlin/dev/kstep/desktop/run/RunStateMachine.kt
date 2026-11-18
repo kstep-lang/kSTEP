@@ -44,12 +44,25 @@ sealed interface DesktopState {
         val reason: String,
         override val lastGood: DesktopModel?,
     ) : DesktopState
+
+    /** The run had nothing to do ([hint] says why, ADR-0058); the last good model stays shown. */
+    data class Waiting(
+        override val file: Path,
+        override val generation: Long,
+        val hint: String,
+        override val lastGood: DesktopModel?,
+    ) : DesktopState
 }
 
 sealed interface DesktopEvent {
+    /** [floor] keeps generations unique across a [Close]: the new generation is above both the state's and the floor. */
     data class Open(
         val path: Path,
+        val floor: Long = 0,
     ) : DesktopEvent
+
+    /** The file is closed (the knowledge workspace was closed, ADR-0058): back to [DesktopState.Idle]. */
+    data object Close : DesktopEvent
 
     data object Changed : DesktopEvent
 
@@ -89,7 +102,7 @@ class RunStateMachine {
     ): Transition =
         when (event) {
             is DesktopEvent.Open -> {
-                val gen = state.generation + 1
+                val gen = maxOf(state.generation, event.floor) + 1
                 Transition(
                     DesktopState.Running(event.path, gen, lastGood = null, startedAtMs = nowMs),
                     listOf(Effect.CancelRun, Effect.ResetCamera, Effect.StartRun(gen, event.path)),
@@ -107,6 +120,7 @@ class RunStateMachine {
                     )
                 }
             }
+            DesktopEvent.Close -> Transition(DesktopState.Idle, listOf(Effect.CancelRun))
             DesktopEvent.Missing -> {
                 val file = state.file
                 if (file == null) {
@@ -141,6 +155,7 @@ class RunStateMachine {
                 is RunResult.Failure -> DesktopState.Error(file, event.generation, result.errors, state.lastGood, now)
                 is RunResult.NativeUnavailable ->
                     DesktopState.NativeUnavailable(file, event.generation, result.reason, state.lastGood)
+                is RunResult.Skipped -> DesktopState.Waiting(file, event.generation, result.hint, state.lastGood)
             }
         return Transition(next, emptyList())
     }

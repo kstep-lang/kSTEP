@@ -31,6 +31,14 @@ sealed interface RunResult {
         val errors: List<DesktopError>,
     ) : RunResult
 
+    /**
+     * Nothing to run yet (a knowledge-workspace note without a block to show, ADR-0058). Not an error: the state becomes
+     * [DesktopState.Waiting] and the last good model stays on screen.
+     */
+    data class Skipped(
+        val hint: String,
+    ) : RunResult
+
     /** The native OCCT bridge is not available in the worker: no geometry can be shown. */
     data class NativeUnavailable(
         val reason: String,
