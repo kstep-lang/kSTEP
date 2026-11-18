@@ -47,7 +47,11 @@ object TestSupport {
         return controller.state.value
     }
 
-    /** Live render workers below this JVM. */
+    /**
+     * Live render workers below this JVM. On Linux `ProcessHandle` cuts the command line at 4096 characters, and the
+     * worker class path is longer than that, so the main class name is not reliable there; the worker's own JVM flags
+     * come first and survive the cut (only workers start with them below the test JVM).
+     */
     fun liveWorkers(): List<ProcessHandle> =
         ProcessHandle
             .current()
@@ -55,6 +59,6 @@ object TestSupport {
             .filter { handle ->
                 val info = handle.info()
                 val text = info.commandLine().orElse(info.arguments().map { it.joinToString(" ") }.orElse(""))
-                text.contains("DesktopRenderWorker")
+                text.contains("DesktopRenderWorker") || text.contains("-XX:+SuppressFatalErrorMessage")
             }.toList()
 }
