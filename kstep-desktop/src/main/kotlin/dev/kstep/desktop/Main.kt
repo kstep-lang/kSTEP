@@ -1,5 +1,6 @@
 package dev.kstep.desktop
 
+import dev.kstep.desktop.ai.AiLogging
 import dev.kstep.desktop.ui.runDesktopApp
 
 /**
@@ -7,4 +8,8 @@ import dev.kstep.desktop.ui.runDesktopApp
  * `./gradlew :kstep-desktop:run --args="<script>"`; the optional first argument is the script to open. All UI code
  * lives in the `ui` package.
  */
-fun main(args: Array<String>) = runDesktopApp(args)
+fun main(args: Array<String>) {
+    // Before the first logger exists: Koog logs whole prompts at DEBUG (ADR-0056).
+    AiLogging.quiet()
+    runDesktopApp(args)
+}

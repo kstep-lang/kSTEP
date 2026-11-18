@@ -64,7 +64,9 @@ class WorkerRunner(
     private val extraJvmOptions: List<String> = emptyList(),
     private val clock: () -> Instant = Instant::now,
     private val supervisorFactory: (Long, Path, (Process) -> Unit) -> ImportWorkerSupervisor =
-        { timeout, base, started -> ImportWorkerSupervisor(timeout, tempBase = base, onStarted = started) },
+        { timeout, base, started ->
+            ImportWorkerSupervisor(timeout, tempBase = base, onStarted = started, start = WorkerEnvironment::start)
+        },
 ) {
     fun run(
         file: Path,

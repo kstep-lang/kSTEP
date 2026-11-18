@@ -51,6 +51,8 @@ include(
     "kstep-viewer",
     // Compose Desktop application (ADR-0051); kstep-viewer stays a library-like module.
     "kstep-desktop",
+    // Desktop AI panel logic (unpublished, ADR-0056): Koog lives only here, never on the worker class path.
+    "kstep-desktop-ai",
     // Grouping directory mirroring kuml-dev/kUML's own kuml-docs/ layout. `:kstep-docs`
     // itself has no build file -- it is a pure namespace project, not a Kotlin module.
     "kstep-docs:kstep-asciidoc",

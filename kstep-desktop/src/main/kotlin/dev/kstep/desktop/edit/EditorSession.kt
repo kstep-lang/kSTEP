@@ -116,6 +116,14 @@ class EditorSession(
         }
     }
 
+    /**
+     * Applies an accepted AI proposal (ADR-0056): one undo step ([replaceText]), the buffer becomes dirty, nothing is
+     * written to disk (saving stays an explicit act). The caret is kept where it fits.
+     */
+    fun applyProposal(text: String) {
+        synchronized(lock) { replaceText(text, minOf(caret, text.length)) }
+    }
+
     /** Moves the caret (an error-bar click) without changing the text. */
     fun requestCaret(offset: Int) {
         synchronized(lock) {

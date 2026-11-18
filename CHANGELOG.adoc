@@ -9,6 +9,16 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop AI panel (Welle D6a, ADR-0056): describe a change in words and get a proposal as a diff. A new unpublished module
+  `kstep-desktop-ai` (Koog as a minimal Anthropic client behind a hardened transport; no tools, no agent). The panel (toolbar `AI`
+  or Cmd/Ctrl+K) shows a prompt field, an optional "Include current script" tick, `Generate`/`Stop`, up to 4 attempts, and the
+  proposal as a diff with `Apply` (one undo step, nothing saved, never run by itself) and `Discard`. Each candidate is first compiled
+  in the same supervised worker as the live preview; compile errors go back to the model (scrubbed of paths and key-like strings).
+  Limits: 4 attempts, 180 s in total, 60 s per call, 200 KiB response, 1 MiB script, 4,000-character prompt, 8,192 output tokens.
+  Nothing is sent before an explicit consent per provider and host. The API key comes from the system keychain (macOS Keychain, Linux
+  Secret Service), this session only, or `KSTEP_AI_ANTHROPIC_KEY`; it is never written to a file or logged. New error codes
+  `KSTEP-D-014` to `KSTEP-D-018`. The CLI zip stays free of the AI client (new `verify-dist` guard). Anthropic only; the generated
+  script is run on this computer to check it and the worker is not a sandbox (see the ADR).
 * kSTEP Desktop transparency (Welle D5, ADR-0055): make a part or a whole sub-assembly transparent or hidden. An eye column in the
   assembly tree (click: visible, transparent, hidden; a group shows a mixed state), toolbar controls `Show all`, `Isolate`, `Hide` and
   an opacity slider (5 % to 60 %, default 25 %), and the keys `T` (transparent), `V` (hide), `I` (isolate), `Shift+V` (show all) and
@@ -53,6 +63,10 @@ minor versions may contain breaking changes.
   Compose jars appear in it).
 
 === Changed
+
+* The kSTEP Desktop render workers (live preview and AI candidate check) no longer inherit secret-like environment variables
+  (`KSTEP_AI_*`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `*_API_KEY`, `*_TOKEN`, `*_SECRET*`, `*PASSWORD*`), so a script cannot read
+  them (ADR-0056).
 
 * `ShapeCanvas` gains an optional `fitReference` parameter (behaviour unchanged without it); `UnavailableNotice` gains `installHint`.
 * `ImportWorkerSupervisor` (new optional `onStarted` callback), `ImportWorkerLaunch.command` (`classPath`, `extraJvmOptions`),

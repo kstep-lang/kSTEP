@@ -9,8 +9,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import dev.kstep.cli.WorkerTempDir
+import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.edit.EditorSession
+import dev.kstep.desktop.run.AiCandidateCompiler
 import dev.kstep.desktop.run.LiveRunController
+import dev.kstep.desktop.run.WorkerRunner
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
 import java.awt.Dimension
 import java.awt.Frame
@@ -32,6 +36,18 @@ fun runDesktopApp(args: Array<String>) {
                 // The one watcher of the run controller also tells the editor about disk changes (ADR-0052).
                 EditorSession().also { controller.onDiskSignal = it::onDiskSignal }
             }
+        val ai =
+            remember {
+                // An own session directory and worker for the candidate check: the live preview is never disturbed.
+                val dir = LiveRunController.createSessionDir()
+                Runtime.getRuntime().addShutdownHook(
+                    Thread({ WorkerTempDir.deleteRecursively(dir) }, "kstep-ai-cleanup"),
+                )
+                val runner = WorkerRunner(dir)
+                AiController.production(
+                    AiCandidateCompiler(dir) { file, gen, started -> runner.run(file, gen, started) },
+                )
+            }
         val state by controller.state.collectAsState()
         val editor by session.view.collectAsState()
         val frame = remember { arrayOfNulls<Frame>(1) }
@@ -46,6 +62,7 @@ fun runDesktopApp(args: Array<String>) {
                 if (confirmUnsaved(frame[0], session)) {
                     controller.close()
                     session.close()
+                    ai.close()
                     exitApplication()
                 }
             },
@@ -56,7 +73,7 @@ fun runDesktopApp(args: Array<String>) {
                 // The macOS "edited" dot in the close button; other platforms ignore the property.
                 window.rootPane.putClientProperty("Window.documentModified", editor.dirty)
             }
-            DesktopApp(controller = controller, session = session, initialFile = initial, window = window)
+            DesktopApp(controller = controller, session = session, initialFile = initial, window = window, ai = ai)
         }
     }
 }

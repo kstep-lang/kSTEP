@@ -22,6 +22,7 @@ dependencies {
     // fine; it also puts the script compiler on the desktop's classpath, which no desktop source may use (see
     // DesktopArchitectureTest): scripts are only ever evaluated in the worker subprocess.
     implementation(project(":kstep-cli"))
+    implementation(project(":kstep-desktop-ai"))
     implementation(project(":kstep-geometry"))
     implementation(project(":kstep-render"))
     implementation(libs.kotlin.logging.jvm)

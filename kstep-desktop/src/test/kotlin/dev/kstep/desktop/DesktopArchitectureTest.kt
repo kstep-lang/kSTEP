@@ -68,4 +68,21 @@ class DesktopArchitectureTest :
                 }.map { root.relativize(it.first).toString() }
                 .shouldBeEmpty()
         }
+
+        "Koog and the AI module's internals are not used directly in the desktop sources" {
+            sources()
+                .filter { (_, text) -> text.contains("import ai.koog") || text.contains("java.net.http") }
+                .map { root.relativize(it.first).toString() }
+                .shouldBeEmpty()
+        }
+
+        "only AiController touches the key store and the settings file" {
+            sources()
+                .filter { (path, text) ->
+                    !path.toString().endsWith("AiController.kt") &&
+                        !path.toString().contains("/ui/") &&
+                        (text.contains("KeychainBackend") || text.contains("SettingsStore") || text.contains("Secret."))
+                }.map { root.relativize(it.first).toString() }
+                .shouldBeEmpty()
+        }
     })

@@ -34,6 +34,11 @@ NATIVE="$(printf '%s\n' "$LIST" | grep -E '\.(so|dylib|dll)$' || true)"
 UI_JARS="$(printf '%s\n' "$LIST" | grep -E "/lib/(kstep-desktop-|kstep-viewer-|skiko|desktop-jvm|org\.jetbrains\.compose)" || true)"
 [ -z "$UI_JARS" ] || fail "desktop/compose jars found in CLI zip: $UI_JARS"
 
+# ... and free of the AI/LLM client (Koog, HTTP client, the AI module; ADR-0056). The CLI zip legitimately carries the
+# Ktor SERVER jars of kstep-mcp, so only the client and Koog artifacts are rejected, not every ktor-* jar.
+AI_JARS="$(printf '%s\n' "$LIST" | grep -E "/lib/(kstep-desktop-ai-|ktor-client-|prompt-executor-|prompt-model-|prompt-llm-|prompt-markdown-|prompt-cache-|prompt-structure-|agents-|http-client-|embeddings-|koog-)" || true)"
+[ -z "$AI_JARS" ] || fail "AI/LLM client jars found in CLI zip: $AI_JARS"
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 unzip -q "$ZIP" -d "$TMP/x"

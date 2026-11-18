@@ -36,10 +36,10 @@ val publishedModules: Map<String, String> =
         ":kstep-docs:kstep-asciidoc" to "Asciidoctor pre-processing integration for kSTEP diagrams and previews.",
     )
 
-// Application, Compose Desktop apps (kstep-viewer demo, kstep-desktop live preview, ADR-0051), integration tests,
+// Application, Compose Desktop apps (kstep-viewer demo, kstep-desktop live preview, ADR-0051; kstep-desktop-ai, ADR-0056), integration tests,
 // namespace parent.
 val nonPublishedModules: Set<String> =
-    setOf(":kstep-cli", ":kstep-viewer", ":kstep-desktop", ":kstep-tests", ":kstep-docs")
+    setOf(":kstep-cli", ":kstep-viewer", ":kstep-desktop", ":kstep-desktop-ai", ":kstep-tests", ":kstep-docs")
 
 val kstepPublishingConfiguredMarker = "kstep.publishingConfigured"
 val mavenStagingDir = layout.buildDirectory.dir("maven-staging")

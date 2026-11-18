@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -54,8 +56,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.kstep.desktop.ai.repair.RepairState
+import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
+import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
@@ -91,9 +96,12 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.nio.file.Path
 
-private val DIM = Color(0xFF8A8A8A)
-private val WARN = Color(0xFFF9A825)
+internal val DIM = Color(0xFF8A8A8A)
+internal val WARN = Color(0xFFF9A825)
 private const val PROGRESS_DELAY_MS = 300L
+private const val AI_TICK_MS = 1_000L
+private const val AI_PANEL_DP = 360
+private const val AI_MIN_WINDOW_DP = 900
 private const val ERROR_BAR_MAX_FRACTION = 0.4f
 private const val SCRIPT_FILTER_SUFFIX = ".kstep.kts"
 private const val INITIAL_EDITOR_FRACTION = 0.45f
@@ -111,8 +119,22 @@ fun DesktopApp(
     session: EditorSession,
     initialFile: Path?,
     window: Frame,
+    ai: AiController,
 ) {
     val editorView by session.view.collectAsState()
+    // AI panel (ADR-0056): hidden by default; nothing is sent before the user asks and agrees.
+    val aiUi by ai.ui.collectAsState()
+    val aiRepair by ai.repair.collectAsState()
+    var aiVisible by remember { mutableStateOf(false) }
+    var aiFocus by remember { mutableStateOf(0) }
+    var aiNow by remember { mutableStateOf(System.currentTimeMillis()) }
+    val aiRunning = aiRepair is RepairState.Requesting || aiRepair is RepairState.Compiling
+    LaunchedEffect(aiRunning) {
+        while (aiRunning) {
+            aiNow = System.currentTimeMillis()
+            delay(AI_TICK_MS)
+        }
+    }
     var editorFocused by remember { mutableStateOf(false) }
     var jump by remember { mutableStateOf<EditorJump?>(null) }
     var jumpNonce by remember { mutableStateOf(0) }
@@ -303,6 +325,11 @@ fun DesktopApp(
                         session.save()
                         true
                     }
+                    command && event.key == Key.K -> {
+                        aiVisible = true
+                        aiFocus++
+                        true
+                    }
                     !command && !editorFocused && event.key == Key.H -> {
                         home()
                         true
@@ -357,6 +384,12 @@ fun DesktopApp(
                         onIsolate = { applyVisibility(target, VisibilityMachine::isolate) },
                         onHide = { applyVisibility(target, VisibilityMachine::hide) },
                         onAlpha = { visibilityState = VisibilityMachine.withAlpha(visibilityState, it) },
+                        aiOn = aiVisible,
+                        onAi = {
+                            aiVisible = !aiVisible
+                            if (aiVisible) aiFocus++
+                        },
+                        aiStatus = aiStatusText(aiRepair, aiNow, ai.limitsInUse.maxAttempts),
                     )
 
                     val totalPx = with(LocalDensity.current) { windowWidth.toPx() }
@@ -441,6 +474,25 @@ fun DesktopApp(
                                 LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter))
                             }
                         }
+                        if (aiVisible && windowWidth >= AI_MIN_WINDOW_DP.dp) {
+                            Box(Modifier.width(1.dp).fillMaxHeight().background(DIM.copy(alpha = 0.5f)))
+                            AiPanel(
+                                controller = ai,
+                                ui = aiUi,
+                                repair = aiRepair,
+                                editorText = editorView.text,
+                                hasFile = editorView.state is EditorState.Editing,
+                                focusNonce = aiFocus,
+                                onApply = session::applyProposal,
+                                onEscapeToEditor = {},
+                                modifier =
+                                    Modifier
+                                        .width(
+                                            AI_PANEL_DP.dp,
+                                        ).fillMaxHeight()
+                                        .verticalScroll(rememberScrollState()),
+                            )
+                        }
                     }
                     (state as? DesktopState.Error)?.let { error ->
                         ErrorBar(error.errors, dark, maxHeight = errorBarMax, onSelect = selectError)
@@ -473,6 +525,9 @@ private fun Toolbar(
     onIsolate: () -> Unit,
     onHide: () -> Unit,
     onAlpha: (Float) -> Unit,
+    aiOn: Boolean,
+    onAi: () -> Unit,
+    aiStatus: String,
 ) {
     Row(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
@@ -485,6 +540,7 @@ private fun Toolbar(
                 Text("Tree", fontSize = 13.sp, color = if (treeOn) Color.Unspecified else DIM)
             }
         }
+        TextButton(onClick = onAi) { Text("AI", fontSize = 13.sp, color = if (aiOn) Color.Unspecified else DIM) }
         if (visibilityEnabled) {
             VisibilityControls(counts, hasSelection, alphaStep, onShowAll, onIsolate, onHide, onAlpha)
         }
@@ -503,6 +559,7 @@ private fun Toolbar(
             Text(
                 listOf(
                     statusText(state),
+                    aiStatus,
                     visibilityStatusText(counts),
                 ).filter { it.isNotEmpty() }.joinToString("  ·  ") +
                     if (editor.dirty) "  ·  unsaved changes  ·  preview shows saved file" else "",

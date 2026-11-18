@@ -131,6 +131,17 @@ if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
   (cd "$WORK/d-nolaunch" && zip -qr ../nolaunch.zip kstep-cli-1.0.0)
   expect_rc "verify-dist rejects missing launcher" 1 bash "$D" "$WORK/nolaunch.zip" 1.0.0
 
+  r="$(mkdist ai)"; : > "$r/lib/prompt-executor-anthropic-client-jvm-1.3.0.jar"; : > "$r/lib/ktor-client-core-jvm-3.4.3.jar"
+  (cd "$WORK/d-ai" && zip -qr ../ai.zip kstep-cli-1.0.0)
+  expect_rc "verify-dist rejects AI/LLM client jars" 1 bash "$D" "$WORK/ai.zip" 1.0.0
+  contains "$WORK/err" "AI/LLM client jars"; check "reports AI/LLM client jars" $?
+
+  # the Ktor SERVER jars of kstep-mcp are legitimate in the CLI zip: they must not trip the AI guard
+  r="$(mkdist ktorserver)"; : > "$r/lib/ktor-server-core-jvm-3.4.3.jar"
+  (cd "$WORK/d-ktorserver" && zip -qr ../ktorserver.zip kstep-cli-1.0.0)
+  bash "$D" "$WORK/ktorserver.zip" 1.0.0 >/dev/null 2>"$WORK/err2"
+  ! grep -q "AI/LLM client jars" "$WORK/err2"; check "ktor-server jars do not trip the AI guard" $?
+
   # Full smoke test against a stub launcher (a shell script, no Java needed): export writes a STEP header, import answers
   # as given by $STUB_IMPORT ("unavailable" = the expected geometry_unavailable error, anything else = success).
   mkstub() { # name

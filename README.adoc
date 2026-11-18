@@ -218,6 +218,18 @@ link:docs/usage.adoc[Usage].
   canvas (toggle `Tree` in the toolbar; Up/Down, Left/Right, Home/End, Enter, Escape when it has focus) selects whole
   sub-assemblies; if the tree cannot be trusted it stays hidden with the warning `KSTEP-D-013` and click selection still works.
   Parts and sub-assemblies can be made transparent or hidden (eye column in the tree, toolbar, keys `T`, `V`, `I`, `Shift+V`).
+  An optional AI panel (toolbar `AI`, Cmd/Ctrl+K) proposes changes from a description as a diff you accept or discard (ADR-0056).
+  *Privacy:* nothing is sent before you agree in a dialog; only your prompt and, if you tick it, the current script go to the
+  provider (Anthropic, `api.anthropic.com`), never keys, file paths or other files. The API key is kept in the system keychain,
+  for this session only, or read from `KSTEP_AI_ANTHROPIC_KEY`; it is never written to a file. To check a proposal, the generated
+  script is run on this computer in the preview worker before you have read it; that worker limits time and memory but is not a
+  sandbox (file system and network are open to a script). *A generated script can therefore read a key from the system keychain
+  or Secret Service, and on Linux from the environment of the desktop process, and send it over the network.* Until a sandbox
+  exists, use the "this session only" key source.
+
+| `kstep-desktop-ai`
+| Logic of the desktop AI panel (not published): repair loop, key store access, consent settings, Koog-based Anthropic client
+  behind a hardened transport. Pure JVM, never on the worker class path or in the CLI zip.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest).

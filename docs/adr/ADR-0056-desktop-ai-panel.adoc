@@ -1,0 +1,129 @@
+= ADR-0056: kSTEP Desktop, AI panel (first stage, D6a)
+:toc:
+
+== Status
+
+Accepted (Welle D6a). The repair loop, the extractor, the error summary, the diff, the key store backends (against a fake process runner), the settings store, the guarded HTTP seam and the Koog client (against a fake transport) are covered by tests. The macOS keychain contract (`put`, `get`, `has`, `delete`) was run once against the real keychain on the development Mac (`./gradlew :kstep-desktop-ai:liveKeychainTest`). Not done in this wave: no call to a real provider (no key was used), the Linux Secret Service backend was only tested against a fake runner, and the panel was compiled and style-checked but not clicked through by hand in a running window.
+
+== Context
+
+The desktop shows a script and its preview. The user wants to describe a change in words and get a proposal as a diff, which is checked by compiling it before it is shown. A proposal is never applied by itself.
+
+== Decision
+
+D1. Module. A new unpublished module `kstep-desktop-ai` (pure JVM, no Compose, no dependency on kstep-cli, kstep-script or kstep-desktop). The script host is not even on its class path. Koog stays in this module only. kstep-desktop depends on it; the worker class path (`workerRuntime`, only `:kstep-cli`) never sees it (test `WorkerClasspathIsolationTest`-style check in `AiWiringTest`, and the new `verify-dist` guard for the CLI zip).
+
+D2. Koog as a minimal client, spike result. Only `ai.koog:prompt-executor-anthropic-client-jvm:1.3.0` is used, no `koog-agents` (it would pull in Bedrock, OpenTelemetry and more). `AnthropicLLMClient` takes a `KoogHttpClient`, which is Koog's own interface; `GuardedKoogHttpClient` implements it on our own transport (JDK `HttpClient`, `Redirect.NEVER`, a byte cap, no logging of headers or bodies). Only `post` is implemented; `get`, `sse` and `lines` throw. The request body arrives as a JSON string, the response is decoded with `serializer(responseType.java)` and a `Json` configured like Koog's own (snake case, lenient). No Ktor client class is on the class path at all, so no exclude was needed. Spike points 1 to 3 were verified by `KoogAnthropicClientTest`; the prompt DSL (`prompt(id, LLMParams(maxTokens)) { system(); user(); assistant() }`) and the model constants (`AnthropicModels.Sonnet_5`, `Opus_5`, `Haiku_4_5`) exist in 1.3.0. The fallback (our own Messages API client without Koog) was not needed.
+
+D3. Provider whitelist. `AiProvider` is an enum with a fixed host; D6a has Anthropic only (`api.anthropic.com`, always https). There is no free host or URL field, so neither a settings file nor a model answer can redirect a request. `GuardedKoogHttpClient` compares the host exactly (no subdomain, no userinfo, port empty or 443).
+
+D4. No tools. The tool list of every request is empty; there is no agent and no function calling. The model can only return text.
+
+D5. Limits.
+
+[cols="2,1,3"]
+|===
+| Limit | Value | Where
+
+| Attempts per run | 4 | `RepairMachine`; an attempt is one model call plus one check, also when the answer has no code
+| Total time | 180 s | `RepairMachine` (state) and `withTimeout` in `RepairSession`; ends in `KSTEP-D-017` and kills the worker
+| Per model call | 60 s | `withTimeoutOrNull` and the transport request timeout
+| Response body | 200 KiB | transport; `RESPONSE_TOO_LARGE`
+| Script from the model | 1 MiB (`EditorText.MAX_BYTES`) | `ResponseExtractor`
+| Script sent along | 128 KiB | checkbox disabled above it; the same limit applies to the previous candidate in a repair
+| Prompt | 4,000 characters | panel and `RepairSession`
+| Error summary | 4 KiB, 20 entries | `ErrorSummary`
+| Output tokens | 8,192 | `LlmRequest.maxOutputTokens`
+| Keychain output | 8 KiB | `SecretProcessRunner`
+|===
+
+D6. Repair loop. `RepairMachine` is a pure reducer (`state + event -> state + effects`) with the effects `CallLlm`, `Compile` and `KillWorker`. A compile error leads to a repair request with a scrubbed error summary and the previous candidate, not a growing history. After 4 attempts the last candidate is offered with the verdict "does not compile". `NativeUnavailable` (no OCCT in the worker) is not a compile error: the proposal is offered at once as "not verified", and the model is never asked to "repair" a missing engine. A stop, or a later answer of an older run (`runId`), never produces a proposal.
+
+D7. The diagram below shows the loop.
+
+[kuml, adr-0056-repair-loop, svg]
+----
+activityDiagram(name = "AI repair loop") {
+    val start = initialNode()
+    val consent = decision(name = "consent given?")
+    val ask = action(name = "Ask the model")
+    val extract = action(name = "Extract the script")
+    val compile = action(name = "Check in the worker")
+    val ok = decision(name = "compiles?")
+    val more = decision(name = "attempts left?")
+    val summary = action(name = "Scrub errors, build repair request")
+    val proposal = action(name = "Show proposal as diff")
+    val stop = action(name = "Stop or fail")
+    val done = finalNode()
+
+    edge(from = start, to = consent)
+    edge(from = consent, to = ask, guard = "yes")
+    edge(from = consent, to = stop, guard = "no")
+    edge(from = ask, to = extract)
+    edge(from = extract, to = compile)
+    edge(from = compile, to = ok)
+    edge(from = ok, to = proposal, guard = "yes")
+    edge(from = ok, to = more, guard = "no")
+    edge(from = more, to = summary, guard = "yes, up to 4")
+    edge(from = more, to = proposal, guard = "no")
+    edge(from = summary, to = ask)
+    edge(from = proposal, to = done)
+    edge(from = stop, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it. `kuml validate` reports only `STYLE_CHECK_UNAVAILABLE` in this environment (the style analysis needs a JVM module the installed runtime lacks), no model violation.
+
+D8. Keys. Three sources, chosen by the user: the system keychain, this session only, or the environment variable `KSTEP_AI_ANTHROPIC_KEY`. There is no plaintext fallback: without a keychain only the other two remain. `Secret` is not a data class and not serializable, `toString` never shows the value, equality is identity, `wipe()` zeroes it, and the value can be read only inside `provider/` and `keys/` (architecture test). The settings file (`desktop-ai.json`, mode 0600, atomic write, at most 64 KiB, unknown provider gives defaults) has no field for a key, by construction. Lessons carried over from kUML: one service name per provider (`dev.kstep.desktop.ai.<id>`, macOS `-l` does not filter), absolute binary paths (`/usr/bin/security`, `/usr/bin/secret-tool`), the secret goes over stdin only (macOS `-w` reads it twice, one line would store an empty secret silently, and a read-back checks the length), stderr of the tools is discarded, a timeout of 60 s because the first macOS access shows a system dialog, all access off the UI thread.
+
+D9. Consent. Nothing is sent before the user agreed for this provider and host (`Consent(host, grantedAt)`; a changed host asks again). The check lives in `RepairSession`, not only in the UI. The dialog names prompt, whether the script is included, the model and the host, says that no keys, paths or other files are sent, and says that the generated script is run on this computer to check it. "Cancel" is the default button.
+
+D10. Candidate check and the worker environment. The candidate is written by desktop code (not by the model) as `candidate-<n>.kstep.kts` into a private session directory (0700 directory, 0600 file, `CREATE_NEW`) and removed in a `finally`. It runs in a `WorkerRunner` of its own, the same supervised worker as the live preview (timeout, heap limit, process tree kill). Since the worker inherited the whole environment, `WorkerEnvironment.scrub` now removes `KSTEP_AI_*`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and every variable with a secret-like name (`*_API_KEY`, `*_TOKEN`, `*_SECRET*`, `*PASSWORD*`) for EVERY desktop worker. This only keeps the worker from inheriting such variables; it does not stop a script from reading the system keychain, the Secret Service or the parent's `/proc/<ppid>/environ` (see the threat model). Until the D6b sandbox or a network block exists, the session-only key source is recommended. This also changes the live preview (D1 of ADR-0051): scripts no longer see such variables.
+
+D11. Output handling. Only the first fenced Kotlin block of an answer is used. Control characters, DEL, C1 and bidirectional controls (U+202A to U+202E, U+2066 to U+2069, the Trojan Source set) are refused, as is a literal occurrence of the configured key. Refusal reasons are fixed texts, never model content. Everything shown from the model is sanitised and drawn as plain text, never as markup or a link. Errors fed back to the model lose paths of all platforms, the candidate name and key-like strings.
+
+D12. Logging. Koog logs the whole prompt (the user's script) at DEBUG, and `LLMClientException` appends the message of the cause. `AiLogging.quiet()` sets the slf4j-simple level of `ai.koog` and `io.ktor` to `warn` before the first logger (the configuration is read once per JVM); our own exceptions never carry a body, header or key. `LeakTest` runs with DEBUG as the default level and checks that a whole run with failures leaves key, prompt and script out of the log.
+
+D13. Apply. "Apply" replaces the editor buffer in one undo step (`EditorSession.applyProposal`), marks it dirty and writes nothing; saving stays an explicit act. There is no "Apply and run". The editor stays editable during a run; if it changed, the panel says so and shows the diff against the current text.
+
+== Threat model
+
+[cols="2,3"]
+|===
+| Threat | Protection and remaining risk
+
+| A compromised or prompt-injected model returns malicious code, which the loop runs before anyone read it
+| The worker limits time, heap and the process tree, and its environment is scrubbed (D10), so it does not inherit a key through its own environment. *This is not a protection against key theft.* The worker is arbitrary Kotlin with the user's rights and an open network, and it runs before anyone has read the script. A script can start `/usr/bin/security find-generic-password -a <user> -s dev.kstep.desktop.ai.anthropic -w` (macOS: the item was created by `/usr/bin/security`, so that binary is trusted and the read returns without a dialog) or `secret-tool lookup service dev.kstep.desktop.ai account anthropic` (Linux: any process of the unlocked session can read it), and send the result to any host. On Linux with the `ENVIRONMENT` source, `/proc/<ppid>/environ` of the desktop JVM is readable by the same user, which bypasses the scrub. Only the `SESSION` source keeps the key out of easy reach of the worker (it lives only in the desktop process memory); it is the recommended source until the sandbox of D6b exists. Not verified against a real keychain item: this is derived from the access control the item is created with. *Remaining risk, stated openly:* the worker is not a sandbox. File system and network are open to a script, and a kSTEP script is arbitrary Kotlin. The consent dialog and the README say that the generated script is run to check it. An OS sandbox or a network block for the worker (macOS `sandbox-exec`, Linux `bwrap`) is a follow-up (D6b).
+
+| Key leak through logs, messages, the settings file, `argv`, the worker environment or dumps
+| `Secret` redaction, no key in any exception, header values never logged, settings without a key field, the secret over stdin only, the environment scrub, Koog loggers silenced. Heap and crash dumps were not addressed: no new JVM flag writes them, but a dump of the running process would contain a key held in memory.
+
+| SSRF or redirection of the request
+| Fixed host, https only, exact host comparison, no redirect, no user-typed URL.
+
+| Denial of service
+| The size and time limits of D5, a cap on attempts, a stdout cap for the keychain tools, an `ErrorSummary` cap, diff caps (50,000 lines, 5,000 edits).
+
+| Trojan Source and terminal or markup tricks in model text
+| Bidi and control characters are refused in scripts and removed from displayed text.
+
+| Data going to the provider
+| Only the prompt and, if ticked, the current script, and only after consent. The desktop sends no paths, no keys, no other files. A generated script that is run to check it can, however, read a stored key itself and send it over the network (see the first row).
+
+| Resource leaks
+| Process tree kill on stop and timeout, the candidate file removed in `finally`, `wipe` of owned secrets on replace and close, the response stream is closed after the byte cap, the coroutine scope is cancelled in `close()`.
+|===
+
+== Dependencies and licences
+
+New runtime artifacts of the desktop (from `./gradlew :kstep-desktop-ai:dependencies --configuration runtimeClasspath`): `ai.koog` `prompt-executor-anthropic-client`, `prompt-executor-clients`, `prompt-llm`, `prompt-model`, `prompt-markdown`, `prompt-structure`, `agents-tools`, `agents-utils`, `utils`, `serialization-core`, `http-client-core` (all 1.3.0); `org.jetbrains.kotlinx` `kotlinx-io-core` and `kotlinx-io-bytestring` 0.9.0, `kotlinx-schema-*` 0.4.4; `org.jetbrains.kotlin:kotlin-reflect`; `org.reactivestreams:reactive-streams` 1.0.3. Koog and the kotlinx libraries are published by JetBrains under Apache-2.0; reactive-streams is public domain (CC0). This is from the projects' published licence statements: the local Gradle cache holds no POM licence fields, so it was not re-derived mechanically in this wave. No GPL or AGPL artifact is involved (no JSDAI). The CLI zip does not contain any of them (`verify-dist` guard, which rejects the Koog and Ktor client jars but not the Ktor server jars kstep-mcp legitimately ships).
+
+== Consequences
+
+* The desktop can propose edits from a description, always as a diff the user accepts or discards.
+* Scripts in the live preview lose access to secret-like environment variables.
+* The worker is still not a sandbox, so the check of a generated script runs it with the user's rights. This includes reading a key from the system keychain or Secret Service and sending it over the network; use the session-only key source until D6b.
+
+== Follow-up D6b
+
+kstep-mcp tools as a vetted whitelist, applying single hunks, selection context from the inspection, more providers (OpenAI) and free or local endpoints with an SSRF check, a prompt history, Windows Credential Manager (DPAPI), "new script from prompt" without an open file, an OS sandbox or network block for the worker, the right-hand `Inspect | AI` tab pair (D6a shows the AI panel as its own column, toggled by the toolbar button or Cmd/Ctrl+K, and keeps the inspection panels over the canvas), Esc moving the focus to the editor, the entry of the key and consent in a compose scene test, and the debounced diff refresh with a "Refresh diff" banner.
