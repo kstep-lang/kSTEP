@@ -1,5 +1,6 @@
 package dev.kstep.desktop.run
 
+import dev.kstep.desktop.model.PartTable
 import dev.kstep.geometry.ColoredMesh
 import java.time.Instant
 
@@ -11,6 +12,10 @@ data class DesktopModel(
     val finishedAt: Instant,
     val durationMs: Long,
     val notes: List<String>,
+    /** The validated part list, or `null` (no list, or an invalid one: see [warnings]); selection is off then. */
+    val parts: PartTable? = null,
+    /** Non-fatal problems of this model, e.g. an invalid part list (`KSTEP-D-012`). */
+    val warnings: List<DesktopError> = emptyList(),
 )
 
 /** The end of one run of the render worker. */

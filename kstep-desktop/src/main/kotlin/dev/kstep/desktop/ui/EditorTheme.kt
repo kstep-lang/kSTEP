@@ -57,3 +57,7 @@ internal class EditorColors(
 
 internal val MARK_ERROR = Color(0xFFC62828)
 internal val MARK_WARNING = Color(0xFFF9A825)
+
+/** Accent of the selection and hover tint in the viewer (ADR-0053): a blue that stays visible on light and dark parts. */
+internal val ACCENT_LIGHT = Color(0xFF1E66F5)
+internal val ACCENT_DARK = Color(0xFF5B9BFF)

@@ -25,7 +25,7 @@ class ErrorParserTest :
             """{"status":"error","errorKind":"runtime_error","code":"KSTEP-S-003","message":"boom at line 2","exceptionClass":"java.lang.IllegalStateException","command":"render"}"""
 
         "a geometry result" {
-            ErrorParser.parseRenderJson(geometry) shouldBe RenderReport.Geometry(24)
+            ErrorParser.parseRenderJson(geometry).shouldBeInstanceOf<RenderReport.Geometry>().glbTriangles shouldBe 24
         }
 
         "a summary result has no geometry" {

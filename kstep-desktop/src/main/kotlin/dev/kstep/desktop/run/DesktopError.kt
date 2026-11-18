@@ -24,4 +24,5 @@ object DesktopErrorCodes {
     const val EDITOR_TOO_LARGE = "KSTEP-D-009"
     const val EDITOR_NOT_TEXT = "KSTEP-D-010"
     const val SAVE_FAILED = "KSTEP-D-011"
+    const val PARTS_INVALID = "KSTEP-D-012"
 }

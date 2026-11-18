@@ -205,6 +205,20 @@ class CliRenderIntegrationTest :
             (svg.split("<polygon").size - 1 >= 6) shouldBe true
         }
 
+        // ADR-0053: the part list is a desktop-worker extra, never part of the public JSON contract
+        "a real OCCT GLB render prints no parts in the public JSON".config(enabled = available) {
+            val script = copyFixture("hello-box.kstep.kts")
+
+            val result = runner.run("render", "--format", "glb", "--output", "json", script.name)
+
+            result.exitCode shouldBe 0
+            val json = Json.parseToJsonElement(result.stdout.trim()).jsonObject
+            json["content"]?.jsonPrimitive?.content shouldBe "geometry"
+            json.containsKey("glb") shouldBe true
+            json.containsKey("parts") shouldBe false
+            json.containsKey("partsOmitted") shouldBe false
+        }
+
         // R7
         "a real OCCT box renders a plausible, distinctly-shaded isometric PNG".config(enabled = available) {
             val script = copyFixture("hello-box.kstep.kts")

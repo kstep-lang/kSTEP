@@ -339,6 +339,7 @@ object GlbWriter {
             triangleCount = kept.size,
             vertexCount = vertexCount,
             droppedTriangleCount = droppedTriangleCount,
+            keptSourceTriangles = IntArray(kept.size) { kept[it].sourceIndex },
         )
     }
 
@@ -418,6 +419,8 @@ object GlbWriter {
          *  kSTEP's viewer-pan-and-material-colors wave, see
          *  docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc. */
         val color: MeshColor,
+        /** Index of this triangle in the SOURCE mesh's triangle soup (before dropping). */
+        val sourceIndex: Int,
     )
 
     /**
@@ -501,7 +504,7 @@ object GlbWriter {
                 normals[outBase + 2] = faceNormal[2]
             }
 
-            kept += KeptTriangle(triangleCoordinates, normals, colorAt(triangleIndex))
+            kept += KeptTriangle(triangleCoordinates, normals, colorAt(triangleIndex), triangleIndex)
         }
         return kept
     }

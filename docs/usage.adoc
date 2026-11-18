@@ -844,6 +844,7 @@ visible with a yellow badge and the time of that result; the error bar below sho
 | `KSTEP-D-009` | The script is larger than 1 MiB: preview only, not editable
 | `KSTEP-D-010` | The file is not editable text (NUL byte, invalid UTF-8, a line over 20 000 characters): preview only
 | `KSTEP-D-011` | Saving failed (read-only file or folder, disk full, atomic replace unsupported, other I/O); the buffer is kept
+| `KSTEP-D-012` | Warning: the list of drawn parts could not be trusted (bad ranges, names, colours or too many parts); the model is shown, selection is off
 |===
 
 The editor (ADR-0052) sits left of the preview. Editing does not change the preview: the preview always shows the saved file, and
@@ -852,6 +853,11 @@ the caret to it. If the file changes on disk while you have unsaved changes, a b
 buffer, undoable) or Keep mine (the next save overwrites the disk version); Save writes nothing until you chose. A script that is
 too large or not UTF-8 text stays preview-only, with the reason in the banner. Closing the window or opening another file with
 unsaved changes asks Save / Don't Save / Cancel; a failed save keeps the window open.
+
+Selection (ADR-0053): moving over a part tints it, a click selects it and opens a panel at the top right of the preview with its name,
+triangle count, size, centroid, colour and position. A click on empty space or Escape (while the preview has the focus) clears the
+selection. A press that moves more than 4 dp is an orbit or pan, not a click. After a re-run the selection stays if a part of that name
+still exists; with several parts of the same name the first one is shown.
 
 A script without a `shape(...)` shows "Script has no shape(...)"; without the native bridge the window shows the OCCT notice
 with an install hint for the current operating system.

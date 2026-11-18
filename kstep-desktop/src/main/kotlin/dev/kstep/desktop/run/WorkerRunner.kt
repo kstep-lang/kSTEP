@@ -7,8 +7,10 @@ import dev.kstep.cli.WorkerOutcome
 import dev.kstep.cli.diagnosticLine
 import dev.kstep.desktop.model.GlbMeshReader
 import dev.kstep.desktop.model.GlbReadException
+import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.model.TooManyTrianglesException
 import io.github.oshai.kotlinlogging.KotlinLogging
+import kotlinx.serialization.json.JsonObject
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -182,15 +184,16 @@ class WorkerRunner(
                         "geometry preview failed: ${ErrorParser.sanitize(report.reason)}",
                     )
                 }
-            is RenderReport.Geometry -> readGlb(out, generation, durationMs, notes)
+            is RenderReport.Geometry -> readGlb(out, generation, durationMs, notes, report.partsJson)
         }
     }
 
-    private fun readGlb(
+    internal fun readGlb(
         out: Path,
         generation: Long,
         durationMs: Long,
         notes: List<String>,
+        partsJson: JsonObject?,
     ): RunResult {
         val attrs =
             try {
@@ -212,7 +215,25 @@ class WorkerRunner(
         }
         return try {
             val mesh = GlbMeshReader.read(Files.readAllBytes(out))
-            RunResult.Success(model(mesh, mesh?.mesh?.triangleCount ?: 0, generation, durationMs, notes))
+            val parsed = if (partsJson == null) PartListResult.Absent else PartListParser.parse(partsJson, mesh)
+            val table = (parsed as? PartListResult.Valid)?.table
+            val warnings =
+                if (parsed is PartListResult.Invalid) {
+                    listOf(
+                        DesktopError(
+                            DesktopErrorCodes.PARTS_INVALID,
+                            null,
+                            null,
+                            ErrorParser.sanitize("Part list invalid: ${parsed.reason} -- selection is off"),
+                            Severity.WARNING,
+                        ),
+                    )
+                } else {
+                    emptyList()
+                }
+            RunResult.Success(
+                model(mesh, mesh?.mesh?.triangleCount ?: 0, generation, durationMs, notes, table, warnings),
+            )
         } catch (e: TooManyTrianglesException) {
             failure(
                 DesktopErrorCodes.TOO_MANY_TRIANGLES,
@@ -232,7 +253,9 @@ class WorkerRunner(
         generation: Long,
         durationMs: Long,
         notes: List<String>,
-    ) = DesktopModel(mesh, triangles, generation, clock(), durationMs, notes)
+        parts: PartTable? = null,
+        warnings: List<DesktopError> = emptyList(),
+    ) = DesktopModel(mesh, triangles, generation, clock(), durationMs, notes, parts, warnings)
 
     /** Warning lines of the render (`kstep render:` prefix, sanitised, at most [MAX_NOTES]) and the discarded stdout lines. */
     private fun notes(

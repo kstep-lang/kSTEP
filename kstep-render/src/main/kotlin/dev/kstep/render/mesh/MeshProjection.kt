@@ -134,6 +134,7 @@ object MeshProjection {
         val depth: Double,
         val color: MeshColor,
         val vertexShades: VertexShades?,
+        val sourceIndex: Int,
     )
 
     /** The resolved screen basis + key-light and fill-light directions for one [Camera] pose. */
@@ -205,6 +206,7 @@ object MeshProjection {
     private data class ProjectionResult(
         val triangles: List<ProjectedTriangle>,
         val scale: Double,
+        val frame: ScreenFrame? = null,
     )
 
     /**
@@ -343,7 +345,9 @@ object MeshProjection {
             val centroid = Vec3((v0.x + v1.x + v2.x) / 3.0, (v0.y + v1.y + v2.y) / 3.0, (v0.z + v1.z + v2.z) / 3.0)
             val depth = centroid dot basis.view
 
-            raw.add(RawTriangle(ax, ay, bx, by, cx, cy, shade, depth, colorAt(triangleIndex), vertexShades))
+            raw.add(
+                RawTriangle(ax, ay, bx, by, cx, cy, shade, depth, colorAt(triangleIndex), vertexShades, triangleIndex),
+            )
         }
 
         if (raw.isEmpty()) return ProjectionResult(emptyList(), requestedScale ?: 1.0)
@@ -395,10 +399,22 @@ object MeshProjection {
                         depth = t.depth,
                         color = t.color,
                         vertexShades = t.vertexShades,
+                        sourceIndex = t.sourceIndex,
                     )
                 }.sortedByDescending { it.depth }
 
-        return ProjectionResult(triangles, effectiveScale)
+        val frame =
+            ScreenFrame(
+                right = doubleArrayOf(basis.right.x, basis.right.y, basis.right.z),
+                trueUp = doubleArrayOf(basis.trueUp.x, basis.trueUp.y, basis.trueUp.z),
+                view = doubleArrayOf(basis.view.x, basis.view.y, basis.view.z),
+                centerX = centerX,
+                centerY = centerY,
+                scale = effectiveScale,
+                originX = originX,
+                originY = originY,
+            )
+        return ProjectionResult(triangles, effectiveScale, frame)
     }
 
     /**
@@ -498,5 +514,55 @@ object MeshProjection {
             panY,
             coloredMesh::colorAt,
         ).triangles
+    }
+
+    /**
+     * Like [project] for a [TriangleMesh], but also returns the [ScreenFrame] the projection was
+     * built with (null when the mesh is empty or every triangle was culled). Runs through the
+     * SAME private pipeline as [project] -- there is no second code path.
+     */
+    fun projectFramed(
+        mesh: TriangleMesh,
+        canvasWidth: Double,
+        canvasHeight: Double,
+        camera: Camera = Camera.ISOMETRIC,
+        scale: Double? = null,
+        panX: Double = 0.0,
+        panY: Double = 0.0,
+    ): FramedProjection {
+        require(scale == null || (scale.isFinite() && scale > 0.0)) {
+            "scale must be null (auto-fit) or a finite, positive value, got $scale"
+        }
+        require(panX.isFinite() && panY.isFinite()) { "panX/panY must be finite, got ($panX, $panY)" }
+        val r = projectInternal(mesh, canvasWidth, canvasHeight, camera, scale, panX, panY) { MeshColor.NEUTRAL }
+        return FramedProjection(r.triangles, r.frame)
+    }
+
+    /** [ColoredMesh] overload of [projectFramed]. */
+    fun projectFramed(
+        coloredMesh: ColoredMesh,
+        canvasWidth: Double,
+        canvasHeight: Double,
+        camera: Camera = Camera.ISOMETRIC,
+        scale: Double? = null,
+        panX: Double = 0.0,
+        panY: Double = 0.0,
+    ): FramedProjection {
+        require(scale == null || (scale.isFinite() && scale > 0.0)) {
+            "scale must be null (auto-fit) or a finite, positive value, got $scale"
+        }
+        require(panX.isFinite() && panY.isFinite()) { "panX/panY must be finite, got ($panX, $panY)" }
+        val r =
+            projectInternal(
+                coloredMesh.mesh,
+                canvasWidth,
+                canvasHeight,
+                camera,
+                scale,
+                panX,
+                panY,
+                coloredMesh::colorAt,
+            )
+        return FramedProjection(r.triangles, r.frame)
     }
 }

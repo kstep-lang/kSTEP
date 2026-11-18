@@ -54,7 +54,49 @@ private class ProducedBytes(
     val bytes: ByteArray,
     val glb: GlbWriteResult? = null,
     val meshExport: MeshExportResult? = null,
+    val parts: List<RenderedPart>? = null,
 )
+
+/** One part's range in the SOURCE mesh (before the GLB writer drops degenerate triangles). */
+internal class PartSpan(
+    val name: String,
+    val sourceFirstTriangle: Int,
+    val sourceTriangleCount: Int,
+    val placement: Placement,
+    val color: MeshColor,
+)
+
+/**
+ * Maps source-mesh part spans onto GLB triangle indices, given the ascending source indices of the triangles the GLB
+ * writer actually kept. A part whose triangles were all dropped disappears (ADR-0053).
+ */
+internal fun mapSpansToGlb(
+    spans: List<PartSpan>,
+    kept: IntArray,
+): List<RenderedPart> {
+    val out = ArrayList<RenderedPart>(spans.size)
+    var pointer = 0
+    for (span in spans) {
+        val end = span.sourceFirstTriangle.toLong() + span.sourceTriangleCount
+        while (pointer < kept.size && kept[pointer] < span.sourceFirstTriangle) pointer++
+        val glbFirst = pointer
+        while (pointer < kept.size && kept[pointer] < end) pointer++
+        val count = pointer - glbFirst
+        if (count > 0) out += RenderedPart(span.name, glbFirst, count, span.placement, span.color)
+    }
+    return out
+}
+
+private fun single(
+    first: ShapeAssignment,
+    mesh: TriangleMesh,
+    color: MeshColor,
+): PartSpan = PartSpan(partDisplayName(first.productDefinition), 0, mesh.triangleCount, Placement.IDENTITY, color)
+
+private fun partDisplayName(pd: ProductDefinition): String =
+    pd.formation.ofProduct.name
+        .ifEmpty { pd.formation.ofProduct.id }
+        .ifEmpty { pd.id }
 
 private sealed interface RenderContent {
     /**
@@ -77,6 +119,8 @@ private sealed interface RenderContent {
         val colored: ColoredMesh? = null,
         /** One entry per distinct (mesh, colour) with its placements -- the input of the STL/3MF writers (ADR-0049). */
         val exportParts: List<MeshExportPart> = emptyList(),
+        /** Source-triangle ranges per part, in merge order (ADR-0053). */
+        val partSpans: List<PartSpan> = emptyList(),
     ) : RenderContent
 
     // Carries no lines of its own -- renderBytes computes the summary card's text fresh from
@@ -226,6 +270,7 @@ object PreviewRenderer {
         val bytes = produced.bytes
         val glbResult = produced.glb
         val meshExport = produced.meshExport
+        val parts = produced.parts
 
         val contentKind =
             when (content) {
@@ -260,6 +305,7 @@ object PreviewRenderer {
             glb = glbResult,
             warnings = warnings + (meshExport?.warnings ?: emptyList()),
             meshExport = meshExport,
+            parts = parts,
         )
     }
 
@@ -332,6 +378,7 @@ object PreviewRenderer {
                             model.shapes.size,
                             previewedShapeIndex = 0,
                             exportParts = singlePart,
+                            partSpans = listOf(single(first, mesh, MeshColor.NEUTRAL)),
                         )
                     } else {
                         val colored =
@@ -346,6 +393,7 @@ object PreviewRenderer {
                             previewedShapeIndex = 0,
                             colored = colored,
                             exportParts = singlePart,
+                            partSpans = listOf(single(first, mesh, colour.toMeshColor())),
                         )
                     }
                 }
@@ -462,6 +510,20 @@ object PreviewRenderer {
             exportOrder.map { (pd, colour, placements) ->
                 MeshExportPart("${pd.id}", meshOf.getValue(pd), colour, placements)
             }
+        val spans = ArrayList<PartSpan>(instances.size)
+        var cursor = 0
+        for ((i, instance) in instances.withIndex()) {
+            val count = parts[i].mesh.triangleCount
+            spans +=
+                PartSpan(
+                    partDisplayName(instance.productDefinition),
+                    cursor,
+                    count,
+                    parts[i].placement,
+                    parts[i].color,
+                )
+            cursor += count
+        }
         val triangles =
             if (colored != null) {
                 MeshProjection.project(colored, width.toDouble(), height.toDouble())
@@ -477,6 +539,7 @@ object PreviewRenderer {
             distinctShapeCount = instanceCountOf.size,
             colored = colored,
             exportParts = exportParts,
+            partSpans = spans,
         )
     }
 
@@ -573,7 +636,16 @@ object PreviewRenderer {
                     } else {
                         GlbWriter.writeEmptyScene(extras)
                     }
-                ProducedBytes(result.bytes, glb = result)
+                val parts =
+                    if (content is RenderContent.Geometry) {
+                        mapSpansToGlb(
+                            content.partSpans,
+                            result.keptSourceTriangles,
+                        )
+                    } else {
+                        null
+                    }
+                ProducedBytes(result.bytes, glb = result, parts = parts)
             }
             RenderFormat.STL, RenderFormat.THREE_MF -> {
                 // ADR-0049 D9: a printer file is NEVER a text card or an empty model -- no geometry means no bytes.

@@ -385,7 +385,8 @@
   GLB (read by `GlbMeshReader`) plus one JSON line. Error bar with `KSTEP-S-xxx`/`KSTEP-D-xxx` codes, last good result
   kept with a badge, polling file watcher (`FileChangeWatcher`). See
   docs/adr/ADR-0051-desktop-live-preview.adoc. Welle D2 adds the script editor (package `dev.kstep.desktop.edit`, Compose-free:
-  tokenizer, undo history, atomic saver, conflict rules; UI in `ui`); see docs/adr/ADR-0052-desktop-script-editor.adoc. Open (D1b): drag and drop, recent files, included files, warm worker,
+  tokenizer, undo history, atomic saver, conflict rules; UI in `ui`); see docs/adr/ADR-0052-desktop-script-editor.adoc. Welle D3 adds part selection and an inspection panel (package `dev.kstep.desktop.pick`, Compose-free); see
+  docs/adr/ADR-0053-desktop-selection-inspection.adoc. Open (D1b): drag and drop, recent files, included files, warm worker,
   packaging.
 
 | `kstep-viewer`

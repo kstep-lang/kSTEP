@@ -27,7 +27,9 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,6 +54,13 @@ import androidx.compose.ui.unit.sp
 import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorView
+import dev.kstep.desktop.model.PartInfo
+import dev.kstep.desktop.model.PartTable
+import dev.kstep.desktop.pick.HoverThrottle
+import dev.kstep.desktop.pick.PickIndex
+import dev.kstep.desktop.pick.SelectionEvent
+import dev.kstep.desktop.pick.SelectionMachine
+import dev.kstep.desktop.pick.SelectionState
 import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.DesktopState
@@ -59,6 +68,8 @@ import dev.kstep.desktop.run.ErrorBarText
 import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.viewer.camera.ViewerCameraState
+import dev.kstep.viewer.ui.CanvasHighlight
+import dev.kstep.viewer.ui.CanvasPicking
 import dev.kstep.viewer.ui.ShapeCanvas
 import dev.kstep.viewer.ui.UnavailableNotice
 import kotlinx.coroutines.delay
@@ -98,6 +109,52 @@ fun DesktopApp(
 
     val display: DesktopModel? = if (state is DesktopState.NativeUnavailable) null else state.lastGood
     val displayMesh = display?.mesh?.mesh
+
+    // Selection (ADR-0053): the part list and the pick index belong to the displayed model; the selection itself is
+    // a part NAME, so it survives a re-run that keeps the part.
+    val parts: PartTable? = display?.parts
+    val selection = remember { mutableStateOf(SelectionState()) }
+    val pickIndex =
+        remember(display?.generation, openCount) {
+            display?.mesh?.let { m ->
+                parts?.let { PickIndex(m, it) }
+            }
+        }
+    LaunchedEffect(display?.generation, openCount) {
+        selection.value = SelectionMachine.reduce(selection.value, SelectionEvent.SceneReplaced(parts))
+    }
+    val picking =
+        remember(pickIndex) {
+            if (pickIndex != null && parts != null) {
+                DesktopPicking(pickIndex, parts, display?.generation ?: -1L, selection)
+            } else {
+                null
+            }
+        }
+    LaunchedEffect(picking) {
+        while (picking != null) {
+            delay(HoverThrottle.DEFAULT_INTERVAL_MS)
+            picking.tick()
+        }
+    }
+    val accent = if (dark) ACCENT_DARK else ACCENT_LIGHT
+    val highlight =
+        remember(parts, dark) {
+            derivedStateOf<CanvasHighlight?> {
+                parts?.let {
+                    CanvasHighlight(
+                        it.triangleToPartArray(),
+                        SelectionMachine.selectedIndex(selection.value, it),
+                        selection.value.hovered ?: -1,
+                        doubleArrayOf(accent.red.toDouble(), accent.green.toDouble(), accent.blue.toDouble()),
+                    )
+                }
+            }
+        }
+    val selectedPart: PartInfo? =
+        parts?.let { table ->
+            SelectionMachine.selectedIndex(selection.value, table).takeIf { it >= 0 }?.let { table.parts[it] }
+        }
 
     // The camera and the fit scale belong to the OPEN file: a re-run keeps both, so the view never jumps.
     LaunchedEffect(openCount) { camera.value = ViewerCameraState.HOME }
@@ -207,8 +264,15 @@ fun DesktopApp(
                                 ),
                         )
                         Box(Modifier.weight(1f).fillMaxHeight()) {
-                            Canvas(state, display, camera, fitReference, openFile)
+                            Canvas(state, display, camera, fitReference, openFile, highlight, picking)
                             Badge(state)
+                            selectedPart?.let {
+                                InspectionPanel(
+                                    it,
+                                    MaterialTheme.colorScheme.background,
+                                    Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                )
+                            }
                             if (showProgress) {
                                 LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter))
                             }
@@ -216,6 +280,11 @@ fun DesktopApp(
                     }
                     (state as? DesktopState.Error)?.let { error ->
                         ErrorBar(error.errors, dark, maxHeight = errorBarMax, onSelect = selectError)
+                    }
+                    // A non-fatal problem of the shown model, e.g. an invalid part list (KSTEP-D-012): the run stays "ok".
+                    val okWarnings = (state as? DesktopState.Ok)?.model?.warnings.orEmpty()
+                    if (okWarnings.isNotEmpty()) {
+                        ErrorBar(okWarnings, dark, maxHeight = errorBarMax, warning = true)
                     }
                 }
             }
@@ -276,6 +345,8 @@ private fun Canvas(
     camera: androidx.compose.runtime.MutableState<ViewerCameraState>,
     fitReference: TriangleMesh?,
     onOpen: () -> Unit,
+    highlight: State<CanvasHighlight?>,
+    picking: CanvasPicking?,
 ) {
     val modifier = Modifier.fillMaxSize()
     when {
@@ -319,7 +390,7 @@ private fun Canvas(
                 heading = "kSTEP Desktop has no geometry to show.",
                 showInstallInstructions = false,
             )
-        else -> ShapeCanvas(display.mesh, modifier, camera, fitReference)
+        else -> ShapeCanvas(display.mesh, modifier, camera, fitReference, highlight, picking)
     }
 }
 

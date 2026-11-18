@@ -761,6 +761,11 @@ scan before either lands.
   (`KSTEP-D-009`, `-010`); save failures are `KSTEP-D-011`. No new dependency, one watcher, one run path. The pure logic and the
   session with a real watcher are tested headless; the window (typing, focus, the dialog, the macOS edited dot) was not exercised by
   hand. Open (D2b): crash-draft recovery, live preview of the unsaved buffer, moving error marks, find/replace, bracket pairs.
+* Welle D3 (ADR-0053): selection and inspection in `kstep-desktop`. The render worker lists the drawn parts (GLB triangle ranges, name,
+  placement, colour); the desktop validates the list against the GLB (`KSTEP-D-012` warning on a bad list, selection off), picks by
+  casting a ray against the frame the canvas drew with, tints the hovered and selected part and shows an inspection panel. Selection is
+  kept over re-runs by part name. `kstep render --output json` is unchanged. The window behaviour (cursor, tooltip, Escape focus) was
+  not exercised by hand.
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

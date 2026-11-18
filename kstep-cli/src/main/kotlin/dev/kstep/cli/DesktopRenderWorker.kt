@@ -31,6 +31,6 @@ object DesktopRenderWorker {
         ImportWatchdog(ImportWatchdog.resolveTimeoutMillis() + ImportWorkerLaunch.ORPHAN_GRACE_MILLIS) {
             Runtime.getRuntime().halt(ImportWorkerLaunch.ORPHAN_EXIT_CODE)
         }.start()
-        runRender(command)
+        runRender(command, includeParts = true)
     }
 }

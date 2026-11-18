@@ -32,6 +32,15 @@ data class PreviewModelStats(
     val hasGeometry: Boolean,
 )
 
+/** One drawn part (an assembly instance, or the single previewed shape) as a range of GLB triangles (ADR-0053). */
+class RenderedPart(
+    val name: String,
+    val firstTriangle: Int,
+    val triangleCount: Int,
+    val placement: dev.kstep.geometry.Placement,
+    val color: dev.kstep.geometry.MeshColor,
+)
+
 sealed interface PreviewOutcome {
     /**
      * A container was produced -- ALWAYS, per ADR-0011's Container-Regel: geometry, a
@@ -68,6 +77,11 @@ sealed interface PreviewOutcome {
         val warnings: List<String>,
         /** Non-null iff the format is STL/3MF and geometry was exported (ADR-0049). */
         val meshExport: MeshExportResult? = null,
+        /**
+         * Per-part triangle ranges of the written GLB (GEOMETRY + GLB only, otherwise `null`): GLB triangle
+         * indices, contiguous, ascending, no zero-length entries (ADR-0053).
+         */
+        val parts: List<RenderedPart>? = null,
     ) : PreviewOutcome
 
     /**

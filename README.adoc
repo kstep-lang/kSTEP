@@ -213,7 +213,8 @@ link:docs/usage.adoc[Usage].
 
 | `kstep-desktop`
 | Live preview of a `*.kstep.kts` script (Compose Desktop, `./gradlew :kstep-desktop:run`): re-renders on save in a
-  supervised worker process; with a small script editor (syntax colouring, error marks, crash-safe save).
+  supervised worker process; with a small script editor (syntax colouring, error marks, crash-safe save). Click a part to select it (Escape or a click on
+  empty space clears), hover tints it, and a panel shows its name, size, centroid, colour and position.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest).

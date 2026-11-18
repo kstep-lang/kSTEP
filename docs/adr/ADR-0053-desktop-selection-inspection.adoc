@@ -1,0 +1,52 @@
+= ADR-0053: kSTEP Desktop, selection and inspection in the viewer
+:toc:
+
+== Status
+
+Accepted (Welle D3). Implemented on macOS arm64; the pure logic (part-list validation, ray and triangle picking, selection rules, text formatting) and the canvas wiring are tested headless, the OCCT-bound end-to-end test (worker, GLB, part list) ran on the development Mac. The window itself (hover feel, cursor, tooltip) was not exercised by hand in this wave.
+
+== Context
+
+ADR-0051 shows the model, ADR-0052 edits the script, but a click on the model does nothing. D3 lets the user hover and click a part (an assembly instance, or the single previewed shape), highlights it, and shows what the model says about it in a small inspection panel. The data comes from a script, so it is hostile input, and there must still be exactly one render path, the supervised worker.
+
+== Decision
+
+D1. The part list is produced by the render worker, not read from the GLB. `PreviewRenderer` knows the instances and their names; `MeshComposition.merge` appends parts in list order, so each instance owns a contiguous range of source triangles. `PreviewOutcome.Rendered.parts` (additive, default `null`, set only for geometry in GLB format) carries `RenderedPart(name, firstTriangle, triangleCount, placement, color)`. The name is the product name (`product_definition.formation.of_product.name`), falling back to the product id and then the definition id.
+
+D2. Ranges are GLB indices, computed after the writer's filter. `GlbWriter` drops degenerate and non-finite triangles, so source ranges would not add up to the GLB triangle count and every real model with one degenerate triangle would fail validation. `GlbWriteResult.keptSourceTriangles` (additive) lists the ascending source indices that were written; `mapSpansToGlb` converts the spans with a two-pointer pass, and a part whose triangles were all dropped disappears from the list.
+
+D3. The part list is a desktop-worker extra. `runRender(command, includeParts = false)`; only `DesktopRenderWorker` passes `true`. The public `kstep render --output json` document stays byte for byte as it was (a test checks that it has no `parts`). The list is written as `"parts":[{name, firstTriangle, triangleCount, placement (12 numbers, row-major 3x4, mm), color "#RRGGBB"}]`. Names are cut to 256 UTF-16 units without splitting a surrogate pair; colour is `round(c*255)`, alpha is dropped. More than 4096 parts would risk the 16 MiB stdout limit (`KSTEP-D-003` aborts the whole run), so the worker writes `"parts": null` and `"partsOmitted": {"reason": "too_many_parts", "count": N}` instead. The limits live in `DesktopPartLimits`, shared by writer and validator.
+
+D4. The desktop validates before it trusts (`PartListParser`, pure, never throws, `Long` arithmetic, bounds checked before any allocation): at most 4096 entries; names 1 to 256 characters (ANSI escapes removed; control characters and bidirectional overrides and isolates U+202A..202E, U+2066..2069, U+200E/F, U+061C, U+2028/9 replaced by U+FFFD; a name with no visible character is refused); `firstTriangle >= 0`, `triangleCount >= 1`, JSON integers only (a string is refused); ranges contiguous from 0 and summing to the triangle count of the GLB that was actually read; exactly 12 finite placement numbers of magnitude at most 1e9; colour `#RRGGBB` that matches the GLB colour of the part's first triangle within one 8-bit step (tamper check, so the panel cannot show a colour other than the drawn one). `bboxMin`, `bboxMax` and the area-weighted centroid are computed by the desktop from the GLB mesh, never taken from the worker. A missing list is silent (`Absent`); a present but untrustworthy one is `KSTEP-D-012`, a WARNING shown in an amber bar, the run stays ok and selection is off.
+
+D5. Picking is CPU ray casting against the frame that was drawn. The projection is orthographic and its mapping (centre of the visible silhouette, y flip, auto-fit scale) depends on culling and the camera, so a picker that rebuilt it would drift. `MeshProjection.projectFramed` returns `FramedProjection(triangles, frame)` through the same private pipeline as `project` (no second code path), `ScreenFrame.worldPointAt(px, py)` inverts a pixel onto the plane through the origin perpendicular to the view direction, and `ProjectedTriangle.sourceIndex` (additive, default -1) tells which source triangle was drawn. The ray starts in front of the whole scene (`2 * sceneRadius + 1` back along the view direction). `TrianglePicker` is Moeller-Trumbore (both faces, parallel and degenerate triangles skipped, NaN never hits). `PickIndex` tests the per-part boxes first, visits the boxes the ray enters nearest first and stops once no remaining box can hold a nearer hit. Picking runs synchronously on the UI thread: the 4096-part cap bounds the box loop, the 130 000-triangle cap bounds the triangle loop, hover picks are throttled to one per 33 ms (`HoverThrottle`, with a ticker so the last point is not lost) and the last pick is cached (`PickCache`, keyed by pixel, screen mapping and scene). No pick runs during a drag.
+
+D6. Selection is by name. `SelectionState(hovered: part index, selected: part name, occurrence: n-th part of that name)` is changed only by the pure `SelectionMachine`. A click selects (no toggle), a click on empty space or Escape clears, a drag start or the pointer leaving clears the hover. After a re-run (`SceneReplaced`) the selection stays if the n-th part of that name still exists, otherwise it is cleared silently; repeated instances of one product keep their own identity (name plus occurrence), so a click on the third wheel selects and inspects the third wheel. Escape only acts while the canvas has the keyboard focus (a press on the canvas takes the focus), so it never competes with the editor. The existing double click still resets the camera and, being two clicks, also selects the part under it.
+
+D7. Highlight is a tint, not a brightening. A light part would clip to white under a brightening and look unchanged; each lit channel moves towards an accent blue (`#1E66F5` light, `#5B9BFF` dark) by 0.45 for the selection and 0.20 for the hover. The viewer already recomputes the colours every frame (`litRgbAt` or `litR/G/B`), so there is no base colour array to copy; the lerp sits in the same loop (O(n) extra per frame, negligible), in both the smooth and the flat path. The highlight and the frame are read and written inside the draw lambda only, the frame into a plain field and never into state (ADR-0012), so the tint itself invalidates only the draw phase. The pointer cursor is different: `pointerHoverIcon` is chosen in the modifier chain from the hover state, so a hover change does recompose the canvas composable (and rebuilds the modifier chain). This is accepted for now (hover updates are throttled); see follow-up.
+
+D8. Input. A press that is released before it moved 4 dp (converted with the density, not 4 px) is a click; moving further starts the usual orbit or pan and reports `onDragStart` once. Shift and the middle button never click. Without `picking` the original touch-slop handler runs unchanged, so the standalone viewer and its wiring tests are untouched. Cursor: hand over a part, move cursor elsewhere (hand as before without picking).
+
+D9. Inspection panel (`InspectionPanel`): top right of the canvas, 260 dp wide, 92 percent background, text only, no close button, present only while a part is selected, in the same box as the canvas so the canvas keeps its size. Name (one line, ellipsis, tooltip with the full name), then triangles (thousands separator), size (`W x D x H mm` of the box), centroid, colour swatch with hex, position (placement origin). Numbers use `Locale.ROOT` and two decimals, so the output does not depend on the system locale.
+
+D10. API additions in the published modules are additive and have defaults: `ProjectedTriangle.sourceIndex`, `MeshProjection.projectFramed`, `ScreenFrame`, `FramedProjection`, `GlbWriteResult.keptSourceTriangles`, `PreviewOutcome.Rendered.parts`, `RenderedPart`. No new dependency; the distribution guard is unaffected. No database or migration is involved.
+
+== Security
+
+* The part list and the GLB are untrusted. Every length and count is checked before the allocation that depends on it (`triangleToPart` is allocated only after the sum check); the parser returns a result instead of throwing.
+* DoS: at most 4096 parts and 130 000 triangles bound a pick; throttle and cache bound the rate; stdout stays below 16 MiB through the 4096 cap and the name cut.
+* Display spoofing: control, ANSI and bidirectional characters are neutralised in names; the colour is cross-checked with the GLB.
+* Logging: no script text; part names are not logged.
+* The script is still evaluated only in the worker. `DesktopArchitectureTest` keeps the forbidden words out of the desktop sources and now also keeps the `pick` package free of Compose and `ui`.
+
+== Rejected alternatives
+
+* Reading part names from GLB nodes: the writer emits one mesh without nodes per part; the names exist only in the worker.
+* Rebuilding the pixel mapping in the desktop: drifts from the drawn frame.
+* A BVH over triangles: the box pre-filter with the triangle caps is enough for this wave.
+* Brightening the selected part: invisible on light parts.
+* Identity by part index: a re-run would select another part after any edit above it.
+
+== Follow-up
+
+Jump from the selection to its place in the script; multi-select; BVH or GPU picking if the caps are raised; an outline instead of a tint; moving the hover cursor out of the composition scope and a recompose-count test for the highlight; hand-testing of cursor, tooltip and Escape focus on every platform.

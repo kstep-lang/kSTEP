@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +40,9 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.isPrimaryPressed
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.isTertiaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
@@ -52,10 +56,12 @@ import dev.kstep.geometry.ColoredMesh
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.render.mesh.Camera
 import dev.kstep.render.mesh.MeshProjection
+import dev.kstep.render.mesh.ScreenFrame
 import dev.kstep.viewer.camera.CameraInteraction
 import dev.kstep.viewer.camera.ViewerCameraState
 import org.jetbrains.skia.BlendMode
 import org.jetbrains.skia.VertexMode
+import java.awt.Cursor
 import org.jetbrains.skia.Color as SkiaColor
 import org.jetbrains.skia.Paint as SkiaPaint
 
@@ -87,7 +93,7 @@ fun ShapeCanvas(
     modifier: Modifier = Modifier,
     state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) },
     fitReference: TriangleMesh? = null,
-) = ShapeCanvasInternal(mesh, coloredMesh = null, modifier, state, fitReference)
+) = ShapeCanvasInternal(mesh, coloredMesh = null, modifier, state, fitReference, null, null)
 
 /**
  * Overload of [ShapeCanvas] for a [ColoredMesh] (see `dev.kstep.geometry.MeshComposition.
@@ -101,7 +107,88 @@ fun ShapeCanvas(
     modifier: Modifier = Modifier,
     state: MutableState<ViewerCameraState> = remember { mutableStateOf(ViewerCameraState.HOME) },
     fitReference: TriangleMesh? = null,
-) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference)
+) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference, null, null)
+
+/**
+ * Tint instructions for part highlighting (ADR-0053). [triangleToPart] maps a SOURCE mesh triangle to a part index;
+ * [selected] and [hovered] are part indices (`-1` for none). Each lit colour channel moves towards [accentRgb]
+ * (0..1) by [selectT] (selected part) or [hoverT] (hovered part): a tint, not a brightening, so a part that is
+ * already light stays distinguishable.
+ */
+class CanvasHighlight(
+    val triangleToPart: IntArray,
+    val selected: Int,
+    val hovered: Int,
+    val accentRgb: DoubleArray,
+    val selectT: Double = DEFAULT_SELECT_T,
+    val hoverT: Double = DEFAULT_HOVER_T,
+) {
+    internal fun tintFor(sourceIndex: Int): Double {
+        if (sourceIndex < 0 || sourceIndex >= triangleToPart.size) return 0.0
+        val part = triangleToPart[sourceIndex]
+        return when {
+            part < 0 -> 0.0
+            part == selected -> selectT
+            part == hovered -> hoverT
+            else -> 0.0
+        }
+    }
+
+    companion object {
+        const val DEFAULT_SELECT_T: Double = 0.45
+        const val DEFAULT_HOVER_T: Double = 0.20
+    }
+}
+
+/**
+ * Pointer callbacks for picking, implemented by the host. [frame] is the screen mapping the canvas drew with last
+ * (`null` before the first frame); the host inverts pixels with it, so picking cannot drift from the drawing.
+ */
+interface CanvasPicking {
+    /** Raw pointer move with no button pressed; throttling is the host's job. */
+    fun onHover(
+        x: Float,
+        y: Float,
+        frame: ScreenFrame?,
+    )
+
+    /** A primary-button press and release that stayed below the drag threshold. */
+    fun onClick(
+        x: Float,
+        y: Float,
+        frame: ScreenFrame?,
+    )
+
+    fun onDragStart()
+
+    fun onPointerExit()
+
+    /** Escape while the canvas has the keyboard focus; `true` if it was consumed. */
+    fun onEscape(): Boolean
+
+    /** Whether the pointer currently rests on a part (picks the cursor). */
+    fun isOverPart(): Boolean
+}
+
+/** [ShapeCanvas] with part highlighting and picking (ADR-0053); the camera interaction is unchanged. */
+@Composable
+fun ShapeCanvas(
+    coloredMesh: ColoredMesh,
+    modifier: Modifier,
+    state: MutableState<ViewerCameraState>,
+    fitReference: TriangleMesh?,
+    highlight: State<CanvasHighlight?>,
+    picking: CanvasPicking?,
+) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference, highlight, picking)
+
+private fun androidx.compose.ui.input.pointer.PointerButtons.anyPressed(): Boolean =
+    isPrimaryPressed || isSecondaryPressed || isTertiaryPressed
+
+private class FrameHolder {
+    var frame: ScreenFrame? = null
+}
+
+private val DRAG_THRESHOLD = 4.dp
 
 @OptIn(ExperimentalComposeUiApi::class) // Modifier.onPointerEvent (scroll-to-zoom) is experimental
 // in this Compose Multiplatform version -- no unstable behavior relied on beyond the API shape
@@ -113,7 +200,10 @@ private fun ShapeCanvasInternal(
     modifier: Modifier,
     state: MutableState<ViewerCameraState>,
     fitReference: TriangleMesh?,
+    highlight: State<CanvasHighlight?>?,
+    picking: CanvasPicking?,
 ) {
+    val frameHolder = remember { FrameHolder() }
     val focusRequester = remember { FocusRequester() }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
 
@@ -163,7 +253,7 @@ private fun ShapeCanvasInternal(
             Modifier
                 .fillMaxSize()
                 .onSizeChanged { canvasSize = it }
-                .pointerInput(Unit) {
+                .pointerInput(picking) {
                     // ONE gesture handler for both orbit and pan -- not a second, competing
                     // pointerInput(Unit) block armed with its own detectDragGestures -- so exactly
                     // one of onDrag/onPan runs per drag, decided once at the initial press by
@@ -176,6 +266,48 @@ private fun ShapeCanvasInternal(
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val isPan =
                             currentEvent.buttons.isTertiaryPressed || currentEvent.keyboardModifiers.isShiftPressed
+                        if (picking != null) {
+                            // Escape must reach THIS canvas afterwards, not the script editor.
+                            focusRequester.requestFocus()
+                            val primary = currentEvent.buttons.isPrimaryPressed && !isPan
+                            val threshold = DRAG_THRESHOLD.toPx()
+                            var dragging = false
+                            var released = false
+                            // A hand-written loop instead of drag(): drag() reports "false" for a press that ends
+                            // without any movement, but exactly that press-and-release is a click here.
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.changedToUpIgnoreConsumed()) {
+                                    released = true
+                                    break
+                                }
+                                if (change.isConsumed) break
+                                if (!dragging) {
+                                    if ((change.position - down.position).getDistance() <= threshold) continue
+                                    dragging = true
+                                    picking.onDragStart()
+                                }
+                                val amount = change.positionChange()
+                                change.consume()
+                                state.value =
+                                    if (isPan) {
+                                        CameraInteraction.onPan(
+                                            state.value,
+                                            amount.x,
+                                            amount.y,
+                                            size.width.toDouble(),
+                                            size.height.toDouble(),
+                                        )
+                                    } else {
+                                        CameraInteraction.onDrag(state.value, amount.x, amount.y)
+                                    }
+                            }
+                            if (released && !dragging && primary) {
+                                picking.onClick(down.position.x, down.position.y, frameHolder.frame)
+                            }
+                            return@awaitEachGesture
+                        }
                         val slopChange = awaitTouchSlopOrCancellation(down.id) { change, _ -> change.consume() }
                         if (slopChange != null) {
                             drag(down.id) { change ->
@@ -198,7 +330,23 @@ private fun ShapeCanvasInternal(
                     }
                 }.pointerInput(Unit) {
                     detectTapGestures(onDoubleTap = { state.value = CameraInteraction.reset() })
-                }.onPointerEvent(PointerEventType.Scroll) { event ->
+                }.onPointerEvent(PointerEventType.Move) { event ->
+                    // Hover for picking: only with no button pressed (a drag is an orbit/pan, not a hover).
+                    if (picking != null && !event.buttons.anyPressed()) {
+                        event.changes
+                            .firstOrNull()
+                            ?.position
+                            ?.let { picking.onHover(it.x, it.y, frameHolder.frame) }
+                    }
+                }.onPointerEvent(PointerEventType.Enter) { event ->
+                    if (picking != null && !event.buttons.anyPressed()) {
+                        event.changes
+                            .firstOrNull()
+                            ?.position
+                            ?.let { picking.onHover(it.x, it.y, frameHolder.frame) }
+                    }
+                }.onPointerEvent(PointerEventType.Exit) { picking?.onPointerExit() }
+                .onPointerEvent(PointerEventType.Scroll) { event ->
                     // firstOrNull, not first(): an empty `changes` list for a reported scroll
                     // event should be a silent no-op, not a NoSuchElementException that takes the
                     // whole window down with it (same "never crash from an input handler"
@@ -215,10 +363,18 @@ private fun ShapeCanvasInternal(
                     if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.R) {
                         state.value = CameraInteraction.reset()
                         true
+                    } else if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.Escape && picking != null) {
+                        picking.onEscape()
                     } else {
                         false
                     }
-                }.pointerHoverIcon(PointerIcon.Hand),
+                }.pointerHoverIcon(
+                    when {
+                        picking == null -> PointerIcon.Hand
+                        picking.isOverPart() -> PointerIcon(Cursor(Cursor.HAND_CURSOR))
+                        else -> PointerIcon(Cursor(Cursor.MOVE_CURSOR))
+                    },
+                ),
         ) {
             // MeshProjection.project() requires a positive canvas size (see its own `require`).
             // A layout pass can legitimately hand this scope a zero-sized `size` -- e.g. a
@@ -240,9 +396,9 @@ private fun ShapeCanvasInternal(
             // the auto-fit scale into this frame's actual scale.
             val panXPixels = cameraState.panX * size.width.toDouble() * cameraState.zoom
             val panYPixels = cameraState.panY * size.height.toDouble() * cameraState.zoom
-            val triangles =
+            val framed =
                 if (coloredMesh != null) {
-                    MeshProjection.project(
+                    MeshProjection.projectFramed(
                         coloredMesh,
                         size.width.toDouble(),
                         size.height.toDouble(),
@@ -252,7 +408,7 @@ private fun ShapeCanvasInternal(
                         panY = panYPixels,
                     )
                 } else {
-                    MeshProjection.project(
+                    MeshProjection.projectFramed(
                         mesh,
                         size.width.toDouble(),
                         size.height.toDouble(),
@@ -262,6 +418,12 @@ private fun ShapeCanvasInternal(
                         panY = panYPixels,
                     )
                 }
+            val triangles = framed.triangles
+            // A plain field, NOT state: writing a State from the draw phase is forbidden (ADR-0012).
+            frameHolder.frame = framed.frame
+            // Read INSIDE the draw lambda: a hover change invalidates only the draw phase, no recomposition.
+            val highlightNow = highlight?.value
+            val accent = highlightNow?.accentRgb
             // Two DISJOINT draw paths, never mixed within one frame's triangle list -- see
             // docs/adr/ADR-0018-smooth-vertex-normals.adoc. `triangles` is homogeneous by
             // construction: `MeshProjection.projectInternal` sets EVERY triangle's
@@ -295,6 +457,10 @@ private fun ShapeCanvasInternal(
                     positions[pIndex++] = t.cy.toFloat()
                     for (corner in 0..2) {
                         val rgb = t.litRgbAt(corner)
+                        val tint = highlightNow?.tintFor(t.sourceIndex) ?: 0.0
+                        if (tint > 0.0 && accent != null) {
+                            for (k in 0..2) rgb[k] = rgb[k] + (accent[k] - rgb[k]) * tint
+                        }
                         colors[cIndex++] =
                             SkiaColor.makeARGB(
                                 255,
@@ -329,7 +495,17 @@ private fun ShapeCanvasInternal(
                     // by construction (shade is coerced in MeshProjection, color channels are
                     // guaranteed in 0.0..1.0 by MeshColor's own init check), so no extra coerceIn is
                     // needed here, matching this file's pre-wave style.
-                    val color = Color(t.litR.toFloat(), t.litG.toFloat(), t.litB.toFloat())
+                    val tint = highlightNow?.tintFor(t.sourceIndex) ?: 0.0
+                    val color =
+                        if (tint > 0.0 && accent != null) {
+                            Color(
+                                (t.litR + (accent[0] - t.litR) * tint).coerceIn(0.0, 1.0).toFloat(),
+                                (t.litG + (accent[1] - t.litG) * tint).coerceIn(0.0, 1.0).toFloat(),
+                                (t.litB + (accent[2] - t.litB) * tint).coerceIn(0.0, 1.0).toFloat(),
+                            )
+                        } else {
+                            Color(t.litR.toFloat(), t.litG.toFloat(), t.litB.toFloat())
+                        }
                     drawPath(path, color, style = Fill)
                     // Same color, 1px stroke -- closes the antialiasing seams between coplanar
                     // neighboring triangles (Atkinson's "haarriss" fix, see ADR-0010).

@@ -107,6 +107,8 @@ class WorkerRunnerHostileTest :
                 val result = runner.run(script, 1) { }.shouldBeInstanceOf<RunResult.Success>()
                 result.model.mesh shouldBe null
                 result.model.triangles shouldBe 0
+                result.model.parts shouldBe null
+                result.model.warnings.shouldBeEmpty()
             }
         }
 

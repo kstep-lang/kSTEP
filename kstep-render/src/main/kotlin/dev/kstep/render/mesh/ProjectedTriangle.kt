@@ -58,6 +58,8 @@ data class ProjectedTriangle(
     val depth: Double,
     val color: MeshColor = MeshColor.NEUTRAL,
     val vertexShades: VertexShades? = null,
+    /** Index of this triangle in the source mesh's triangle soup, `-1` when hand-constructed. */
+    val sourceIndex: Int = -1,
 ) {
     /** [shade] multiplied by [color]'s red channel -- the lighting formula itself lives entirely
      *  in [MeshProjection] and is untouched by [color]; this is just the multiplicative combine

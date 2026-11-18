@@ -12,6 +12,8 @@ sealed interface RenderReport {
     /** A geometry GLB was written; [glbTriangles] triangles. */
     data class Geometry(
         val glbTriangles: Int,
+        /** The whole result object, raw: its `parts`/`partsOmitted` are validated only after the GLB was read (ADR-0053). */
+        val partsJson: JsonObject? = null,
     ) : RenderReport
 
     /** The script ran but has no geometry (e.g. a product-structure-only script). */
@@ -64,7 +66,7 @@ object ErrorParser {
         return when (obj.str("content")) {
             "geometry" -> {
                 val glb = obj["glb"] as? JsonObject
-                RenderReport.Geometry((glb?.get("triangleCount") as? JsonPrimitive)?.intOrNull ?: 0)
+                RenderReport.Geometry((glb?.get("triangleCount") as? JsonPrimitive)?.intOrNull ?: 0, obj)
             }
             "summary" -> RenderReport.NoGeometry
             "notice" ->

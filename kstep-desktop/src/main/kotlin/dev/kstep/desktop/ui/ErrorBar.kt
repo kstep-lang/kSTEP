@@ -35,11 +35,14 @@ import java.awt.datatransfer.StringSelection
 private val STRIPE = Color(0xFFC62828)
 private val BACKGROUND_LIGHT = Color(0xFFFDECEA)
 private val BACKGROUND_DARK = Color(0xFF3B1F1F)
+private val WARNING_BACKGROUND_LIGHT = Color(0xFFFFF4D6)
+private val WARNING_BACKGROUND_DARK = Color(0xFF3A3017)
 
 /**
  * The error bar (ADR-0051): collapsed it is one 32 dp line with the first error (code, line:column, message), a
  * "+N more" toggle and "Copy"; expanded it lists every error, at most [maxHeight] high. A red stripe on the left, the
- * code and position in monospace. Never covers the canvas: it sits below it.
+ * code and position in monospace. Never covers the canvas: it sits below it. With [warning] it uses the amber warning
+ * colours of the editor markers instead (e.g. an invalid part list, ADR-0053).
  */
 @Composable
 fun ErrorBar(
@@ -48,16 +51,29 @@ fun ErrorBar(
     maxHeight: Dp,
     modifier: Modifier = Modifier,
     initiallyExpanded: Boolean = false,
+    warning: Boolean = false,
     onSelect: (DesktopError) -> Unit = {},
 ) {
     var expanded by remember(errors) { mutableStateOf(initiallyExpanded) }
-    val textColor = if (dark) Color(0xFFFFDAD6) else Color(0xFF410002)
+    val textColor =
+        when {
+            warning && dark -> Color(0xFFFFE9B0)
+            warning -> Color(0xFF3D2A00)
+            dark -> Color(0xFFFFDAD6)
+            else -> Color(0xFF410002)
+        }
     // The stripe is drawn behind the content (no IntrinsicSize: the expanded list must stay measurable).
     Box(
         modifier
             .fillMaxWidth()
-            .background(if (dark) BACKGROUND_DARK else BACKGROUND_LIGHT)
-            .drawBehind { drawRect(STRIPE, size = Size(4.dp.toPx(), size.height)) }
+            .background(
+                when {
+                    warning && dark -> WARNING_BACKGROUND_DARK
+                    warning -> WARNING_BACKGROUND_LIGHT
+                    dark -> BACKGROUND_DARK
+                    else -> BACKGROUND_LIGHT
+                },
+            ).drawBehind { drawRect(if (warning) MARK_WARNING else STRIPE, size = Size(4.dp.toPx(), size.height)) }
             .padding(start = 4.dp),
     ) {
         if (!expanded) {

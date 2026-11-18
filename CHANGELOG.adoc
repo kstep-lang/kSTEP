@@ -9,6 +9,11 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop selection and inspection (Welle D3, ADR-0053): hover tints the part under the pointer, a click selects it (a click on
+  empty space or Escape clears), and an inspection panel shows its name, triangle count, size, centroid, colour and position. The render
+  worker now reports the drawn parts and the desktop validates the list against the GLB; an untrustworthy list switches selection off
+  with the warning `KSTEP-D-012`. No new dependency; `kstep render --output json` is unchanged (the part list is a desktop-worker extra).
+  Additive API: `ProjectedTriangle.sourceIndex`, `MeshProjection.projectFramed`, `GlbWriteResult.keptSourceTriangles`.
 * kSTEP Desktop script editor (Welle D2, ADR-0052): the window shows an editor next to the preview. Kotlin syntax colouring with the
   kSTEP DSL names, a gutter with line numbers and error/warning marks (hollow while the buffer has unsaved changes), click on an error
   to jump to its position, explicit save (Cmd/Ctrl+S) by temp file, `fsync` and atomic rename, own undo/redo, indentation on Enter and

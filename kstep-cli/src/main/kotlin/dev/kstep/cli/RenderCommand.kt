@@ -9,13 +9,16 @@ import dev.kstep.preview.PreviewRenderer
 import dev.kstep.preview.PreviewRequest
 import dev.kstep.preview.PreviewSource
 import dev.kstep.preview.PreviewWriter
+import dev.kstep.preview.RenderedPart
 import dev.kstep.preview.deriveRenderOutputPath
 import dev.kstep.render.export.MeshExportResult
 import dev.kstep.render.gltf.GlbWriteResult
 import dev.kstep.script.KStepScriptOutcome
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
@@ -31,7 +34,10 @@ import kotlin.system.exitProcess
  * before the extraction, byte-for-byte (see `CliRenderIntegrationTest`, which is unchanged by
  * this wave).
  */
-fun runRender(command: CliCommand.Render) {
+fun runRender(
+    command: CliCommand.Render,
+    includeParts: Boolean = false,
+) {
     val request =
         PreviewRequest(
             source = PreviewSource.ScriptFile(File(command.scriptPath)),
@@ -65,13 +71,14 @@ fun runRender(command: CliCommand.Render) {
             exitProcess(1)
         }
         is PreviewOutcome.ScriptFailed -> printError(command.jsonOutput, outcome.outcome)
-        is PreviewOutcome.Rendered -> handleRendered(command, outcome)
+        is PreviewOutcome.Rendered -> handleRendered(command, outcome, includeParts)
     }
 }
 
 private fun handleRendered(
     command: CliCommand.Render,
     outcome: PreviewOutcome.Rendered,
+    includeParts: Boolean,
 ) {
     if (outcome.contentKind == PreviewContentKind.NOTICE) {
         // Printed on stderr unconditionally -- even on the silent-fallback (exit 0) path -- so
@@ -114,16 +121,17 @@ private fun handleRendered(
         reportIoFailure(command, e.message ?: "unknown I/O error")
         return
     }
-    reportSuccess(command, outPath, outcome)
+    reportSuccess(command, outPath, outcome, includeParts)
 }
 
 private fun reportSuccess(
     command: CliCommand.Render,
     outPath: String,
     outcome: PreviewOutcome.Rendered,
+    includeParts: Boolean,
 ) {
     if (command.jsonOutput) {
-        println(successJson(outPath, outcome, command.toleranceMm).toString())
+        println(successJson(outPath, outcome, command.toleranceMm, includeParts).toString())
     } else {
         println("Wrote $outPath")
     }
@@ -223,6 +231,7 @@ private fun successJson(
     outPath: String,
     outcome: PreviewOutcome.Rendered,
     toleranceMm: Double?,
+    includeParts: Boolean = false,
 ): JsonObject =
     buildJsonObject {
         put("status", "success")
@@ -257,6 +266,7 @@ private fun successJson(
         putOcct(outcome.occt)
         put("rootCount", outcome.model?.rootCount ?: 0)
         outcome.glb?.let { glbResult -> putGlb(glbResult) }
+        if (includeParts) outcome.parts?.let { putParts(it) }
         outcome.meshExport?.let { export -> putMeshExport(export, toleranceMm) }
     }
 
@@ -280,6 +290,39 @@ private fun JsonObjectBuilder.putMeshExport(
         put("toleranceMm", toleranceMm)
         putJsonArray("warnings") { export.warnings.forEach { add(it) } }
     }
+}
+
+/** Desktop-worker only (ADR-0053): the part list of the written GLB; never part of the public `kstep render` JSON. */
+internal fun JsonObjectBuilder.putParts(parts: List<RenderedPart>) {
+    if (parts.size > DesktopPartLimits.MAX_PARTS) {
+        put("parts", JsonNull)
+        putJsonObject("partsOmitted") {
+            put("reason", "too_many_parts")
+            put("count", parts.size)
+        }
+        return
+    }
+    putJsonArray("parts") {
+        for (part in parts) {
+            addJsonObject {
+                put("name", truncateName(part.name))
+                put("firstTriangle", part.firstTriangle)
+                put("triangleCount", part.triangleCount)
+                putJsonArray("placement") { part.placement.rowMajor3x4().forEach { add(it) } }
+                val c = part.color
+                put("color", "#%02X%02X%02X".format(channel(c.r), channel(c.g), channel(c.b)))
+            }
+        }
+    }
+}
+
+private fun channel(v: Double): Int = Math.round(v * 255.0).toInt().coerceIn(0, 255)
+
+private fun truncateName(name: String): String {
+    if (name.length <= DesktopPartLimits.MAX_NAME_CHARS) return name
+    var end = DesktopPartLimits.MAX_NAME_CHARS
+    if (Character.isHighSurrogate(name[end - 1])) end--
+    return name.substring(0, end)
 }
 
 private fun JsonObjectBuilder.putGlb(glbResult: GlbWriteResult) {
@@ -310,3 +353,9 @@ private fun printError(
     jsonOutput: Boolean,
     outcome: KStepScriptOutcome,
 ): Unit = printExportError(jsonOutput, outcome, command = "render")
+
+/** Limits shared by the desktop worker (writer) and the desktop app (validator) for the part list (ADR-0053). */
+object DesktopPartLimits {
+    const val MAX_PARTS: Int = 4096
+    const val MAX_NAME_CHARS: Int = 256
+}

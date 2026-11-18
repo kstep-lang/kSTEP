@@ -22,6 +22,12 @@ class GlbWriteResult(
      *  or carried a non-finite or float32-unrepresentable coordinate -- see
      *  [GlbWriter]'s KDoc. */
     val droppedTriangleCount: Int,
+    /**
+     * Ascending source-mesh triangle indices of the triangles actually written (GLB triangle `i`
+     * came from source triangle `keptSourceTriangles[i]`). Empty for the empty scene. Not a data
+     * class: [IntArray]/[ByteArray] equality is by identity.
+     */
+    val keptSourceTriangles: IntArray = IntArray(0),
 ) {
     /** The size of [bytes], in bytes -- what `kstep render --output json` reports as
      *  `glb.byteLength`. */
