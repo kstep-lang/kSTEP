@@ -9,6 +9,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop export dialog (Welle D7, ADR-0057): toolbar `Export...` or Cmd/Ctrl+E writes the open script as STEP AP242, GLB, STL
+  or 3MF. Format first, then the target; the export runs on the saved file (`Save and Export` or `Export Saved Version` with unsaved
+  changes). The script runs only in a supervised worker (new `DesktopExportWorker` with a strict argument whitelist and its own
+  orphan watchdog, so a 120 s export is not halted at 70 s). The worker output goes to a private session directory, is validated
+  (size cap 512 MiB, magic bytes) and moved to the target atomically, with no non-atomic fallback; links and non-regular targets are
+  refused, an existing file is replaced only after an inline `Replace` confirmation. A structure-only script exports as STEP; STEP
+  with shapes but without OCCT is refused instead of silently writing structure only. `Stop` (Esc or Cmd/Ctrl+.) kills the worker
+  and writes nothing. New error codes `KSTEP-D-019` to `KSTEP-D-024`. No new dependency; `runExport` in kstep-cli is now `internal`.
 * kSTEP Desktop AI panel (Welle D6a, ADR-0056): describe a change in words and get a proposal as a diff. A new unpublished module
   `kstep-desktop-ai` (Koog as a minimal Anthropic client behind a hardened transport; no tools, no agent). The panel (toolbar `AI`
   or Cmd/Ctrl+K) shows a prompt field, an optional "Include current script" tick, `Generate`/`Stop`, up to 4 attempts, and the

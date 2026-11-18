@@ -47,6 +47,17 @@ object TestSupport {
         return controller.state.value
     }
 
+    fun awaitExportState(
+        controller: dev.kstep.desktop.export.ExportController,
+        timeoutMs: Long = 90_000,
+        predicate: (dev.kstep.desktop.export.ExportState) -> Boolean,
+    ): dev.kstep.desktop.export.ExportState {
+        check(await(timeoutMs) { predicate(controller.state.value) }) {
+            "export state did not reach the expected condition; last state: ${controller.state.value}"
+        }
+        return controller.state.value
+    }
+
     /**
      * Live render workers below this JVM. On Linux `ProcessHandle` cuts the command line at 4096 characters, and the
      * worker class path is longer than that, so the main class name is not reliable there; the worker's own JVM flags
@@ -59,6 +70,8 @@ object TestSupport {
             .filter { handle ->
                 val info = handle.info()
                 val text = info.commandLine().orElse(info.arguments().map { it.joinToString(" ") }.orElse(""))
-                text.contains("DesktopRenderWorker") || text.contains("-XX:+SuppressFatalErrorMessage")
+                text.contains("DesktopRenderWorker") ||
+                    text.contains("DesktopExportWorker") ||
+                    text.contains("-XX:+SuppressFatalErrorMessage")
             }.toList()
 }

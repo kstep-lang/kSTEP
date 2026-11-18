@@ -31,7 +31,7 @@ private const val PERCENT_PER_STEP = 5
 /** The tooltip of a control that may be disabled: it also appears over a disabled button, which says why. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun WithTip(
+internal fun WithTip(
     tip: String?,
     content: @Composable () -> Unit,
 ) {

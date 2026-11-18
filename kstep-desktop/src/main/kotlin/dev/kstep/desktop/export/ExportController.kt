@@ -1,0 +1,263 @@
+package dev.kstep.desktop.export
+
+import dev.kstep.cli.ImportWorkerSupervisor
+import dev.kstep.cli.WorkerTempDir
+import dev.kstep.desktop.run.DesktopError
+import dev.kstep.desktop.run.DesktopErrorCodes
+import dev.kstep.desktop.run.ErrorParser
+import dev.kstep.desktop.run.LiveRunController
+import io.github.oshai.kotlinlogging.KotlinLogging
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+private val logger = KotlinLogging.logger {}
+
+/**
+ * Wires the pure [ExportStateMachine] to the export worker and the atomic writer (ADR-0057). Compose-free. Every event
+ * goes through one lock; the pipeline (check target, run worker, validate output, write atomically) runs on a single
+ * thread, so at most one export and one worker process exist. A kill never happens under the lock. The script path is
+ * captured when the dialog opens ([begin]): a later change of the open script does not affect a running export.
+ *
+ * Logging is limited to generation, format and outcome kind: never paths, script text or worker output.
+ */
+class ExportController(
+    private val worker: (
+        script: Path,
+        format: ExportFormat,
+        generation: Long,
+        onStarted: (Process) -> Unit,
+    ) -> ExportWorkerResult,
+    private val checker: (Path) -> TargetCheck = ExportTargets::check,
+    private val validator: (
+        Path,
+        ExportFormat,
+    ) -> ValidationResult = { f, fmt -> ExportOutputValidator.validate(f, fmt) },
+    private val writer: ExportAtomicWriter = ExportAtomicWriter(),
+    private val clock: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
+    private val sessionDir: Path? = null,
+    private val executor: ExecutorService =
+        Executors.newSingleThreadExecutor { r -> Thread(r, "kstep-desktop-export").apply { isDaemon = true } },
+) : AutoCloseable {
+    private val lock = Any()
+    private val mutableState = MutableStateFlow<ExportState>(ExportStateMachine.initial(ExportFormat.DEFAULT, null))
+    private val closed = AtomicBoolean(false)
+    private var script: Path? = null
+    private var current: Pair<Long, Process>? = null
+
+    val state: StateFlow<ExportState> = mutableState.asStateFlow()
+
+    /** Elapsed milliseconds since [startedAtMs] on this controller's clock (the dialog's progress line). */
+    fun elapsedSince(startedAtMs: Long): Long = (clock() - startedAtMs).coerceAtLeast(0)
+
+    /** Opens the dialog's session for [scriptPath]; a running export is never interrupted by this. */
+    fun begin(
+        scriptPath: Path,
+        format: ExportFormat,
+        directory: Path,
+    ) {
+        val name = ExportNaming.defaultFileName(scriptPath.fileName.toString(), format)
+        synchronized(lock) {
+            if (mutableState.value is ExportState.Running) return
+            script = scriptPath.toAbsolutePath().normalize()
+            mutableState.value =
+                ExportStateMachine.initial(format, null).copy(generation = mutableState.value.generation)
+        }
+        chooseTarget(directory.resolve(name))
+    }
+
+    fun chooseFormat(format: ExportFormat) {
+        dispatch(ExportEvent.ChooseFormat(format))
+        // the target's extension changed: look at the new name (existing file, writable)
+        (mutableState.value as? ExportState.Configuring)?.target?.let { chooseTarget(it) }
+    }
+
+    fun chooseTarget(path: Path) {
+        val format = (mutableState.value as? ExportState.Configuring)?.format ?: return
+        val adjusted = ExportStateMachine.retarget(path, format)
+        when (val check = checker(adjusted)) {
+            is TargetCheck.Ok -> dispatch(ExportEvent.ChooseTarget(check.file, check.existing?.bytes))
+            is TargetCheck.Invalid ->
+                dispatch(
+                    ExportEvent.TargetRejected(
+                        adjusted,
+                        DesktopError(check.code, null, null, ErrorParser.sanitize(check.message)),
+                    ),
+                )
+        }
+    }
+
+    fun confirmReplace() = dispatch(ExportEvent.ConfirmReplace)
+
+    fun start() = dispatch(ExportEvent.Start(clock()))
+
+    fun stop() = dispatch(ExportEvent.Stop)
+
+    /** Closing the dialog: only effective while configuring or done (a run is stopped first). */
+    fun closeDialog() = dispatch(ExportEvent.Close)
+
+    private fun dispatch(event: ExportEvent) {
+        val toKill: Process?
+        val starts = ArrayList<ExportEffect.StartPipeline>()
+        synchronized(lock) {
+            if (closed.get()) return
+            val transition = ExportStateMachine.reduce(mutableState.value, event)
+            mutableState.value = transition.state
+            var cancel = false
+            for (effect in transition.effects) {
+                when (effect) {
+                    is ExportEffect.CancelRun -> cancel = true
+                    is ExportEffect.StartPipeline -> starts += effect
+                    ExportEffect.CloseDialog -> Unit // the UI observes the state; nothing to do here
+                }
+            }
+            toKill = if (cancel) current?.second else null
+            if (cancel) current = null
+            val path = script
+            if (path != null) starts.forEach { submit(it, path) }
+        }
+        toKill?.let { killAsync(it) }
+    }
+
+    private fun submit(
+        effect: ExportEffect.StartPipeline,
+        scriptPath: Path,
+    ) {
+        try {
+            executor.submit { runPipeline(effect, scriptPath) }
+        } catch (_: RejectedExecutionException) {
+            // closed
+        }
+    }
+
+    private fun isActive(generation: Long): Boolean =
+        synchronized(lock) {
+            val s = mutableState.value
+            !closed.get() && s is ExportState.Running && s.generation == generation
+        }
+
+    private fun runPipeline(
+        effect: ExportEffect.StartPipeline,
+        scriptPath: Path,
+    ) {
+        val generation = effect.generation
+        val outcome =
+            try {
+                pipeline(effect, scriptPath)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            } catch (e: Exception) {
+                logger.warn { "export gen=$generation failed unexpectedly (${e::class.simpleName})" }
+                failed(DesktopErrorCodes.EXPORT_FAILED, "the export failed (${e::class.simpleName})")
+            }
+        synchronized(lock) { if (current?.first == generation) current = null }
+        logger.info { "export gen=$generation format=${effect.format.workerId} outcome=${outcome::class.simpleName}" }
+        dispatch(ExportEvent.Finished(generation, outcome))
+    }
+
+    private fun pipeline(
+        effect: ExportEffect.StartPipeline,
+        scriptPath: Path,
+    ): PipelineOutcome {
+        val generation = effect.generation
+        val ok =
+            when (val check = checker(effect.target)) {
+                is TargetCheck.Invalid -> return failed(check.code, check.message)
+                is TargetCheck.Ok -> check
+            }
+        ok.existing?.let { if (!effect.replaceConfirmed) return PipelineOutcome.NeedsReplace(it.bytes) }
+        if (!isActive(generation)) return PipelineOutcome.Cancelled
+        dispatch(ExportEvent.PhaseChanged(generation, ExportPhase.RUNNING_SCRIPT))
+        val file =
+            when (val result = worker(scriptPath, effect.format, generation) { onStarted(generation, it) }) {
+                is ExportWorkerResult.Failure ->
+                    return if (isActive(generation)) PipelineOutcome.Failed(result.error) else PipelineOutcome.Cancelled
+                is ExportWorkerResult.Produced -> result.file
+            }
+        try {
+            if (!isActive(generation)) return PipelineOutcome.Cancelled
+            dispatch(ExportEvent.PhaseChanged(generation, ExportPhase.VALIDATING))
+            (validator(file, effect.format) as? ValidationResult.Invalid)?.let {
+                return failed(DesktopErrorCodes.EXPORT_OUTPUT_INVALID, it.reason)
+            }
+            dispatch(ExportEvent.PhaseChanged(generation, ExportPhase.WRITING))
+            return when (val written = writer.write(file, ok.file, effect.replaceConfirmed) { !isActive(generation) }) {
+                is WriteResult.Written ->
+                    PipelineOutcome.Success(ok.file.fileName.toString(), written.bytes, ok.dir)
+                is WriteResult.NeedsReplace -> PipelineOutcome.NeedsReplace(written.existingBytes)
+                WriteResult.Cancelled -> PipelineOutcome.Cancelled
+                is WriteResult.Failed -> failed(written.code, written.message)
+            }
+        } finally {
+            try {
+                Files.deleteIfExists(file)
+            } catch (_: IOException) {
+                logger.warn { "could not remove a temporary export file" }
+            }
+        }
+    }
+
+    private fun failed(
+        code: String,
+        message: String,
+    ) = PipelineOutcome.Failed(DesktopError(code, null, null, ErrorParser.sanitize(message)))
+
+    private fun onStarted(
+        generation: Long,
+        process: Process,
+    ) {
+        val outdated =
+            synchronized(lock) {
+                if (!isActive(generation)) {
+                    true
+                } else {
+                    current = generation to process
+                    false
+                }
+            }
+        if (outdated) killAsync(process)
+    }
+
+    private fun killAsync(process: Process) {
+        Thread({ ImportWorkerSupervisor.kill(process) }, "kstep-desktop-export-kill").apply { isDaemon = true }.start()
+    }
+
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        val process = synchronized(lock) { current.also { current = null } }
+        process?.second?.let { ImportWorkerSupervisor.kill(it) }
+        executor.shutdownNow()
+        if (!executor.awaitTermination(CLOSE_WAIT_SECONDS, TimeUnit.SECONDS)) {
+            logger.warn { "the export executor did not end in time" }
+        }
+        sessionDir?.let { WorkerTempDir.deleteRecursively(it) }
+    }
+
+    companion object {
+        private const val NANOS_PER_MILLI = 1_000_000L
+        private const val CLOSE_WAIT_SECONDS = 15L
+
+        /** The production wiring: a real [ExportWorkerRunner] in its own session directory (the live run stays untouched). */
+        fun production(): ExportController {
+            val dir = LiveRunController.createSessionDir()
+            // A normal close() removes the session directory; this covers SIGTERM/Ctrl-C of the whole application.
+            Runtime.getRuntime().addShutdownHook(
+                Thread({ WorkerTempDir.deleteRecursively(dir) }, "kstep-desktop-export-cleanup"),
+            )
+            val runner = ExportWorkerRunner(dir)
+            return ExportController(
+                worker = { script, format, generation, started -> runner.run(script, format, generation, started) },
+                sessionDir = dir,
+            )
+        }
+    }
+}

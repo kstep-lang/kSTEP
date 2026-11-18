@@ -26,4 +26,12 @@ object DesktopErrorCodes {
     const val SAVE_FAILED = "KSTEP-D-011"
     const val PARTS_INVALID = "KSTEP-D-012"
     const val TREE_INVALID = "KSTEP-D-013"
+
+    // The export dialog (ADR-0057).
+    const val EXPORT_UNAVAILABLE = "KSTEP-D-019"
+    const val EXPORT_TARGET_INVALID = "KSTEP-D-020"
+    const val EXPORT_TARGET_NOT_WRITABLE = "KSTEP-D-021"
+    const val EXPORT_FAILED = "KSTEP-D-022"
+    const val EXPORT_WRITE_FAILED = "KSTEP-D-023"
+    const val EXPORT_OUTPUT_INVALID = "KSTEP-D-024"
 }

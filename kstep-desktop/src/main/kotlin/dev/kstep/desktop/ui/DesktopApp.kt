@@ -62,6 +62,11 @@ import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
+import dev.kstep.desktop.export.ExportController
+import dev.kstep.desktop.export.ExportFormat
+import dev.kstep.desktop.export.ExportState
+import dev.kstep.desktop.export.ExportText
+import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.pick.AssemblyTree
@@ -120,6 +125,7 @@ fun DesktopApp(
     initialFile: Path?,
     window: Frame,
     ai: AiController,
+    exporter: ExportController,
 ) {
     val editorView by session.view.collectAsState()
     // AI panel (ADR-0056): hidden by default; nothing is sent before the user asks and agrees.
@@ -132,6 +138,21 @@ fun DesktopApp(
     LaunchedEffect(aiRunning) {
         while (aiRunning) {
             aiNow = System.currentTimeMillis()
+            delay(AI_TICK_MS)
+        }
+    }
+    // Export dialog (ADR-0057): the controller owns the run; the last format and folder live only for this session.
+    val exportState by exporter.state.collectAsState()
+    var exportVisible by remember { mutableStateOf(false) }
+    var exportNow by remember { mutableStateOf(0L) }
+    var exportSaveError by remember { mutableStateOf<String?>(null) }
+    var exportStatus by remember { mutableStateOf<ExportStatus?>(null) }
+    var lastExportFormat by remember { mutableStateOf(ExportFormat.DEFAULT) }
+    var lastExportDir by remember { mutableStateOf<Path?>(null) }
+    val exportRunning = exportState is ExportState.Running
+    LaunchedEffect(exportRunning) {
+        while (exportRunning) {
+            exportNow = System.currentTimeMillis()
             delay(AI_TICK_MS)
         }
     }
@@ -294,6 +315,32 @@ fun DesktopApp(
     }
 
     val openFile: () -> Unit = { chooseScript(window)?.let(openPath) }
+    val exportScript: Path? = state.file
+    val openExport: () -> Unit = {
+        if (exportScript != null && editorView.state is EditorState.Editing && !exportRunning) {
+            exportStatus = null
+            exportSaveError = null
+            exporter.begin(
+                exportScript,
+                lastExportFormat,
+                lastExportDir ?: exportScript.toAbsolutePath().parent ?: exportScript.toAbsolutePath(),
+            )
+            exportVisible = true
+        }
+    }
+    val closeExport: () -> Unit = {
+        exportVisible = false
+        exporter.closeDialog()
+    }
+    LaunchedEffect(exportState) {
+        val done = exportState as? ExportState.Succeeded ?: return@LaunchedEffect
+        exportStatus = ExportStatus(ExportText.successLine(done.fileName, done.bytes), done.dir)
+        lastExportDir = done.dir
+        exportVisible = false
+    }
+    LaunchedEffect(exportState.generation, exportState is ExportState.Running) {
+        (exportState as? ExportState.Running)?.let { lastExportFormat = it.format }
+    }
     val selectError: (DesktopError) -> Unit = { error ->
         val offset = CaretMapper.toOffset(editorView.text, error.line, error.column)
         if (offset != null) {
@@ -323,6 +370,10 @@ fun DesktopApp(
                     }
                     command && event.key == Key.S -> {
                         session.save()
+                        true
+                    }
+                    command && event.key == Key.E -> {
+                        openExport()
                         true
                     }
                     command && event.key == Key.K -> {
@@ -364,6 +415,43 @@ fun DesktopApp(
                 }
             },
         ) {
+            if (exportVisible) {
+                ExportDialog(
+                    state = exportState,
+                    context =
+                        ExportDialogContext(
+                            scriptName = exportScript?.fileName?.toString().orEmpty(),
+                            dirty = editorView.dirty,
+                            nativeUnavailable = state is DesktopState.NativeUnavailable,
+                            saveError = exportSaveError,
+                            tick = exportNow,
+                            elapsedSince = exporter::elapsedSince,
+                        ),
+                    onFormat = exporter::chooseFormat,
+                    onChoose = {
+                        val current = exportState as? ExportState.Configuring
+                        val start = current?.target?.parent ?: lastExportDir
+                        chooseExportTarget(
+                            window,
+                            start,
+                            current?.target?.fileName?.toString(),
+                        )?.let(exporter::chooseTarget)
+                    },
+                    onExport = { saveFirst ->
+                        exportSaveError = null
+                        if (saveFirst && !session.saveAndWait()) {
+                            exportSaveError = "The script could not be saved (KSTEP-D-011). Nothing was exported."
+                        } else {
+                            if ((exportState as? ExportState.Configuring)?.overwrite is Overwrite.NeedsConfirm) {
+                                exporter.confirmReplace()
+                            }
+                            exporter.start()
+                        }
+                    },
+                    onStop = exporter::stop,
+                    onClose = closeExport,
+                )
+            }
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val errorBarMax = maxHeight * ERROR_BAR_MAX_FRACTION
                 val windowWidth = maxWidth
@@ -372,6 +460,10 @@ fun DesktopApp(
                         state,
                         editorView,
                         onOpen = openFile,
+                        onExport = openExport,
+                        exportEnabled = exportScript != null && editorView.state is EditorState.Editing,
+                        exportStatus = exportStatus,
+                        onShowInFolder = { exportStatus?.let { showInFolder(it.dir) } },
                         onHome = home,
                         treeAvailable = treeAvailable,
                         treeOn = treeVisible,
@@ -513,6 +605,10 @@ private fun Toolbar(
     state: DesktopState,
     editor: EditorView,
     onOpen: () -> Unit,
+    onExport: () -> Unit,
+    exportEnabled: Boolean,
+    exportStatus: ExportStatus?,
+    onShowInFolder: () -> Unit,
     onHome: () -> Unit,
     treeAvailable: Boolean,
     treeOn: Boolean,
@@ -534,6 +630,9 @@ private fun Toolbar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TextButton(onClick = onOpen) { Text("Open", fontSize = 13.sp) }
+        WithTip(if (exportEnabled) null else "Open a script first") {
+            TextButton(onClick = onExport, enabled = exportEnabled) { Text("Export…", fontSize = 13.sp) }
+        }
         TextButton(onClick = onHome) { Text("Home", fontSize = 13.sp) }
         if (treeAvailable) {
             TextButton(onClick = onTree) {
@@ -556,6 +655,10 @@ private fun Toolbar(
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            exportStatus?.let {
+                Text(it.text, fontSize = 12.sp, color = DIM, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                TextButton(onClick = onShowInFolder) { Text("Show in Folder", fontSize = 12.sp) }
+            }
             Text(
                 listOf(
                     statusText(state),
@@ -668,6 +771,36 @@ private fun Badge(state: DesktopState) {
 private fun chooseScript(parent: Frame): Path? {
     val dialog = FileDialog(parent, "Open a kSTEP script", FileDialog.LOAD)
     dialog.setFilenameFilter { _, name -> name.endsWith(SCRIPT_FILTER_SUFFIX) }
+    dialog.isVisible = true
+    val name = dialog.file ?: return null
+    return Path.of(dialog.directory ?: "", name)
+}
+
+/** The line after a successful export: what was written and where, with the action "Show in Folder". */
+internal class ExportStatus(
+    val text: String,
+    val dir: Path,
+)
+
+/** Opens the folder of an exported file in the system file manager; no-op where the platform has no such support. */
+private fun showInFolder(dir: Path) {
+    try {
+        val desktop = if (java.awt.Desktop.isDesktopSupported()) java.awt.Desktop.getDesktop() else return
+        if (desktop.isSupported(java.awt.Desktop.Action.OPEN)) desktop.open(dir.toFile())
+    } catch (_: Exception) {
+        // a missing file manager is not an error of the export
+    }
+}
+
+/** A native save dialog for an export; `null` if cancelled. The suggested name is only a suggestion. */
+private fun chooseExportTarget(
+    parent: Frame,
+    startDir: Path?,
+    suggestedName: String?,
+): Path? {
+    val dialog = FileDialog(parent, "Export to", FileDialog.SAVE)
+    startDir?.let { dialog.directory = it.toString() }
+    suggestedName?.let { dialog.file = it }
     dialog.isVisible = true
     val name = dialog.file ?: return null
     return Path.of(dialog.directory ?: "", name)

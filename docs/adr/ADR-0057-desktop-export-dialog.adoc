@@ -1,0 +1,111 @@
+= ADR-0057: kSTEP Desktop, export dialog (Welle D7)
+:toc:
+
+== Status
+
+Accepted (Welle D7). The pure parts (names, target check, output validation, atomic write, state machine, report parser, texts), the controller (against a fake worker and against real child processes) and the worker's argument whitelist are covered by tests; real exports of STEP, GLB, STL and 3MF run in `DesktopExportOcctTest` (OCCT). Not done in this wave: the dialog was compiled and style-checked but not clicked through by hand in a running window, and the macOS save panel (`FileDialog`) was not driven by an automated test.
+
+== Context
+
+The desktop shows a script and its preview but cannot hand the result to anything else. The user wants one dialog to write the model as STEP (exchange with CAD tools), GLB (viewing, web), STL or 3MF (3D printing). The export must not be able to damage the user's files, must not run a script in the desktop's own JVM, and must be stoppable.
+
+== Decision
+
+D1. Formats and order. STEP AP242 (default), GLB, STL, 3MF, in this fixed order, as plain text rows (name, extension in monospace, one line of purpose), no icons. The format is chosen before the target, because the format decides the extension.
+
+D2. The saved file, not the editor buffer. The export runs on the file on disk, like the preview. With unsaved changes the dialog says "Preview and export use the saved file" and offers `Save and Export` (primary) and `Export Saved Version`. If the save fails (`KSTEP-D-011`) the export is not started.
+
+D3. Worker-only export. A script is only evaluated in a supervised subprocess, never in the desktop JVM. A new entry point `DesktopExportWorker` (in kstep-cli, next to `DesktopRenderWorker`) accepts exactly `<script> --format glb|stl|3mf|step --out <path> --output json` (a strict whitelist in `parse`, anything else ends with exit code 2; no `--with-step`, no tolerance, no extra flag). Mesh formats run `kstep render` with `--require-geometry` (STL and 3MF already fail closed, ADR-0049), STEP runs `kstep export`. `runExport` became `internal` for this; `kstep render --output json` and the standard CLI are unchanged.
+
+D4. Own orphan watchdog. `ImportWatchdog.resolveTimeoutMillis()` can only lower the 60 s default. The render worker arms 60 s plus 10 s grace, so reusing it would let the worker halt itself (exit 124) at 70 s in the middle of a legitimate 120 s export. `DesktopExportWorker` therefore arms its own watchdog with `EXPORT_TIMEOUT_MILLIS + ORPHAN_GRACE_MILLIS` and ignores the property. A test pins the relation.
+
+D5. STEP of a structure-only script. `kstep export` is run without `--require-geometry`: with the flag a pure AP242 product-structure script (no `shape(...)`) would fail with `geometry_required` and could never be exported. Without the flag `kstep export` silently writes a structure-only file when OCCT is missing, so the result is judged from the JSON line (`ExportReportParser`): shapes registered but `geometry.merged` not true is `KSTEP-D-019` and the file is discarded; a script without shapes is a valid structure-only export.
+
+D6. The worker never sees the user's target. It writes `export-<generation>.<ext>` into a private session directory (mode 0700, shared nowhere with the live run). The controller validates that file (D8) and only then moves it to the target. The session directory is removed on close and by a shutdown hook.
+
+D7. Target handling. `ExportTargets.check` resolves the parent with `toRealPath` (a symbolic link in the path is followed and the real folder is shown), refuses a target that is a symbolic link (also a broken one), a directory or any non-regular file (`KSTEP-D-020`), refuses a name that is empty, has separators or exceeds 255 bytes, and probes writability by creating and deleting a temp file (`KSTEP-D-021`; `isWritable` alone is wrong on read-only mounts and with ACLs). Suggested names (`ExportNaming`) drop control and bidi-override characters and the characters `/ \ : * ? " < > |`, prefix reserved Windows names, cut at 120 code points on a code point boundary and keep the whole name within 255 bytes. A typed extension is added, replaced when it is another export extension, and kept when unknown (`my.v2` becomes `my.v2.step`), so nothing is cut silently.
+
+D8. Output validation. Before the move: a regular file (no link), not empty, at most 512 MiB, and the magic bytes of the format (`ISO-10303-21;` for STEP, `glTF`, the zip signature for 3MF, a matching triangle count for binary STL or a leading `solid` for ASCII STL). A violation is `KSTEP-D-024`. The worker ran an arbitrary script, so its output is checked, not trusted.
+
+D9. Atomic write, no non-atomic fallback. The output is copied in chunks (with a cancel check between chunks) into a temp file in the target directory, `fsync`ed, and moved with `ATOMIC_MOVE`. The temp file is in the target directory so the move stays on one file system. `AtomicMoveNotSupportedException` is `KSTEP-D-023` with a readable text, never a copy-and-delete. The temp file is removed in `finally`. Only a code and a size are logged, never a path. Between the last check and the move another process can still replace the target; no portable API closes that window, so it is accepted. The writer re-checks right before the move that the target is not a link, and an existing file that appeared after the dialog's check leads back to the inline question instead of being replaced.
+
+D10. Replacing is inline and never automatic. An existing target shows "`<file>` already exists (1.4 MB). Exporting replaces it." and the primary button becomes `Replace` in the destructive colour. There is no automatic suffix. The macOS save panel asks once itself; the inline question is the tested one.
+
+D11. Progress and stop. One indeterminate bar, the phase ("Running script... 12 s of max. 120 s") and a `Stop` button; Esc or Cmd/Ctrl+. stops while running (the dialog stays open), Esc closes while configuring. `Stop` kills the process tree and writes nothing; a late result of a stopped run is ignored by a generation counter. While the file is being written (short, atomic) `Stop` is disabled, so there is no half-state. A failed export leads back to the settings with the code and message; nothing is lost. Limits: 120 s, worker heap 2 GiB, 512 MiB output.
+
+D12. Entry points. Toolbar `Export...` and Cmd/Ctrl+E, disabled with a tooltip without an open script. After success the dialog closes and the status line shows "Exported bracket.step (1.4 MB)" with `Show in Folder`. The last format and folder are kept in memory for the session only. Without the native bridge (OCCT) all four rows are disabled with the reason, because every format needs geometry to be useful.
+
+D13. Error codes (new): `KSTEP-D-019` export needs the native bridge, `-020` target invalid, `-021` target not writable, `-022` export failed (for example "the script has no geometry"), `-023` writing failed, `-024` output invalid. Script errors keep their `KSTEP-S-xxx`/`KSTEP-V-xxx` codes.
+
+D14. Structure. A Compose-free package `dev.kstep.desktop.export` (an architecture test forbids Compose and the `ui` package there, and `ProcessBuilder` outside `WorkerEnvironment`); the dialog is the only Compose code. The diagram shows one run.
+
+[kuml, adr-0057-export-run, svg]
+----
+activityDiagram(name = "Export run") {
+    val start = initialNode()
+    val target = action(name = "Check target")
+    val exists = decision(name = "replace needed?")
+    val ask = action(name = "Ask inline, Replace")
+    val run = action(name = "Run export worker")
+    val ok = decision(name = "worker ok?")
+    val validate = action(name = "Validate output")
+    val valid = decision(name = "valid?")
+    val write = action(name = "Write atomically")
+    val fail = action(name = "Show error, keep settings")
+    val done = finalNode()
+
+    edge(from = start, to = target)
+    edge(from = target, to = exists)
+    edge(from = exists, to = ask, guard = "yes, not confirmed")
+    edge(from = ask, to = target)
+    edge(from = exists, to = run, guard = "no or confirmed")
+    edge(from = run, to = ok)
+    edge(from = ok, to = validate, guard = "yes")
+    edge(from = ok, to = fail, guard = "no or stopped")
+    edge(from = validate, to = valid)
+    edge(from = valid, to = write, guard = "yes")
+    edge(from = valid, to = fail, guard = "no")
+    edge(from = write, to = done)
+    edge(from = fail, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it.
+
+== Threat model
+
+[cols="2,3"]
+|===
+| Threat | Protection and remaining risk
+
+| A script runs in the desktop's JVM
+| Never: only `DesktopExportWorker` in a supervised subprocess (timeout, heap limit, output bounds, process tree kill, scrubbed environment). The worker is still not a sandbox (ADR-0056): a script runs with the user's rights.
+
+| The worker writes somewhere it should not, or a hostile output file
+| The worker gets an output path in a private session directory, never the user's target. The output is validated (D8) and a link is refused. The whitelist of `parse` leaves no flag that could redirect output.
+
+| Overwriting or damaging the user's files
+| Explicit inline confirmation (D10), atomic move, no non-atomic fallback, temp file removed in every case, symbolic links and non-regular targets refused. Remaining: the TOCTOU window of D9.
+
+| Path tricks in names (separators, `..`, device names, bidi overrides, over-long names)
+| `ExportNaming` and `ExportTargets` (D7); messages carry file names only, never full paths, and are sanitised.
+
+| Denial of service
+| 120 s limit with an orphan watchdog that outlives it, 512 MiB output cap, stdout and stderr caps of the supervisor, one export at a time (a second `Start` is rejected by the state machine).
+
+| Resource leaks
+| Process tree kill on stop, timeout and close; the session directory is removed on close and by a shutdown hook; the temp file is removed in `finally`; executor shut down in `close()`.
+|===
+
+== Dependencies and licences
+
+No new dependency.
+
+== Consequences
+
+* The desktop can write STEP, GLB, STL and 3MF without a terminal, safely and stoppably.
+* `runExport` in kstep-cli is `internal` instead of `private`; nothing else of the CLI changed.
+
+== Follow-up D7b
+
+A declarative export block in the script itself (`KStepModel` has no export-target declaration, so it needs a language feature in kstep-script first), remembering the last format and folder across sessions, an own file picker against the double replace question on macOS, per-format options (tolerance, watertight check), a progress bar with a real percentage where the worker can report one.

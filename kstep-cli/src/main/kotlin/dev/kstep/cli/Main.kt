@@ -446,7 +446,7 @@ private fun deriveOutputPath(scriptPath: String): String =
         "$scriptPath.step"
     }
 
-private fun runExport(command: CliCommand.Export) {
+internal fun runExport(command: CliCommand.Export) {
     when (val outcome = KStepScriptHost.eval(File(command.scriptPath))) {
         is KStepScriptOutcome.Success -> writeExport(command, outcome)
         is KStepScriptOutcome.CompilationError -> printError(command.jsonOutput, outcome)

@@ -12,6 +12,7 @@ import androidx.compose.ui.window.rememberWindowState
 import dev.kstep.cli.WorkerTempDir
 import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.edit.EditorSession
+import dev.kstep.desktop.export.ExportController
 import dev.kstep.desktop.run.AiCandidateCompiler
 import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.WorkerRunner
@@ -48,6 +49,8 @@ fun runDesktopApp(args: Array<String>) {
                     AiCandidateCompiler(dir) { file, gen, started -> runner.run(file, gen, started) },
                 )
             }
+        // Own session directory and worker for exports: the live preview is never disturbed (ADR-0057).
+        val exporter = remember { ExportController.production() }
         val state by controller.state.collectAsState()
         val editor by session.view.collectAsState()
         val frame = remember { arrayOfNulls<Frame>(1) }
@@ -63,6 +66,7 @@ fun runDesktopApp(args: Array<String>) {
                     controller.close()
                     session.close()
                     ai.close()
+                    exporter.close()
                     exitApplication()
                 }
             },
@@ -73,7 +77,14 @@ fun runDesktopApp(args: Array<String>) {
                 // The macOS "edited" dot in the close button; other platforms ignore the property.
                 window.rootPane.putClientProperty("Window.documentModified", editor.dirty)
             }
-            DesktopApp(controller = controller, session = session, initialFile = initial, window = window, ai = ai)
+            DesktopApp(
+                controller = controller,
+                session = session,
+                initialFile = initial,
+                window = window,
+                ai = ai,
+                exporter = exporter,
+            )
         }
     }
 }
