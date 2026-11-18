@@ -821,6 +821,9 @@ visible with a yellow badge and the time of that result; the error bar below sho
 |===
 | Key | Action
 | Ctrl/Cmd+O | Open a script
+| Ctrl/Cmd+S | Save the script (the preview shows the saved file)
+| Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, Ctrl+Y | Undo, redo (the editor's own history)
+| Enter, Tab | New line with the indentation of the line (one level deeper after `{`); four spaces
 | Ctrl/Cmd+R | Run again now
 | H | Reset camera and fit scale to the current shape
 | Drag, Shift-drag, scroll, double-click | Orbit, pan, zoom, reset camera (as in `kstep-viewer`)
@@ -838,7 +841,17 @@ visible with a yellow badge and the time of that result; the error bar below sho
 | `KSTEP-D-006` | The worker process could not be started
 | `KSTEP-D-007` | The result could not be read (worker crash or signal, no JSON, invalid GLB)
 | `KSTEP-D-008` | Geometry preview failed (triangulation or placement)
+| `KSTEP-D-009` | The script is larger than 1 MiB: preview only, not editable
+| `KSTEP-D-010` | The file is not editable text (NUL byte, invalid UTF-8, a line over 20 000 characters): preview only
+| `KSTEP-D-011` | Saving failed (read-only file or folder, disk full, atomic replace unsupported, other I/O); the buffer is kept
 |===
+
+The editor (ADR-0052) sits left of the preview. Editing does not change the preview: the preview always shows the saved file, and
+the status line says so while there are unsaved changes (the window title carries a dot). A click on an error in the error bar moves
+the caret to it. If the file changes on disk while you have unsaved changes, a banner offers Reload (the disk version becomes the
+buffer, undoable) or Keep mine (the next save overwrites the disk version); Save writes nothing until you chose. A script that is
+too large or not UTF-8 text stays preview-only, with the reason in the banner. Closing the window or opening another file with
+unsaved changes asks Save / Don't Save / Cancel; a failed save keeps the window open.
 
 A script without a `shape(...)` shows "Script has no shape(...)"; without the native bridge the window shows the OCCT notice
 with an install hint for the current operating system.

@@ -48,6 +48,7 @@ fun ErrorBar(
     maxHeight: Dp,
     modifier: Modifier = Modifier,
     initiallyExpanded: Boolean = false,
+    onSelect: (DesktopError) -> Unit = {},
 ) {
     var expanded by remember(errors) { mutableStateOf(initiallyExpanded) }
     val textColor = if (dark) Color(0xFFFFDAD6) else Color(0xFF410002)
@@ -71,7 +72,7 @@ fun ErrorBar(
                     color = textColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).clickable { errors.firstOrNull()?.let(onSelect) },
                 )
                 ErrorBarText.moreLabel(errors)?.let { label ->
                     Text(
@@ -92,7 +93,7 @@ fun ErrorBar(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp,
                             color = textColor,
-                            modifier = Modifier.padding(vertical = 2.dp),
+                            modifier = Modifier.clickable { onSelect(error) }.padding(vertical = 2.dp),
                         )
                     }
                 }

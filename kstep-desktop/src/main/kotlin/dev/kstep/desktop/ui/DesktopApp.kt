@@ -1,17 +1,22 @@
 package dev.kstep.desktop.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -39,8 +44,15 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.kstep.desktop.edit.CaretMapper
+import dev.kstep.desktop.edit.EditorSession
+import dev.kstep.desktop.edit.EditorView
+import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.DesktopState
 import dev.kstep.desktop.run.ErrorBarText
@@ -59,14 +71,25 @@ private val WARN = Color(0xFFF9A825)
 private const val PROGRESS_DELAY_MS = 300L
 private const val ERROR_BAR_MAX_FRACTION = 0.4f
 private const val SCRIPT_FILTER_SUFFIX = ".kstep.kts"
+private const val INITIAL_EDITOR_FRACTION = 0.45f
+private const val MIN_PANE_DP = 240
 
-/** The whole window content: toolbar, canvas with badge and progress line, error bar (ADR-0051). */
+/**
+ * The whole window content: toolbar, script editor | canvas with badge and progress line, error bar (ADR-0051,
+ * ADR-0052). Opening a file and closing the window first ask about unsaved changes.
+ */
 @Composable
 fun DesktopApp(
     controller: LiveRunController,
+    session: EditorSession,
     initialFile: Path?,
     window: Frame,
 ) {
+    val editorView by session.view.collectAsState()
+    var editorFocused by remember { mutableStateOf(false) }
+    var jump by remember { mutableStateOf<EditorJump?>(null) }
+    var jumpNonce by remember { mutableStateOf(0) }
+    var editorFraction by remember { mutableStateOf(INITIAL_EDITOR_FRACTION) }
     val dark = isSystemInDarkTheme()
     val state by controller.state.collectAsState()
     val openCount by controller.openCount.collectAsState()
@@ -81,7 +104,18 @@ fun DesktopApp(
     LaunchedEffect(displayMesh, openCount) {
         if (fitReference == null && displayMesh != null) fitReference = displayMesh
     }
-    LaunchedEffect(Unit) { initialFile?.let(controller::open) }
+    val openPath: (Path) -> Unit = { path ->
+        if (confirmUnsaved(window, session)) {
+            session.open(path)
+            controller.open(path)
+        }
+    }
+    LaunchedEffect(Unit) {
+        initialFile?.let {
+            session.open(it)
+            controller.open(it)
+        }
+    }
 
     var showProgress by remember { mutableStateOf(false) }
     val running = state as? DesktopState.Running
@@ -93,7 +127,15 @@ fun DesktopApp(
         }
     }
 
-    val openFile: () -> Unit = { chooseScript(window)?.let(controller::open) }
+    val openFile: () -> Unit = { chooseScript(window)?.let(openPath) }
+    val selectError: (DesktopError) -> Unit = { error ->
+        val offset = CaretMapper.toOffset(editorView.text, error.line, error.column)
+        if (offset != null) {
+            session.requestCaret(offset)
+            jumpNonce++
+            jump = EditorJump(CaretMapper.lineColumn(editorView.text, offset).first, jumpNonce)
+        }
+    }
     val home: () -> Unit = {
         camera.value = ViewerCameraState.HOME
         fitReference = displayMesh
@@ -113,7 +155,11 @@ fun DesktopApp(
                         controller.forceRun()
                         true
                     }
-                    !command && event.key == Key.H -> {
+                    command && event.key == Key.S -> {
+                        session.save()
+                        true
+                    }
+                    !command && !editorFocused && event.key == Key.H -> {
                         home()
                         true
                     }
@@ -123,17 +169,53 @@ fun DesktopApp(
         ) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val errorBarMax = maxHeight * ERROR_BAR_MAX_FRACTION
+                val windowWidth = maxWidth
                 Column(Modifier.fillMaxSize()) {
-                    Toolbar(state, onOpen = openFile, onHome = home)
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        Canvas(state, display, camera, fitReference, openFile)
-                        Badge(state)
-                        if (showProgress) {
-                            LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter))
+                    Toolbar(state, editorView, onOpen = openFile, onHome = home)
+                    val totalPx = with(LocalDensity.current) { windowWidth.toPx() }
+                    val minFraction = (MIN_PANE_DP.dp / windowWidth).coerceIn(0.1f, 0.5f)
+                    val errors = (state as? DesktopState.Error)?.errors.orEmpty()
+                    Row(Modifier.weight(1f).fillMaxWidth()) {
+                        ScriptEditor(
+                            session,
+                            editorView,
+                            errors,
+                            dark,
+                            jump,
+                            onFocusChanged = { editorFocused = it },
+                            modifier = Modifier.width(windowWidth * editorFraction).fillMaxHeight(),
+                        )
+                        Box(
+                            Modifier
+                                .width(1.dp)
+                                .fillMaxHeight()
+                                .background(DIM.copy(alpha = 0.5f))
+                                .pointerHoverIcon(PointerIcon.Crosshair),
+                        )
+                        Box(
+                            Modifier
+                                .width(6.dp)
+                                .fillMaxHeight()
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .draggable(
+                                    orientation = Orientation.Horizontal,
+                                    state =
+                                        rememberDraggableState { dx ->
+                                            editorFraction =
+                                                (editorFraction + dx / totalPx).coerceIn(minFraction, 1f - minFraction)
+                                        },
+                                ),
+                        )
+                        Box(Modifier.weight(1f).fillMaxHeight()) {
+                            Canvas(state, display, camera, fitReference, openFile)
+                            Badge(state)
+                            if (showProgress) {
+                                LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter))
+                            }
                         }
                     }
                     (state as? DesktopState.Error)?.let { error ->
-                        ErrorBar(error.errors, dark, maxHeight = errorBarMax)
+                        ErrorBar(error.errors, dark, maxHeight = errorBarMax, onSelect = selectError)
                     }
                 }
             }
@@ -144,6 +226,7 @@ fun DesktopApp(
 @Composable
 private fun Toolbar(
     state: DesktopState,
+    editor: EditorView,
     onOpen: () -> Unit,
     onHome: () -> Unit,
 ) {
@@ -163,7 +246,11 @@ private fun Toolbar(
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(statusText(state), fontSize = 12.sp, color = DIM)
+            Text(
+                statusText(state) + if (editor.dirty) "  ·  unsaved changes  ·  preview shows saved file" else "",
+                fontSize = 12.sp,
+                color = DIM,
+            )
         }
     }
 }

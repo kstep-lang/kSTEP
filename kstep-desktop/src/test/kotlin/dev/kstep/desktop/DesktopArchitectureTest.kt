@@ -38,4 +38,20 @@ class DesktopArchitectureTest :
                 .map { root.relativize(it.first).toString() }
                 .shouldBeEmpty()
         }
+
+        "the editor package is independent of the UI and of the watcher internals" {
+            sources()
+                .filter { (path, _) ->
+                    root
+                        .relativize(path)
+                        .toString()
+                        .replace('\\', '/')
+                        .startsWith("dev/kstep/desktop/edit/")
+                }.filter { (_, text) ->
+                    text.contains("dev.kstep.desktop.ui") ||
+                        text.contains("FileChangeWatcher") ||
+                        text.contains("androidx.compose")
+                }.map { root.relativize(it.first).toString() }
+                .shouldBeEmpty()
+        }
     })

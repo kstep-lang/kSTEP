@@ -1,5 +1,6 @@
 package dev.kstep.desktop.ui
 
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -8,9 +9,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.run.LiveRunController
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
 import java.awt.Dimension
+import java.awt.Frame
 import java.nio.file.Path
 
 private const val INITIAL_WIDTH = 1200
@@ -24,18 +27,36 @@ fun runDesktopApp(args: Array<String>) {
     val initial = args.firstOrNull()?.let { Path.of(it) }
     application {
         val controller = remember { LiveRunController.production() }
+        val session =
+            remember {
+                // The one watcher of the run controller also tells the editor about disk changes (ADR-0052).
+                EditorSession().also { controller.onDiskSignal = it::onDiskSignal }
+            }
         val state by controller.state.collectAsState()
+        val editor by session.view.collectAsState()
+        val frame = remember { arrayOfNulls<Frame>(1) }
         val windowState = rememberWindowState(size = DpSize(INITIAL_WIDTH.dp, INITIAL_HEIGHT.dp))
         Window(
-            title = "kSTEP Desktop" + (state.file?.fileName?.let { " — $it" } ?: ""),
+            title =
+                state.file?.fileName?.let { (if (editor.dirty) "● " else "") + "$it — kSTEP Desktop" }
+                    ?: "kSTEP Desktop",
             state = windowState,
             onCloseRequest = {
-                controller.close()
-                exitApplication()
+                // A failed save (or Cancel) keeps the window open: the buffer is never lost.
+                if (confirmUnsaved(frame[0], session)) {
+                    controller.close()
+                    session.close()
+                    exitApplication()
+                }
             },
         ) {
             window.minimumSize = Dimension(MIN_WIDTH, MIN_HEIGHT)
-            DesktopApp(controller = controller, initialFile = initial, window = window)
+            frame[0] = window
+            SideEffect {
+                // The macOS "edited" dot in the close button; other platforms ignore the property.
+                window.rootPane.putClientProperty("Window.documentModified", editor.dirty)
+            }
+            DesktopApp(controller = controller, session = session, initialFile = initial, window = window)
         }
     }
 }

@@ -46,6 +46,13 @@ class LiveRunController(
     private var current: Pair<Long, Process>? = null
     private var watcher: AutoCloseable? = null
 
+    /**
+     * Receives every watcher signal before the run starts (the editor, ADR-0052). Called on the watcher thread, outside
+     * the lock. There is still exactly one watcher and one run path; this is only a second listener.
+     */
+    @Volatile
+    var onDiskSignal: ((WatchSignal) -> Unit)? = null
+
     val state: StateFlow<DesktopState> = mutableState.asStateFlow()
 
     /** Counts `Open` events; the UI resets the camera when it changes. */
@@ -68,8 +75,14 @@ class LiveRunController(
 
     fun forceRun() = dispatch(DesktopEvent.ForceRun)
 
-    private fun onSignal(signal: WatchSignal) =
+    private fun onSignal(signal: WatchSignal) {
+        try {
+            onDiskSignal?.invoke(signal)
+        } catch (e: Exception) {
+            logger.warn { "the disk-signal listener failed (${e::class.simpleName})" }
+        }
         dispatch(if (signal == WatchSignal.CHANGED) DesktopEvent.Changed else DesktopEvent.Missing)
+    }
 
     private fun dispatch(event: DesktopEvent) {
         val toKill: Process?

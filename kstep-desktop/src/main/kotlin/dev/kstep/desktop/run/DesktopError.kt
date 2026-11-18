@@ -21,4 +21,7 @@ object DesktopErrorCodes {
     const val WORKER_START_FAILED = "KSTEP-D-006"
     const val RESULT_UNREADABLE = "KSTEP-D-007"
     const val PREVIEW_FAILED = "KSTEP-D-008"
+    const val EDITOR_TOO_LARGE = "KSTEP-D-009"
+    const val EDITOR_NOT_TEXT = "KSTEP-D-010"
+    const val SAVE_FAILED = "KSTEP-D-011"
 }

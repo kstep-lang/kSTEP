@@ -1,0 +1,48 @@
+= ADR-0052: kSTEP Desktop, script editor
+:toc:
+
+== Status
+
+Accepted (Welle D2). Implemented on macOS arm64. The pure logic (tokenizer, text loading, history, caret mapping, atomic saver, session rules) and the session with a real watcher are tested headless; the window itself (typing, focus, dialogs, the macOS edited dot) was not exercised by hand in this wave.
+
+== Context
+
+ADR-0051 shows a script and re-renders it when the file changes, but the script is edited in another program. D2 puts a small editor next to the preview. Two things must never go wrong: the author's text must not be lost (a crash while saving, a file that changed on disk under the editor, a full disk), and there must still be exactly one run path (the D1 watcher, the supervised worker).
+
+== Decision
+
+D1. No editor library, no new dependency. The editor is a plain Compose `BasicTextField` with a `VisualTransformation` for syntax colouring (identity offset mapping, so selection, caret and input methods are untouched) and a canvas gutter. `build.gradle.kts` of `kstep-desktop` and the version catalogue are unchanged; the distribution guard (`verify-dist.sh`) is unaffected.
+
+D2. Package `dev.kstep.desktop.edit` is Compose-free and does not know `ui` or the watcher internals (`DesktopArchitectureTest`). It holds `KotlinTokenizer`, `EditorText`, `EditHistory`, `CaretMapper`, `LineIndex`, `Indent`, `AtomicSaver`, the pure reducer `EditorSessionMachine` and the thin coordinator `EditorSession`. The UI (`ScriptEditor`, `EditorGutter`, `EditorBanner`, `EditorTheme`, `SyntaxTransformation`) lives in `ui`.
+
+D3. Explicit save, no autosave. Cmd/Ctrl+S saves; the preview shows the saved file ("unsaved changes, preview shows saved file" in the status line, a dot in the window title and the macOS edited dot). Autosave would rewrite the file under every other tool and turn each pause into a run.
+
+D4. One run path. A save is an atomic rename; the D1 watcher sees it and starts exactly one run. `LiveRunController` got one hook (`onDiskSignal`): the same watcher signal also reaches the editor, before the run starts, on the watcher thread outside the controller lock. There is still one watcher and one run path. The editor ignores its own save: before the move the machine records the hash of the bytes it is about to write (`saving.hash`); a disk change whose hash equals that or the base hash is not a change (this also covers a signal that arrives between the move and the completion). The hash is over the raw file bytes (BOM and CRLF included), so CRLF files never show a false conflict.
+
+D5. Loading. UTF-8 only, strict decoder. Refused as preview-only (the preview still works): more than 1 MiB (`KSTEP-D-009`, decided from `Files.size` without reading; the read is capped at 1 MiB + 1 byte so a growing file cannot exhaust memory), a NUL byte, invalid UTF-8 or a line longer than 20 000 characters (`KSTEP-D-010`). A BOM is stripped and written back. Line endings are normalised to `\n` in the buffer, the first kind found is written back; mixed endings show a banner "will be saved as CRLF/LF" (a lone `\r` counts as LF).
+
+D6. Saving. `AtomicSaver`: resolve the real path (a symbolic link is followed, the link survives); refuse a read-only file or folder before writing; re-hash the disk and compare with the hash the editor last saw (mismatch writes nothing and is a conflict); temp file `.<name>.kstep-save-<random>.tmp` in the same directory with the original's POSIX permissions; write, `fsync`; `Files.move(ATOMIC_MOVE, REPLACE_EXISTING)`. No non-atomic fallback: a failure (`KSTEP-D-011`: read-only, disk full, atomic move unsupported, other I/O) leaves the original untouched, removes the temp file and keeps buffer, history and dirty state; the error stays in the editor banner until the next successful save. A deleted file is recreated by Save. The window between the hash check and the move cannot be closed against another writer; this is accepted (an atomic rename cannot be made race-free against a concurrent writer). Logging: result kind and duration only.
+
+D7. Conflicts are a banner, not a dialog. If the file changes on disk while the buffer has unsaved changes, a banner offers Reload (the disk version replaces the buffer as an undoable step; impossible when the disk version is deleted, too large or not text, with the reason shown) and Keep mine (the disk version becomes the base, nothing is written, the next Save overwrites). Save during a conflict writes nothing and makes the banner flash for 400 ms. A clean buffer reloads silently (undoable, caret kept by line and column). A save while a save is running sets one catch-up save; edits made during a save survive.
+
+D8. Own undo. `EditHistory` keeps full-text snapshots under a limit of 500 steps and 16 MiB, merges consecutive typing until a pause over 1 s, a line break or a caret jump, and records a reload as its own step. Cmd/Ctrl+Z, Shift+Cmd+Z and Ctrl+Y are intercepted before the field, so Compose's own undo never double-applies.
+
+D9. Highlighting. `KotlinTokenizer` is a single forward scan with an explicit stack for string templates (nesting beyond 32 is plain string text); no regex, no recursion, never throws; unterminated strings end at the line end, raw strings and block comments at the end of the text. Kinds: keyword, string, template, number, comment, annotation, DSL. DSL names (`KStepDslNames`: `stepFile roots root shape place style vec OcctKernel`) are a hand-kept list, checked by a test against the script, shape and geometry sources. The keyword set is Kotlin's hard keywords plus the usual soft and modifier keywords. Colours: comments `#8A8A8A` italic, nothing bold. Measured: a 1 MiB synthetic script (about 193 000 tokens) tokenizes in about 16 ms on the development Mac (the test bound is 30 s). The result is cached by text because the field filters on every recomposition.
+
+D10. Layout. Editor and preview sit side by side (editor 45 %, a draggable divider, at least 240 dp each side, the ratio is not persisted); the error bar stays below across the full width. A click on an error (collapsed headline or an expanded row) moves the caret to its position (`CaretMapper`: 1-based line and column in UTF-16 units, clamped; no column means the first non-blank character) and flashes the line for 600 ms. The gutter marks error and warning lines (3 dp bar); the bar is hollow while the buffer is dirty because the position refers to the saved file. The line height is fixed, so the gutter lines up with the text and only visible lines are drawn. The `H` shortcut of the canvas is ignored while the editor has the focus.
+
+D11. Closing and opening. Closing the window or opening another file with unsaved changes asks Save / Don't Save / Cancel (a Swing option dialog; AWT has no three-button dialog). A failed save, or a save during a conflict, keeps the window open; the buffer is never lost to a dialog answer (`CloseDecision`, `mayProceed`).
+
+D12. Error codes. `KSTEP-D-009` file larger than 1 MiB (preview only), `KSTEP-D-010` not editable text (NUL, invalid UTF-8, line too long), `KSTEP-D-011` save failed.
+
+== Rejected alternatives
+
+* Autosave: rewrites the file under other tools, makes every pause a run.
+* A live preview of the unsaved buffer through a shadow file: a second run path with its own cancellation and error positions; not worth it for D2.
+* An editor library (RSyntaxTextArea, a Compose code-editor component): a new dependency, a second text engine and an unclear fit with the distribution guard.
+* Compose's own undo: platform dependent, cannot record a reload as a step.
+* A modal dialog for conflicts: it blocks the window while the user may want to look at the preview or copy text first.
+
+== Follow-up (D2b)
+
+Crash-draft recovery; a live preview of the unsaved buffer; error marks that move with edits; an incremental tokenizer (only if a 1 MiB file ever measures over 50 ms); DSL names generated from the EXPRESS schema; find/replace and go to line; bracket pairs; soft wrap; a persisted split ratio; hover tooltips on gutter marks and click-to-select of the matching error-bar entry. The window behaviour was not exercised by hand in D2 (focus, IME, the Swing dialog on every platform).

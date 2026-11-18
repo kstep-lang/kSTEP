@@ -754,6 +754,13 @@ scan before either lands.
   based cancellation, last good result with badge, error bar with `KSTEP-D-001` to `-008`. Not in the CLI zip or on Maven Central
   (`verify-dist.sh` checks the zip). Verified on macOS arm64 with a strict build; Linux CI to follow the push. Open (D1b): drag and drop,
   recent files, included files, warm worker, packaging, `kstep desktop` launcher.
+* Welle D2 (ADR-0052): `kstep-desktop` gets a script editor next to the preview. Plain `BasicTextField` with Kotlin highlighting (a
+  1 MiB script tokenizes in about 16 ms), gutter with error marks, error click jumps to the position, explicit save by temp file,
+  `fsync` and atomic rename with a hash check against the last seen disk version, own undo history, Reload / Keep mine banner for
+  changes on disk, Save / Don't Save / Cancel when closing or opening. Files over 1 MiB or not UTF-8 text are preview-only
+  (`KSTEP-D-009`, `-010`); save failures are `KSTEP-D-011`. No new dependency, one watcher, one run path. The pure logic and the
+  session with a real watcher are tested headless; the window (typing, focus, the dialog, the macOS edited dot) was not exercised by
+  hand. Open (D2b): crash-draft recovery, live preview of the unsaved buffer, moving error marks, find/replace, bracket pairs.
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;
