@@ -766,6 +766,10 @@ scan before either lands.
   casting a ray against the frame the canvas drew with, tints the hovered and selected part and shows an inspection panel. Selection is
   kept over re-runs by part name. `kstep render --output json` is unchanged. The window behaviour (cursor, tooltip, Escape focus) was
   not exercised by hand.
+* Welle D4 (ADR-0054): assembly tree in `kstep-desktop`. The render worker reports the hierarchy next to the part list (built from the
+  depth-first instance order by usage identity, re-indexed after the GLB mapping); the desktop validates it as hostile input
+  (`KSTEP-D-013` warning on a bad tree, flat selection unaffected), shows it beside the canvas and selects groups with a range highlight
+  and a group inspection. `kstep render --output json` is unchanged. The panel look and feel was not exercised by hand.
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

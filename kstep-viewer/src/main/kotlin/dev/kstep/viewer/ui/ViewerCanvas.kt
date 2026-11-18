@@ -113,7 +113,8 @@ fun ShapeCanvas(
  * Tint instructions for part highlighting (ADR-0053). [triangleToPart] maps a SOURCE mesh triangle to a part index;
  * [selected] and [hovered] are part indices (`-1` for none). Each lit colour channel moves towards [accentRgb]
  * (0..1) by [selectT] (selected part) or [hoverT] (hovered part): a tint, not a brightening, so a part that is
- * already light stays distinguishable.
+ * already light stays distinguishable. [selectedLast] and [hoveredLast] (inclusive, default: the same part) widen
+ * either one to a range of part indices, e.g. a whole assembly group (ADR-0054).
  */
 class CanvasHighlight(
     val triangleToPart: IntArray,
@@ -122,14 +123,16 @@ class CanvasHighlight(
     val accentRgb: DoubleArray,
     val selectT: Double = DEFAULT_SELECT_T,
     val hoverT: Double = DEFAULT_HOVER_T,
+    val selectedLast: Int = selected,
+    val hoveredLast: Int = hovered,
 ) {
     internal fun tintFor(sourceIndex: Int): Double {
         if (sourceIndex < 0 || sourceIndex >= triangleToPart.size) return 0.0
         val part = triangleToPart[sourceIndex]
         return when {
             part < 0 -> 0.0
-            part == selected -> selectT
-            part == hovered -> hoverT
+            part in selected..selectedLast -> selectT
+            part in hovered..hoveredLast -> hoverT
             else -> 0.0
         }
     }

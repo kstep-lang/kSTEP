@@ -18,10 +18,18 @@ object InspectionText {
     fun size(p: PartInfo): String =
         (0 until 3).joinToString(" × ") { number(abs(p.bboxMax[it] - p.bboxMin[it])) } + " mm"
 
+    /** `W x D x H mm` of a box given by its corners. */
+    fun size(
+        min: DoubleArray,
+        max: DoubleArray,
+    ): String = (0 until 3).joinToString(" × ") { number(abs(max[it] - min[it])) } + " mm"
+
     fun point(v: DoubleArray): String = v.joinToString(", ", "(", ")") { number(it) } + " mm"
 
     /** Triangle count with a comma as thousands separator. */
-    fun triangles(n: Int): String {
+    fun triangles(n: Int): String = triangles(n.toLong())
+
+    fun triangles(n: Long): String {
         val digits = n.toString()
         val sb = StringBuilder()
         for ((i, ch) in digits.withIndex()) {

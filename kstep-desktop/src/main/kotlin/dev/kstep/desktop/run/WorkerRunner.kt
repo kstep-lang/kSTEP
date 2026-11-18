@@ -9,6 +9,7 @@ import dev.kstep.desktop.model.GlbMeshReader
 import dev.kstep.desktop.model.GlbReadException
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.model.TooManyTrianglesException
+import dev.kstep.desktop.pick.AssemblyTree
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.json.JsonObject
 import java.nio.file.Files
@@ -217,22 +218,39 @@ class WorkerRunner(
             val mesh = GlbMeshReader.read(Files.readAllBytes(out))
             val parsed = if (partsJson == null) PartListResult.Absent else PartListParser.parse(partsJson, mesh)
             val table = (parsed as? PartListResult.Valid)?.table
+            // a tree is only read with a valid part list; with an invalid one D-012 is shown already
+            val treeResult =
+                if (partsJson != null && table != null) AssemblyTreeParser.parse(partsJson, table) else null
             val warnings =
-                if (parsed is PartListResult.Invalid) {
-                    listOf(
-                        DesktopError(
-                            DesktopErrorCodes.PARTS_INVALID,
-                            null,
-                            null,
-                            ErrorParser.sanitize("Part list invalid: ${parsed.reason} -- selection is off"),
-                            Severity.WARNING,
-                        ),
-                    )
-                } else {
-                    emptyList()
+                buildList {
+                    if (parsed is PartListResult.Invalid) {
+                        add(
+                            DesktopError(
+                                DesktopErrorCodes.PARTS_INVALID,
+                                null,
+                                null,
+                                ErrorParser.sanitize("Part list invalid: ${parsed.reason} -- selection is off"),
+                                Severity.WARNING,
+                            ),
+                        )
+                    }
+                    if (treeResult is AssemblyTreeResult.Invalid) {
+                        add(
+                            DesktopError(
+                                DesktopErrorCodes.TREE_INVALID,
+                                null,
+                                null,
+                                ErrorParser.sanitize(
+                                    "Assembly tree unavailable (${treeResult.reason}); click selection still works",
+                                ),
+                                Severity.WARNING,
+                            ),
+                        )
+                    }
                 }
+            val tree = (treeResult as? AssemblyTreeResult.Valid)?.tree
             RunResult.Success(
-                model(mesh, mesh?.mesh?.triangleCount ?: 0, generation, durationMs, notes, table, warnings),
+                model(mesh, mesh?.mesh?.triangleCount ?: 0, generation, durationMs, notes, table, warnings, tree),
             )
         } catch (e: TooManyTrianglesException) {
             failure(
@@ -255,7 +273,8 @@ class WorkerRunner(
         notes: List<String>,
         parts: PartTable? = null,
         warnings: List<DesktopError> = emptyList(),
-    ) = DesktopModel(mesh, triangles, generation, clock(), durationMs, notes, parts, warnings)
+        tree: AssemblyTree? = null,
+    ) = DesktopModel(mesh, triangles, generation, clock(), durationMs, notes, parts, warnings, tree)
 
     /** Warning lines of the render (`kstep render:` prefix, sanitised, at most [MAX_NOTES]) and the discarded stdout lines. */
     private fun notes(

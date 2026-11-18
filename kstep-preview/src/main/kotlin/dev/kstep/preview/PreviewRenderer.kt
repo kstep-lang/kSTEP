@@ -55,6 +55,7 @@ private class ProducedBytes(
     val glb: GlbWriteResult? = null,
     val meshExport: MeshExportResult? = null,
     val parts: List<RenderedPart>? = null,
+    val tree: RenderedAssemblyTree? = null,
 )
 
 /** One part's range in the SOURCE mesh (before the GLB writer drops degenerate triangles). */
@@ -73,18 +74,31 @@ internal class PartSpan(
 internal fun mapSpansToGlb(
     spans: List<PartSpan>,
     kept: IntArray,
-): List<RenderedPart> {
+): List<RenderedPart> = mapSpansToGlbIndexed(spans, kept).first
+
+/**
+ * Like [mapSpansToGlb], plus, per span, the index of its part in the resulting list (`-1` for a span that vanished);
+ * the assembly tree (ADR-0054) is re-indexed with it.
+ */
+internal fun mapSpansToGlbIndexed(
+    spans: List<PartSpan>,
+    kept: IntArray,
+): Pair<List<RenderedPart>, IntArray> {
     val out = ArrayList<RenderedPart>(spans.size)
+    val partOfSpan = IntArray(spans.size) { -1 }
     var pointer = 0
-    for (span in spans) {
+    for ((i, span) in spans.withIndex()) {
         val end = span.sourceFirstTriangle.toLong() + span.sourceTriangleCount
         while (pointer < kept.size && kept[pointer] < span.sourceFirstTriangle) pointer++
         val glbFirst = pointer
         while (pointer < kept.size && kept[pointer] < end) pointer++
         val count = pointer - glbFirst
-        if (count > 0) out += RenderedPart(span.name, glbFirst, count, span.placement, span.color)
+        if (count > 0) {
+            partOfSpan[i] = out.size
+            out += RenderedPart(span.name, glbFirst, count, span.placement, span.color)
+        }
     }
-    return out
+    return out to partOfSpan
 }
 
 private fun single(
@@ -121,6 +135,8 @@ private sealed interface RenderContent {
         val exportParts: List<MeshExportPart> = emptyList(),
         /** Source-triangle ranges per part, in merge order (ADR-0053). */
         val partSpans: List<PartSpan> = emptyList(),
+        /** The assembly hierarchy over [partSpans] (ADR-0054); `null` for the single-shape preview. */
+        val rawTree: RawAssemblyTree? = null,
     ) : RenderContent
 
     // Carries no lines of its own -- renderBytes computes the summary card's text fresh from
@@ -271,6 +287,7 @@ object PreviewRenderer {
         val glbResult = produced.glb
         val meshExport = produced.meshExport
         val parts = produced.parts
+        val tree = produced.tree
 
         val contentKind =
             when (content) {
@@ -306,6 +323,7 @@ object PreviewRenderer {
             warnings = warnings + (meshExport?.warnings ?: emptyList()),
             meshExport = meshExport,
             parts = parts,
+            tree = tree,
         )
     }
 
@@ -524,6 +542,24 @@ object PreviewRenderer {
                 )
             cursor += count
         }
+        val chains =
+            instances.mapIndexed { i, instance ->
+                val path = instance.usagePath
+                val rootPd =
+                    (path.firstOrNull()?.relatingProductDefinition as? ProductDefinition)
+                        ?: instance.productDefinition
+                InstanceChain(
+                    rootKey = rootPd,
+                    rootName = partDisplayName(rootPd),
+                    steps =
+                        path.map { usage ->
+                            val related = usage.relatedProductDefinition as? ProductDefinition
+                            ChainStep(usage, related?.let { partDisplayName(it) } ?: usage.name.ifEmpty { usage.id })
+                        },
+                    leafName = spans[i].name,
+                    leafSpan = i,
+                )
+            }
         val triangles =
             if (colored != null) {
                 MeshProjection.project(colored, width.toDouble(), height.toDouble())
@@ -540,6 +576,7 @@ object PreviewRenderer {
             colored = colored,
             exportParts = exportParts,
             partSpans = spans,
+            rawTree = buildAssemblyTree(chains),
         )
     }
 
@@ -636,16 +673,14 @@ object PreviewRenderer {
                     } else {
                         GlbWriter.writeEmptyScene(extras)
                     }
-                val parts =
+                val mapped =
                     if (content is RenderContent.Geometry) {
-                        mapSpansToGlb(
-                            content.partSpans,
-                            result.keptSourceTriangles,
-                        )
+                        mapSpansToGlbIndexed(content.partSpans, result.keptSourceTriangles)
                     } else {
                         null
                     }
-                ProducedBytes(result.bytes, glb = result, parts = parts)
+                val tree = mapped?.let { (content as RenderContent.Geometry).rawTree?.reindexed(it.second) }
+                ProducedBytes(result.bytes, glb = result, parts = mapped?.first, tree = tree)
             }
             RenderFormat.STL, RenderFormat.THREE_MF -> {
                 // ADR-0049 D9: a printer file is NEVER a text card or an empty model -- no geometry means no bytes.

@@ -214,7 +214,9 @@ link:docs/usage.adoc[Usage].
 | `kstep-desktop`
 | Live preview of a `*.kstep.kts` script (Compose Desktop, `./gradlew :kstep-desktop:run`): re-renders on save in a
   supervised worker process; with a small script editor (syntax colouring, error marks, crash-safe save). Click a part to select it (Escape or a click on
-  empty space clears), hover tints it, and a panel shows its name, size, centroid, colour and position.
+  empty space clears), hover tints it, and a panel shows its name, size, centroid, colour and position. An assembly tree beside the
+  canvas (toggle `Tree` in the toolbar; Up/Down, Left/Right, Home/End, Enter, Escape when it has focus) selects whole
+  sub-assemblies; if the tree cannot be trusted it stays hidden with the warning `KSTEP-D-013` and click selection still works.
 
 | `kstep-tests`
 | Cross-module integration tests (Kotest).

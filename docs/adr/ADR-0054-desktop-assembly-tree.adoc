@@ -1,0 +1,47 @@
+= ADR-0054: kSTEP Desktop, assembly tree
+:toc:
+
+== Status
+
+Accepted (Welle D4). The pure logic (tree building, tree validation, open state, keyboard model, selection rules, group figures) and the worker side are tested headless; the OCCT-bound end-to-end tests (`PreviewAssemblyTreeOcctTest`, `TreeOcctTest`) need the native bridge. The look and feel of the panel (row hover, focus colours, scroll behaviour, tooltips, keyboard focus handover to and from the editor) was not exercised by hand in this wave; the Compose code is compiled and its logic is covered through the pure pick package.
+
+== Context
+
+ADR-0053 lets the user pick a part in the viewer, but an assembly is a hierarchy and the flat list says nothing about it. D4 adds a tree beside the canvas: select a part or a whole sub-assembly from the tree, see the selection in the viewer, and see what the selection is. The tree comes from a script, so it is hostile input, and there is still exactly one render path, the supervised worker.
+
+== Decision
+
+D1. The worker reports the hierarchy as `tree`. `PreviewOutcome.Rendered.tree: RenderedAssemblyTree?` (additive, default `null`) holds `RenderedTreeNode(name, parent, part)` in pre-order: the parent index is smaller than the node's own index, the root has parent `-1`, a leaf names the index of its entry in `parts`, a group has part `-1`. It is set only for a placed assembly in GLB format. The desktop worker writes `"tree": {"nodes":[{"name","parent","part"}, ...]}` right after `parts`, and only while `parts` itself is present. `kstep render --output json` stays byte for byte as it was (`PutTreeTest` compares the public document with the desktop document without its two extra keys). Limits live in `DesktopPartLimits`: `MAX_TREE_NODES = 8192` (4096 parts plus groups; a hard 4096 would make every assembly of 4096 parts with one group fail) and `MAX_TREE_DEPTH = 64`. Over a limit the worker writes `"tree": null` and `"treeOmitted": {"reason": "too_many_nodes"|"too_deep", "count": n}`. Names are cut like part names.
+
+D2. Building the tree needs no trie (`buildAssemblyTree`, pure, `InstanceChain`/`ChainStep`). Instances arrive in the depth-first order of `AssemblyInstanceExpander`, and the GLB spans are laid out in that same order. For each instance the common prefix with the nodes currently open is found by identity of the usage objects. A trie keyed by usage identity would be wrong: the same usage object hangs on every instance of a repeated parent, so two occurrences of one sub-assembly would fuse into one group. The first differing key is the occurrence of the parent (a different usage object on the way down), which splits them. An instance whose path is a prefix of later instances (a shaped sub-assembly) becomes a group whose first child is a leaf of the same name carrying its own geometry. More than one root definition gets a synthetic root named `Assembly`. Names are the product names of the related product definitions, like part names (`partDisplayName`), so a leaf name equals the name of its part.
+
+D3. The tree is re-indexed after the GLB mapping. `mapSpansToGlb` drops parts without a surviving triangle, so part indices shift. `mapSpansToGlbIndexed` also returns the new part index per span (`-1` for a vanished one); `RawAssemblyTree.reindexed` drops those leaves, prunes groups left without a leaf (an empty group is never written) and renumbers the nodes. Leaf order stays equal to part order.
+
+D4. The desktop validates the tree before it trusts it (`AssemblyTreeParser`, pure, never throws, bounds before allocation). Only read if the part list is valid (otherwise `KSTEP-D-012` is shown already). Rules: 1 to 8192 nodes; node 0 is the only root (`parent = -1`); every other node has a parent with a smaller index that is a group; the parent lies on the current rightmost path, which makes the list a true pre-order tree (no cycles, every subtree one contiguous index range); depth at most 64 (computed incrementally); the leaves carry the part indices 0, 1, 2, ... in order, so every part appears exactly once and every group covers one contiguous part range; the name of a leaf equals the name of its part (so ADR-0053's selection by name and occurrence stays consistent); names go through the shared `NameSanitizer` (extracted from `PartListParser` without changing its behaviour); every group has at least one child; JSON integers only. A missing tree is silent; a present but untrustworthy or omitted one is the WARNING `KSTEP-D-013` (the flat selection of ADR-0053 keeps working and the tree is simply not shown).
+
+D5. Tree model and open state are pure logic in the `pick` package. `AssemblyTree` is immutable and computes everything once in O(n): depth, exclusive subtree end, first and last part, leaf count, occurrence among same-named siblings, a `#k` flag, leaf of a part. The path key of a node is a digest (SHA-256, 128 bits) of the parent's key and `len:name#occurrence`; the length prefix keeps names with `/` or `#` from colliding, and the digest keeps keys short whatever the depth and name length (concatenating the path would let a hostile 64-deep, 256-character-name tree cost over a hundred megabytes). `TreeViewLogic` keeps `expanded` and `known` key sets: at first sight the root and level one are open; after a re-run, keys that still exist keep their state, vanished keys are dropped and new nodes follow the first-sight rule. The visible rows are computed in O(n) by jumping over closed subtrees and depend only on tree and open state, never on selection or hover.
+
+D6. Selection. `SelectionState` gains `selectedGroup` (path key, excludes the part selection) and `treeHover` (part range under the pointer in the tree). New events `SelectGroup`, `TreeHover`, and `SceneReplaced(table, tree)` (tree defaults to `null`, so the old call stays valid); a click on the canvas or Escape clears the group; after a re-run a group stays only if its key exists and is a group. `SelectionMachine.highlightRange` gives the part range of the selection. A click on a leaf in the tree dispatches the same `ClickAt(part, name, global occurrence)` as a canvas click.
+
+D7. Viewer highlight by range. `CanvasHighlight` gets `selectedLast` and `hoveredLast` (inclusive, default the single part), additive. The group selection and the hover of a tree row therefore tint all parts of the group at once; the hover of a row uses the tree hover range, the viewer hover keeps working when the pointer is not in the tree.
+
+D8. Layout and input. The panel is 240 dp wide, left of the canvas, divided by a 1 dp line, shown when the tree has at least two leaves, the toolbar toggle `Tree` is on (default on, not persisted) and the viewer area is wide enough for tree, line and the minimum pane width. Rows are 24 dp, indented 14 dp per level (capped at level 10), with a disclosure triangle drawn as a path; groups are medium weight with the leaf count dimmed, same-named siblings get a dimmed `#k`, the tooltip shows the full path. Selection is a light accent fill (grey without focus) and a 2 dp accent bar. A click selects, a click on the triangle only opens or closes, a double click on a group also toggles. Keyboard (when the panel has focus): Up and Down over the visible rows without wrap, Right opens a group or goes to its first child, Left closes a group or goes to the parent, Home and End, Enter toggles, Escape clears the selection and is passed on when there is none. A part chosen in the viewer opens its ancestors and scrolls to its row only if the row is not completely visible; hovering in the viewer never moves the tree. Compose Desktop has no tree role, so rows carry a content description (`name, assembly, n parts, expanded, level n`), `selected` and a state description. The inspection panel for a group shows name, part count, triangle count, size of the joined box and its centre.
+
+== Security
+
+* The tree is untrusted. Node count, depth and every index are checked before the allocation that depends on them; the parser returns a result instead of throwing; keys are digests of bounded length; the arrays are sized from the validated count only.
+* DoS: at most 8192 nodes and depth 64 bound every pass; the worker output stays below the 16 MiB stdout limit through these caps and the name cut.
+* Display spoofing: names are neutralised like part names; the leaf name must equal the part name.
+* Logging: no script text and no names.
+* The script is still evaluated only in the worker; `DesktopArchitectureTest` still holds (Compose only in `ui`, `pick` free of Compose, no script host in the desktop).
+
+== Rejected alternatives
+
+* A trie by usage identity: fuses repeated sub-assemblies.
+* Path keys by string concatenation: unbounded memory on hostile input.
+* Rejecting a shaped sub-assembly with children: legal AP242 structure; it becomes a group plus a leaf of its own geometry.
+* Real instance names (`NAUO name`) for the nodes: leaf names would no longer equal part names and ADR-0053's selection would break.
+
+== Not in this wave
+
+Resizable panel width, type-to-search, context menu, multi-select with Cmd or Shift, visibility per part, hover in the viewer revealing the row in the tree, persisted open state.

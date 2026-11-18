@@ -41,6 +41,21 @@ class RenderedPart(
     val color: dev.kstep.geometry.MeshColor,
 )
 
+/**
+ * One node of the assembly hierarchy (ADR-0054). [parent] is the index of the parent node (`-1` for the root); [part]
+ * is the index into the outcome's `parts` list for a leaf, `-1` for a group.
+ */
+class RenderedTreeNode(
+    val name: String,
+    val parent: Int,
+    val part: Int,
+)
+
+/** The assembly hierarchy in pre-order: every node's [RenderedTreeNode.parent] is smaller than its own index. */
+class RenderedAssemblyTree(
+    val nodes: List<RenderedTreeNode>,
+)
+
 sealed interface PreviewOutcome {
     /**
      * A container was produced -- ALWAYS, per ADR-0011's Container-Regel: geometry, a
@@ -82,6 +97,8 @@ sealed interface PreviewOutcome {
          * indices, contiguous, ascending, no zero-length entries (ADR-0053).
          */
         val parts: List<RenderedPart>? = null,
+        /** The assembly hierarchy over [parts] (ADR-0054); `null` for a single shape or a non-GLB container. */
+        val tree: RenderedAssemblyTree? = null,
     ) : PreviewOutcome
 
     /**

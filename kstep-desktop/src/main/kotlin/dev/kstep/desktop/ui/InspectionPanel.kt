@@ -21,6 +21,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.desktop.model.PartInfo
+import dev.kstep.desktop.pick.GroupInfo
+import dev.kstep.desktop.pick.GroupInspection
 import dev.kstep.desktop.pick.InspectionText
 
 private val LABEL = Color(0xFF8A8A8A)
@@ -74,6 +76,43 @@ fun InspectionPanel(
                 modifier = Modifier.padding(start = 6.dp),
             )
         }
+    }
+}
+
+/** The inspection panel of a selected assembly group (ADR-0054): name, part count, triangles, size and centre. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun GroupInspectionPanel(
+    info: GroupInfo,
+    background: Color,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .width(260.dp)
+            .background(background.copy(alpha = 0.92f))
+            .border(1.dp, LABEL.copy(alpha = 0.5f))
+            .padding(10.dp),
+    ) {
+        TooltipArea(
+            tooltip = {
+                Box(Modifier.background(Color.Black.copy(alpha = 0.8f)).padding(6.dp)) {
+                    Text(info.name, color = Color.White, fontSize = 12.sp)
+                }
+            },
+        ) {
+            Text(
+                info.name,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Line("Parts", GroupInspection.partsLine(info))
+        Line("Triangles", GroupInspection.triangles(info))
+        Line("Size", GroupInspection.size(info))
+        Line("Center", InspectionText.point(info.center))
     }
 }
 

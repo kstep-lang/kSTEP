@@ -9,6 +9,13 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop assembly tree (Welle D4, ADR-0054): a tree of the assembly beside the canvas. Click a part or a whole sub-assembly to
+  select it (the group tints all its parts and the inspection panel shows its part count, triangles, size and centre), hover a row to
+  highlight it, open and close groups with the triangle or the keyboard (Up/Down, Left/Right, Home/End, Enter, Escape), toggle it with
+  `Tree` in the toolbar. The render worker reports the hierarchy as a `tree` next to the part list and the desktop validates it; an
+  untrustworthy tree is not shown and gives the warning `KSTEP-D-013` while click selection keeps working. `kstep render --output json`
+  is unchanged (the tree is a desktop-worker extra). Additive API: `PreviewOutcome.Rendered.tree`, `RenderedAssemblyTree`,
+  `RenderedTreeNode`, `CanvasHighlight.selectedLast`/`hoveredLast`. No new dependency.
 * kSTEP Desktop selection and inspection (Welle D3, ADR-0053): hover tints the part under the pointer, a click selects it (a click on
   empty space or Escape clears), and an inspection panel shows its name, triangle count, size, centroid, colour and position. The render
   worker now reports the drawn parts and the desktop validates the list against the GLB; an untrustworthy list switches selection off

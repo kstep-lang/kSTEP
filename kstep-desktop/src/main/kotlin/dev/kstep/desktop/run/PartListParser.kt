@@ -44,7 +44,6 @@ object PartListParser {
     private const val COLOR_TOLERANCE = 1
     private const val AREA_EPSILON = 1e-18
     private val colorPattern = Regex("^#[0-9A-Fa-f]{6}$")
-    private val ansi = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]")
 
     fun parse(
         json: JsonObject,
@@ -83,7 +82,7 @@ object PartListParser {
         var expectedFirst = 0L
         for ((index, item) in array.withIndex()) {
             val obj = item as? JsonObject ?: return invalid(index, "not an object")
-            val name = cleanName(obj["name"]) ?: return invalid(index, "invalid name")
+            val name = NameSanitizer.cleanName(obj["name"]) ?: return invalid(index, "invalid name")
             val first = integer(obj["firstTriangle"]) ?: return invalid(index, "invalid firstTriangle")
             val count = integer(obj["triangleCount"]) ?: return invalid(index, "invalid triangleCount")
             if (first < 0 || count < 1) return invalid(index, "triangle range out of bounds")
@@ -141,34 +140,6 @@ object PartListParser {
         val axes = doubleArrayOf(v[0], v[1], v[2], v[4], v[5], v[6], v[8], v[9], v[10])
         return PartPlacement(doubleArrayOf(v[3], v[7], v[11]), axes)
     }
-
-    /**
-     * ANSI escapes are removed; other control characters and bidirectional overrides/isolates become U+FFFD (they
-     * could reorder or hide text in the inspection panel). Rejects empty names and names with no visible character.
-     */
-    private fun cleanName(e: JsonElement?): String? {
-        val p = e as? JsonPrimitive ?: return null
-        if (!p.isString) return null
-        val raw = p.content
-        if (raw.isEmpty() || raw.length > DesktopPartLimits.MAX_NAME_CHARS) return null
-        val sb = StringBuilder(raw.length)
-        for (ch in ansi.replace(raw, "")) sb.append(if (isUnsafe(ch)) '\uFFFD' else ch)
-        val cleaned = sb.toString()
-        if (cleaned.all { it == '\uFFFD' || it.isWhitespace() }) return null
-        return cleaned
-    }
-
-    private fun isUnsafe(c: Char): Boolean =
-        c.code < 0x20 ||
-            c.code == 0x7f ||
-            c.code in 0x80..0x9f ||
-            c.code in 0x202A..0x202E ||
-            c.code in 0x2066..0x2069 ||
-            c.code == 0x200E ||
-            c.code == 0x200F ||
-            c.code == 0x061C ||
-            c.code == 0x2028 ||
-            c.code == 0x2029
 
     private fun colorMatches(
         hex: String,

@@ -9,7 +9,9 @@ import dev.kstep.preview.PreviewRenderer
 import dev.kstep.preview.PreviewRequest
 import dev.kstep.preview.PreviewSource
 import dev.kstep.preview.PreviewWriter
+import dev.kstep.preview.RenderedAssemblyTree
 import dev.kstep.preview.RenderedPart
+import dev.kstep.preview.RenderedTreeNode
 import dev.kstep.preview.deriveRenderOutputPath
 import dev.kstep.render.export.MeshExportResult
 import dev.kstep.render.gltf.GlbWriteResult
@@ -227,7 +229,7 @@ private fun reportIoFailure(
     exitProcess(1)
 }
 
-private fun successJson(
+internal fun successJson(
     outPath: String,
     outcome: PreviewOutcome.Rendered,
     toleranceMm: Double?,
@@ -266,7 +268,12 @@ private fun successJson(
         putOcct(outcome.occt)
         put("rootCount", outcome.model?.rootCount ?: 0)
         outcome.glb?.let { glbResult -> putGlb(glbResult) }
-        if (includeParts) outcome.parts?.let { putParts(it) }
+        if (includeParts) {
+            outcome.parts?.let { parts ->
+                putParts(parts)
+                if (parts.size <= DesktopPartLimits.MAX_PARTS) outcome.tree?.let { putTree(it) }
+            }
+        }
         outcome.meshExport?.let { export -> putMeshExport(export, toleranceMm) }
     }
 
@@ -316,6 +323,49 @@ internal fun JsonObjectBuilder.putParts(parts: List<RenderedPart>) {
     }
 }
 
+/**
+ * Desktop-worker only (ADR-0054): the assembly hierarchy over the part list, pre-order. Over the limits the tree is
+ * left out (`"tree": null` plus `treeOmitted`); the flat part list stays usable.
+ */
+internal fun JsonObjectBuilder.putTree(tree: RenderedAssemblyTree) {
+    val nodes = tree.nodes
+    val reason =
+        when {
+            nodes.size > DesktopPartLimits.MAX_TREE_NODES -> "too_many_nodes"
+            treeDepth(nodes) > DesktopPartLimits.MAX_TREE_DEPTH -> "too_deep"
+            else -> null
+        }
+    if (reason != null) {
+        put("tree", JsonNull)
+        putJsonObject("treeOmitted") {
+            put("reason", reason)
+            put("count", nodes.size)
+        }
+        return
+    }
+    putJsonObject("tree") {
+        putJsonArray("nodes") {
+            for (node in nodes) {
+                addJsonObject {
+                    put("name", truncateName(node.name))
+                    put("parent", node.parent)
+                    put("part", node.part)
+                }
+            }
+        }
+    }
+}
+
+private fun treeDepth(nodes: List<RenderedTreeNode>): Int {
+    val depth = IntArray(nodes.size)
+    var max = 0
+    for ((i, node) in nodes.withIndex()) {
+        depth[i] = if (node.parent < 0) 0 else depth[node.parent] + 1
+        if (depth[i] > max) max = depth[i]
+    }
+    return max
+}
+
 private fun channel(v: Double): Int = Math.round(v * 255.0).toInt().coerceIn(0, 255)
 
 private fun truncateName(name: String): String {
@@ -358,4 +408,8 @@ private fun printError(
 object DesktopPartLimits {
     const val MAX_PARTS: Int = 4096
     const val MAX_NAME_CHARS: Int = 256
+
+    /** Assembly tree (ADR-0054): groups come on top of the parts, so the node limit is twice the part limit. */
+    const val MAX_TREE_NODES: Int = 8192
+    const val MAX_TREE_DEPTH: Int = 64
 }

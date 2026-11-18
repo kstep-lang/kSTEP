@@ -47,6 +47,15 @@ class PartTable(
         return -1
     }
 
+    /** How many parts before [part] carry the same name (0 for the first of that name). */
+    fun occurrenceOf(part: Int): Int {
+        if (part !in parts.indices) return 0
+        val name = parts[part].name
+        var seen = 0
+        for (i in 0 until part) if (parts[i].name == name) seen++
+        return seen
+    }
+
     /** The raw triangle-to-part map (read-only use: highlight lookup in the viewer). */
     fun triangleToPartArray(): IntArray = triangleToPart
 }

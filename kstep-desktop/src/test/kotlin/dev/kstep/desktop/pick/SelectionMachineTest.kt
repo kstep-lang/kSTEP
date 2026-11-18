@@ -68,4 +68,68 @@ class SelectionMachineTest :
             reduce(s, SelectionEvent.SceneReplaced(duplicates)).occurrence shouldBe 1
             reduce(s, SelectionEvent.SceneReplaced(table)).selected shouldBe null
         }
+
+        // Top > [Bolt, Sub > [Nut]]
+        val tree =
+            AssemblyTree(
+                arrayOf("Top", "Bolt", "Sub", "Nut"),
+                intArrayOf(-1, 0, 0, 2),
+                intArrayOf(-1, 0, -1, 1),
+            )
+        val subKey = tree.key(2)
+
+        "selecting a group excludes a part selection and vice versa" {
+            val part = reduce(start, SelectionEvent.ClickAt(0, "Bolt"))
+            val group = reduce(part, SelectionEvent.SelectGroup(subKey))
+            group.selectedGroup shouldBe subKey
+            group.selected shouldBe null
+            val back = reduce(group, SelectionEvent.ClickAt(1, "Nut"))
+            back.selectedGroup shouldBe null
+            back.selected shouldBe "Nut"
+        }
+
+        "clicking empty space or Escape also ends a group selection" {
+            val group = reduce(start, SelectionEvent.SelectGroup(subKey))
+            reduce(group, SelectionEvent.ClickAt(null, null)).selectedGroup shouldBe null
+            reduce(group, SelectionEvent.Escape).selectedGroup shouldBe null
+        }
+
+        "tree hover is set, cleared, and kept by drag start" {
+            val over = reduce(start, SelectionEvent.TreeHover(1..2))
+            over.treeHover shouldBe 1..2
+            reduce(over, SelectionEvent.DragStart).treeHover shouldBe 1..2
+            reduce(over, SelectionEvent.TreeHover(null)).treeHover shouldBe null
+        }
+
+        "a replaced scene keeps a group whose path still exists and clears the tree hover" {
+            val s = reduce(start, SelectionEvent.SelectGroup(subKey), SelectionEvent.TreeHover(0..1))
+            val kept = reduce(s, SelectionEvent.SceneReplaced(table, tree))
+            kept.selectedGroup shouldBe subKey
+            kept.treeHover shouldBe null
+        }
+
+        "a replaced scene drops a group that is gone, or a group of a leaf key, or without a tree" {
+            val other =
+                AssemblyTree(arrayOf("Top", "Bolt", "Other", "Nut"), intArrayOf(-1, 0, 0, 2), intArrayOf(-1, 0, -1, 1))
+            val s = reduce(start, SelectionEvent.SelectGroup(subKey))
+            reduce(s, SelectionEvent.SceneReplaced(table, other)).selectedGroup shouldBe null
+            reduce(s, SelectionEvent.SceneReplaced(table, null)).selectedGroup shouldBe null
+            val leaf = reduce(start, SelectionEvent.SelectGroup(tree.key(1)))
+            reduce(leaf, SelectionEvent.SceneReplaced(table, tree)).selectedGroup shouldBe null
+        }
+
+        "the highlight range is the group's range, the single part, or none" {
+            SelectionMachine.highlightRange(reduce(start, SelectionEvent.SelectGroup(subKey)), tree, table) shouldBe
+                1..1
+            SelectionMachine.highlightRange(
+                reduce(start, SelectionEvent.SelectGroup(tree.key(0))),
+                tree,
+                table,
+            ) shouldBe
+                0..1
+            SelectionMachine.highlightRange(reduce(start, SelectionEvent.ClickAt(0, "Bolt")), tree, table) shouldBe 0..0
+            SelectionMachine.highlightRange(start, tree, table) shouldBe SelectionMachine.NONE
+            SelectionMachine.highlightRange(reduce(start, SelectionEvent.SelectGroup("x")), tree, table) shouldBe
+                SelectionMachine.NONE
+        }
     })

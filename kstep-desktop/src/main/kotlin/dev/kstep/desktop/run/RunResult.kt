@@ -1,6 +1,7 @@
 package dev.kstep.desktop.run
 
 import dev.kstep.desktop.model.PartTable
+import dev.kstep.desktop.pick.AssemblyTree
 import dev.kstep.geometry.ColoredMesh
 import java.time.Instant
 
@@ -16,6 +17,8 @@ data class DesktopModel(
     val parts: PartTable? = null,
     /** Non-fatal problems of this model, e.g. an invalid part list (`KSTEP-D-012`). */
     val warnings: List<DesktopError> = emptyList(),
+    /** The validated assembly hierarchy over [parts] (ADR-0054), or `null` (none, or invalid: see [warnings]). */
+    val tree: AssemblyTree? = null,
 )
 
 /** The end of one run of the render worker. */

@@ -56,11 +56,15 @@ import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
+import dev.kstep.desktop.pick.AssemblyTree
+import dev.kstep.desktop.pick.GroupInspection
 import dev.kstep.desktop.pick.HoverThrottle
 import dev.kstep.desktop.pick.PickIndex
 import dev.kstep.desktop.pick.SelectionEvent
 import dev.kstep.desktop.pick.SelectionMachine
 import dev.kstep.desktop.pick.SelectionState
+import dev.kstep.desktop.pick.TreeViewLogic
+import dev.kstep.desktop.pick.TreeViewState
 import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.DesktopState
@@ -84,6 +88,8 @@ private const val ERROR_BAR_MAX_FRACTION = 0.4f
 private const val SCRIPT_FILTER_SUFFIX = ".kstep.kts"
 private const val INITIAL_EDITOR_FRACTION = 0.45f
 private const val MIN_PANE_DP = 240
+private const val TREE_DIVIDER_DP = 1
+private const val EDITOR_DIVIDER_DP = 7 // the 1 dp line and the 6 dp drag handle between editor and viewer
 
 /**
  * The whole window content: toolbar, script editor | canvas with badge and progress line, error bar (ADR-0051,
@@ -120,8 +126,20 @@ fun DesktopApp(
                 parts?.let { PickIndex(m, it) }
             }
         }
+    // Assembly tree (ADR-0054): the open state lives here so it survives re-runs; the panel draws it.
+    val tree: AssemblyTree? = display?.tree
+    var treeView by remember { mutableStateOf<TreeViewState?>(null) }
+    var shownTree by remember { mutableStateOf<AssemblyTree?>(null) }
+    var shownOpenCount by remember { mutableStateOf(openCount) }
+    var treeVisible by remember { mutableStateOf(true) }
     LaunchedEffect(display?.generation, openCount) {
-        selection.value = SelectionMachine.reduce(selection.value, SelectionEvent.SceneReplaced(parts))
+        selection.value = SelectionMachine.reduce(selection.value, SelectionEvent.SceneReplaced(parts, tree))
+        // a different file starts from the first-sight state, a re-run carries the open groups over
+        val previous = if (shownOpenCount == openCount) shownTree else null
+        treeView =
+            tree?.let { TreeViewLogic.onTreeReplaced(previous, it, treeView ?: TreeViewState(emptySet(), emptySet())) }
+        shownTree = tree
+        shownOpenCount = openCount
     }
     val picking =
         remember(pickIndex) {
@@ -139,14 +157,26 @@ fun DesktopApp(
     }
     val accent = if (dark) ACCENT_DARK else ACCENT_LIGHT
     val highlight =
-        remember(parts, dark) {
+        remember(parts, tree, dark) {
             derivedStateOf<CanvasHighlight?> {
                 parts?.let {
+                    val chosen = SelectionMachine.highlightRange(selection.value, tree, it)
+                    val over =
+                        selection.value.treeHover
+                            ?: selection.value.hovered?.let { h -> h..h }
+                            ?: SelectionMachine.NONE
                     CanvasHighlight(
                         it.triangleToPartArray(),
-                        SelectionMachine.selectedIndex(selection.value, it),
-                        selection.value.hovered ?: -1,
-                        doubleArrayOf(accent.red.toDouble(), accent.green.toDouble(), accent.blue.toDouble()),
+                        selected = chosen.first,
+                        hovered = over.first,
+                        accentRgb =
+                            doubleArrayOf(
+                                accent.red.toDouble(),
+                                accent.green.toDouble(),
+                                accent.blue.toDouble(),
+                            ),
+                        selectedLast = chosen.last,
+                        hoveredLast = over.last,
                     )
                 }
             }
@@ -155,6 +185,16 @@ fun DesktopApp(
         parts?.let { table ->
             SelectionMachine.selectedIndex(selection.value, table).takeIf { it >= 0 }?.let { table.parts[it] }
         }
+
+    val selectedGroup =
+        if (parts != null && tree != null) {
+            selection.value.selectedGroup?.let { key ->
+                tree.nodeOfKey(key).takeIf { it >= 0 }?.let { GroupInspection.of(tree, it, parts) }
+            }
+        } else {
+            null
+        }
+    val treeAvailable = tree != null && tree.leafCount(0) >= 2
 
     // The camera and the fit scale belong to the OPEN file: a re-run keeps both, so the view never jumps.
     LaunchedEffect(openCount) { camera.value = ViewerCameraState.HOME }
@@ -228,7 +268,15 @@ fun DesktopApp(
                 val errorBarMax = maxHeight * ERROR_BAR_MAX_FRACTION
                 val windowWidth = maxWidth
                 Column(Modifier.fillMaxSize()) {
-                    Toolbar(state, editorView, onOpen = openFile, onHome = home)
+                    Toolbar(
+                        state,
+                        editorView,
+                        onOpen = openFile,
+                        onHome = home,
+                        treeAvailable = treeAvailable,
+                        treeOn = treeVisible,
+                        onTree = { treeVisible = !treeVisible },
+                    )
                     val totalPx = with(LocalDensity.current) { windowWidth.toPx() }
                     val minFraction = (MIN_PANE_DP.dp / windowWidth).coerceIn(0.1f, 0.5f)
                     val errors = (state as? DesktopState.Error)?.errors.orEmpty()
@@ -263,11 +311,39 @@ fun DesktopApp(
                                         },
                                 ),
                         )
+                        // the tree needs its own width and still leaves the canvas at least the minimum pane width
+                        val viewerWidth = windowWidth * (1f - editorFraction) - EDITOR_DIVIDER_DP.dp
+                        val showTree =
+                            treeVisible &&
+                                treeAvailable &&
+                                parts != null &&
+                                viewerWidth >= TREE_WIDTH + TREE_DIVIDER_DP.dp + MIN_PANE_DP.dp
+                        if (showTree && tree != null && parts != null) {
+                            AssemblyTreePanel(
+                                tree = tree,
+                                table = parts,
+                                view = treeView ?: remember(tree) { TreeViewLogic.initial(tree) },
+                                onView = { treeView = it },
+                                selection = selection,
+                                dispatch = { selection.value = SelectionMachine.reduce(selection.value, it) },
+                                dark = dark,
+                                background = MaterialTheme.colorScheme.background,
+                                modifier = Modifier.fillMaxHeight(),
+                            )
+                            Box(Modifier.width(TREE_DIVIDER_DP.dp).fillMaxHeight().background(DIM.copy(alpha = 0.5f)))
+                        }
                         Box(Modifier.weight(1f).fillMaxHeight()) {
                             Canvas(state, display, camera, fitReference, openFile, highlight, picking)
                             Badge(state)
                             selectedPart?.let {
                                 InspectionPanel(
+                                    it,
+                                    MaterialTheme.colorScheme.background,
+                                    Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                )
+                            }
+                            selectedGroup?.let {
+                                GroupInspectionPanel(
                                     it,
                                     MaterialTheme.colorScheme.background,
                                     Modifier.align(Alignment.TopEnd).padding(12.dp),
@@ -298,6 +374,9 @@ private fun Toolbar(
     editor: EditorView,
     onOpen: () -> Unit,
     onHome: () -> Unit,
+    treeAvailable: Boolean,
+    treeOn: Boolean,
+    onTree: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
@@ -305,6 +384,11 @@ private fun Toolbar(
     ) {
         TextButton(onClick = onOpen) { Text("Open", fontSize = 13.sp) }
         TextButton(onClick = onHome) { Text("Home", fontSize = 13.sp) }
+        if (treeAvailable) {
+            TextButton(onClick = onTree) {
+                Text("Tree", fontSize = 13.sp, color = if (treeOn) Color.Unspecified else DIM)
+            }
+        }
         Text(
             state.file?.fileName?.toString() ?: "No file",
             fontSize = 13.sp,

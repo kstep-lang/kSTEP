@@ -68,7 +68,7 @@ internal class DesktopPicking(
         val part = if (frame == null) -1 else partAt(x, y, frame)
         if (part >= 0) {
             val name = table.parts[part].name
-            val occurrence = (0 until part).count { table.parts[it].name == name }
+            val occurrence = table.occurrenceOf(part)
             dispatch(SelectionEvent.ClickAt(part, name, occurrence))
         } else {
             dispatch(SelectionEvent.ClickAt(null, null))
@@ -86,7 +86,7 @@ internal class DesktopPicking(
     }
 
     override fun onEscape(): Boolean {
-        if (selection.value.selected == null) return false
+        if (selection.value.selected == null && selection.value.selectedGroup == null) return false
         dispatch(SelectionEvent.Escape)
         return true
     }
