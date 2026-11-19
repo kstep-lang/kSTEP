@@ -40,4 +40,7 @@ object DesktopErrorCodes {
     const val WORKSPACE_PATH_REJECTED = "KSTEP-D-026"
     const val WORKSPACE_LIMIT = "KSTEP-D-027"
     const val BLOCK_NOT_CLOSED = "KSTEP-D-028"
+
+    // The sandbox of the user's own flows (ADR-0062); D-029 and D-030 belong to the AI check (AiErrorCodes).
+    const val SANDBOX_START_FAILED = "KSTEP-D-031"
 }

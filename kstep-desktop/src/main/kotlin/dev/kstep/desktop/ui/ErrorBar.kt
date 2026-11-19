@@ -57,8 +57,7 @@ fun ErrorBar(
     var expanded by remember(errors) { mutableStateOf(initiallyExpanded) }
     val textColor =
         when {
-            warning && dark -> Color(0xFFFFE9B0)
-            warning -> Color(0xFF3D2A00)
+            warning -> warningTextColor(dark)
             dark -> Color(0xFFFFDAD6)
             else -> Color(0xFF410002)
         }
@@ -135,3 +134,6 @@ private fun CopyButton(errors: List<DesktopError>) {
         Text("Copy", fontSize = 12.sp)
     }
 }
+
+/** The text colour on amber warnings (error bar, status line notice), light and dark (ADR-0062). */
+internal fun warningTextColor(dark: Boolean): Color = if (dark) Color(0xFFFFE9B0) else Color(0xFF3D2A00)

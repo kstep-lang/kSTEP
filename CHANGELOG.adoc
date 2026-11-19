@@ -9,6 +9,16 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Sandbox for your own scripts in kSTEP Desktop (Welle D6c, ADR-0062): live preview, export and knowledge-workspace blocks now
+  run in `sandbox-exec` (macOS) or `bubblewrap` (Linux) with no network and write access only to their session folder; reading
+  stays allowed. The system is probed once per program run; where the probe fails (Windows, Linux without a working
+  `bubblewrap`) the flows run as before and the status line and the export dialog show "Script runs without sandbox", with the
+  reason as a tooltip. A start failure after a successful probe is the new error `KSTEP-D-031`, without retry or fall-back.
+  Behaviour change: a script that writes outside the session folder fails in the Desktop but not under `kstep render`.
+  Linux user-flow sandbox: not yet confirmed in CI. Moved to D6d: kstep-mcp whitelist tools, more providers with an SSRF check,
+  prompt history, Windows Credential Manager and AppContainer, new script from prompt, the `Inspect | AI` tab pair, a key broker,
+  applying single hunks (the chosen subset must be checked again before applying), `SessionDirGuard` before writing the block
+  file, JNI and further Mach services, TIOCSTI on macOS, read protection.
 * `kstep convert` extensions (Welle D8c, ADR-0061): the input may be a folder (one level, no recursion, no links, hidden files skipped;
   `--to okf` converts every `*.kstep.kts`, `--to kts` every `*.md`; empty scripts and notes without a `kstep` block are skipped, any
   other failing file stops the whole run with nothing written; name clashes, also case-insensitive ones, and hard links to inputs are

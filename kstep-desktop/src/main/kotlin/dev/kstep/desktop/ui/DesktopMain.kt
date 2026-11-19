@@ -18,6 +18,7 @@ import dev.kstep.desktop.export.ExportController
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
 import dev.kstep.desktop.run.AiCandidateCompiler
 import dev.kstep.desktop.run.LiveRunController
+import dev.kstep.desktop.run.UserScriptSandbox
 import dev.kstep.desktop.run.WorkerRunner
 import dev.kstep.desktop.run.WorkerSandbox
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
@@ -36,11 +37,15 @@ fun runDesktopApp(args: Array<String>) {
     val initial = args.firstOrNull()?.let { Path.of(it) }
     application {
         // Knowledge workspace (ADR-0058): own session directory and worker; it routes a note to its block runner.
-        val knowledge = remember { KnowledgeWorkspaceController.production() }
+        // The sandbox of the user's own flows (ADR-0062), probed once at the first run; the AI check keeps its own.
+        val userSandbox = remember { UserScriptSandbox.production() }
+        val knowledge = remember { KnowledgeWorkspaceController.production(userSandbox) }
         val controller =
             remember {
                 LiveRunController
-                    .production { file -> if (knowledge.isWorkspaceFile(file)) knowledge::runBlock else null }
+                    .production(
+                        userSandbox,
+                    ) { file -> if (knowledge.isWorkspaceFile(file)) knowledge::runBlock else null }
                     .also {
                         it.runFilter = knowledge::runFilter
                         knowledge.onRunRequested = it::forceRun
@@ -76,7 +81,7 @@ fun runDesktopApp(args: Array<String>) {
                 )
             }
         // Own session directory and worker for exports: the live preview is never disturbed (ADR-0057).
-        val exporter = remember { ExportController.production() }
+        val exporter = remember { ExportController.production(userSandbox) }
         val state by controller.state.collectAsState()
         val editor by session.view.collectAsState()
         val frame = remember { arrayOfNulls<Frame>(1) }
@@ -114,6 +119,7 @@ fun runDesktopApp(args: Array<String>) {
                 ai = ai,
                 exporter = exporter,
                 knowledge = knowledge,
+                userSandbox = userSandbox.state,
             )
         }
     }

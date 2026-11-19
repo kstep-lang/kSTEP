@@ -65,6 +65,10 @@ class WorkerRunner(
     private val extraJvmOptions: List<String> = emptyList(),
     private val clock: () -> Instant = Instant::now,
     private val sandbox: WorkerSandbox? = null,
+    /** The code of a sandbox that failed to start: D-030 for the AI check, D-031 for the user flows (ADR-0062). */
+    private val sandboxFailureCode: String = AiErrorCodes.AI_SANDBOX_START_FAILED,
+    /** `null` keeps the AI texts unchanged. */
+    private val sandboxFailureMessage: String? = null,
     private val supervisorFactory: (Long, Path, (Process) -> Unit) -> ImportWorkerSupervisor =
         { timeout, base, started ->
             ImportWorkerSupervisor(
@@ -94,7 +98,10 @@ class WorkerRunner(
             )
         }
         if (sandbox != null && !guard.intact()) {
-            return failure(AiErrorCodes.AI_SANDBOX_START_FAILED, SessionDirGuard.MESSAGE)
+            return failure(
+                sandboxFailureCode,
+                if (sandboxFailureMessage == null) SessionDirGuard.MESSAGE else GUARD_MESSAGE_USER,
+            )
         }
         FileArgument.validate(file)?.let { return failure(DesktopErrorCodes.FILE_MISSING, it) }
         val out = sessionDir.resolve("run-$generation.glb")
@@ -152,15 +159,14 @@ class WorkerRunner(
                 )
             is WorkerOutcome.StartFailed ->
                 failure(
-                    if (sandbox !=
-                        null
-                    ) {
-                        AiErrorCodes.AI_SANDBOX_START_FAILED
-                    } else {
-                        DesktopErrorCodes.WORKER_START_FAILED
-                    },
-                    (if (sandbox != null) "cannot start the worker sandbox" else "cannot start the render worker") +
-                        detail(outcome.reason),
+                    if (sandbox != null) sandboxFailureCode else DesktopErrorCodes.WORKER_START_FAILED,
+                    (
+                        if (sandbox != null) {
+                            sandboxFailureMessage ?: "cannot start the worker sandbox"
+                        } else {
+                            "cannot start the render worker"
+                        }
+                    ) + detail(outcome.reason),
                 )
             is WorkerOutcome.IncompleteOutput ->
                 failure(
@@ -188,8 +194,8 @@ class WorkerRunner(
         }
         if (sandbox != null && code != 0 && code != 1 && sandboxRefusal(stderr)) {
             return failure(
-                AiErrorCodes.AI_SANDBOX_START_FAILED,
-                "cannot start the worker sandbox" + detail(diagnosticLine(stderr)),
+                sandboxFailureCode,
+                (sandboxFailureMessage ?: "cannot start the worker sandbox") + detail(diagnosticLine(stderr)),
             )
         }
         if (code != 0 && code != 1) {
@@ -335,10 +341,6 @@ class WorkerRunner(
         message: String,
     ): RunResult.Failure = RunResult.Failure(listOf(DesktopError(code, null, null, ErrorParser.sanitize(message))))
 
-    /** A line of the sandbox wrapper itself (`sandbox-exec:` / `bwrap:`), not of the script. */
-    private fun sandboxRefusal(stderr: String): Boolean =
-        stderr.lineSequence().any { it.trimStart().startsWith("sandbox-exec:") || it.trimStart().startsWith("bwrap:") }
-
     private fun detail(text: String?): String = if (text.isNullOrBlank()) "" else " (${ErrorParser.sanitize(text)})"
 
     private fun text(
@@ -347,6 +349,9 @@ class WorkerRunner(
     ): String = String(bytes, if (stdout) ImportWorkerLaunch.stdoutCharset() else ImportWorkerLaunch.stderrCharset())
 
     companion object {
+        /** The message of a changed session folder in the user flows (ADR-0062). */
+        const val GUARD_MESSAGE_USER: String =
+            "the session folder was changed while the script ran; the script was not run"
         const val DEFAULT_TIMEOUT_MILLIS: Long = 60_000
         const val DEFAULT_MAX_GLB_BYTES: Long = 64L shl 20
         private const val OOM_EXIT_CODE = 3
@@ -359,3 +364,7 @@ class WorkerRunner(
         private const val MIB_SHIFT = 20
     }
 }
+
+/** A line of the sandbox wrapper itself (`sandbox-exec:` / `bwrap:`), not of the script. */
+internal fun sandboxRefusal(stderr: String): Boolean =
+    stderr.lineSequence().any { it.trimStart().startsWith("sandbox-exec:") || it.trimStart().startsWith("bwrap:") }

@@ -109,3 +109,5 @@ No new dependency.
 == Follow-up D7b
 
 A declarative export block in the script itself (`KStepModel` has no export-target declaration, so it needs a language feature in kstep-script first), remembering the last format and folder across sessions, an own file picker against the double replace question on macOS, per-format options (tolerance, watertight check), a progress bar with a real percentage where the worker can report one.
+
+Note: since Welle D6c the worker of this flow runs sandboxed where the system has a sandbox (ADR-0062); where it has none it runs as described here, with a visible notice.

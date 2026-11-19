@@ -4,7 +4,7 @@ package dev.kstep.desktop.run
  * The environment of the render worker (ADR-0056). A script is arbitrary Kotlin, and since the AI panel it can also be
  * AI-generated code that runs before anyone read it; it must not be able to read a key from the environment. Applies to
  * EVERY worker of the desktop (live preview and AI candidate check). The AI candidate check additionally starts inside an
- * OS sandbox ([startSandboxed], ADR-0059); the other workers use [start] and are not sandboxed.
+ * OS sandbox ([startSandboxed], ADR-0059); the user flows use [startSandboxed] when the system has a sandbox (ADR-0062), else [start] with a visible notice.
  */
 object WorkerEnvironment {
     private val exactNames = setOf("ANTHROPIC_API_KEY", "OPENAI_API_KEY")

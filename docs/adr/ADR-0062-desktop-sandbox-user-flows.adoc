@@ -1,0 +1,118 @@
+= ADR-0062: kSTEP Desktop, a sandbox for the user's own scripts (Welle D6c)
+:toc:
+
+== Status
+
+Accepted (Welle D6c), implemented on a local branch. What is tested, per platform:
+
+* *Everywhere:* the state machine of the probe (`UserScriptSandboxTest`: one probe per program run, also under parallel callers, a throwing detector, rebinding to the real path of each session), the texts of the notice (`SandboxNoticeTest`), the argv of both wrappers incl. `hideTmp` and the byte-identical AI argv (`WorkerSandboxCommandTest`), the error mapping of the live runner and the export runner with injected supervisors (`WorkerRunnerSandboxCodeTest`, `ExportWorkerRunnerSandboxTest`) and the uniqueness of the error codes (`DesktopErrorCodesTest`).
+* *macOS arm64 (development Mac):* `UserFlowSandboxMacTest` runs real scripts through the probe of the production wiring, each write and network case with a control run that shows the same script achieves the effect without a sandbox, plus reading outside the session, export, a knowledge block, and timeout with kill. `UserFlowSandboxOcctTest` renders a two-part assembly and exports STEP and STL inside the sandbox (OCCT from Homebrew).
+* *Linux (bubblewrap): not yet confirmed in CI.* `UserFlowSandboxLinuxTest` and `UserFlowSandboxOcctTest` run there only after the first CI run that follows the push; no Linux host exists here. The Linux flags of the user flows (no `--tmpfs /tmp`) are therefore untested on a real machine until then. The AI variant of the same wrapper: CI on `51d2b32` (job `ubuntu-26.04`) installs bubblewrap and passes `-Pkstep.sandbox.require=true`, and was green, which makes `WorkerSandboxLinuxTest` a required case that passed. The Gradle log of that job prints no per-test lines, so this is derived from the flag and the green job, not read from a test report; ADR-0059 says "not run" and stays unchanged for that reason.
+* *Windows:* no sandbox. The flows run as before and show the notice.
+* The status line and the export dialog were composed and compiled but not clicked through by hand in a running window.
+
+== Context
+
+ADR-0059 sandboxed only the AI candidate check, because that text runs before anyone read it. The user's own scripts (live preview ADR-0051, export ADR-0057, knowledge-workspace blocks ADR-0058) still ran in a worker with the user's rights and an open network. They are not hostile by assumption, but a script from a download, a note from a shared folder, or an accepted AI proposal runs in the preview at once. The same walls cost little here: no flow starts a child process (the render and export workers do not; `ImportWorkerSupervisor` is used by the worker only for `kstep import`, and FreeCAD only runs there), and the kSTEP script language has no network function and no `@file:DependsOn`.
+
+== Decision
+
+D1. Reading stays allowed everywhere: scripts read relative input files, and the JDK, the compiler and OCCT read widely. This remains a deliberate residual gap (as ADR-0059, D1).
+
+D2. Writing is allowed only in the session folder of the flow. The worker temp folder (`-Djava.io.tmpdir`) lies below it, and so do the native bridges of OCCT and PlaneGCS, which unpack into `java.io.tmpdir`. Write and `file-map-executable` are therefore both open exactly there; no extra path for the native bridge is needed. On macOS `/dev` is writable as well.
+
+D3. No network (macOS `deny network*`, Linux `--unshare-net`).
+
+D4. macOS uses the same `MAC_PROFILE` as the AI check, so a user script cannot start any program except the JDK nor create a process (`process-fork`). The process-tree kill and the race-free `SessionDirGuard` need one process, and no flow starts a child.
+
+D5. Linux uses the flags of the AI check *without* `--tmpfs /tmp` (`Bubblewrap.hideTmp = false`). Scripts, inputs and the test scripts in `@TempDir` live under `/tmp`; a tmpfs there would hide all of it. `/tmp` stays readable through `--ro-bind / /`, the only writable folders are the bound session folders. Residual risk: a unix-domain socket below `/tmp` (for example X11) stays reachable by `connect` through the read-only mount; the network namespace isolates only abstract sockets. Accepted for the user's own scripts.
+
+D6. Available means: the probe succeeds. The probe runs once per program run, at the first need, in the runner thread (never on the UI thread), with a 30 s timeout (a slow CI runner must not count as "no sandbox"). On macOS the probe is `java -version` under the profile, not `/usr/bin/true`: the profile forbids starting anything outside the JDK, so a probe with `true` would always fail. On Linux it is `/bin/true` with exactly the flags of the user flows (`detect(..., hideTmp = false)`). If the probe fails, the state is `Unavailable(kind)`, the flows run as before, and the status line shows "Script runs without sandbox" for the rest of the run, with the reason as a tooltip. This is not a silent fall-back: the state is visible and explained. The probe instance is bound to a throw-away folder; each flow rebinds it to the real path of its own session folder (`forSession`, `/var` is `/private/var` on macOS).
+
+D7. If the probe succeeded and a real start fails afterwards, the flow ends with `KSTEP-D-031` ("Sandbox failed to start; the script was not run."). No retry, no fall-back, and no button "run without sandbox". A changed session folder (`SessionDirGuard`) is also `KSTEP-D-031` with its own message ("the session folder was changed while the script ran; the script was not run"); a separate code was not worth it.
+
+D8. Heap limit, timeout and process-tree kill are unchanged. `sandbox-exec` replaces itself with the command, `bwrap` passes the exit code of the child on, sets `--die-with-parent` and `--unshare-pid`, and the supervisor kills the descendants.
+
+D9. An export writes only into its private session folder. `ExportAtomicWriter` copies into the target in the unsandboxed parent; the worker never sees the target path. With an active sandbox, `SessionDirGuard` checks the folder before the start and again before the output is handed over; if it was swapped, the output is deleted and the export ends with `KSTEP-D-031`.
+
+D10. Behaviour change: a script that writes outside the session folder fails in the Desktop with a script error, but not under `kstep render` in the CLI, which is not sandboxed. The CLI, `kstep render --output json`, the standard zip and the release scripts are unchanged.
+
+D11. Windows has no sandbox in this wave (notice only). An AppContainer follows (D6d).
+
+D12. The AI check keeps its own detection (`WorkerSandbox.detect` in `DesktopMain`), fail-closed. It is not merged with the user-flow probe: "AI: no sandbox, no run" and "user: no sandbox, run with notice" must stay different decisions.
+
+The native bridges need no extra rule: they unpack into the worker temp folder, which is inside the session folder (D2).
+
+Diagram of a flow:
+
+[kuml, adr-0062-user-flow-sandbox, svg]
+----
+activityDiagram(name = "User flow with the sandbox") {
+    val start = initialNode()
+    val known = decision(name = "sandbox state known?")
+    val probe = action(name = "Probe once (detect, hideTmp=false)")
+    val ok = decision(name = "probe ok?")
+    val run = action(name = "Run worker in sandbox (writes: session only, no network)")
+    val started = decision(name = "started?")
+    val result = action(name = "Result as before")
+    val failed = action(name = "Failed KSTEP-D-031, no retry, no fallback")
+    val plain = action(name = "Run unsandboxed; status line 'Script runs without sandbox' (reason in tooltip)")
+    val done = finalNode()
+
+    edge(from = start, to = known)
+    edge(from = known, to = probe, guard = "no")
+    edge(from = known, to = ok, guard = "yes")
+    edge(from = probe, to = ok)
+    edge(from = ok, to = run, guard = "yes")
+    edge(from = ok, to = plain, guard = "no")
+    edge(from = run, to = started)
+    edge(from = started, to = result, guard = "yes")
+    edge(from = started, to = failed, guard = "no")
+    edge(from = result, to = done)
+    edge(from = failed, to = done)
+    edge(from = plain, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it.
+
+== Threat model
+
+[cols="1,2",options="header"]
+|===
+| Threat | Protection and remaining risk
+
+| A script (downloaded, from a shared note, or an accepted proposal) sends data out or contacts a service
+| No network in the sandbox. Reading stays possible, so it can read files; it cannot send them by network, by a program, or by a file outside the session folder. Where no sandbox exists the script still runs (D6), with a visible notice.
+
+| A script writes outside the session folder
+| Refused by the profile or the read-only mount; the control runs in the tests show the same script writes without a sandbox. A system daemon that writes on behalf of a client may exist (see ADR-0059); `(deny user-preference-write)` closes the known one.
+
+| A script swaps the session folder for a link while the desktop copies from it (confused deputy)
+| `SessionDirGuard` before the start and before the output is handed over; the existing no-follow check of `ExportOutputValidator` stays.
+
+| A script starts or leaves a process
+| macOS: `process-fork` and `process-exec` are denied outside the JDK. Linux: `--unshare-pid`, `--die-with-parent`, kill of the process tree.
+
+| A unix socket under `/tmp` on Linux (for example X11)
+| Reachable by `connect` through the read-only mount (D5). Accepted, documented.
+
+| A script prints a line starting with `bwrap:` or `sandbox-exec:` and exits with 2
+| It is reported as `KSTEP-D-031`. Harmless: the message is the sandbox message, and the script did run.
+
+| Native code (JNI) calls Mach/XPC services; TIOCSTI on macOS
+| Not covered; as in ADR-0059, open for D6d.
+
+| The Linux variant behaves differently from what is written here
+| Not yet confirmed in CI (see Status). The CI job passes `-Pkstep.sandbox.require=true`, so `UserFlowSandboxLinuxTest` and `UserFlowSandboxOcctTest` fail (not skip) there when bubblewrap is unusable.
+|===
+
+== Consequences
+
+* Live preview, export and knowledge blocks run in `sandbox-exec` (macOS) or `bubblewrap` (Linux) with no network and write access only to their session folder. Where the probe fails, they run as before and the status line (and the export dialog) show "Script runs without sandbox", reason in a tooltip. Nothing is stored, no setting, no migration.
+* New error code `KSTEP-D-031` (`SANDBOX_START_FAILED`) in `DesktopErrorCodes`; `WorkerRunner` got the additive parameters `sandboxFailureCode` and `sandboxFailureMessage`, `ExportWorkerRunner` the parameter `sandbox`, `WorkerSandbox.Bubblewrap` the field `hideTmp`, `Unavailable` a `kind`. Defaults keep the AI behaviour (`KSTEP-D-030`) byte for byte.
+* `kstep-cli` and `scripts/release/` were not touched.
+
+== Follow-up D6d
+
+kstep-mcp tools as a vetted whitelist; more providers with an SSRF check; a prompt history; Windows Credential Manager and an AppContainer; "new script from prompt"; the `Inspect | AI` tab pair; a key broker; *applying single hunks*, on the condition that the chosen subset is checked again before it is applied (the compile loop checked only the whole proposal); `SessionDirGuard` also before the block file is written in the knowledge workspace; JNI and further Mach services; TIOCSTI on macOS; read protection; and the remaining items of the follow-up of ADR-0059.

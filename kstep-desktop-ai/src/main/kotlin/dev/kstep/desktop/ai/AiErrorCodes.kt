@@ -1,6 +1,6 @@
 package dev.kstep.desktop.ai
 
-/** The desktop's AI error codes (ADR-0056); they continue the `KSTEP-D-xxx` range of `DesktopErrorCodes` (D-001..D-013; the sandbox codes D-029/D-030 are the last, ADR-0059). */
+/** The desktop's AI error codes (ADR-0056); they continue the `KSTEP-D-xxx` range of `DesktopErrorCodes` (D-001..D-013; the sandbox codes D-029/D-030 belong to the AI check, ADR-0059; D-031, the sandbox of the user flows, is flow-neutral and lives in `DesktopErrorCodes`, ADR-0062). */
 object AiErrorCodes {
     const val AI_PROVIDER_UNREACHABLE = "KSTEP-D-014"
     const val AI_PROVIDER_REJECTED = "KSTEP-D-015"

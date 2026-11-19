@@ -227,17 +227,21 @@ class LiveRunController(
          * The production wiring: a real [WorkerRunner] and a polling [FileChangeWatcher]. [route] may hand a file to
          * another runner (the knowledge workspace runs a block of a note, ADR-0058); `null` means the default runner.
          */
-        fun production(route: ((Path) -> ((Path, Long, (Process) -> Unit) -> RunResult)?)? = null): LiveRunController {
+        fun production(
+            sandbox: UserScriptSandbox? = null,
+            route: ((Path) -> ((Path, Long, (Process) -> Unit) -> RunResult)?)? = null,
+        ): LiveRunController {
             val dir = createSessionDir()
             // A normal close() removes the session directory; this covers SIGTERM/Ctrl-C of the whole application.
             Runtime.getRuntime().addShutdownHook(
                 Thread({ WorkerTempDir.deleteRecursively(dir) }, "kstep-desktop-cleanup"),
             )
-            val runner = WorkerRunner(dir)
+            // With a sandbox (ADR-0062) the runner resolves it at the first run, in the runner thread.
+            val runner = sandbox?.workerRunner(dir) ?: lazyOf(WorkerRunner(dir))
             return LiveRunController(
                 runner = { file, gen, started ->
                     val routed = route?.invoke(file)
-                    if (routed != null) routed(file, gen, started) else runner.run(file, gen, started)
+                    if (routed != null) routed(file, gen, started) else runner.value.run(file, gen, started)
                 },
                 watcherFactory = { file, onEvent -> FileChangeWatcher(file, onEvent = onEvent) },
                 sessionDir = dir,

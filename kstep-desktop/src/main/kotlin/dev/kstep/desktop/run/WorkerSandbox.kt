@@ -40,6 +40,8 @@ sealed interface WorkerSandbox {
         val path: Path,
         val session: Path,
         val tmp: Path,
+        /** False for the user's own flows (ADR-0062): /tmp stays readable so scripts and inputs there are found. */
+        val hideTmp: Boolean = true,
     ) : WorkerSandbox {
         override fun wrap(command: List<String>): List<String> =
             listOf(
@@ -55,28 +57,40 @@ sealed interface WorkerSandbox {
                 "--unshare-pid",
                 "--proc",
                 "/proc",
-                "--tmpfs",
-                "/tmp",
-                "--tmpfs",
-                "/run",
-                "--bind",
-                session.toString(),
-                session.toString(),
-                "--bind",
-                tmp.toString(),
-                tmp.toString(),
-                "--unshare-net",
-                "--unsetenv",
-                "DBUS_SESSION_BUS_ADDRESS",
-                "--new-session",
-                "--die-with-parent",
-                "--",
-            ) + command
+            ) + (if (hideTmp) listOf("--tmpfs", "/tmp") else emptyList()) +
+                listOf(
+                    "--tmpfs",
+                    "/run",
+                    "--bind",
+                    session.toString(),
+                    session.toString(),
+                    "--bind",
+                    tmp.toString(),
+                    tmp.toString(),
+                    "--unshare-net",
+                    "--unsetenv",
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    "--new-session",
+                    "--die-with-parent",
+                    "--",
+                ) + command
+    }
+
+    /** Why no sandbox is available; drives the visible notice of the user flows (ADR-0062). */
+    enum class UnavailableKind {
+        WINDOWS,
+        BWRAP_MISSING,
+        BWRAP_PROBE_FAILED,
+        MAC_EXEC_MISSING,
+        MAC_PROBE_FAILED,
+        OTHER_OS,
+        CHECK_FAILED,
     }
 
     /** No sandbox on this system; the candidate must not be run. */
     data class Unavailable(
         val reason: String,
+        val kind: UnavailableKind = UnavailableKind.CHECK_FAILED,
     ) : WorkerSandbox {
         override fun wrap(command: List<String>): List<String> = throw IllegalStateException(reason)
     }
@@ -119,11 +133,12 @@ sealed interface WorkerSandbox {
             probe: (List<String>) -> Int? = { WorkerEnvironment.probe(it, PROBE_TIMEOUT_MILLIS) },
             pathEnv: String? = System.getenv("PATH"),
             isExecutable: (Path) -> Boolean = Files::isExecutable,
+            hideTmp: Boolean = true,
         ): WorkerSandbox =
             try {
-                detectUnchecked(sessionDir, tempBase, osName, probe, pathEnv, isExecutable)
+                detectUnchecked(sessionDir, tempBase, osName, probe, pathEnv, isExecutable, hideTmp)
             } catch (e: Exception) {
-                Unavailable("worker sandbox check failed (${e.javaClass.simpleName})")
+                Unavailable("worker sandbox check failed (${e.javaClass.simpleName})", UnavailableKind.CHECK_FAILED)
             }
 
         private fun detectUnchecked(
@@ -133,39 +148,49 @@ sealed interface WorkerSandbox {
             probe: (List<String>) -> Int?,
             pathEnv: String?,
             isExecutable: (Path) -> Boolean,
+            hideTmp: Boolean,
         ): WorkerSandbox {
             val os = osName.lowercase()
-            if (os.startsWith("windows")) return Unavailable("Windows: no worker sandbox")
+            if (os.startsWith("windows")) return Unavailable("Windows: no worker sandbox", UnavailableKind.WINDOWS)
             val session = sessionDir.toRealPath()
             val tmp = tempBase.toRealPath()
             return when {
                 os.startsWith("mac") -> {
                     if (!isExecutable(Path.of(SANDBOX_EXEC))) {
-                        Unavailable("sandbox-exec not found")
+                        Unavailable("sandbox-exec not found", UnavailableKind.MAC_EXEC_MISSING)
                     } else {
                         val candidate = MacSandboxExec(MAC_PROFILE, session, tmp)
                         val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
                         if (probe(candidate.wrap(listOf(java, "-version"))) == 0) {
                             candidate
                         } else {
-                            Unavailable("sandbox-exec cannot apply the worker profile")
+                            Unavailable(
+                                "sandbox-exec cannot apply the worker profile",
+                                UnavailableKind.MAC_PROBE_FAILED,
+                            )
                         }
                     }
                 }
                 os.startsWith("linux") -> {
                     val bwrap = findBwrap(pathEnv, isExecutable)
                     if (bwrap == null) {
-                        Unavailable("Linux: bubblewrap (bwrap) not installed or not usable")
+                        Unavailable(
+                            "Linux: bubblewrap (bwrap) not installed or not usable",
+                            UnavailableKind.BWRAP_MISSING,
+                        )
                     } else {
-                        val candidate = Bubblewrap(bwrap, session, tmp)
+                        val candidate = Bubblewrap(bwrap, session, tmp, hideTmp)
                         if (probe(candidate.wrap(listOf("/bin/true"))) == 0) {
                             candidate
                         } else {
-                            Unavailable("Linux: bubblewrap (bwrap) not installed or not usable")
+                            Unavailable(
+                                "Linux: bubblewrap (bwrap) not installed or not usable",
+                                UnavailableKind.BWRAP_PROBE_FAILED,
+                            )
                         }
                     }
                 }
-                else -> Unavailable("$osName: no worker sandbox")
+                else -> Unavailable("$osName: no worker sandbox", UnavailableKind.OTHER_OS)
             }
         }
 

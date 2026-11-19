@@ -239,7 +239,10 @@ link:docs/usage.adoc[Usage].
   script is run on this computer before you have read it, in a sandbox (macOS `sandbox-exec`, Linux `bubblewrap`) without network
   access that can write only to its session folder. *It can still read your files*, including a key in the system keychain, but
   cannot send what it reads out. Windows and Linux without `bubblewrap` have no such sandbox: there the script is not run and the
-  proposal is shown as "not checked", so read the diff before you apply it. The live preview of your own scripts is not sandboxed.
+  proposal is shown as "not checked", so read the diff before you apply it. The live preview, the export and the blocks of the knowledge workspace run your own scripts in the same kind of
+  sandbox (macOS `sandbox-exec`, Linux `bubblewrap`): no network, writing only in their session folder, reading stays
+  allowed. Where no sandbox works the scripts still run, and the status line shows "Script runs without sandbox". The
+  Linux variant is not yet confirmed in CI.
 
 | `kstep-desktop-ai`
 | Logic of the desktop AI panel (not published): repair loop, key store access, consent settings, Koog-based Anthropic client

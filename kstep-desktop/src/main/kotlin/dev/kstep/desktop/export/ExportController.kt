@@ -6,6 +6,7 @@ import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.DesktopErrorCodes
 import dev.kstep.desktop.run.ErrorParser
 import dev.kstep.desktop.run.LiveRunController
+import dev.kstep.desktop.run.UserScriptSandbox
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -247,15 +248,26 @@ class ExportController(
         private const val CLOSE_WAIT_SECONDS = 15L
 
         /** The production wiring: a real [ExportWorkerRunner] in its own session directory (the live run stays untouched). */
-        fun production(): ExportController {
+        fun production(sandbox: UserScriptSandbox? = null): ExportController {
             val dir = LiveRunController.createSessionDir()
             // A normal close() removes the session directory; this covers SIGTERM/Ctrl-C of the whole application.
             Runtime.getRuntime().addShutdownHook(
                 Thread({ WorkerTempDir.deleteRecursively(dir) }, "kstep-desktop-export-cleanup"),
             )
-            val runner = ExportWorkerRunner(dir)
+            // With a sandbox (ADR-0062) the runner resolves it at the first export, in the worker thread.
+            val runner =
+                lazy {
+                    ExportWorkerRunner(dir, sandbox = sandbox?.forSession(dir))
+                }
             return ExportController(
-                worker = { script, format, generation, started -> runner.run(script, format, generation, started) },
+                worker = {
+                    script,
+                    format,
+                    generation,
+                    started,
+                    ->
+                    runner.value.run(script, format, generation, started)
+                },
                 sessionDir = dir,
             )
         }

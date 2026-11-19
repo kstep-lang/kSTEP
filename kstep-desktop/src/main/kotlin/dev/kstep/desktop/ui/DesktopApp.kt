@@ -94,6 +94,9 @@ import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.DesktopState
 import dev.kstep.desktop.run.ErrorBarText
 import dev.kstep.desktop.run.LiveRunController
+import dev.kstep.desktop.run.SandboxNotice
+import dev.kstep.desktop.run.UserSandboxState
+import dev.kstep.desktop.run.sandboxNotice
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.viewer.camera.ViewerCameraState
 import dev.kstep.viewer.ui.CanvasHighlight
@@ -102,6 +105,8 @@ import dev.kstep.viewer.ui.CanvasVisibility
 import dev.kstep.viewer.ui.ShapeCanvas
 import dev.kstep.viewer.ui.UnavailableNotice
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import java.awt.FileDialog
 import java.awt.Frame
 import java.nio.file.Path
@@ -132,7 +137,10 @@ fun DesktopApp(
     ai: AiController,
     exporter: ExportController,
     knowledge: KnowledgeWorkspaceController,
+    userSandbox: StateFlow<UserSandboxState> = MutableStateFlow(UserSandboxState.Unknown),
 ) {
+    val sandboxState by userSandbox.collectAsState()
+    val sandboxNotice = sandboxNotice(sandboxState)
     val editorView by session.view.collectAsState()
     // Knowledge workspace (ADR-0058): a folder of notes, one fenced block previewed at a time.
     val workspace by knowledge.workspace.collectAsState()
@@ -504,6 +512,7 @@ fun DesktopApp(
         ) {
             if (exportVisible) {
                 ExportDialog(
+                    sandboxNotice = sandboxNotice,
                     state = exportState,
                     context =
                         ExportDialogContext(
@@ -557,6 +566,7 @@ fun DesktopApp(
                             },
                         onOpenFolder = chooseFolder,
                         onCloseWorkspace = closeWorkspace,
+                        sandboxNotice = sandboxNotice,
                         exportStatus = exportStatus,
                         onShowInFolder = { exportStatus?.let { showInFolder(it.dir) } },
                         onHome = home,
@@ -760,6 +770,7 @@ private fun Toolbar(
     knowledgeLabel: String?,
     onOpenFolder: () -> Unit,
     onCloseWorkspace: () -> Unit,
+    sandboxNotice: SandboxNotice? = null,
 ) {
     Row(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
@@ -811,6 +822,10 @@ private fun Toolbar(
                 Text(it.text, fontSize = 12.sp, color = DIM, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 TextButton(onClick = onShowInFolder) { Text("Show in Folder", fontSize = 12.sp) }
             }
+            sandboxNotice?.let {
+                SandboxMark(it, warningTextColor(isSystemInDarkTheme()))
+                Text("  ·  ", fontSize = 12.sp, color = DIM, maxLines = 1)
+            }
             Text(
                 listOfNotNull(
                     knowledgeLabel,
@@ -823,6 +838,7 @@ private fun Toolbar(
                 color = DIM,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
         }
     }

@@ -150,4 +150,107 @@ class WorkerSandboxCommandTest :
         "detect: an unknown OS is unavailable" {
             detect("Plan 9", 0).shouldBeInstanceOf<WorkerSandbox.Unavailable>()
         }
+
+        "hideTmp = false drops only the tmpfs on /tmp and keeps every other flag in order (ADR-0062)" {
+            val hidden =
+                WorkerSandbox
+                    .Bubblewrap(
+                        Path.of("/usr/bin/bwrap"),
+                        Path.of("/s"),
+                        Path.of("/t"),
+                    ).wrap(listOf(java))
+            val open =
+                WorkerSandbox
+                    .Bubblewrap(Path.of("/usr/bin/bwrap"), Path.of("/s"), Path.of("/t"), hideTmp = false)
+                    .wrap(listOf(java))
+            hidden.zipWithNext().any { it == ("--tmpfs" to "/tmp") } shouldBe true
+            open.zipWithNext().any { it == ("--tmpfs" to "/tmp") } shouldBe false
+            open shouldBe
+                hidden.take(hidden.indexOf("/tmp") - 1) + hidden.drop(hidden.indexOf("/tmp") + 1)
+            open.contains("--tmpfs") shouldBe true
+            open.zipWithNext().any { it == ("--tmpfs" to "/run") } shouldBe true
+            open.contains("--unshare-net") shouldBe true
+            open.contains("--unshare-pid") shouldBe true
+        }
+
+        "the AI default argv is byte-identical to the one before ADR-0062" {
+            WorkerSandbox
+                .Bubblewrap(
+                    Path.of("/usr/bin/bwrap"),
+                    Path.of("/s"),
+                    Path.of("/t"),
+                ).wrap(listOf(java)) shouldBe
+                listOf(
+                    "/usr/bin/bwrap",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--dev",
+                    "/dev",
+                    "--unshare-pid",
+                    "--proc",
+                    "/proc",
+                    "--tmpfs",
+                    "/tmp",
+                    "--tmpfs",
+                    "/run",
+                    "--bind",
+                    "/s",
+                    "/s",
+                    "--bind",
+                    "/t",
+                    "/t",
+                    "--unshare-net",
+                    "--unsetenv",
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    "--new-session",
+                    "--die-with-parent",
+                    "--",
+                    java,
+                )
+        }
+
+        fun kindOf(
+            os: String,
+            probeResult: Int?,
+            bwrapPresent: Boolean = true,
+        ) = (detect(os, probeResult, bwrapPresent) as WorkerSandbox.Unavailable).kind
+
+        "detect reports the kind of every unavailable case and keeps the reason strings" {
+            kindOf("Windows 11", 0) shouldBe WorkerSandbox.UnavailableKind.WINDOWS
+            kindOf("Linux", 0, bwrapPresent = false) shouldBe WorkerSandbox.UnavailableKind.BWRAP_MISSING
+            kindOf("Linux", 1) shouldBe WorkerSandbox.UnavailableKind.BWRAP_PROBE_FAILED
+            kindOf("Linux", null) shouldBe WorkerSandbox.UnavailableKind.BWRAP_PROBE_FAILED
+            kindOf("Mac OS X", 71) shouldBe WorkerSandbox.UnavailableKind.MAC_PROBE_FAILED
+            kindOf("Plan 9", 0) shouldBe WorkerSandbox.UnavailableKind.OTHER_OS
+            (detect("Windows 11", 0) as WorkerSandbox.Unavailable).reason shouldBe "Windows: no worker sandbox"
+            (detect("Linux", 1) as WorkerSandbox.Unavailable).reason shouldBe
+                "Linux: bubblewrap (bwrap) not installed or not usable"
+            (detect("Mac OS X", 71) as WorkerSandbox.Unavailable).reason shouldBe
+                "sandbox-exec cannot apply the worker profile"
+        }
+
+        "detect(hideTmp = false) probes with the flags of the user flows" {
+            val dir = TestSupport.newDir()
+            try {
+                val calls = mutableListOf<List<String>>()
+                val found =
+                    WorkerSandbox.detect(
+                        dir,
+                        dir,
+                        osName = "Linux",
+                        probe = {
+                            calls.add(it)
+                            0
+                        },
+                        pathEnv = "/opt/bin",
+                        isExecutable = { it.fileName.toString() == "bwrap" },
+                        hideTmp = false,
+                    )
+                found.shouldBeInstanceOf<WorkerSandbox.Bubblewrap>().hideTmp shouldBe false
+                calls.single().zipWithNext().any { it == ("--tmpfs" to "/tmp") } shouldBe false
+            } finally {
+                dir.toFile().deleteRecursively()
+            }
+        }
     })

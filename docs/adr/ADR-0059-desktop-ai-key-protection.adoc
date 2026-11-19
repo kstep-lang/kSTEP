@@ -46,7 +46,7 @@ D5. Fail closed, no override. `WorkerSandbox.detect` returns `MacSandboxExec`, `
 
 There is deliberately no setting to switch the sandbox off. A setting is a place to lose the protection silently.
 
-D6. What stays unprotected. The live preview, the export and the knowledge-workspace blocks run the user's own scripts in the unsandboxed worker, as before (ADR-0051, ADR-0057, ADR-0058). After "Apply" the accepted text is in the editor and runs in the live preview; the user has read the diff by then. The same holds for the export. An optional sandbox for these flows is a follow-up (D6c).
+D6. Superseded for the live preview, the export and the knowledge-workspace blocks by ADR-0062 (Welle D6c): they now run in a sandbox where the system has one, otherwise as before with a visible notice. The candidate check keeps the fail-closed rule of this ADR.
 
 D7. Target architecture (outlook, not built). Separation of capabilities in the sense of Alan Kay's object model: the process that holds the key should not be able to hand it to any code that was not written by the user. A key broker (a small process that signs or sends the one request and never lets the key into a process that runs scripts) would also close the read paths. The sandbox above is the cheap step on the way.
 
@@ -91,7 +91,7 @@ The kSTEP documentation does not render the `[kuml]` macro at build time yet; th
 | Error lines sent to the provider are scrubbed (ADR-0056, D11). A candidate could still encode a key into an error message, which then goes to the provider that issued the key, not to a third party. Not closed in this wave.
 
 | Native code of a script calls other services
-| The Java foreign function API is a preview feature on JDK 21 and does not work without `--enable-preview`, which the worker does not set. The open path is JNI: a candidate writes a self-built `.dylib`/`.so` into the writable session or temp folder and loads it with `System.load`. That gives it native access to Mach/XPC services the profile does not name (for example job submission to `launchd`, which runs outside the sandbox). `file-map-executable` cannot simply be denied for the temp folder, because the native bridges are extracted there. Not covered; open and part of D6c.
+| The Java foreign function API is a preview feature on JDK 21 and does not work without `--enable-preview`, which the worker does not set. The open path is JNI: a candidate writes a self-built `.dylib`/`.so` into the writable session or temp folder and loads it with `System.load`. That gives it native access to Mach/XPC services the profile does not name (for example job submission to `launchd`, which runs outside the sandbox). `file-map-executable` cannot simply be denied for the temp folder, because the native bridges are extracted there. Not covered; open and part of D6d.
 
 | A script changes the session folder so that the desktop itself writes outside it (confused deputy)
 | The sandbox must let the script write below the session folder, so it can replace `ai/` (or, on macOS, the session folder itself) by a link to a user-writable folder. Before every access, `SessionDirGuard` checks without following links that the session folder is still the real directory seen first and that `ai/` is no link; otherwise the run ends with `KSTEP-D-030` and nothing is written. Covered by a regression test. The check is only race-free if no sandboxed process runs while the desktop works in the folder. On Linux `bwrap --unshare-pid` ends every descendant with the worker. macOS has no PID namespace, so the profile denies `process-fork`: a candidate cannot start a second JVM that survives the worker (verified: with the profile before this change a detached child kept writing for 10 s; now `Process.start` fails with every launch mechanism), the worker stays one process, and `kill()` reaches all of it. The candidate file name is random, and a failure to create it ends the attempt with `KSTEP-D-030` instead of an uncaught exception. Residual risk: native code via JNI (see above) could create a thread but not a process; a process started through a system daemon is not covered.
@@ -100,10 +100,10 @@ The kSTEP documentation does not render the `[kuml]` macro at build time yet; th
 | The profile denies `file-write*` only for the script's own process. Other services answer it: `cfprefsd` wrote `~/Library/Preferences/com.apple.java.util.prefs.plist` for `java.util.prefs`. `(deny user-preference-write)` closes this path. Other daemons that write on behalf of a client may exist; so "cannot write outside its session folder" holds for the script's own file operations, not for every service it can ask.
 
 | Terminal input injection (TIOCSTI) on macOS, when kSTEP was started from a terminal
-| Not covered on macOS (the Linux flags have `--new-session`). Part of D6c.
+| Not covered on macOS (the Linux flags have `--new-session`). Part of D6d.
 
 | A key in the environment source on Linux and the live preview
-| The user's own scripts in the live preview run without a sandbox and can read `/proc/<ppid>/environ`. The provider dialog says so for the environment source on Linux.
+| Since ADR-0062 the user's own scripts run in `bubblewrap` on Linux where it works, which hides `/proc/<ppid>/environ` (`--unshare-pid`). Without a sandbox (bubblewrap missing or unusable) they still can read it. The provider dialog says so for the environment source on Linux.
 
 | The Linux variant works differently from what is written here
 | It was not run (see Status). The first CI run is the first evidence. The Linux CI job passes `-Pkstep.sandbox.require=true`, so `WorkerSandboxLinuxTest` and `WorkerSandboxOcctTest` fail (not skip) when bubblewrap is installed but unusable, for example under an AppArmor user-namespace restriction.
@@ -118,6 +118,6 @@ There is no `jna` jar on the worker class path (checked with `./gradlew :kstep-c
 * The recommendation to use the session-only key source is gone from the dialog, the README and ADR-0056; the key source still matters for the live preview.
 * New error codes `KSTEP-D-029` (`AI_SANDBOX_UNAVAILABLE`) and `KSTEP-D-030` (`AI_SANDBOX_START_FAILED`). `RepairState.Proposal` carries a `NotVerifiedReason`; `CompileOutcome` has the variant `Refused`. No new dependency, no persisted setting, no migration; the render result of `kstep-cli` is unchanged (`kstep-cli` was not touched).
 
-== Follow-up D6c
+== Follow-up D6d
 
-kstep-mcp tools as a vetted whitelist, more providers and free or local endpoints with an SSRF check, a prompt history, Windows Credential Manager (DPAPI) and a Windows sandbox (AppContainer), "new script from prompt" without an open file, the right-hand `Inspect | AI` tab pair, applying single hunks, the selection context from the inspection, read protection (a deny of the keychain Mach services, the Secret Service) and the key broker (D7), an optional sandbox for the live preview and the export, native code and further Mach services, TIOCSTI on macOS, Esc moving the focus to the editor, the entry of the key and consent in a compose scene test, the debounced diff refresh, and a Linux CI job with bubblewrap if the one added here is skipped.
+The sandbox for the user's own flows was done in ADR-0062 (D6c). Remaining here: kstep-mcp tools as a vetted whitelist, more providers and free or local endpoints with an SSRF check, a prompt history, Windows Credential Manager (DPAPI) and a Windows sandbox (AppContainer), "new script from prompt" without an open file, the right-hand `Inspect | AI` tab pair, applying single hunks, the selection context from the inspection, read protection (a deny of the keychain Mach services, the Secret Service) and the key broker (D7), native code and further Mach services, TIOCSTI on macOS, Esc moving the focus to the editor, the entry of the key and consent in a compose scene test, the debounced diff refresh, and a Linux CI job with bubblewrap if the one added here is skipped.

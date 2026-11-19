@@ -12,6 +12,7 @@ import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.DesktopErrorCodes
 import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.RunResult
+import dev.kstep.desktop.run.UserScriptSandbox
 import dev.kstep.desktop.run.WorkerRunner
 import dev.kstep.desktop.watch.WatchSignal
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -548,17 +549,17 @@ class KnowledgeWorkspaceController(
 
     companion object {
         /** The production wiring: an own session directory and worker, a daemon debounce scheduler. */
-        fun production(): KnowledgeWorkspaceController {
+        fun production(sandbox: UserScriptSandbox? = null): KnowledgeWorkspaceController {
             val dir = BlockSessionFile.createSessionDir()
             Runtime.getRuntime().addShutdownHook(
                 Thread({ WorkerTempDir.deleteRecursively(dir) }, "kstep-knowledge-cleanup"),
             )
-            val runner = WorkerRunner(dir)
+            val runner = sandbox?.workerRunner(dir) ?: lazyOf(WorkerRunner(dir))
             val timer =
                 ScheduledThreadPoolExecutor(1) { r -> Thread(r, "kstep-desktop-debounce").apply { isDaemon = true } }
                     .apply { removeOnCancelPolicy = true }
             return KnowledgeWorkspaceController(
-                workerRun = { file, gen, started -> runner.run(file, gen, started) },
+                workerRun = { file, gen, started -> runner.value.run(file, gen, started) },
                 sessionDir = dir,
                 scheduler = { delayMs, task ->
                     val future = timer.schedule(task, delayMs, TimeUnit.MILLISECONDS)

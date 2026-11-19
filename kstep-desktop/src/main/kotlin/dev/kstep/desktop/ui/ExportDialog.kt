@@ -33,6 +33,7 @@ import dev.kstep.desktop.export.ExportFormat
 import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
+import dev.kstep.desktop.run.SandboxNotice
 
 private const val DIALOG_WIDTH_DP = 480
 private const val PATH_MAX_CHARS = 56
@@ -66,6 +67,7 @@ internal fun ExportDialog(
     onExport: (saveFirst: Boolean) -> Unit,
     onStop: () -> Unit,
     onClose: () -> Unit,
+    sandboxNotice: SandboxNotice? = null,
 ) {
     val running = state as? ExportState.Running
     AlertDialog(
@@ -82,10 +84,14 @@ internal fun ExportDialog(
             },
         title = { Text("Export ${context.scriptName}") },
         text = {
-            when (state) {
-                is ExportState.Configuring -> ConfiguringBody(state, context, onFormat, onChoose)
-                is ExportState.Running -> RunningBody(state, context)
-                is ExportState.Succeeded -> Text(ExportText.successLine(state.fileName, state.bytes), fontSize = 13.sp)
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                when (state) {
+                    is ExportState.Configuring -> ConfiguringBody(state, context, onFormat, onChoose)
+                    is ExportState.Running -> RunningBody(state, context)
+                    is ExportState.Succeeded ->
+                        Text(ExportText.successLine(state.fileName, state.bytes), fontSize = 13.sp)
+                }
+                sandboxNotice?.let { SandboxMark(it, DIM) }
             }
         },
         confirmButton = {
