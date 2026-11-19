@@ -143,7 +143,7 @@ if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
   ! grep -q "AI/LLM client jars" "$WORK/err2"; check "ktor-server jars do not trip the AI guard" $?
 
   # Full smoke test against a stub launcher (a shell script, no Java needed): export writes a STEP header, import answers
-  # as given by $STUB_IMPORT ("unavailable" = the expected geometry_unavailable error, anything else = success).
+  # as given by $STUB_IMPORT ("unavailable" = the expected geometry_unavailable error, anything else = success), convert copies.
   mkstub() { # name
     local r="$WORK/d-$1/kstep-cli-1.0.0"
     mkdir -p "$r/bin" "$r/lib"
@@ -160,6 +160,13 @@ case "$1" in
       echo '{"status":"error","command":"import","errorKind":"geometry_unavailable","code":"KSTEP-S-007"}'; exit 1
     fi
     echo '{"status":"success","command":"import"}'; exit 0 ;;
+  convert)
+    # kstep-cli convert <file> --to okf|kts --out <dir>: copies the file under the name the real command would use.
+    in="$2"; shift 2
+    while [ "$#" -gt 0 ]; do [ "$1" = "--to" ] && to="$2"; [ "$1" = "--out" ] && out="$2"; shift; done
+    name="$(basename "$in")"
+    if [ "$to" = "okf" ]; then cp "$in" "$out/${name%.kstep.kts}.md"; else cp "$in" "$out/${name%.md}.kstep.kts"; fi
+    exit 0 ;;
 esac
 exit 3
 STUB
