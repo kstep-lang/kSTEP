@@ -1,0 +1,81 @@
+= ADR-0065: `kstep export` writes the targets a script declares (Welle D7c)
+:toc:
+
+== Status
+
+Accepted (Welle D7c), implemented on a local branch. Tested without OCCT: the argument forms and the unchanged old forms (`ExportTargetsResolveTest`), the pure selection and re-validation of declared names (`ExportTargetSelectionTest`), the temporary-file prefix and link refusal of the shared writer (`ConvertFilesTempPrefixTest`), the end-to-end behaviour in a subprocess with STEP-only scripts (`CliExportTargetsIntegrationTest`), and the release scripts with their self-test (`test-release-scripts.sh`). The mesh files themselves (GLB, STL, 3MF) are covered by `CliExportTargetsOcctIntegrationTest`, which needs the native bridge.
+
+== Context
+
+ADR-0063 let a script declare file names (`export { }`), but only the desktop app used them. `kstep export` still wrote exactly one STEP file under a derived name. Binding the command to the block must not change a single byte of the existing behaviour, because scripts and automation call `kstep export <script>` today.
+
+Facts about the existing code that shape the design: STL, 3MF and GLB are only produced by `PreviewRenderer.render`, which evaluates the script itself and closes the shapes in a `finally`, so an already evaluated model cannot be handed to it; `ScriptExportTarget` has a public constructor without validation; `kstep convert` (ADR-0060) already has a hardened atomic file writer; STEP text contains a time stamp (`header.timestamp`).
+
+== Decision
+
+D1. The new path exists only behind `--target <selector>` (repeatable, at most four) or `--all-targets`. Without either, `kstep export` is exactly the old command: same `CliCommand.Export`, same output, no hint on stderr, also for a script that has an `export { }` block. `--out-dir`, `--force` and `--tolerance` without a target choice stay unknown flags (usage, exit 1), as before. `--out` together with a target choice, `--target` together with `--all-targets`, a repeated `--out-dir`, more than four or a repeated selector, and a `--tolerance` that is not a number are usage errors (exit 1). `USAGE_TEXT` is the only changed old output.
+
+D2. A selector is one of the exact lower-case ids `step`, `glb`, `stl`, `3mf` or an exact declared file name. A declared name always has a non-empty stem plus an extension, so an id and a name cannot be confused. A selector that resolves to a target twice (`step` and `part.step`) is `invalid_request`; an undeclared one is `export_target_not_declared`; a script without a block is `no_export_targets`. Targets are written in selection order (`--all-targets`: declaration order).
+
+D3. The CLI validates the whole declared list again with `ScriptExportNames.validate` (every name, each format once, names unique ignoring case, at most four), all or nothing like ADR-0063 D5; one bad entry is `export_target_invalid` and nothing is written, also for targets that were not selected. The CLI evaluates the script itself, so it is the place where the rules must hold, and a model can carry names the block builder would have refused (public constructor). The rule set is not copied a third time: the function is the one of `kstep-script`, and `ExportNamingParityTest` (script versus desktop) is unchanged.
+
+D4. Producers. STEP comes from the planning model through `produceStepText` (the pure core of the old `exportModel`: geometry plan, merge or structure-only writer; the old path now calls it too and keeps its order of effects: failure report after closing the shapes, stderr notes before the file is written, result last). Every mesh target goes through `PreviewRenderer` with a `ScriptFile` source, like `kstep render -f <format>`. That evaluates the script once per mesh target; with at most three mesh formats a run evaluates the script at most four times. This is accepted because the renderer owns the shape lifecycle. The renderer must report the same declared targets as the planning evaluation, else `export_targets_changed` (a script that is not deterministic). Like the desktop worker, a mesh target needs real geometry: a text card or summary is never written into a `.glb`, `.stl` or `.3mf` (`geometry_unavailable`).
+
+D5. Output folder. `--out-dir` must exist and may itself be a link (`/tmp` on macOS); it is resolved with `toRealPath` and never created (`out_dir_invalid`). Without it, the folder of the script path as given. The declared name is only ever a file name, resolved against the real folder and checked for `parent == folder`.
+
+D6. Target check, shared with `kstep convert` (`ConvertFiles.checkTarget`): no separators, no link, no non-regular file, not the script itself (by file key). An existing regular file stops the run without `--force` (`target_exists`, "Nothing was written."); with `--force` it is replaced. A link, a directory or the script are refused with or without `--force`.
+
+D7. Everything is checked and produced in memory before the first byte is written. Each file is then written by `ConvertFiles.writeAtomic` (temporary file `.kstep-export-*.tmp` created with CREATE_NEW and NOFOLLOW, `fsync`, atomic move, no fallback). Each file is atomic, the set is not: if a later write fails the earlier files stay and are listed (`written` in the JSON, a line on stderr), exit 1. A file that appears between the check and the move is `target_exists` ("appeared meanwhile"). The accepted rest window is the one of ADR-0057 and ADR-0060: a process that creates the target between the last check and the move wins the race without `--force`, never with a link.
+
+D8. Output. Text: the old sentence for STEP (`Exported N root(s)[ with S geometric shape(s)] to <path>`), `Wrote <path>` for a mesh file. JSON, one line: `status`, `command` = `export`, `outDir`, `rootCount`, `shapeCount`, `targets` (`format`, `fileName`, `outPath`, `byteLength`, `replaced`, and `meshExport` for STL/3MF), plus `validation` and `geometry` when they apply. Errors: `status` = `error`, `command` = `export`, `errorKind`, `message`, optionally `written`. Error kinds: `no_export_targets`, `export_target_not_declared`, `export_target_invalid`, `invalid_request`, `out_dir_invalid`, `target_exists`, `export_targets_changed`, `geometry_unavailable`, `mesh_export_invalid`, `geometry_export_failed`, `write_failed`; script failures use the existing error documents. No new script outcome code, `kstep-script` is unchanged. Names in messages go through `DisplayName.escaped`.
+
+D9. `--tolerance <mm>` applies to STL and 3MF targets only and has the meaning of `kstep render --tolerance` (finite, greater than zero, passed as `PreviewRequest.meshToleranceMm`); without it the value is `null`, the render default, so the bytes equal `kstep render -f <format>`. It is refused (`invalid_request`) when no STL or 3MF target is selected. GLB has no tolerance here: the renderer rejects it with a fixed message, and unlocking it would change the error behaviour of `kstep render -f glb --tolerance`.
+
+D10. Release. `scripts/release/verify-dist.sh` gets an optional fourth argument (the targets fixture, default `export-block.kstep.kts` next to the fixture, STEP only because the zip ships no native bridge) and a smoke test: `--all-targets --out-dir` writes the declared file with one JSON success line, a second run exits 1. `test-release-scripts.sh` gets the matching stub and negative cases.
+
+[kuml, adr-0065-cli-export-flow, svg]
+----
+activityDiagram(name = "kstep export targets flow") {
+    val start = initialNode()
+    val eval = action(name = "Evaluate the script")
+    val select = action(name = "Re-validate declared names, select targets")
+    val folder = action(name = "Resolve folder, check every target")
+    val produce = action(name = "Produce STEP and mesh files in memory")
+    val ok = decision(name = "all checks and producers ok?")
+    val fail = action(name = "Report error, write nothing")
+    val write = action(name = "Write each file atomically")
+    val report = action(name = "Report written files")
+    val done = finalNode()
+    edge(from = start, to = eval)
+    edge(from = eval, to = select)
+    edge(from = select, to = folder)
+    edge(from = folder, to = produce)
+    edge(from = produce, to = ok)
+    edge(from = ok, to = fail, guard = "no")
+    edge(from = ok, to = write, guard = "yes")
+    edge(from = fail, to = done)
+    edge(from = write, to = report)
+    edge(from = report, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it.
+
+== Threat model
+
+The script and its declared names are untrusted. A name is validated twice (D3, then `checkTarget`), is never used as a path and is resolved only against the resolved real folder (D5, D6). Links and non-regular files are never written through, with or without `--force`; the temporary file is created exclusively and without following links. Nothing from the script chooses the folder. A hostile model cannot make the command write outside the folder. Names are shown escaped. Mesh sizes are bounded by the existing writers (ADR-0049); at most four files and four evaluations per run; the bytes are held in memory until they are written. No network access.
+
+== Dependencies
+
+None. `kstep-cli` reuses `ConvertFiles` (now also used for export, new optional temp-file prefix), `ScriptExportNames` and `PreviewRenderer`; the standard zip gets no new jar.
+
+== Consequences
+
+* The STEP header file name is the one passed to `stepFile(fileName = ...)`, not the declared target name; the same as `--out other.step` today.
+* A byte comparison of two STEP files must mask the `FILE_NAME` time stamp.
+* A run with several mesh targets evaluates the script several times; a script with side effects outside the model would see that.
+* Not atomic as a set (D7), like `kstep convert`.
+
+== Follow-up D7d
+
+An own file and folder picker against the double replace question on macOS, a real percentage for the progress bar, export options in the desktop dialog, the watertight check for declared targets, a tolerance for GLB, and an "export all" in the desktop app (ADR-0063 D7 rejected it, so only after a new decision of the design team).

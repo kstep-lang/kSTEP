@@ -596,7 +596,7 @@ private fun finish(
     val written = ArrayList<WrittenFile>()
     for (p in planned) {
         val shownName = DisplayName.escaped(p.name)
-        when (val r = ConvertFiles.writeAtomic(outReal, p.name, p.bytes, command.force, beforeMove)) {
+        when (val r = ConvertFiles.writeAtomic(outReal, p.name, p.bytes, command.force, beforeMove = beforeMove)) {
             ConvertFiles.WriteResult.Written -> {
                 val w = WrittenFile(shownName, p.source, p.block)
                 written += w

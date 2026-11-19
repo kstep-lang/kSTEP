@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Verify the kstep-cli distribution zip and smoke-test it.
-# Usage: verify-dist.sh <zip> <version> [fixture]
-# Needs a JDK 21 `java` on PATH / JAVA_HOME. Fixture default: hello-assembly.kstep.kts.
+# Usage: verify-dist.sh <zip> <version> [fixture] [targets-fixture]
+# Needs a JDK 21 `java` on PATH / JAVA_HOME. Fixture default: hello-assembly.kstep.kts; the targets fixture (a script with
+# an export { } block, ADR-0065) defaults to export-block.kstep.kts next to the fixture.
 set -euo pipefail
 
-if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-  echo "::error::usage: verify-dist.sh <zip> <version> [fixture]" >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
+  echo "::error::usage: verify-dist.sh <zip> <version> [fixture] [targets-fixture]" >&2
   exit 2
 fi
 ZIP="$1"
 VERSION="$2"
 FIXTURE="${3:-kstep-tests/src/test/resources/hello-assembly.kstep.kts}"
+TARGETS_FIXTURE="${4:-$(dirname "$FIXTURE")/export-block.kstep.kts}"
 ROOT="kstep-cli-$VERSION"
 
 fail() { echo "::error::verify-dist: $*" >&2; exit 1; }
@@ -97,4 +99,20 @@ J="$("$BIN" convert "$FIXTURE" --to okf --out "$TMP/okf-json" --output json --ta
 "$BIN" convert "$TMP/okf" --to kts --out "$TMP/kts-dir" >/dev/null || fail "kstep-cli convert of a folder failed"
 [ -f "$TMP/kts-dir/$STEM.kstep.kts" ] || fail "folder convert produced no $STEM.kstep.kts"
 
-echo "OK: $ZIP verified (layout, no natives, --help, export, import, convert incl. json and folder smoke tests)"
+# Declared export targets (ADR-0065): STEP only (the zip ships no native bridge). One JSON line, the declared file is
+# written, and a second run over the existing file must fail (exit 1) without --force.
+[ -f "$TARGETS_FIXTURE" ] || fail "targets fixture $TARGETS_FIXTURE not found"
+mkdir -p "$TMP/targets"
+J="$("$BIN" export "$TARGETS_FIXTURE" --all-targets --out-dir "$TMP/targets" --output json)" \
+  || fail "kstep-cli export --all-targets failed"
+[ "$(printf '%s\n' "$J" | wc -l | tr -d ' ')" = "1" ] || fail "export --all-targets json is not one line"
+{ printf '%s' "$J" | grep -q '"status":"success"' && printf '%s' "$J" | grep -q '"command":"export"'; } \
+  || fail "export --all-targets json did not report success (got: $J)"
+[ -f "$TMP/targets/export-block-smoke.step" ] || fail "declared target not written"
+[ "$(head -n 1 "$TMP/targets/export-block-smoke.step" | tr -d '\r')" = "ISO-10303-21;" ] \
+  || fail "declared target does not start with ISO-10303-21;"
+rc=0
+"$BIN" export "$TARGETS_FIXTURE" --all-targets --out-dir "$TMP/targets" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 1 ] || fail "export --all-targets over an existing file exited $rc, expected 1 (no --force)"
+
+echo "OK: $ZIP verified (layout, no natives, --help, export, export targets, import, convert incl. json and folder smoke tests)"

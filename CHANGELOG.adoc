@@ -17,6 +17,11 @@ minor versions may contain breaking changes.
 
 === Added
 
+* `kstep export --target <step|glb|stl|3mf|name>` and `--all-targets` write the targets a script declares in its `export { }`
+  block (Welle D7c, ADR-0065), with `--out-dir`, `--force` and `--tolerance` (STL/3MF). Targets and names are validated again,
+  everything is produced before the first write, each file is written atomically through the writer of `kstep convert`, and an
+  existing file is only replaced with `--force`. `kstep export` without these flags is unchanged. The release smoke test
+  (`verify-dist.sh`) covers it.
 * Declarative `export { }` block and remembered export folder (Welle D7b, ADR-0063): a script can declare up to four file names
   (`step`, `glb`, `stl`, `threeMf`, one per format) that the kSTEP Desktop export dialog suggests; names are validated strictly
   (no paths, control or direction characters, reserved device names, extension must match the format) and an invalid declaration

@@ -292,7 +292,15 @@ private fun JsonObjectBuilder.putMeshExport(
     export: MeshExportResult,
     toleranceMm: Double?,
 ) {
-    putJsonObject("meshExport") {
+    put("meshExport", meshExportJson(export, toleranceMm))
+}
+
+/** The `meshExport` object of a STL/3MF result; shared by `kstep render` and `kstep export --target` (ADR-0065). */
+internal fun meshExportJson(
+    export: MeshExportResult,
+    toleranceMm: Double?,
+): JsonObject =
+    buildJsonObject {
         put("format", export.format)
         put("unit", "mm")
         put("triangleCount", export.triangleCount)
@@ -308,7 +316,6 @@ private fun JsonObjectBuilder.putMeshExport(
         put("toleranceMm", toleranceMm)
         putJsonArray("warnings") { export.warnings.forEach { add(it) } }
     }
-}
 
 /** Desktop-worker only (ADR-0053): the part list of the written GLB; never part of the public `kstep render` JSON. */
 internal fun JsonObjectBuilder.putParts(parts: List<RenderedPart>) {

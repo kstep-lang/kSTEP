@@ -425,6 +425,36 @@ exits with status 1 and writes no file; if no verdict can be reached (a
 limit is exceeded, a schema construct is unsupported) it fails closed with
 `KSTEP-S-005`. Only `root(...)` entities are validated, not `shape(...)`.
 
+*Declared targets (ADR-0065).* A script can name its export files in an `export { }` block inside `stepFile`
+(ADR-0063): `export { step("bracket.step"); stl("bracket.stl") }`. `kstep export` writes them when asked:
+
+[source,shell]
+----
+kstep export bracket.kstep.kts --target step                 # one declared target, by format id
+kstep export bracket.kstep.kts --target stl --tolerance 0.05 # a mesh target, absolute chordal deviation in mm
+kstep export bracket.kstep.kts --all-targets --out-dir out   # every declared target into an existing folder
+kstep export bracket.kstep.kts --all-targets --force --output json
+----
+
+`--target` takes a format id (`step`, `glb`, `stl`, `3mf`) or an exact declared file name, is repeatable (at most four)
+and cannot be combined with `--all-targets` or `--out`. `--out-dir` must exist (it is never created; default: the folder
+of the script). An existing file stops the run (exit 1, nothing written) unless `--force` is given; a link, a directory or
+the script itself is never replaced. Everything is checked and produced before the first file is written, and each file
+is written atomically (a failure part-way keeps the earlier files and lists them). GLB, STL and 3MF need geometry and the
+native bridge; without them the whole run fails with `geometry_unavailable` and writes nothing, not even the STEP file.
+`--tolerance` applies to STL and 3MF targets only. `--validate` and `--require-geometry` work as for a plain export.
+Without `--target` or `--all-targets` the command behaves exactly as described above, whether or not the script declares
+targets. The success document (one line):
+
+[source,json]
+----
+{"status":"success","command":"export","outDir":"/work/out","rootCount":1,"shapeCount":0,
+ "targets":[{"format":"step","fileName":"bracket.step","outPath":"/work/out/bracket.step","byteLength":2214,"replaced":false}]}
+----
+
+Errors carry `"command":"export"` and an `errorKind` such as `no_export_targets`, `export_target_not_declared`,
+`export_target_invalid`, `target_exists`, `out_dir_invalid` or `geometry_unavailable`.
+
 *Geometry (ADR-0027).* A script that registers `shape(definition, occtShape)`
 (together with `root(...)` for the same product structure) is exported with its
 B-Rep geometry merged into the one Part 21 file, linked to the product

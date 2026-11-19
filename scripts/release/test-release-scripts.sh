@@ -153,8 +153,36 @@ if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
 case "$1" in
   --help) echo "Usage: kstep-cli"; exit 0 ;;
   export)
-    while [ "$#" -gt 0 ]; do [ "$1" = "--out" ] && out="$2"; shift; done
-    printf 'ISO-10303-21;\nEND-ISO-10303-21;\n' > "$out"; exit 0 ;;
+    # kstep-cli export <script> [--out f] | [--target t ... | --all-targets] [--out-dir d] [--force] [--output json]:
+    # without a target choice it writes --out; with one it writes export-block-smoke.step into --out-dir (exit 1 over
+    # an existing file without --force). STUB_EXPORT: nojson = text instead of JSON, notargets = fails, overwrite = never
+    # refuses an existing file.
+    out=""; outdir=""; targets=0; force=0; json=0
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --out) out="$2"; shift 2 ;;
+        --out-dir) outdir="$2"; shift 2 ;;
+        --all-targets) targets=1; shift ;;
+        --target) targets=1; shift 2 ;;
+        --force) force=1; shift ;;
+        --output) json=1; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$targets" = "0" ]; then
+      printf 'ISO-10303-21;\nEND-ISO-10303-21;\n' > "$out"; exit 0
+    fi
+    [ "${STUB_EXPORT:-}" = "notargets" ] && exit 1
+    t="$outdir/export-block-smoke.step"
+    if [ -e "$t" ] && [ "$force" = "0" ] && [ "${STUB_EXPORT:-}" != "overwrite" ]; then exit 1; fi
+    printf 'ISO-10303-21;\nEND-ISO-10303-21;\n' > "$t"
+    if [ "$json" = "1" ]; then
+      if [ "${STUB_EXPORT:-}" = "nojson" ]; then echo "Exported 1 root(s)"; else
+        echo '{"status":"success","command":"export","targets":[]}'
+      fi
+    fi
+    exit 0 ;;
   import)
     if [ "${STUB_IMPORT:-}" = "unavailable" ]; then
       echo '{"status":"error","command":"import","errorKind":"geometry_unavailable","code":"KSTEP-S-007"}'; exit 1
@@ -194,7 +222,7 @@ esac
 exit 3
 STUB
   }
-  : > "$WORK/fixture.kts"
+  : > "$WORK/fixture.kts"; : > "$WORK/export-block.kstep.kts"
   mkstub ok; (cd "$WORK/d-ok" && zip -qr ../ok.zip kstep-cli-1.0.0)
   STUB_IMPORT=unavailable expect_rc "verify-dist accepts geometry_unavailable import" 0 \
     bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
@@ -208,6 +236,18 @@ STUB
   STUB_IMPORT=unavailable STUB_CONVERT=nodir expect_rc "verify-dist rejects a failing folder convert" 1 \
     bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
   contains "$WORK/err" "convert of a folder failed"; check "reports failing folder convert" $?
+  STUB_IMPORT=unavailable STUB_EXPORT=nojson expect_rc "verify-dist rejects export --all-targets without JSON" 1 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
+  contains "$WORK/err" "did not report success"; check "reports export targets json without success" $?
+  STUB_IMPORT=unavailable STUB_EXPORT=notargets expect_rc "verify-dist rejects a failing export --all-targets" 1 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
+  contains "$WORK/err" "--all-targets failed"; check "reports failing export --all-targets" $?
+  STUB_IMPORT=unavailable STUB_EXPORT=overwrite expect_rc "verify-dist rejects an export that overwrites without --force" 1 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
+  contains "$WORK/err" "expected 1 (no --force)"; check "reports silent overwrite" $?
+  STUB_IMPORT=unavailable expect_rc "verify-dist rejects a missing targets fixture" 1 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts" "$WORK/missing-targets.kts"
+  contains "$WORK/err" "targets fixture"; check "reports missing targets fixture" $?
 else
   echo "note: zip/unzip missing, skipping verify-dist negative tests" >&2
 fi

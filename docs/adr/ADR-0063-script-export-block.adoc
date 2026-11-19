@@ -72,6 +72,6 @@ None added (`kstep-script` is a test-only dependency of `kstep-desktop` for the 
 * The mark falls on a name the user retypes in the system dialog even if it equals another declared name; the first click is cheap.
 * On macOS the system save dialog and the replace question can still ask twice (unchanged from ADR-0057).
 
-== Follow-up D7c
+== D7c done (ADR-0065)
 
-Export all declared targets in one go, an own file and folder picker against the double replace question on macOS, per-format options (tolerance, watertight check), a real percentage for the progress bar, and binding `kstep export` to the block.
+`kstep export --target/--all-targets` writes the declared targets, with `--tolerance` for STL and 3MF. The rest moves to D7d: an own file and folder picker against the double replace question on macOS, a real percentage for the progress bar, per-format options in the desktop dialog, the watertight check, a tolerance for GLB, and an "export all" in the desktop app (only after a new decision, D7 rejected it).

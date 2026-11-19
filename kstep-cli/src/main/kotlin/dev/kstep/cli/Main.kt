@@ -1,17 +1,11 @@
 package dev.kstep.cli
 
 import dev.kstep.asciidoc.OnErrorPolicy
-import dev.kstep.geometry.OcctAvailability
-import dev.kstep.geometry.OcctKernel
 import dev.kstep.mcp.runStdioServer
 import dev.kstep.preview.RenderFormat
 import dev.kstep.script.KStepScriptHost
 import dev.kstep.script.KStepScriptOutcome
 import dev.kstep.script.KStepScriptOutcomeCodes
-import dev.kstep.step21.Part21EncodingException
-import dev.kstep.step21.Part21LimitExceededException
-import dev.kstep.step21.Part21WriteException
-import dev.kstep.step21.Part21Writer
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
@@ -40,6 +34,14 @@ Usage:
                                             assemblies); exit 1 on violations, nothing is written
       --require-geometry                   Fail (exit 1), writing nothing, unless the script's geometry
                                             is merged into the file
+      --target <step|glb|stl|3mf|name>     Write a target declared in the script's export { } block (the
+                                            format or the exact declared file name; repeatable, at most 4)
+      --all-targets                        Write every declared target (not with --target or --out)
+      --out-dir <dir>                      Folder for declared targets, must exist (default: the script's folder)
+      --force                              Replace existing target files (never a link or a non-regular file)
+      --tolerance <mm>                     Declared stl/3mf targets only: absolute chordal deviation
+                                            Declared targets are checked and produced first; then each file is
+                                            written atomically. Exit 1 on any error.
   kstep render <script.kstep.kts> [opts]   Render a headless SVG/PNG/text/glTF preview, or export STL/3MF
       -f, --format <auto|svg|png|text|glb|stl|3mf>
                                             Container (default: auto); "gltf" is an alias for "glb"
@@ -102,6 +104,18 @@ sealed interface CliCommand {
         val requireGeometry: Boolean = false,
     ) : CliCommand
 
+    /** `kstep export --target/--all-targets` (ADR-0065): writes the targets a script declares in `export { }`. */
+    data class ExportTargets(
+        val scriptPath: String,
+        val selection: ExportTargetSelection,
+        val outDir: String?,
+        val force: Boolean,
+        val jsonOutput: Boolean,
+        val validate: Boolean = false,
+        val requireGeometry: Boolean = false,
+        val toleranceMm: Double? = null,
+    ) : CliCommand
+
     data class Render(
         val scriptPath: String,
         val format: RenderFormat,
@@ -150,6 +164,16 @@ sealed interface CliCommand {
     data object ShowVersion : CliCommand
 }
 
+/** Which declared export targets `kstep export` writes (ADR-0065). */
+sealed interface ExportTargetSelection {
+    data object All : ExportTargetSelection
+
+    /** One to four selectors, each a format id (`step`, `glb`, `stl`, `3mf`) or an exact declared file name. */
+    data class Named(
+        val selectors: List<String>,
+    ) : ExportTargetSelection
+}
+
 /** Direction of `kstep convert` (ADR-0060). */
 enum class ConvertTarget { OKF, KTS }
 
@@ -196,6 +220,12 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
     var jsonOutput = false
     var validate = false
     var requireGeometry = false
+    val selectors = ArrayList<String>()
+    var allTargets = false
+    var outDir: String? = null
+    var force = false
+    var toleranceMm: Double? = null
+    var toleranceSeen = false
     var i = 0
     while (i < rest.size) {
         when (rest[i]) {
@@ -217,6 +247,29 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
                 validate = true
                 i += 1
             }
+            // The value of --target/--out-dir is taken verbatim, also when it starts with "--".
+            "--target" -> {
+                selectors += rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--all-targets" -> {
+                allTargets = true
+                i += 1
+            }
+            "--out-dir" -> {
+                if (outDir != null) return CliCommand.ShowUsage(1)
+                outDir = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--force" -> {
+                force = true
+                i += 1
+            }
+            "--tolerance" -> {
+                toleranceMm = rest.getOrNull(i + 1)?.toDoubleOrNull() ?: return CliCommand.ShowUsage(1)
+                toleranceSeen = true
+                i += 2
+            }
             else -> {
                 val arg = rest[i]
                 if (arg.startsWith("--") || scriptPath != null) return CliCommand.ShowUsage(1)
@@ -226,14 +279,35 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
         }
     }
     val resolvedScriptPath = scriptPath ?: return CliCommand.ShowUsage(1)
-    return CliCommand.Export(
+    val targetsChosen = selectors.isNotEmpty() || allTargets
+    if (!targetsChosen) {
+        // The new flags only exist together with a target choice; alone they stay what they always were: unknown.
+        if (outDir != null || force || toleranceSeen) return CliCommand.ShowUsage(1)
+        return CliCommand.Export(
+            scriptPath = resolvedScriptPath,
+            outPath = outPath,
+            jsonOutput = jsonOutput,
+            validate = validate,
+            requireGeometry = requireGeometry,
+        )
+    }
+    if (outPath != null || (allTargets && selectors.isNotEmpty())) return CliCommand.ShowUsage(1)
+    if (selectors.size > MAX_EXPORT_TARGET_SELECTORS || selectors.toSet().size != selectors.size) {
+        return CliCommand.ShowUsage(1)
+    }
+    return CliCommand.ExportTargets(
         scriptPath = resolvedScriptPath,
-        outPath = outPath,
+        selection = if (allTargets) ExportTargetSelection.All else ExportTargetSelection.Named(selectors.toList()),
+        outDir = outDir,
+        force = force,
         jsonOutput = jsonOutput,
         validate = validate,
         requireGeometry = requireGeometry,
+        toleranceMm = toleranceMm,
     )
 }
+
+private const val MAX_EXPORT_TARGET_SELECTORS = 4
 
 // `convert <file|dir> --to okf|kts [--out <dir>] [--force] [--output json] [--title <t>] [--tag <t>]...`; any malformed combination -> ShowUsage(1).
 private fun resolveConvertCommand(rest: List<String>): CliCommand {
@@ -512,13 +586,19 @@ fun main(args: Array<String>) {
     KotlinLoggingConfiguration.logStartupMessage = false
     val command = resolveCommand(args)
     if (NativeDist.isActive() &&
-        (command is CliCommand.Export || command is CliCommand.Render || command is CliCommand.Import)
+        (
+            command is CliCommand.Export ||
+                command is CliCommand.ExportTargets ||
+                command is CliCommand.Render ||
+                command is CliCommand.Import
+        )
     ) {
         NativeDist.occtHintOrNull()?.let { System.err.println(it) }
     }
     when (command) {
         CliCommand.StartMcpServer -> runBlocking { runStdioServer() }
         is CliCommand.Export -> runExport(command)
+        is CliCommand.ExportTargets -> runExportTargets(command)
         is CliCommand.Render -> runRender(command)
         is CliCommand.Asciidoc -> runAsciidoc(command)
         is CliCommand.Import -> runImport(command)
@@ -580,10 +660,6 @@ private fun exportModel(
     command: CliCommand.Export,
     model: dev.kstep.script.KStepModel,
 ) {
-    fun fail(report: () -> Nothing): Nothing {
-        closeShapes(model)
-        report()
-    }
     // Opt-in population-level validation (ADR-0024): runs BEFORE the writer and before any file
     // access, and exits 1 (never returning) on findings or when no verdict is available, so no
     // output file is written and a stale one is never mistaken for fresh output. It evaluates
@@ -592,59 +668,25 @@ private fun exportModel(
         if (command.validate) validateForExport(model, command.jsonOutput) { closeShapes(model) } else null
 
     val shapeCount = model.shapes.size
-    // Only probe the native bridge when geometry is actually in play.
-    val occt =
-        if (shapeCount > 0) OcctKernel.availability() else OcctAvailability.Unavailable("not queried")
-    val placementCount = model.placements.size
-    val plan = planExportGeometry(shapeCount, command.requireGeometry, occt, placementCount, model.usageStyles.size)
-    val text: String
-    var geometry: GeometryReport? = null
-    when (plan) {
-        is ExportGeometryPlan.Fail ->
-            fail { printGeometryExportError(command.jsonOutput, plan.errorKind, plan.code, plan.message) }
-        is ExportGeometryPlan.Merge -> {
-            val merged = mergeGeometry(model)
-            text =
-                merged.getOrElse { e ->
-                    fail {
-                        printGeometryExportError(
-                            command.jsonOutput,
-                            "geometry_export_failed",
-                            KStepScriptOutcomeCodes.GEOMETRY_EXPORT_FAILED,
-                            e.message ?: "geometry export failed",
-                        )
-                    }
+    // The pure producer (shared with `export --target`, ADR-0065); the order of effects stays the
+    // one of this command since ADR-0027: failure report after closing the shapes, stderr notes
+    // before the file is written, result report last.
+    val produced =
+        when (val step = produceStepText(model, command.requireGeometry)) {
+            is StepProduction.Ok -> step
+            is StepProduction.Failed -> {
+                closeShapes(model)
+                val runtime = step.runtime
+                if (runtime != null) {
+                    printError(command.jsonOutput, runtime)
+                } else {
+                    printGeometryExportError(command.jsonOutput, step.errorKind, step.code.orEmpty(), step.message)
                 }
-            geometry =
-                GeometryReport(
-                    merged = true,
-                    shapeCount = shapeCount,
-                    occt = occt,
-                    placementCount = placementCount,
-                    usageCount = countPlacedUsages(text),
-                )
-        }
-        is ExportGeometryPlan.StructureOnly -> {
-            text =
-                try {
-                    Part21Writer.write(model.header, model.roots)
-                } catch (e: Part21WriteException) {
-                    fail { printError(command.jsonOutput, e.toRuntimeError()) }
-                } catch (e: Part21EncodingException) {
-                    fail { printError(command.jsonOutput, e.toRuntimeError()) }
-                } catch (e: Part21LimitExceededException) {
-                    fail { printError(command.jsonOutput, e.toRuntimeError()) }
-                }
-            plan.ignoredPlacementsNote?.let { System.err.println("kstep export: $it.") }
-            if (plan.unmergedReason != null) {
-                System.err.println(
-                    "kstep export: geometry NOT written: OCCT unavailable (${plan.unmergedReason}); " +
-                        "the file contains the product structure only.",
-                )
-                geometry = GeometryReport(false, shapeCount, occt, plan.unmergedReason, placementCount)
             }
         }
-    }
+    val text = produced.text
+    val geometry = produced.geometry
+    produced.stderrNotes.forEach { System.err.println(it) }
     val outPath = command.outPath ?: deriveOutputPath(command.scriptPath)
     // The complete text exists before the file is opened, so a failure above never leaves a
     // partial or truncated output file behind.
@@ -661,18 +703,12 @@ private fun exportModel(
             }.toString(),
         )
     } else {
-        if (geometry?.merged == true) {
-            val placed = geometry.usageCount
-            val placedText = if (placed > 0) " and $placed placed usage(s)" else ""
-            println("Exported ${model.roots.size} root(s) with $shapeCount geometric shape(s)$placedText to $outPath")
-        } else {
-            println("Exported ${model.roots.size} root(s) to $outPath")
-        }
+        println(stepSuccessText(model.roots.size, shapeCount, geometry, outPath))
         if (validation != null) println(validationSummaryText(validation))
     }
 }
 
-private fun Exception.toRuntimeError(): KStepScriptOutcome.RuntimeError =
+internal fun Exception.toRuntimeError(): KStepScriptOutcome.RuntimeError =
     KStepScriptOutcome.RuntimeError(
         message = message ?: "export failed",
         exceptionClass = this::class.qualifiedName ?: "unknown",

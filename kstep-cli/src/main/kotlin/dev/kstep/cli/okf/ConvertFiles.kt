@@ -17,7 +17,7 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.security.SecureRandom
 
 /**
- * The file-system side of `kstep convert` (ADR-0060): bounded reads without following links, an output folder that must
+ * The file-system side of `kstep convert` (ADR-0060), shared by `kstep export --target` (ADR-0065): bounded reads without following links, an output folder that must
  * already exist, targets that are never links, and atomic writes (temp file + `fsync` + atomic move, no fallback).
  */
 internal object ConvertFiles {
@@ -205,12 +205,13 @@ internal object ConvertFiles {
         fileName: String,
         bytes: ByteArray,
         replace: Boolean,
+        tempPrefix: String = ".kstep-convert-",
         beforeMove: () -> Unit = {},
     ): WriteResult {
         var temp: Path? = null
         try {
             val target = outReal.resolve(fileName)
-            temp = outReal.resolve(".kstep-convert-${randomHex()}.tmp")
+            temp = outReal.resolve("$tempPrefix${randomHex()}.tmp")
             FileChannel
                 .open(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
                 .use { ch ->

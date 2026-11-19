@@ -192,7 +192,7 @@ link:docs/usage.adoc[Usage].
 | Kotlin scripting host for `*.kstep.kts` scripts.
 
 | `kstep-cli`
-| Command-line entry point (`export`, `render`, `import`, `asciidoc`, `convert`, `mcp`).
+| Command-line entry point (`export`, `render`, `import`, `asciidoc`, `convert`, `mcp`). `kstep export --target/--all-targets` writes the file names a script declares in its `export { }` block (ADR-0065).
 
 | `kstep-mcp`
 | MCP server exposing the entity builders and Part 21 export as LLM tools.
