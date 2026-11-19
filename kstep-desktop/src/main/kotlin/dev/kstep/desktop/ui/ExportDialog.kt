@@ -1,6 +1,7 @@
 package dev.kstep.desktop.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,17 +27,19 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.cli.DesktopExportWorker
 import dev.kstep.desktop.export.ExportFormat
+import dev.kstep.desktop.export.ExportPathText
 import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.run.SandboxNotice
 
 private const val DIALOG_WIDTH_DP = 480
-private const val PATH_MAX_CHARS = 56
 
 /** What the dialog needs to know besides the export state (all of it from the window, none of it from a worker). */
 internal class ExportDialogContext(
@@ -150,14 +153,40 @@ private fun ConfiguringBody(
             Text("Requires the native geometry bridge (OCCT), which is not available.", fontSize = 12.sp, color = WARN)
         }
         Text("Save to", fontSize = 12.sp, color = DIM, modifier = Modifier.padding(top = 8.dp))
+        val label = state.target?.let(ExportPathText::label)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                state.target?.let { ExportText.middleEllipsis(it.toString(), PATH_MAX_CHARS) } ?: "No target chosen",
-                fontSize = 13.sp,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                modifier = Modifier.weight(1f),
-            )
+            if (label == null) {
+                Text(
+                    "No target chosen",
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                Box(Modifier.weight(1f)) {
+                    WithTip(label.full) {
+                        Column(Modifier.fillMaxWidth()) {
+                            Text(
+                                label.fileName,
+                                fontSize = 13.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                label.folder,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = DIM,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
             TextButton(onClick = onChoose) { Text("Choose…", fontSize = 13.sp) }
         }
         (state.overwrite as? Overwrite.NeedsConfirm)?.let { overwrite ->

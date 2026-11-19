@@ -1,0 +1,24 @@
+= ADR-0064: Desktop UI polish: status line, export dialog target, lifetime of the export notice (Welle D9a)
+:toc:
+
+== Status
+
+Accepted (Welle D9a), implemented on a local branch. Tested without OCCT: the pure texts (`StatusLineTextTest`, `ExportPathTextTest`), the notice rules (`ExportNoticeTest`) and a headless composition of the status line at several widths (`StatusLineSceneTest`, bounds of the tagged parts). Not clicked through by hand in a running window in this wave.
+
+== Context
+
+Three small defects of the desktop window, all seen in a running window: the status line showed pieces without separators and let long file names push other parts out; the "Save to" row of the export dialog cut the end of the target, which is the part that matters; and the line "Exported ... Show in Folder" stayed on screen for as long as the window lived, also over another file.
+
+== Decisions
+
+D1. Status line. Order: buttons, file name, separator, right group. A separator stands only between parts that are shown (no separator after the file name when nothing follows, none after the export line when neither sandbox notice nor status follows). The file name is escaped (`DisplayName.escaped`) and cut in the middle with its extension kept (`.kstep.kts` or the last extension), counted in code points: neither a surrogate pair nor a `‹U+202E›` marker is cut; below 8 characters nothing is cut. It gets at least 64 dp. Squeeze order: file name, run status, export line; "Show in Folder" and the sandbox notice are never cut. In a knowledge workspace there is no export line (the export is not available there).
+
+D2. Export dialog. Finding: the shown value was always the file path (the controller passes `dir.resolve(fileName)`), so it was not a wrong value; 56 monospace characters are wider than the column next to "Choose...", and the text was cut hard at the end, which removes exactly the file name. Decision: two lines. Line 1 the file name (monospace, semibold, cut in the middle with its extension only beyond 64 characters), line 2 the folder (muted, root and first segment, `...`, last two segments; beyond 48 characters cut in the middle with the end favoured); the full escaped path is the tooltip. Rejected: one line with a character count (it cannot be right at every font and window size and still loses the name).
+
+D3. Lifetime of the export line. It is state, not a toast: it stays while it is true and goes when (a) another file is shown, (b) a run with a higher generation than the one at the time of the export starts, (c) the knowledge workspace opens, (d) the next export dialog opens. Paths are compared as `toAbsolutePath().normalize()`; no file system access (no `toRealPath`) in the UI path. `ExportNotice` has no clock. Rejected: a 30 second timer (the proof of the export would vanish while the user looks away, and a timer makes the line flicker and the tests clock dependent) and clearing at every running state (it would also hit a run that belongs to the export).
+
+D4. Check of the export's own run. The export runs in its own session directory with its own runner; it does not start a live run, and the file watcher watches only the script file, not the target folder, so writing the target does not start a run. Only the save before the export (`saveAndWait`) changes the script file and can make the watcher start a run. That run is started by the save, before or while the export runs; the generation is read when the export succeeds, so a run that has already started is not counted as newer. A run that starts only after the success (a later edit) clears the line, which is intended. `ExportNoticeTest` pins that the same or an older generation keeps the line.
+
+== Consequences
+
+No change to the worker, the sandbox, `ExportController` or the export state machine, no persistence, no API change. `ExportText.middleEllipsis` and its test are gone (no other caller). The new package `dev.kstep.desktop.status` contains no Compose; `DesktopArchitectureTest` is unchanged and passes. The layout uses Compose weights (file 1, right group 2), so the squeeze order is approximate; `StatusLineSceneTest` checks the bounds (no overlap, sandbox notice whole, file name at least 64 dp) at 520, 660, 900 and 2000 dp.

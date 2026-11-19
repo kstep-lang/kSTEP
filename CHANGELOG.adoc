@@ -7,6 +7,14 @@ minor versions may contain breaking changes.
 
 == Unreleased
 
+=== Changed
+
+* kSTEP Desktop UI polish (Welle D9a, ADR-0064): the status line puts separators only between parts that are shown and
+  shortens a long file name in the middle (extension kept) before it pushes the export line, the sandbox notice or the run
+  status out; the export dialog shows the target as file name (always whole) and folder (shortened) with the full path as
+  tooltip instead of cutting the end of the path; the line after an export stays until another file is shown, a newer run
+  starts, a workspace opens or the next export dialog opens.
+
 === Added
 
 * Declarative `export { }` block and remembered export folder (Welle D7b, ADR-0063): a script can declare up to four file names

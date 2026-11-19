@@ -53,7 +53,6 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.cli.okf.DisplayName
@@ -65,6 +64,7 @@ import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.export.ExportController
 import dev.kstep.desktop.export.ExportFormat
+import dev.kstep.desktop.export.ExportNotice
 import dev.kstep.desktop.export.ExportPreferences
 import dev.kstep.desktop.export.ExportPreferencesStore
 import dev.kstep.desktop.export.ExportState
@@ -99,6 +99,7 @@ import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.SandboxNotice
 import dev.kstep.desktop.run.UserSandboxState
 import dev.kstep.desktop.run.sandboxNotice
+import dev.kstep.desktop.status.StatusLineText
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.viewer.camera.ViewerCameraState
 import dev.kstep.viewer.ui.CanvasHighlight
@@ -168,7 +169,7 @@ fun DesktopApp(
     var exportVisible by remember { mutableStateOf(false) }
     var exportNow by remember { mutableStateOf(0L) }
     var exportSaveError by remember { mutableStateOf<String?>(null) }
-    var exportStatus by remember { mutableStateOf<ExportStatus?>(null) }
+    var exportNotice by remember { mutableStateOf<ExportNotice.Notice?>(null) }
     val exportPreferences = remember { ExportPreferencesStore() }
     val savedExportPreferences = remember { exportPreferences.load() }
     var lastExportFormat by remember { mutableStateOf(savedExportPreferences.lastFormat ?: ExportFormat.DEFAULT) }
@@ -404,7 +405,8 @@ fun DesktopApp(
     val exportScript: Path? = state.file
     val openExport: () -> Unit = {
         if (exportScript != null && editorView.state is EditorState.Editing && !exportRunning) {
-            exportStatus = null
+            exportNotice =
+                ExportNotice.retain(exportNotice, state.file, state, knowledgeOpen, exportDialogOpened = true)
             exportSaveError = null
             exporter.begin(
                 exportScript,
@@ -421,10 +423,23 @@ fun DesktopApp(
     }
     LaunchedEffect(exportState) {
         val done = exportState as? ExportState.Succeeded ?: return@LaunchedEffect
-        exportStatus = ExportStatus(ExportText.successLine(done.fileName, done.bytes), done.dir)
+        // Only with a shown script (a notice for no file would never be visible); the generation is taken NOW so the
+        // run the export's own save may have started does not clear it (ADR-0064).
+        state.file?.let {
+            exportNotice =
+                ExportNotice.onExportSucceeded(
+                    ExportText.successLine(done.fileName, done.bytes),
+                    done.dir,
+                    it,
+                    state.generation,
+                )
+        }
         lastExportDir = done.dir
         exportPreferences.save(ExportPreferences(lastExportFormat, done.dir))
         exportVisible = false
+    }
+    LaunchedEffect(state, knowledgeOpen) {
+        exportNotice = ExportNotice.retain(exportNotice, state.file, state, knowledgeOpen, exportDialogOpened = false)
     }
     LaunchedEffect(exportState.generation, exportState is ExportState.Running) {
         (exportState as? ExportState.Running)?.let { lastExportFormat = it.format }
@@ -574,8 +589,8 @@ fun DesktopApp(
                         onOpenFolder = chooseFolder,
                         onCloseWorkspace = closeWorkspace,
                         sandboxNotice = sandboxNotice,
-                        exportStatus = exportStatus,
-                        onShowInFolder = { exportStatus?.let { showInFolder(it.dir) } },
+                        exportNotice = exportNotice,
+                        onShowInFolder = { exportNotice?.let { showInFolder(it.dir) } },
                         onHome = home,
                         treeAvailable = treeAvailable,
                         treeOn = treeVisible,
@@ -756,7 +771,7 @@ private fun Toolbar(
     onOpen: () -> Unit,
     onExport: () -> Unit,
     exportEnabled: Boolean,
-    exportStatus: ExportStatus?,
+    exportNotice: ExportNotice.Notice?,
     onShowInFolder: () -> Unit,
     onHome: () -> Unit,
     treeAvailable: Boolean,
@@ -813,41 +828,20 @@ private fun Toolbar(
         if (visibilityEnabled) {
             VisibilityControls(counts, hasSelection, alphaStep, onShowAll, onIsolate, onHide, onAlpha)
         }
-        Text(
-            state.file?.fileName?.toString() ?: "No file",
-            fontSize = 13.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(start = 8.dp),
-        )
-        Row(
-            Modifier.weight(1f),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            exportStatus?.let {
-                Text(it.text, fontSize = 12.sp, color = DIM, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                TextButton(onClick = onShowInFolder) { Text("Show in Folder", fontSize = 12.sp) }
-            }
-            sandboxNotice?.let {
-                SandboxMark(it, warningTextColor(isSystemInDarkTheme()))
-                Text("  ·  ", fontSize = 12.sp, color = DIM, maxLines = 1)
-            }
-            Text(
+        StatusLine(
+            fileName = state.file?.fileName?.toString(),
+            exportText = exportNotice?.text?.takeIf { !knowledgeOpen },
+            onShowInFolder = onShowInFolder,
+            sandboxNotice = sandboxNotice,
+            statusText =
                 listOfNotNull(
                     knowledgeLabel,
                     statusText(state),
                     aiStatus,
                     visibilityStatusText(counts),
-                ).filter { it.isNotEmpty() }.joinToString("  ·  ") +
+                ).filter { it.isNotEmpty() }.joinToString(StatusLineText.SEPARATOR) +
                     if (editor.dirty) "  ·  unsaved changes  ·  preview shows saved file" else "",
-                fontSize = 12.sp,
-                color = DIM,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-        }
+        )
     }
 }
 
@@ -999,12 +993,6 @@ private fun chooseScript(parent: Frame): Path? {
     val name = dialog.file ?: return null
     return Path.of(dialog.directory ?: "", name)
 }
-
-/** The line after a successful export: what was written and where, with the action "Show in Folder". */
-internal class ExportStatus(
-    val text: String,
-    val dir: Path,
-)
 
 /** Opens the folder of an exported file in the system file manager; no-op where the platform has no such support. */
 private fun showInFolder(dir: Path) {

@@ -41,19 +41,6 @@ object ExportText {
         return "$label... ${elapsedMs / 1_000} s of max. ${limitMs / 1_000} s"
     }
 
-    /** [text] shortened to at most [max] characters with an ellipsis in the middle (a long folder path, name kept). */
-    fun middleEllipsis(
-        text: String,
-        max: Int,
-    ): String {
-        if (text.length <= max || max < MIN_ELLIPSIS_CHARS) return text
-        val keepEnd = (max - 1) * 2 / 3
-        val keepStart = max - 1 - keepEnd
-        return text.take(keepStart) + "…" + text.takeLast(keepEnd)
-    }
-
-    private const val MIN_ELLIPSIS_CHARS = 5
-
     const val STOPPED_NOTICE: String = "Export stopped. Nothing was written."
 
     /** One line of an error for the dialog: the code and a sanitized message. */

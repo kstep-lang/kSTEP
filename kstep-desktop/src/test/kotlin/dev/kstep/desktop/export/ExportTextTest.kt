@@ -26,13 +26,4 @@ class ExportTextTest :
         "control characters and ANSI escapes never reach the dialog" {
             ExportText.successLine("a\u001B[31m.step", 1) shouldNotContain "\u001B"
         }
-
-        "a long path is shortened in the middle and keeps the end" {
-            val text = "/Users/someone/projects/a/very/deep/folder/with/many/parts/bracket.step"
-            val short = ExportText.middleEllipsis(text, 30)
-            short.length shouldBe 30
-            short.endsWith("bracket.step") shouldBe true
-            short.contains("…") shouldBe true
-            ExportText.middleEllipsis("short", 30) shouldBe "short"
-        }
     })
