@@ -32,6 +32,8 @@ dependencies {
     implementation(libs.compose.material3)
     // Same logging backend as kstep-viewer and kstep-cli (slf4j-simple is the repo standard, no logback).
     runtimeOnly(libs.slf4j.simple)
+    // ExportNamingParityTest compares the desktop's file-name rules with the script's (ADR-0063); test code only.
+    testImplementation(project(":kstep-script"))
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
     testRuntimeOnly(libs.slf4j.simple)

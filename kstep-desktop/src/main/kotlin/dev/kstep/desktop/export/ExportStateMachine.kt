@@ -27,6 +27,10 @@ sealed interface ExportState {
         val notice: String?,
         val error: DesktopError?,
         override val generation: Long,
+        /** The names the script suggested (ADR-0063), at most four; empty without an `export { }` block. */
+        val scriptTargets: List<ScriptExportTarget> = emptyList(),
+        /** Index into [scriptTargets] while the chosen format and file name are still the declared ones, else `null`. */
+        val selectedScriptTarget: Int? = null,
     ) : ExportState
 
     data class Running(
@@ -36,6 +40,9 @@ sealed interface ExportState {
         val startedAtMs: Long,
         val replaceConfirmed: Boolean,
         override val generation: Long,
+        /** Carried through a run so that a stopped or failed run returns to the same dialog (ADR-0063). */
+        val scriptTargets: List<ScriptExportTarget> = emptyList(),
+        val selectedScriptTarget: Int? = null,
     ) : ExportState
 
     data class Succeeded(
@@ -80,6 +87,11 @@ sealed interface ExportEvent {
     data class TargetRejected(
         val target: Path,
         val error: DesktopError,
+    ) : ExportEvent
+
+    /** The user clicked one of the names the script suggested; [index] outside the list is ignored. */
+    data class ChooseScriptTarget(
+        val index: Int,
     ) : ExportEvent
 
     data object ConfirmReplace : ExportEvent
@@ -135,6 +147,8 @@ object ExportStateMachine {
         format: ExportFormat,
         target: Path?,
         existing: Long? = null,
+        scriptTargets: List<ScriptExportTarget> = emptyList(),
+        selectedScriptTarget: Int? = null,
     ): ExportState.Configuring =
         ExportState.Configuring(
             format,
@@ -143,7 +157,28 @@ object ExportStateMachine {
             null,
             null,
             0,
+            scriptTargets,
+            selectedScriptTarget,
         )
+
+    /** The format, marked script target and suggested file name the dialog opens with (ADR-0063). */
+    data class Suggestion(
+        val format: ExportFormat,
+        val selectedScriptTarget: Int?,
+        val fileName: String,
+    )
+
+    /** With a script block the first declared name wins over the last used format; without one nothing changes. */
+    fun suggestion(
+        scriptFileName: String,
+        scriptTargets: List<ScriptExportTarget>,
+        lastFormat: ExportFormat?,
+    ): Suggestion {
+        val first = scriptTargets.firstOrNull()
+        if (first != null) return Suggestion(first.format, 0, first.fileName)
+        val format = lastFormat ?: ExportFormat.DEFAULT
+        return Suggestion(format, null, ExportNaming.defaultFileName(scriptFileName, format))
+    }
 
     fun reduce(
         state: ExportState,
@@ -169,6 +204,7 @@ object ExportStateMachine {
                 ExportTransition(
                     state.copy(
                         format = event.format,
+                        selectedScriptTarget = null,
                         target = state.target?.let { retarget(it, event.format) },
                         // the extension changed, so the old existing-file check is void; Start re-checks
                         overwrite = Overwrite.None,
@@ -176,10 +212,15 @@ object ExportStateMachine {
                         error = null,
                     ),
                 )
+            is ExportEvent.ChooseScriptTarget -> chooseScriptTarget(state, event.index)
             is ExportEvent.ChooseTarget ->
                 ExportTransition(
                     state.copy(
                         target = event.target,
+                        selectedScriptTarget =
+                            state.selectedScriptTarget?.takeIf { selected ->
+                                state.scriptTargets.getOrNull(selected)?.fileName == event.target.fileName?.toString()
+                            },
                         overwrite = event.existing?.let { Overwrite.NeedsConfirm(it) } ?: Overwrite.None,
                         notice = null,
                         error = null,
@@ -204,6 +245,34 @@ object ExportStateMachine {
             else -> ExportTransition(state)
         }
 
+    /** The mark stays only while the chosen file name is exactly the declared one. */
+    private fun stillDeclared(
+        state: ExportState.Configuring,
+        target: Path,
+    ): Int? {
+        val selected = state.selectedScriptTarget ?: return null
+        val declared = state.scriptTargets.getOrNull(selected) ?: return null
+        return if (declared.fileName == target.fileName?.toString()) selected else null
+    }
+
+    /** The declared name replaces the file name in the folder already chosen (or none yet); the folder is never the script's. */
+    private fun chooseScriptTarget(
+        state: ExportState.Configuring,
+        index: Int,
+    ): ExportTransition {
+        val declared = state.scriptTargets.getOrNull(index) ?: return ExportTransition(state)
+        return ExportTransition(
+            state.copy(
+                format = declared.format,
+                selectedScriptTarget = index,
+                target = state.target?.resolveSibling(declared.fileName),
+                overwrite = Overwrite.None,
+                notice = null,
+                error = null,
+            ),
+        )
+    }
+
     private fun start(
         state: ExportState.Configuring,
         nowMs: Long,
@@ -213,7 +282,16 @@ object ExportStateMachine {
         val generation = state.generation + 1
         val confirmed = state.overwrite is Overwrite.Confirmed
         return ExportTransition(
-            ExportState.Running(state.format, target, ExportPhase.STARTING, nowMs, confirmed, generation),
+            ExportState.Running(
+                state.format,
+                target,
+                ExportPhase.STARTING,
+                nowMs,
+                confirmed,
+                generation,
+                state.scriptTargets,
+                state.selectedScriptTarget,
+            ),
             listOf(ExportEffect.StartPipeline(generation, state.format, target, confirmed)),
         )
     }
@@ -249,6 +327,8 @@ object ExportStateMachine {
                             ExportText.STOPPED_NOTICE,
                             null,
                             state.generation,
+                            state.scriptTargets,
+                            state.selectedScriptTarget,
                         ),
                         listOf(ExportEffect.CancelRun(state.generation)),
                     )
@@ -265,7 +345,16 @@ object ExportStateMachine {
             notice: String?,
             error: DesktopError?,
         ) = ExportTransition(
-            ExportState.Configuring(state.format, state.target, overwrite, notice, error, state.generation),
+            ExportState.Configuring(
+                state.format,
+                state.target,
+                overwrite,
+                notice,
+                error,
+                state.generation,
+                state.scriptTargets,
+                state.selectedScriptTarget,
+            ),
         )
         return when (outcome) {
             is PipelineOutcome.Success ->

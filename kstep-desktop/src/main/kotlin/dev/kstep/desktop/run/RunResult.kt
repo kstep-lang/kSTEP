@@ -1,5 +1,6 @@
 package dev.kstep.desktop.run
 
+import dev.kstep.desktop.export.ScriptExportTarget
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.pick.AssemblyTree
 import dev.kstep.geometry.ColoredMesh
@@ -19,6 +20,8 @@ data class DesktopModel(
     val warnings: List<DesktopError> = emptyList(),
     /** The validated assembly hierarchy over [parts] (ADR-0054), or `null` (none, or invalid: see [warnings]). */
     val tree: AssemblyTree? = null,
+    /** File names the script declared in its `export { }` block (ADR-0063), validated; empty without a block. */
+    val scriptExportTargets: List<ScriptExportTarget> = emptyList(),
 )
 
 /** The end of one run of the render worker. */

@@ -57,6 +57,11 @@ data class KStepModel(
      * A separate additive channel like [placements]; only `kstep export` consults it when geometry is merged.
      */
     val usageStyles: List<UsageStyle> = emptyList(),
+    /**
+     * File names declared by the script's `export { }` block (ADR-0063). Pure declaration: the desktop app suggests
+     * them in its export dialog, nothing is written by the script.
+     */
+    val exportTargets: List<ScriptExportTarget> = emptyList(),
 ) {
     val isValid: Boolean get() = violations.isEmpty()
 
@@ -90,6 +95,7 @@ class KStepModelBuilder internal constructor() {
     private val registeredShapes = mutableListOf<ShapeAssignment>()
     private val registeredPlacements = mutableListOf<UsagePlacement>()
     private val registeredUsageStyles = mutableListOf<UsageStyle>()
+    private var declaredExportTargets: List<ScriptExportTarget>? = null
     private val styles = java.util.IdentityHashMap<ProductDefinition, StyleAccumulator>()
 
     // Colours and layers of one part (ADR-0039), collected in any call order and applied in build().
@@ -348,6 +354,15 @@ class KStepModelBuilder internal constructor() {
         }
     }
 
+    /**
+     * Declares the file names the desktop export dialog suggests (ADR-0063). At most one call per script, at least one
+     * and at most four targets, each format once; an invalid name aborts the script with a clear message.
+     */
+    fun export(block: ExportBlockBuilder.() -> Unit) {
+        require(declaredExportTargets == null) { "export { } may be declared only once" }
+        declaredExportTargets = ExportBlockBuilder().apply(block).build()
+    }
+
     private fun styledShapes(): List<ShapeAssignment> {
         for (productDefinition in styles.keys) {
             if (registeredShapes.none { it.productDefinition === productDefinition }) {
@@ -379,6 +394,7 @@ class KStepModelBuilder internal constructor() {
             shapes = styledShapes(),
             placements = registeredPlacements.toList(),
             usageStyles = registeredUsageStyles.toList(),
+            exportTargets = declaredExportTargets.orEmpty(),
         )
 }
 

@@ -65,6 +65,8 @@ import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.export.ExportController
 import dev.kstep.desktop.export.ExportFormat
+import dev.kstep.desktop.export.ExportPreferences
+import dev.kstep.desktop.export.ExportPreferencesStore
 import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
@@ -167,8 +169,10 @@ fun DesktopApp(
     var exportNow by remember { mutableStateOf(0L) }
     var exportSaveError by remember { mutableStateOf<String?>(null) }
     var exportStatus by remember { mutableStateOf<ExportStatus?>(null) }
-    var lastExportFormat by remember { mutableStateOf(ExportFormat.DEFAULT) }
-    var lastExportDir by remember { mutableStateOf<Path?>(null) }
+    val exportPreferences = remember { ExportPreferencesStore() }
+    val savedExportPreferences = remember { exportPreferences.load() }
+    var lastExportFormat by remember { mutableStateOf(savedExportPreferences.lastFormat ?: ExportFormat.DEFAULT) }
+    var lastExportDir by remember { mutableStateOf(savedExportPreferences.lastDir) }
     val exportRunning = exportState is ExportState.Running
     LaunchedEffect(exportRunning) {
         while (exportRunning) {
@@ -406,6 +410,7 @@ fun DesktopApp(
                 exportScript,
                 lastExportFormat,
                 lastExportDir ?: exportScript.toAbsolutePath().parent ?: exportScript.toAbsolutePath(),
+                (state as? DesktopState.Ok)?.model?.scriptExportTargets.orEmpty(),
             )
             exportVisible = true
         }
@@ -418,6 +423,7 @@ fun DesktopApp(
         val done = exportState as? ExportState.Succeeded ?: return@LaunchedEffect
         exportStatus = ExportStatus(ExportText.successLine(done.fileName, done.bytes), done.dir)
         lastExportDir = done.dir
+        exportPreferences.save(ExportPreferences(lastExportFormat, done.dir))
         exportVisible = false
     }
     LaunchedEffect(exportState.generation, exportState is ExportState.Running) {
@@ -524,6 +530,7 @@ fun DesktopApp(
                             elapsedSince = exporter::elapsedSince,
                         ),
                     onFormat = exporter::chooseFormat,
+                    onScriptTarget = exporter::chooseScriptTarget,
                     onChoose = {
                         val current = exportState as? ExportState.Configuring
                         val start = current?.target?.parent ?: lastExportDir

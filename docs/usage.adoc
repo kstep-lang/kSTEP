@@ -925,6 +925,14 @@ The status line and the tree header count the hidden and transparent parts. Know
 each triangle, so a part inside a transparent hull can show over it when the hull has large slanted triangles; and only the front side of
 a transparent hull is drawn. The colour transparency written in a STEP file is not drawn in the desktop.
 
+Export names (ADR-0063): a script can suggest file names for the `Export...` dialog with an `export { }` block, for example
+`stepFile(fileName = "bracket.step") { export { step("bracket.step"); glb("bracket-view.glb") } }`. The methods are `step`, `glb`,
+`stl` and `threeMf`; at most one block, at most four names, each format once. A name must be a plain file name with the extension of
+its format (`.step` or `.stp`, `.glb`, `.stl`, `.3mf`) and is rejected, not corrected, if it has a path part, a control or direction
+character, a reserved Windows device name or more than 120 characters. The block writes nothing: the dialog shows the names ("From
+script"), a click sets format and name, and you still choose the folder. The dialog also remembers the last format and folder
+between sessions (`export.json` in the kSTEP config folder). A script without a block behaves as before.
+
 A script without a `shape(...)` shows "Script has no shape(...)"; without the native bridge the window shows the OCCT notice
 with an install hint for the current operating system.
 

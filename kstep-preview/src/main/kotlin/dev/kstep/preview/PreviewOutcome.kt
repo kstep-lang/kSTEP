@@ -99,6 +99,8 @@ sealed interface PreviewOutcome {
         val parts: List<RenderedPart>? = null,
         /** The assembly hierarchy over [parts] (ADR-0054); `null` for a single shape or a non-GLB container. */
         val tree: RenderedAssemblyTree? = null,
+        /** File names declared by the script's `export { }` block (ADR-0063); empty without a block. */
+        val exportTargets: List<RenderedExportTarget> = emptyList(),
     ) : PreviewOutcome
 
     /**
@@ -118,3 +120,9 @@ sealed interface PreviewOutcome {
         val message: String,
     ) : PreviewOutcome
 }
+
+/** One declared export target of a script (ADR-0063): [format] is the transport id (`step`, `glb`, `stl`, `3mf`). */
+data class RenderedExportTarget(
+    val format: String,
+    val fileName: String,
+)

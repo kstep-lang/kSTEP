@@ -273,6 +273,17 @@ internal fun successJson(
                 putParts(parts)
                 if (parts.size <= DesktopPartLimits.MAX_PARTS) outcome.tree?.let { putTree(it) }
             }
+            // ADR-0063: declared export names go to the desktop worker only, never to the public JSON.
+            if (outcome.exportTargets.isNotEmpty()) {
+                putJsonArray("exportTargets") {
+                    for (target in outcome.exportTargets) {
+                        addJsonObject {
+                            put("format", target.format)
+                            put("fileName", target.fileName)
+                        }
+                    }
+                }
+            }
         }
         outcome.meshExport?.let { export -> putMeshExport(export, toleranceMm) }
     }

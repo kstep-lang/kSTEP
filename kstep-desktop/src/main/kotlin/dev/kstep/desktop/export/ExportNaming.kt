@@ -68,6 +68,32 @@ object ExportNaming {
         return finish(stem, format.extension)
     }
 
+    /**
+     * Strict check of a name a script declared (ADR-0063): rejects, never cleans. Same rules as
+     * `ScriptExportNames.validate` in `kstep-script` (a parity test keeps both in step), plus the extension of [format].
+     */
+    fun isValidDeclaredName(
+        name: String,
+        format: ExportFormat,
+    ): Boolean {
+        if (name.isEmpty() || name.codePointCount(0, name.length) > MAX_STEM_CODE_POINTS) return false
+        if (name.toByteArray(Charsets.UTF_8).size > MAX_FILE_NAME_BYTES) return false
+        if (!Normalizer.isNormalized(name, Normalizer.Form.NFC)) return false
+        var i = 0
+        while (i < name.length) {
+            val cp = name.codePointAt(i)
+            i += Character.charCount(cp)
+            if (Character.isISOControl(cp) || cp in bidiAndSeparators) return false
+            if (cp < 0x10000 && cp.toChar() in forbiddenChars) return false
+        }
+        if (name == "." || name == ".." || name.startsWith(".") || name.startsWith(" ")) return false
+        if (name.endsWith(".") || name.endsWith(" ")) return false
+        if (reserved.matches(name)) return false
+        val lower = name.lowercase()
+        val extensions = if (format == ExportFormat.STEP) listOf(".step", ".stp") else listOf(format.extension)
+        return extensions.any { lower.endsWith(it) && lower.length > it.length }
+    }
+
     private fun clean(raw: String): String {
         val normalized = Normalizer.normalize(raw, Normalizer.Form.NFC)
         val out = StringBuilder()

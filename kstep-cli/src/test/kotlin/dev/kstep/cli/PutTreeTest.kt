@@ -7,6 +7,7 @@ import dev.kstep.preview.PreviewContentKind
 import dev.kstep.preview.PreviewOutcome
 import dev.kstep.preview.RenderFormat
 import dev.kstep.preview.RenderedAssemblyTree
+import dev.kstep.preview.RenderedExportTarget
 import dev.kstep.preview.RenderedPart
 import dev.kstep.preview.RenderedTreeNode
 import io.kotest.core.spec.style.StringSpec
@@ -35,6 +36,7 @@ class PutTreeTest :
         fun rendered(
             parts: List<RenderedPart>?,
             tree: RenderedAssemblyTree?,
+            exportTargets: List<RenderedExportTarget> = emptyList(),
         ) = PreviewOutcome.Rendered(
             bytes = ByteArray(0),
             format = RenderFormat.GLB,
@@ -48,6 +50,7 @@ class PutTreeTest :
             warnings = emptyList(),
             parts = parts,
             tree = tree,
+            exportTargets = exportTargets,
         )
 
         "nodes are written with name, parent and part" {
@@ -119,5 +122,21 @@ class PutTreeTest :
             val json = successJson("o.glb", outcome, null, includeParts = true)
             json["parts"] shouldBe JsonNull
             json.containsKey("tree") shouldBe false
+        }
+
+        "declared export targets reach only the desktop result, and only when there are some" {
+            val targets = listOf(RenderedExportTarget("step", "bolt.step"), RenderedExportTarget("glb", "bolt.glb"))
+            val withTargets = rendered(listOf(part("Bolt")), null, targets)
+            val without = rendered(listOf(part("Bolt")), null)
+            val desktop = successJson("o.glb", withTargets, null, includeParts = true)
+            val array = desktop["exportTargets"]!!.jsonArray
+            array.size shouldBe 2
+            array[0].jsonObject["format"]!!.jsonPrimitive.content shouldBe "step"
+            array[1].jsonObject["fileName"]!!.jsonPrimitive.content shouldBe "bolt.glb"
+            // the public JSON is byte for byte what it is without a block
+            successJson("o.glb", withTargets, null).toString() shouldBe successJson("o.glb", without, null).toString()
+            successJson("o.glb", withTargets, null).containsKey("exportTargets") shouldBe false
+            // no block: no field even for the desktop
+            successJson("o.glb", without, null, includeParts = true).containsKey("exportTargets") shouldBe false
         }
     })

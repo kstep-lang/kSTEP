@@ -9,6 +9,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Declarative `export { }` block and remembered export folder (Welle D7b, ADR-0063): a script can declare up to four file names
+  (`step`, `glb`, `stl`, `threeMf`, one per format) that the kSTEP Desktop export dialog suggests; names are validated strictly
+  (no paths, control or direction characters, reserved device names, extension must match the format) and an invalid declaration
+  is a script error. The desktop reads the names from its own worker result only (never from the public `kstep render` JSON,
+  which is unchanged), treats them as hostile input and drops the whole list with a notice if anything is off. The dialog
+  remembers the last format and folder between sessions. `KStepModel` gained a last field `exportTargets` (source compatible,
+  not strictly binary compatible). Moved to D7c: export all names in one go, an own file picker, per-format options, a real
+  progress percentage, `kstep export` bound to the block.
 * Sandbox for your own scripts in kSTEP Desktop (Welle D6c, ADR-0062): live preview, export and knowledge-workspace blocks now
   run in `sandbox-exec` (macOS) or `bubblewrap` (Linux) with no network and write access only to their session folder; reading
   stays allowed. The system is probed once per program run; where the probe fails (Windows, Linux without a working

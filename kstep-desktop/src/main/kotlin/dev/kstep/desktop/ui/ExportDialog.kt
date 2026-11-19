@@ -68,6 +68,7 @@ internal fun ExportDialog(
     onStop: () -> Unit,
     onClose: () -> Unit,
     sandboxNotice: SandboxNotice? = null,
+    onScriptTarget: (Int) -> Unit = {},
 ) {
     val running = state as? ExportState.Running
     AlertDialog(
@@ -86,7 +87,7 @@ internal fun ExportDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 when (state) {
-                    is ExportState.Configuring -> ConfiguringBody(state, context, onFormat, onChoose)
+                    is ExportState.Configuring -> ConfiguringBody(state, context, onFormat, onChoose, onScriptTarget)
                     is ExportState.Running -> RunningBody(state, context)
                     is ExportState.Succeeded ->
                         Text(ExportText.successLine(state.fileName, state.bytes), fontSize = 13.sp)
@@ -117,8 +118,10 @@ private fun ConfiguringBody(
     context: ExportDialogContext,
     onFormat: (ExportFormat) -> Unit,
     onChoose: () -> Unit,
+    onScriptTarget: (Int) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        ScriptTargetsRow(state, onScriptTarget)
         Text("Format", fontSize = 12.sp, color = DIM)
         ExportFormat.ALL.forEach { format ->
             val enabled = !context.nativeUnavailable
@@ -176,6 +179,47 @@ private fun ConfiguringBody(
         state.notice?.let { Text(it, fontSize = 12.sp, color = DIM) }
         (state.error?.let { ExportText.errorLine(it) } ?: context.saveError)?.let {
             Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+/**
+ * The names the script suggested (ADR-0063): one muted line for a single name, a row of plain text buttons for two to
+ * four. Nothing is drawn without an `export { }` block, so the dialog of an ordinary script is unchanged.
+ */
+@Composable
+private fun ScriptTargetsRow(
+    state: ExportState.Configuring,
+    onScriptTarget: (Int) -> Unit,
+) {
+    val targets = state.scriptTargets
+    when {
+        targets.isEmpty() -> Unit
+        targets.size == 1 ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("From script: ", fontSize = 12.sp, color = DIM)
+                Text(targets[0].fileName, fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = DIM)
+            }
+        else -> {
+            Text("From script", fontSize = 12.sp, color = DIM)
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                targets.forEachIndexed { index, target ->
+                    TextButton(onClick = { onScriptTarget(index) }) {
+                        Text(
+                            target.fileName,
+                            fontSize = 13.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            color =
+                                if (state.selectedScriptTarget == index) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    DIM
+                                },
+                        )
+                    }
+                }
+            }
         }
     }
 }

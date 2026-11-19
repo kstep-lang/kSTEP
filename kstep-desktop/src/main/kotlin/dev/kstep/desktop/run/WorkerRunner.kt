@@ -6,6 +6,7 @@ import dev.kstep.cli.ImportWorkerSupervisor
 import dev.kstep.cli.WorkerOutcome
 import dev.kstep.cli.diagnosticLine
 import dev.kstep.desktop.ai.AiErrorCodes
+import dev.kstep.desktop.export.ScriptExportTarget
 import dev.kstep.desktop.model.GlbMeshReader
 import dev.kstep.desktop.model.GlbReadException
 import dev.kstep.desktop.model.PartTable
@@ -293,8 +294,22 @@ class WorkerRunner(
                     }
                 }
             val tree = (treeResult as? AssemblyTreeResult.Valid)?.tree
+            val declared = ExportTargetsParser.parse(partsJson?.get("exportTargets"))
+            val scriptTargets = (declared as? ExportTargetsResult.Valid)?.targets.orEmpty()
+            val allNotes =
+                if (declared is ExportTargetsResult.Invalid) notes + ExportTargetsParser.IGNORED_NOTICE else notes
             RunResult.Success(
-                model(mesh, mesh?.mesh?.triangleCount ?: 0, generation, durationMs, notes, table, warnings, tree),
+                model(
+                    mesh,
+                    mesh?.mesh?.triangleCount ?: 0,
+                    generation,
+                    durationMs,
+                    allNotes,
+                    table,
+                    warnings,
+                    tree,
+                    scriptTargets,
+                ),
             )
         } catch (e: TooManyTrianglesException) {
             failure(
@@ -318,7 +333,19 @@ class WorkerRunner(
         parts: PartTable? = null,
         warnings: List<DesktopError> = emptyList(),
         tree: AssemblyTree? = null,
-    ) = DesktopModel(mesh, triangles, generation, clock(), durationMs, notes, parts, warnings, tree)
+        scriptExportTargets: List<ScriptExportTarget> = emptyList(),
+    ) = DesktopModel(
+        mesh,
+        triangles,
+        generation,
+        clock(),
+        durationMs,
+        notes,
+        parts,
+        warnings,
+        tree,
+        scriptExportTargets,
+    )
 
     /** Warning lines of the render (`kstep render:` prefix, sanitised, at most [MAX_NOTES]) and the discarded stdout lines. */
     private fun notes(

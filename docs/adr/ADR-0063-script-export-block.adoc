@@ -1,0 +1,77 @@
+= ADR-0063: A declarative `export { }` block in the script, remembered export folder (Welle D7b)
+:toc:
+
+== Status
+
+Accepted (Welle D7b), implemented on a local branch. Tested without OCCT: the DSL block and its name rules (`KStepExportBlockTest`, also through the script host), the JSON of the desktop worker with and without the field (`PutTreeTest`), the hostile-input parser (`ExportTargetsParserTest`), the pure state rules and the controller (`ExportScriptTargetsTest`), the preferences file (`ExportPreferencesStoreTest`) and the parity of the two name rule sets (`ExportNamingParityTest`). Not clicked through by hand in a running window.
+
+== Context
+
+ADR-0057 left a follow-up: a script should be able to say which file names it wants exported, so that the dialog of the desktop app can suggest them, and the last used folder and format should survive a restart. `KStepModel` had no place for such a declaration, so it needed a language feature in `kstep-script` first. The declared names are attacker-influenced text (a script from a download), and they travel through the worker output, which is hostile input to the desktop (ADR-0051, ADR-0053).
+
+== Decision
+
+D1. `stepFile { export { step("bracket.step"); glb("bracket.glb") } }` declares file names. The block is pure data: it executes nothing, writes nothing and reads nothing. Methods: `step`, `glb`, `stl`, `threeMf`.
+
+D2. Limits: at most one `export { }` per script, a non-empty block, at most four targets, each format at most once. A violation is an `IllegalArgumentException` inside the script and therefore the usual script runtime error.
+
+D3. A declared name is validated strictly and rejected, never cleaned (`ExportNaming.clean` silently drops characters, which is right for a suggestion made from a script file name but wrong for a declaration): not empty; at most 120 code points and 255 UTF-8 bytes; NFC-normalized; no control characters, no bidirectional or line/paragraph separator characters; none of `/ \ : * ? " < > |`; not `.` or `..`; no leading dot or space; no trailing dot or space; not a reserved Windows device name (`CON`, `NUL`, `COM1` ...); and the extension must belong to the format (`.step` or `.stp`, `.glb`, `.stl`, `.3mf`, case-insensitive) with a non-empty stem.
+
+D4. Transport: `KStepModel.exportTargets` (a new last field with an empty default) becomes `PreviewOutcome.Rendered.exportTargets` and, only in the desktop worker result (`includeParts = true`) and only when not empty, the JSON array `exportTargets` of `{format, fileName}`. The public `kstep render --output json` never carries it and is byte for byte unchanged (pinned by a test that compares the public JSON with and without targets).
+
+D5. The desktop never evaluates a script. It reads the array with `ExportTargetsParser`: the list is capped (four) before it is iterated, every entry must be an object with two string fields, the format must be a known worker id, formats must not repeat, and every name must pass `ExportNaming.isValidDeclaredName` (the desktop copy of D3 plus the extension rule). One bad entry drops the whole list, and the run shows the notice "Script export targets were ignored."; the model itself is unaffected. The parser never throws.
+
+D6. `kstep-script` must not depend on `kstep-desktop`, and a shared module would add a jar to the release archives, so the rules of D3 exist twice. `ExportNamingParityTest` runs one table of names through both and fails if they differ.
+
+D7. The dialog. Without a block nothing changes. With one target a muted line "From script: <name>" is shown; with two to four a row "From script" with one plain text button per name (the marked one in the primary colour). No icons, no chips and no "export all" (Design-Team decision: one export per run stays the rule). A click sets format and file name and keeps the folder; the mark falls when the format is chosen by hand or the file name is changed in the system dialog. The first declared target wins over the last used format when the dialog opens.
+
+D8. A declared name is only ever a file name. The folder is the user's: the last folder, else the script's folder, never anything from the script. The chosen path goes through the unchanged `ExportTargets.check`, the replace question, `ExportController`, the session folder, `ExportOutputValidator` and `ExportAtomicWriter`. The name component can therefore not leave the folder, and an invalid declaration cannot reach this point at all (D5). A declared `.stp` name is kept as `.stp` (the normal retargeting would turn it into `.step`) as long as the name is exactly the declared one.
+
+D9. `ExportPreferencesStore` keeps `{lastFormat, lastDir}` in `export.json` in the same per-user config folder as the AI settings (`defaultConfigDir()`). It is untrusted on load: at most 4 KiB, a known format id, and a folder that is absolute, an existing directory and not reached through a symbolic link (the real path must equal the normalized one), else the value is dropped silently. It is written atomically (temporary file and move), with mode 0600 where the platform supports it, only after a successful export, and every I/O failure is swallowed. The order is: declared target, then last format; the folder is always the last one.
+
+[kuml, adr-0063-script-export-flow, svg]
+----
+activityDiagram(name = "export block flow") {
+    val start = initialNode()
+    val script = action(name = "Script declares export { } (data only)")
+    val worker = action(name = "Render worker adds exportTargets to the desktop JSON")
+    val parse = action(name = "Desktop parses it as hostile input")
+    val bad = decision(name = "list valid?")
+    val drop = action(name = "Drop the list, show notice")
+    val dialog = action(name = "Dialog suggests the declared names")
+    val pick = action(name = "User picks folder in the system dialog")
+    val check = action(name = "ExportTargets.check, replace question, ExportController")
+    val done = finalNode()
+    edge(from = start, to = script)
+    edge(from = script, to = worker)
+    edge(from = worker, to = parse)
+    edge(from = parse, to = bad)
+    edge(from = bad, to = drop, guard = "no")
+    edge(from = bad, to = dialog, guard = "yes")
+    edge(from = drop, to = done)
+    edge(from = dialog, to = pick)
+    edge(from = pick, to = check)
+    edge(from = check, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it.
+
+== Threat model
+
+The script, and with it the declared names, is untrusted. A name cannot contain a path, a control or direction character, a Windows device name or a different extension, cannot exceed the limits, and is never cleaned into something else (D3); the worker JSON is bounded, type-checked and all-or-nothing (D5); the name is never used as a path (D8); the preferences file cannot point the dialog at a symbolic link or a relative path (D9). A script cannot make the desktop write anywhere: the user still picks the folder and confirms a replacement.
+
+== Dependencies
+
+None added (`kstep-script` is a test-only dependency of `kstep-desktop` for the parity test).
+
+== Consequences
+
+* `KStepModel` gained a constructor parameter and a property at the end. The change is source compatible for named and for default-using callers; as a data class it changes `copy` and `componentN` and is therefore not strictly binary compatible for a compiled caller of the published `kstep-script`. Accepted while the major version is 0.
+* Only geometry results carry the targets: a script without `shape(...)` (a summary result) does not pass them on, so the dialog suggests nothing for it.
+* The mark falls on a name the user retypes in the system dialog even if it equals another declared name; the first click is cheap.
+* On macOS the system save dialog and the replace question can still ask twice (unchanged from ADR-0057).
+
+== Follow-up D7c
+
+Export all declared targets in one go, an own file and folder picker against the double replace question on macOS, per-format options (tolerance, watertight check), a real percentage for the progress bar, and binding `kstep export` to the block.

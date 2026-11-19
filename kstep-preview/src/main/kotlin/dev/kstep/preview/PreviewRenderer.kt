@@ -324,6 +324,7 @@ object PreviewRenderer {
             meshExport = meshExport,
             parts = parts,
             tree = tree,
+            exportTargets = model?.exportTargets.orEmpty().map { RenderedExportTarget(it.format.id, it.fileName) },
         )
     }
 

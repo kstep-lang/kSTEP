@@ -64,15 +64,33 @@ class ExportController(
         scriptPath: Path,
         format: ExportFormat,
         directory: Path,
+        scriptTargets: List<ScriptExportTarget> = emptyList(),
     ) {
-        val name = ExportNaming.defaultFileName(scriptPath.fileName.toString(), format)
+        // a declared name wins over the last used format (ADR-0063); the folder is always the caller's, never the script's
+        val suggestion = ExportStateMachine.suggestion(scriptPath.fileName.toString(), scriptTargets, format)
         synchronized(lock) {
             if (mutableState.value is ExportState.Running) return
             script = scriptPath.toAbsolutePath().normalize()
             mutableState.value =
-                ExportStateMachine.initial(format, null).copy(generation = mutableState.value.generation)
+                ExportStateMachine
+                    .initial(
+                        suggestion.format,
+                        null,
+                        scriptTargets = scriptTargets,
+                        selectedScriptTarget = suggestion.selectedScriptTarget,
+                    ).copy(generation = mutableState.value.generation)
         }
-        chooseTarget(directory.resolve(name))
+        chooseExact(directory.resolve(suggestion.fileName))
+    }
+
+    /** The user picked one of the names the script suggested. */
+    fun chooseScriptTarget(index: Int) {
+        val before = mutableState.value as? ExportState.Configuring ?: return
+        val declared = before.scriptTargets.getOrNull(index) ?: return
+        dispatch(ExportEvent.ChooseScriptTarget(index))
+        val target = (mutableState.value as? ExportState.Configuring)?.target
+        val folder = target?.parent ?: return
+        chooseExact(folder.resolve(declared.fileName))
     }
 
     fun chooseFormat(format: ExportFormat) {
@@ -82,8 +100,17 @@ class ExportController(
     }
 
     fun chooseTarget(path: Path) {
-        val format = (mutableState.value as? ExportState.Configuring)?.format ?: return
-        val adjusted = ExportStateMachine.retarget(path, format)
+        val current = mutableState.value as? ExportState.Configuring ?: return
+        // exactly the declared name stays as it is (a `.stp` declaration is not turned into `.step`)
+        val declared = current.selectedScriptTarget?.let { current.scriptTargets.getOrNull(it) }
+        if (declared != null && path.fileName?.toString() == declared.fileName && declared.format == current.format) {
+            chooseExact(path)
+        } else {
+            chooseExact(ExportStateMachine.retarget(path, current.format))
+        }
+    }
+
+    private fun chooseExact(adjusted: Path) {
         when (val check = checker(adjusted)) {
             is TargetCheck.Ok -> dispatch(ExportEvent.ChooseTarget(check.file, check.existing?.bytes))
             is TargetCheck.Invalid ->
