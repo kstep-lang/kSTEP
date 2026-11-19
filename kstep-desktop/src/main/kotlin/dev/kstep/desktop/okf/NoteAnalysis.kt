@@ -1,5 +1,9 @@
 package dev.kstep.desktop.okf
 
+import dev.kstep.cli.okf.Extraction
+import dev.kstep.cli.okf.Frontmatter
+import dev.kstep.cli.okf.FrontmatterParser
+import dev.kstep.cli.okf.MarkdownBlockExtractor
 import dev.kstep.desktop.edit.LineIndex
 
 /** Front matter, blocks and line index of one text version. */

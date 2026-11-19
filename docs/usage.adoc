@@ -799,6 +799,22 @@ stepFile(fileName = "two-boxes.step") {
 * Verified with OCCT's own reader, `kstep import` and FreeCAD (geometry; headless FreeCAD reads no colours):
   `scripts/interop/verify-export-instance-colours.sh`. See docs/adr/ADR-0044-instance-colours.adoc.
 
+== Converting between scripts and notes
+
+`kstep convert <file> --to okf|kts [--out <dir>] [--force]` (ADR-0060) moves between a `*.kstep.kts` script and a Markdown note
+with a fenced `kstep` block, as used by the Desktop knowledge workspace. It only handles text; a script is never run.
+
+* `--to okf` wraps `part.kstep.kts` as `part.md`: front matter with `title` and `tags: [kstep]`, a heading and one `kstep` block.
+  The script may be at most 256 KiB and must not be empty.
+* `--to kts` writes every non-empty `kstep` block of `part.md` as `part.kstep.kts` (one block) or `part-1.kstep.kts`,
+  `part-2.kstep.kts`, ... (several). The note may be at most 1 MiB. A note with an unclosed block, a block over 256 KiB, more than
+  200 blocks or no usable block is refused.
+* `--out <dir>` is the target folder; it must exist and defaults to the folder of the input file.
+* An existing target is replaced only with `--force`. Without it nothing is written if any target exists. Links and
+  non-regular files are never replaced. The input must not be a symbolic link.
+* kts to okf to kts returns the script unchanged (a missing final line break is added). okf to kts to okf loses front matter,
+  prose and other blocks.
+
 == Desktop live preview
 
 `kstep-desktop` shows a `*.kstep.kts` script as a 3D shape and updates it when the file is saved (ADR-0051). It is a

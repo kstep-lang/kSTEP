@@ -92,6 +92,6 @@ None added. kstep-cli and the published modules are untouched, so `kstep render 
 * A block cannot use the note's folder; blocks must be self-contained until a working directory for the worker is decided.
 * Because the list limit equals the editor limit, a note between 1 and 2 MiB is not editable; raising the editor limit is a separate decision.
 
-== Follow-up (D8b)
+== Follow-up (D8b, D8c)
 
-`kstep convert --to okf/kts`, the marker file and front-matter vocabulary of the kUML integration, export and AI for a chosen block, pick-to-source, a working directory for the worker.
+`kstep convert --to okf/kts` is done in ADR-0060 (Welle D8b); for it the block extractor, front-matter reader, display-name escaping and limits moved from `dev.kstep.desktop.okf` to `dev.kstep.cli.okf` in kstep-cli. Left for D8c: the marker file and front-matter vocabulary of the kUML integration, export and AI for a chosen block, pick-to-source, a working directory for the worker.

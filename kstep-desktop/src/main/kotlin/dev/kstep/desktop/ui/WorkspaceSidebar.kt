@@ -38,8 +38,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.kstep.desktop.okf.DisplayName
-import dev.kstep.desktop.okf.OkfLimits
+import dev.kstep.cli.okf.DisplayName
+import dev.kstep.cli.okf.OkfLimits
 import dev.kstep.desktop.okf.PartialReason
 import dev.kstep.desktop.okf.ScanResult
 import dev.kstep.desktop.okf.WorkspaceEntry

@@ -1,4 +1,4 @@
-package dev.kstep.desktop.okf
+package dev.kstep.cli.okf
 
 enum class BlockState { OK, EMPTY, UNCLOSED, TOO_LARGE }
 

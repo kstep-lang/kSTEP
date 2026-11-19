@@ -1,5 +1,7 @@
 package dev.kstep.desktop.okf
 
+import dev.kstep.cli.okf.MarkdownBlockExtractor
+import dev.kstep.cli.okf.OkfLimits
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import java.nio.file.FileSystems
@@ -67,5 +69,10 @@ class OkfSmallPartsTest :
             val bigPlan = KnowledgeHighlightPlan.of(MarkdownBlockExtractor.extract("```kstep\n$big\n```\n"))
             bigPlan.count { it.kind == HlKind.KSTEP_CODE } shouldBe 0
             bigPlan.count { it.kind == HlKind.FENCE_LINE } shouldBe 2
+        }
+
+        "the file limit of the okf logic equals the editor limit" {
+            dev.kstep.desktop.edit.EditorText.MAX_BYTES
+                .toLong() shouldBe OkfLimits.MAX_FILE_BYTES
         }
     })

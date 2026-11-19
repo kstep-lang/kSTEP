@@ -1,0 +1,80 @@
+= ADR-0060: `kstep convert --to okf|kts` (Welle D8b)
+:toc:
+
+== Status
+
+Accepted (Welle D8b). The pure conversion, the file handling and the command are covered by tests, including a round trip over the repository's scripts and hostile inputs. Not done: the Desktop menu entry `Convert...` and everything listed under "Follow-up (D8c)".
+
+== Context
+
+ADR-0058 made a folder of Markdown notes with fenced `kstep` blocks usable in the Desktop. What is missing is a way to move between a plain `*.kstep.kts` script and such a note, from the command line. kUML has `kuml workspace convert`; this ADR adds the kSTEP counterpart with the same naming rules but stricter file handling.
+
+== Decision
+
+D1. Command. `kstep convert <file> --to okf|kts [--out <dir>] [--force]`. `--to okf` takes a `*.kstep.kts` file and writes `<stem>.md`; `--to kts` takes a `*.md` note and writes one `*.kstep.kts` per non-empty `kstep` block. `--to` is mandatory. A malformed command line is a usage error (exit 1), never a partly filled command. Exit code 0 or 1.
+
+D2. Text only. Conversion never evaluates a script, starts a process or opens a network connection. kUML evaluates scripts for the `type:` front matter key; kSTEP does not, because the conversion must be safe on any file. The package `dev.kstep.cli.okf` has an architecture test that forbids Compose, the desktop, `ProcessBuilder`, the script host, `java.net` and logging.
+
+D3. Reuse. The block extractor, front-matter reader, display-name escaping and limits of ADR-0058 moved from `dev.kstep.desktop.okf` to `dev.kstep.cli.okf` in kstep-cli (the desktop already depends on kstep-cli, not the reverse). No new module and no copy; `kstep-cli` and `kstep-desktop` are not in `published-artifacts.txt`, so no published API changed. `OkfLimits.MAX_FILE_BYTES` is now a constant (1 MiB); a desktop test pins it to `EditorText.MAX_BYTES`. The distribution zip gains classes in the existing `kstep-cli` jar, no new jar.
+
+D4. The note. Front matter with `title` (double quoted) and `tags: [kstep]`, a blank line, a `# <title>` heading, then one fenced `kstep` block. The title is the file stem, shown through `DisplayName.escaped` (at most 100 code points, so the header always stays under its scalar limit). The fence is made longer than any fence-like line at the start of a script line: a run of R backticks gives `max(3, R+1)` backticks. Because the extractor caps runs at 64 for comparison, R above 63 switches to tildes with the same rule; if both exceed 63 the script is refused. The note is read back through `FrontmatterParser` and `MarkdownBlockExtractor` before it is returned (title, tags and exactly one block in state `OK`), otherwise the script is refused. The line ending of the script (LF, CRLF or CR) is used for the whole frame.
+
+D5. Naming. A note with exactly one `kstep` block (empty ones counted) writes `<stem>.kstep.kts`; otherwise `<stem>-<N>.kstep.kts` with N the 1-based block number. Empty blocks are skipped with a note on stderr and keep their number, so the names do not change when a block is emptied. `<stem>` is the file name reduced to `[A-Za-z0-9._-]` (the last path segment; everything else, including control, bidirectional and non-ASCII characters, becomes `_`), `.`, `_` and `-` trimmed at both ends, at most 120 characters, `block` if nothing is left, and prefixed with `_` if it is a Windows device name.
+
+D6. Refused. `--to kts` refuses a note with an unclosed block, a block over 256 KiB, more than 200 blocks, no `kstep` block, or only empty blocks. `--to okf` refuses an empty script and a script whose UTF-8 size is over 256 KiB (such a note would hold a `TOO_LARGE` block that cannot be converted back). Nothing is written in any of these cases.
+
+D7. Limits. `--to okf` reads at most 256 KiB, `--to kts` at most 1 MiB (the Desktop's note limit). The read never reads more than the limit plus one byte, even if the file grows meanwhile, and decodes strict UTF-8.
+
+D8. Paths. The input must be a regular file and not a symbolic link (unlike `export` and `render`, which follow links); it is opened without following links. `--out` must be an existing directory and is never created; it is resolved with `toRealPath`, so a link chosen by the user (for example `/tmp` on macOS) is allowed. Without `--out` the folder of the input file is used. Every target is `<real out dir>/<name>` with a name without separators, and its parent must equal the real out dir. A target that exists as a link, a directory or any non-regular file is refused, with or without `--force`. The input file itself is never a valid target.
+
+D9. Writing. All targets are checked first: a conflict without `--force` (or an invalid target) ends with exit 1 and nothing written, not even the free names. Then each file is written on its own: temp file `.kstep-convert-<random>.tmp` in the target folder (created with `CREATE_NEW`, no links), `fsync`, a last check of the target, then `ATOMIC_MOVE` (with `REPLACE_EXISTING` only for `--force`), and no non-atomic fallback. The temp file is deleted in `finally`. Each file is atomic, the set is not: if a later file fails, the files already written are listed on stderr and the exit code is 1. Between the last check and the move another process can still create the target (a window no portable API closes; accepted as in ADR-0057, and `ATOMIC_MOVE` without `REPLACE_EXISTING` may replace on POSIX). The temp file gets the default permissions (umask), as a note is not a secret.
+
+D10. Messages. File names are always shown through `DisplayName.escaped`; no absolute path is printed and no file content appears in a message. stdout: `Wrote <name>` per file. stderr: `kstep convert: <message>`.
+
+D11. Round trip. kts to okf to kts is lossless, except that exactly one trailing line break is added if the script had none, so a script that ends with its line break comes back byte for byte (including CRLF, a BOM, tabs and fence-like lines). okf to kts to okf is lossy: front matter, prose and all other blocks are dropped.
+
+[kuml, adr-0060-convert-flow, svg]
+----
+activityDiagram(name = "kstep convert") {
+    val start = initialNode()
+    val read = action(name = "Read input (no link, bounded, strict UTF-8)")
+    val dir = decision(name = "--to")
+    val wrap = action(name = "Wrap script: front matter + fenced kstep block")
+    val extract = action(name = "Extract kstep blocks, name stem-N")
+    val check = action(name = "Check all targets under --out")
+    val clash = decision(name = "conflict without --force?")
+    val write = action(name = "Write each file: temp + fsync + ATOMIC_MOVE")
+    val fail = action(name = "Exit 1, nothing written")
+    val done = finalNode()
+    edge(from = start, to = read)
+    edge(from = read, to = dir)
+    edge(from = dir, to = wrap, guard = "okf")
+    edge(from = dir, to = extract, guard = "kts")
+    edge(from = wrap, to = check)
+    edge(from = extract, to = check)
+    edge(from = check, to = clash)
+    edge(from = clash, to = fail, guard = "yes")
+    edge(from = clash, to = write, guard = "no")
+    edge(from = write, to = done)
+    edge(from = fail, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it.
+
+== Threat model
+
+The note and the script are untrusted text. Hostile fence lines and BOMs are handled by D4; a name with control or bidirectional characters cannot become a file name (D5) or reach the terminal raw (D10); a link as input, target or parent cannot redirect a write (D8); a huge or growing file is bounded (D7); a malformed header or note cannot make the extractor run beyond its linear pass (ADR-0058, D11 and D12). Nothing is evaluated (D2).
+
+== Dependencies
+
+None added.
+
+== Consequences
+
+* The Desktop okf logic is now in kstep-cli; the Desktop imports it from there.
+* The set of files of one conversion is not transactional (D9).
+
+== Follow-up (D8c)
+
+Directory sources, a marker file, the front matter vocabulary `type:` as in kUML, a `{name="..."}` attribute on blocks, `--tag` and `--title`, `--output json`, the Desktop entry `Convert...`, export and AI for one block, pick-to-source and a working directory for the worker.

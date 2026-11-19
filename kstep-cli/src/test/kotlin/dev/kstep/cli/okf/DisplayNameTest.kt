@@ -1,4 +1,4 @@
-package dev.kstep.desktop.okf
+package dev.kstep.cli.okf
 
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe

@@ -3,6 +3,7 @@ package dev.kstep.tests
 import dev.kstep.asciidoc.OnErrorPolicy
 import dev.kstep.cli.AsciidocMode
 import dev.kstep.cli.CliCommand
+import dev.kstep.cli.ConvertTarget
 import dev.kstep.cli.USAGE_TEXT
 import dev.kstep.cli.resolveCommand
 import dev.kstep.preview.RenderFormat
@@ -511,5 +512,30 @@ class CliMainTest :
         "USAGE_TEXT documents the import subcommand" {
             USAGE_TEXT shouldContain "kstep import <file.step>"
             USAGE_TEXT shouldContain "--render <out.svg|out.png|out.glb>"
+        }
+        "convert resolves its flags" {
+            resolveCommand(arrayOf("convert", "a.kstep.kts", "--to", "okf")) shouldBe
+                CliCommand.Convert("a.kstep.kts", ConvertTarget.OKF, null, false)
+            resolveCommand(arrayOf("convert", "--to", "kts", "n.md", "--out", "d", "--force")) shouldBe
+                CliCommand.Convert("n.md", ConvertTarget.KTS, "d", true)
+        }
+
+        "convert with malformed arguments resolves to ShowUsage(1)" {
+            val bad =
+                listOf(
+                    arrayOf("convert", "a.kstep.kts"),
+                    arrayOf("convert", "a.kstep.kts", "--to", "xml"),
+                    arrayOf("convert", "a.kstep.kts", "--to"),
+                    arrayOf("convert", "a.kstep.kts", "--to", "okf", "--bogus"),
+                    arrayOf("convert", "a", "b", "--to", "okf"),
+                    arrayOf("convert", "--to", "okf"),
+                    arrayOf("convert", "a", "--to", "okf", "--to", "kts"),
+                    arrayOf("convert", "a", "--to", "okf", "--out"),
+                )
+            for (args in bad) resolveCommand(args) shouldBe CliCommand.ShowUsage(1)
+        }
+
+        "USAGE_TEXT documents convert" {
+            USAGE_TEXT shouldContain "kstep convert <file> --to okf|kts"
         }
     })

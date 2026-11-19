@@ -73,4 +73,17 @@ IMP="$("$BIN" import "$OUTFILE" --output json 2>"$TMP/import.err")" || rc=$?
 printf '%s' "$IMP" | grep -q '"errorKind":"geometry_unavailable"' \
   || fail "import did not report geometry_unavailable (got: $IMP)"
 
-echo "OK: $ZIP verified (layout, no natives, --help, export and import smoke tests)"
+# Convert smoke test (ADR-0060): script -> note -> script, text only (no native bridge needed), and the round trip must
+# return the fixture unchanged when it ends with a line break.
+FIXTURE_NAME="$(basename "$FIXTURE")"
+STEM="${FIXTURE_NAME%.kstep.kts}"
+mkdir -p "$TMP/okf" "$TMP/kts"
+"$BIN" convert "$FIXTURE" --to okf --out "$TMP/okf" >/dev/null || fail "kstep-cli convert --to okf failed"
+[ -f "$TMP/okf/$STEM.md" ] || fail "convert --to okf produced no $STEM.md"
+"$BIN" convert "$TMP/okf/$STEM.md" --to kts --out "$TMP/kts" >/dev/null || fail "kstep-cli convert --to kts failed"
+[ -f "$TMP/kts/$STEM.kstep.kts" ] || fail "convert --to kts produced no $STEM.kstep.kts"
+if [ -z "$(tail -c 1 "$FIXTURE")" ]; then
+  cmp -s "$FIXTURE" "$TMP/kts/$STEM.kstep.kts" || fail "convert round trip changed the script"
+fi
+
+echo "OK: $ZIP verified (layout, no natives, --help, export, import and convert smoke tests)"

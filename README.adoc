@@ -126,7 +126,16 @@ kstep-cli/build/install/kstep-cli/bin/kstep-cli export bracket.kstep.kts
 ----
 
 The installed launcher is named `kstep-cli`; the documentation calls the
-command `kstep`. The same pipeline as a library, parsing an EXPRESS schema and
+command `kstep`. `kstep convert` moves between a script and a Markdown note
+holding it in a fenced `kstep` block, without running anything:
+
+[source,shell]
+----
+kstep-cli/build/install/kstep-cli/bin/kstep-cli convert bracket.kstep.kts --to okf   # writes bracket.md
+kstep-cli/build/install/kstep-cli/bin/kstep-cli convert bracket.md --to kts          # writes bracket.kstep.kts
+----
+
+The same pipeline as a library, parsing an EXPRESS schema and
 generating Kotlin source:
 
 [source,kotlin]
@@ -182,7 +191,7 @@ link:docs/usage.adoc[Usage].
 | Kotlin scripting host for `*.kstep.kts` scripts.
 
 | `kstep-cli`
-| Command-line entry point.
+| Command-line entry point (`export`, `render`, `import`, `asciidoc`, `convert`, `mcp`).
 
 | `kstep-mcp`
 | MCP server exposing the entity builders and Part 21 export as LLM tools.

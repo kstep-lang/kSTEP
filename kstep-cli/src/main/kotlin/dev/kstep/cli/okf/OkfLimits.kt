@@ -1,6 +1,4 @@
-package dev.kstep.desktop.okf
-
-import dev.kstep.desktop.edit.EditorText
+package dev.kstep.cli.okf
 
 /** Every bound of the knowledge workspace (ADR-0058). The scan and the extraction never exceed them. */
 object OkfLimits {
@@ -10,8 +8,11 @@ object OkfLimits {
     const val MAX_SCAN_BYTES = 64L shl 20
     const val MAX_SCAN_MILLIS = 10_000L
 
-    /** A note must be openable in the editor, so the list limit is the editor limit (ADR-0058, D2). */
-    val MAX_FILE_BYTES: Long = EditorText.MAX_BYTES.toLong()
+    /**
+     * A note must be openable in the editor, so the list limit is the editor limit (ADR-0058, D2).
+     * Must equal `EditorText.MAX_BYTES` (guarded by a test in kstep-desktop).
+     */
+    const val MAX_FILE_BYTES: Long = 1_048_576L
     const val MAX_BLOCKS = 200
     const val MAX_BLOCK_BYTES = 256 * 1024
     const val MAX_FENCE_RUN = 64

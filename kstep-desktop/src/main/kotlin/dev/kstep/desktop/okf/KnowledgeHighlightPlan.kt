@@ -1,5 +1,8 @@
 package dev.kstep.desktop.okf
 
+import dev.kstep.cli.okf.BlockState
+import dev.kstep.cli.okf.Extraction
+
 enum class HlKind { FENCE_LINE, KSTEP_CODE, OTHER_FENCE }
 
 /** [start]..[end] (exclusive) are text offsets; for [HlKind.KSTEP_CODE] the code is tokenised from [offsetBase]. */

@@ -1,4 +1,4 @@
-package dev.kstep.desktop.okf
+package dev.kstep.cli.okf
 
 /** A piece of a displayed name; [escaped] spans are shown dimmed as `‹U+202E›`. */
 data class DisplaySpan(

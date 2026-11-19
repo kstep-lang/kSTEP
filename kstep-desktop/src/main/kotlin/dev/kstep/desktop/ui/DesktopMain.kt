@@ -10,11 +10,11 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import dev.kstep.cli.WorkerTempDir
+import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.edit.AtomicSaver
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.export.ExportController
-import dev.kstep.desktop.okf.DisplayName
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
 import dev.kstep.desktop.run.AiCandidateCompiler
 import dev.kstep.desktop.run.LiveRunController

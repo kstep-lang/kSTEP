@@ -1,4 +1,4 @@
-package dev.kstep.desktop.okf
+package dev.kstep.cli.okf
 
 /**
  * What the knowledge workspace reads of a note's YAML header (ADR-0058, D12). [ignored] is set when a header opens but

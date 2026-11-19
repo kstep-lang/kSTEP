@@ -56,6 +56,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.edit.CaretMapper
@@ -69,7 +70,6 @@ import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
-import dev.kstep.desktop.okf.DisplayName
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
 import dev.kstep.desktop.okf.PathCheck
 import dev.kstep.desktop.okf.WorkspaceEntry

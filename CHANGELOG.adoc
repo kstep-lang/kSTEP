@@ -9,6 +9,13 @@ minor versions may contain breaking changes.
 
 === Added
 
+* `kstep convert <file> --to okf|kts [--out <dir>] [--force]` (Welle D8b, ADR-0060): wraps a `*.kstep.kts` script as a Markdown note
+  (front matter `title`/`tags`, one fenced `kstep` block) or extracts every `kstep` block of a note as `*.kstep.kts` files
+  (`<stem>.kstep.kts` or `<stem>-N.kstep.kts`). Text only, a script is never run. The input must not be a link, `--out` must exist,
+  all targets are checked before anything is written (a conflict without `--force` writes nothing), each file is written atomically
+  with no fallback, names are shown with control and bidirectional characters escaped. kts to okf to kts is lossless; okf to kts to
+  okf is not. Directory sources, `type:` front matter, `--output json` and a Desktop `Convert...` entry follow in D8c.
+
 * kSTEP Desktop knowledge workspace (Welle D8a, ADR-0058): `Open Folder...` (Cmd/Ctrl+Shift+O) opens a folder of Markdown notes; the
   fenced `kstep` block under the cursor is previewed with the same supervised worker and live preview (new Compose-free package
   `dev.kstep.desktop.okf`). A sidebar lists the notes (title, folder, number of blocks), the editor colours fences and `kstep`
@@ -84,6 +91,8 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* The fence, front-matter and display-name logic of the Desktop knowledge workspace moved from `dev.kstep.desktop.okf` to
+  `dev.kstep.cli.okf` (ADR-0060). No published API is touched: `kstep-cli` and `kstep-desktop` are not published artifacts.
 * The kSTEP Desktop render workers (live preview and AI candidate check) no longer inherit secret-like environment variables
   (`KSTEP_AI_*`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `*_API_KEY`, `*_TOKEN`, `*_SECRET*`, `*PASSWORD*`), so a script cannot read
   them (ADR-0056).
