@@ -12,6 +12,7 @@ import dev.kstep.desktop.run.DesktopErrorCodes
 import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.RunResult
 import dev.kstep.desktop.run.WorkerEnvironment
+import dev.kstep.desktop.run.WorkerSandbox
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.shouldBe
@@ -23,7 +24,7 @@ import java.time.Instant
 
 class AiWiringTest :
     StringSpec({
-        "error codes D-001 to D-028 are gap-free and unique" {
+        "error codes D-001 to D-030 are gap-free and unique" {
             val desktop =
                 DesktopErrorCodes::class.java.declaredFields
                     .filter {
@@ -33,7 +34,7 @@ class AiWiringTest :
                     }.map { it.apply { isAccessible = true }.get(null) as String }
             val all = desktop + AiErrorCodes.all
             all.toSet().size shouldBe all.size
-            all.sorted() shouldBe (1..28).map { "KSTEP-D-%03d".format(it) }
+            all.sorted() shouldBe (1..30).map { "KSTEP-D-%03d".format(it) }
         }
 
         "the AI script limit equals the editor limit" {
@@ -120,14 +121,15 @@ class AiWiringTest :
                 var seen: java.nio.file.Path? = null
                 var content: String? = null
                 var results: RunResult = RunResult.Success(DesktopModel(null, 0, 1, Instant.EPOCH, 1, emptyList()))
+                var failWith: ((java.nio.file.Path) -> RunResult)? = null
                 val c =
-                    AiCandidateCompiler(dir) { file, _, _ ->
+                    AiCandidateCompiler(dir, { WorkerSandbox.MacSandboxExec("p", dir, dir) }) { file, _, _ ->
                         seen = file
                         content = Files.readString(file)
                         if ("posix" in file.fileSystem.supportedFileAttributeViews()) {
                             PosixFilePermissions.toString(Files.getPosixFilePermissions(file)) shouldBe "rw-------"
                         }
-                        results
+                        failWith?.invoke(file) ?: results
                     }
                 c.compile("val a = 1") {}.shouldBeInstanceOf<CompileOutcome.Ok>()
                 seen!!.fileName.toString().endsWith(".kstep.kts") shouldBe true
@@ -138,17 +140,14 @@ class AiWiringTest :
                 results = RunResult.NativeUnavailable("no occt")
                 c.compile("x") {}.shouldBeInstanceOf<CompileOutcome.Unverifiable>()
 
-                results =
-                    RunResult.Failure(
-                        listOf(DesktopError("KSTEP-S-001", 3, 4, "bad ${dir.resolve("ai/candidate-3.kstep.kts")}")),
-                    )
+                failWith = { f -> RunResult.Failure(listOf(DesktopError("KSTEP-S-001", 3, 4, "bad $f"))) }
                 val errs = c.compile("x") {}.shouldBeInstanceOf<CompileOutcome.Errors>()
                 errs.diagnostics.single().message shouldNotContain dir.toString()
                 errs.diagnostics.single().line shouldBe 3
 
                 // removed even when the runner throws
                 val boom =
-                    AiCandidateCompiler(dir) { f, _, _ ->
+                    AiCandidateCompiler(dir, { WorkerSandbox.MacSandboxExec("p", dir, dir) }) { f, _, _ ->
                         seen = f
                         error("boom")
                     }

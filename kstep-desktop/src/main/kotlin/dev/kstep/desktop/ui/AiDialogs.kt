@@ -30,6 +30,7 @@ import dev.kstep.desktop.ai.keys.KeySource
 import dev.kstep.desktop.ai.provider.ProviderCatalog
 import dev.kstep.desktop.aiwire.AiUiState
 import dev.kstep.desktop.aiwire.KeyStatus
+import dev.kstep.desktop.aiwire.SandboxStatus
 
 private const val CONSENT_PREVIEW_LINES = 6
 
@@ -66,20 +67,28 @@ internal fun AiConsentDialog(
                     fontSize = 13.sp,
                 )
                 Text("Model: ${ui.model.displayName}  ·  Host: ${ui.provider.host}", fontSize = 13.sp)
-                Text(
-                    "No API keys, file paths or other files are sent by kSTEP. The generated script is run on this " +
-                        "computer in the preview worker to check it, before you have read it. That worker is not a " +
-                        "sandbox: a script can read a key from the system keychain or Secret Service (on Linux also " +
-                        "from the environment) and send it over the network. Use the \"This session only\" key source.",
-                    fontSize = 12.sp,
-                    color = DIM,
-                )
+                Text(consentSandboxText(ui.sandbox), fontSize = 12.sp, color = DIM)
             }
         },
         confirmButton = { TextButton(onClick = onSend) { Text("Send to ${ui.provider.displayName}") } },
         dismissButton = { Button(onClick = onCancel, modifier = Modifier.focusRequester(focus)) { Text("Cancel") } },
     )
 }
+
+/** The last paragraph of the consent dialog: what is and is not run on this computer (ADR-0059). */
+internal fun consentSandboxText(status: SandboxStatus): String =
+    "No API keys, file paths or other files are sent by kSTEP. " +
+        when (status) {
+            SandboxStatus.AVAILABLE ->
+                "The generated script is run on this computer to check it, before you have read it, in a sandbox " +
+                    "without network access that can write only to its session folder. It can still read your files."
+            SandboxStatus.UNAVAILABLE ->
+                "The generated script is not run on this system (no worker sandbox available), so it is not " +
+                    "checked before you read it."
+            SandboxStatus.CHECKING ->
+                "The generated script is run to check it only inside a worker sandbox; kSTEP is still checking " +
+                    "whether this system has one."
+        }
 
 /** Provider, model and key source; the key is typed into a masked field and never shown again. */
 @Composable
@@ -121,6 +130,14 @@ internal fun AiProviderDialog(
                     true,
                     null,
                 ) { onSource(KeySource.ENVIRONMENT) }
+                if (source == KeySource.ENVIRONMENT && System.getProperty("os.name").orEmpty().startsWith("Linux")) {
+                    Text(
+                        "On Linux the live preview runs your own scripts without a sandbox; they can read this " +
+                            "variable from the kSTEP process.",
+                        fontSize = 11.sp,
+                        color = DIM,
+                    )
+                }
                 if (source != KeySource.ENVIRONMENT) {
                     OutlinedTextField(
                         value = typed,

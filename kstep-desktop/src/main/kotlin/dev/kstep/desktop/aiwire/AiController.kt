@@ -25,6 +25,7 @@ import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.ai.settings.AiSettings
 import dev.kstep.desktop.ai.settings.SettingsStore
 import dev.kstep.desktop.edit.EditorText
+import dev.kstep.desktop.run.WorkerSandbox
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,11 +33,15 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 private val logger = KotlinLogging.logger {}
 
 enum class KeyStatus { PRESENT, MISSING, UNKNOWN }
+
+/** Whether this system has a worker sandbox for the candidate check (ADR-0059); `CHECKING` until detected. */
+enum class SandboxStatus { CHECKING, AVAILABLE, UNAVAILABLE }
 
 /** Everything the AI panel shows apart from the repair state (ADR-0056). Never holds a key. */
 data class AiUiState(
@@ -49,6 +54,7 @@ data class AiUiState(
     /** One short line with a `KSTEP-D-xxx` code (e.g. the key store refused), or `null`. */
     val notice: String? = null,
     val busyKeyStore: Boolean = false,
+    val sandbox: SandboxStatus = SandboxStatus.CHECKING,
 )
 
 /**
@@ -61,6 +67,7 @@ class AiController(
     private val session: SessionKeyStore,
     private val env: (String) -> String? = System::getenv,
     compiler: CandidateCompiler,
+    private val sandbox: () -> WorkerSandbox = { WorkerSandbox.Unavailable("not detected") },
     private val limits: AiLimits = AiLimits(maxScriptBytes = EditorText.MAX_BYTES),
     private val clientFactory: (AiModel, Secret) -> LlmClient = { m, k ->
         KoogAnthropicClient(m.id, k, JdkHttpTransport(), limits)
@@ -89,8 +96,20 @@ class AiController(
 
     val repair: StateFlow<RepairState> get() = repairSession.state
 
+    @Volatile private var sandboxStatus = SandboxStatus.CHECKING
+
     private val state = MutableStateFlow(computeUi(KeyStatus.UNKNOWN, null))
     val ui: StateFlow<AiUiState> get() = state
+
+    init {
+        // The detection runs one probe process: once per session, never on the UI thread.
+        scope.launch {
+            sandboxStatus =
+                if (sandbox() is WorkerSandbox.Unavailable) SandboxStatus.UNAVAILABLE else SandboxStatus.AVAILABLE
+            // Only the sandbox field: a full publish() would reset a notice or busy flag set meanwhile.
+            state.update { it.copy(sandbox = sandboxStatus) }
+        }
+    }
 
     val limitsInUse: AiLimits get() = limits
 
@@ -111,6 +130,7 @@ class AiController(
             settingsStore.hasConsent(settings, p),
             notice,
             busy,
+            sandboxStatus,
         )
     }
 
@@ -280,7 +300,10 @@ class AiController(
     }
 
     companion object {
-        fun production(compiler: CandidateCompiler): AiController =
-            AiController(SettingsStore(), platformKeychain(), SessionKeyStore(), compiler = compiler)
+        fun production(
+            compiler: CandidateCompiler,
+            sandbox: () -> WorkerSandbox = { WorkerSandbox.Unavailable("not detected") },
+        ): AiController =
+            AiController(SettingsStore(), platformKeychain(), SessionKeyStore(), compiler = compiler, sandbox = sandbox)
     }
 }

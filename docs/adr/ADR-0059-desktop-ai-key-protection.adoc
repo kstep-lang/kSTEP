@@ -1,0 +1,123 @@
+= ADR-0059: kSTEP Desktop, protecting the AI key from candidate scripts (Welle D6b)
+:toc:
+
+== Status
+
+Accepted (Welle D6b). The argv of both sandbox wrappers, the detection (with an injected OS and probe), the fail-closed path (no file written, no worker started, one model call) and the error mapping are covered by tests that run everywhere. On macOS the profile is exercised against real hostile candidates in `WorkerSandboxMacTest`, each with a control run without a sandbox that shows the same candidate achieves the effect; a real two-part assembly renders inside the sandbox in `WorkerSandboxOcctTest` (OCCT). The "open a link" case (D2) was run once with its control, which opens a browser, by hand on the development Mac (`KSTEP_SANDBOX_BROWSE_CONTROL=true`): without the sandbox the request reached the local listener, with the sandbox it did not. Not done in this wave: *the Linux variant (bubblewrap) was not run on any machine*, because there is no Linux host here; `WorkerSandboxLinuxTest` skips itself where `bwrap` is missing. The CI job that installs `bubblewrap` (see D3) will be the first run. Windows has no sandbox. The panel and dialog texts were composed in scene tests but not clicked through by hand in a running window.
+
+== Context
+
+ADR-0056 (D10 and the threat model) states openly that the AI candidate check runs a generated script before anyone has read it, in a worker that is not a sandbox. Such a script is arbitrary Kotlin with the user's rights and an open network: it can read the API key from the system keychain (`/usr/bin/security`), from the Secret Service, or from `/proc/<ppid>/environ`, and send it anywhere. ADR-0056 recommended the session-only key source until a sandbox exists. This ADR adds that sandbox for the candidate check, and makes the check refuse to run where no sandbox exists.
+
+The candidate check already has its own session directory and its own `WorkerRunner`; the live preview, the export and the knowledge-workspace blocks have theirs. The sandbox can therefore be limited to the one runner that runs text nobody read yet, without touching the other flows.
+
+== Decision
+
+D1. What the sandbox forbids. The boundary is *network and writing*, not reading. A candidate cannot open a network connection and cannot write outside its session folder (and the worker temp folder below it). It can still read files, including the keychain database and the environment of the parent process. This is deliberate: the Java runtime, the script compiler and the native geometry bridge need to read widely (system libraries, caches, the JDK), and a read deny list would be fragile. What is read cannot leave the machine by network or by a file outside the session folder (see the threat model for the residual paths).
+
+D2. macOS. `/usr/bin/sandbox-exec` with a fixed profile; the paths are never spliced into the profile text, they are passed as `-D` parameters and read with `(param ...)`, so a path with a quote or a parenthesis cannot inject a rule:
+
+----
+(version 1)(allow default)(deny network*)(deny file-write*)
+(allow file-write* (subpath (param "SESSION")) (subpath (param "TMP")) (subpath "/dev"))
+(deny process-exec*)(allow process-exec* (subpath (param "JAVA_HOME")))
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))
+----
+
+(Written on one line in the code.) Command: `sandbox-exec -D SESSION=<s> -D TMP=<t> -D JAVA_HOME=<jdk> -p <profile> <java> ...`. `sandbox-exec` replaces itself with the command (`exec`), so the pid and the supervisor's process tree kill are unchanged. All paths are canonicalised with `toRealPath` (`/var` is `/private/var` on macOS; a profile that names the symlink would deny every write). The two rules after the network and write rules were added after a review of the first design, which had only the first two lines: with only `(deny network*)` a candidate could ask another program to open a link (`/usr/bin/open`, or `java.awt.Desktop.browse` after setting `java.awt.headless=false`), and the browser is started by LaunchServices outside the sandbox, so a key could leave in a URL. The `process-exec` rule also stops `curl`, `security`, `osascript` and `launchctl`. The LaunchServices rule stops the in-process variant. Both were run with a control (see Status). The service name in the last rule is not documented by Apple; the test, not the name, is the evidence.
+
+D3. Linux. bubblewrap only. `--unshare-pid` must come before `--proc`: without a new pid namespace the kernel gives the proc mount to the host's init user namespace, and an unprivileged bwrap fails with EPERM (derived from the kernel rule, not run in a container). It also hides `/proc/<ppid>/environ` of the desktop JVM from the candidate. Command (flags in this order: a `--tmpfs` must come before a `--bind` that lies below it, otherwise the session folder under `/tmp` is hidden):
+
+----
+bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --tmpfs /tmp --tmpfs /run
+      --bind <s> <s> --bind <t> <t> --unshare-net --unsetenv DBUS_SESSION_BUS_ADDRESS
+      --new-session --die-with-parent -- <java> ...
+----
+
+`--tmpfs /run` hides the D-Bus session socket under `/run/user/<uid>` (a way out through `xdg-desktop-portal` or `systemd-run --user`), `--unsetenv` removes the address, `--new-session` stops terminal input injection (TIOCSTI). `unshare -rn` was rejected: it gives no write restriction, and Ubuntu 24.04 and later restrict unprivileged user namespaces by AppArmor. Where `bwrap` is missing or cannot start, the sandbox is unavailable (D5). The CI job on Ubuntu installs `bubblewrap`; GitHub runners with AppArmor may still refuse user namespaces for it, and then the Linux test skips itself by its name suffix. Whether that happens was not tested.
+
+D4. Windows is not covered: no sandbox, so the candidate is not run (D5). An AppContainer sandbox is a follow-up.
+
+D5. Fail closed, no override. `WorkerSandbox.detect` returns `MacSandboxExec`, `Bubblewrap` or `Unavailable(reason)`. It runs one real probe (macOS: the profile with `java -version`; Linux: the flags with `/bin/true`; 30 s, exit code 0). On macOS the probe is more than "the binary exists": it also catches the case that kSTEP itself runs inside a sandbox, where `sandbox-exec` fails with `sandbox_apply: Operation not permitted`. It runs once per session, never on the UI thread. With `Unavailable`:
+
+* `AiCandidateCompiler` returns `CompileOutcome.Unverifiable(reason, SANDBOX_UNAVAILABLE)` *before* it writes the candidate or calls the runner; the repair loop ends at once with the proposal "not checked (no worker sandbox on this system)", after exactly one model call, and the model is never asked to repair a missing sandbox.
+* `WorkerRunner(sandbox = Unavailable)` refuses to start any worker (`KSTEP-D-029`), also with an injected supervisor.
+* If the sandbox is available at detection but cannot start later (the wrapper fails), the run ends with `KSTEP-D-030`. This is `CompileOutcome.Refused`, not an error list for the model: wrapper messages are no compiler errors and must not be repaired. There is never a second start without the sandbox.
+
+There is deliberately no setting to switch the sandbox off. A setting is a place to lose the protection silently.
+
+D6. What stays unprotected. The live preview, the export and the knowledge-workspace blocks run the user's own scripts in the unsandboxed worker, as before (ADR-0051, ADR-0057, ADR-0058). After "Apply" the accepted text is in the editor and runs in the live preview; the user has read the diff by then. The same holds for the export. An optional sandbox for these flows is a follow-up (D6c).
+
+D7. Target architecture (outlook, not built). Separation of capabilities in the sense of Alan Kay's object model: the process that holds the key should not be able to hand it to any code that was not written by the user. A key broker (a small process that signs or sends the one request and never lets the key into a process that runs scripts) would also close the read paths. The sandbox above is the cheap step on the way.
+
+Diagram of the check:
+
+[kuml, adr-0059-key-protection, svg]
+----
+activityDiagram(name = "AI candidate check with the worker sandbox") {
+    val start = initialNode()
+    val has = decision(name = "sandbox available?")
+    val run = action(name = "Start worker in WorkerSandbox (no network, writes only to session)")
+    val started = decision(name = "sandbox started?")
+    val verdict = action(name = "Verdict: compiles or errors")
+    val refused = action(name = "Failed KSTEP-D-030, no retry")
+    val notRun = action(name = "Do not run; proposal 'not checked'")
+    val done = finalNode()
+
+    edge(from = start, to = has)
+    edge(from = has, to = run, guard = "yes")
+    edge(from = has, to = notRun, guard = "no (fail closed)")
+    edge(from = run, to = started)
+    edge(from = started, to = verdict, guard = "yes")
+    edge(from = started, to = refused, guard = "no")
+    edge(from = verdict, to = done)
+    edge(from = refused, to = done)
+    edge(from = notRun, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it.
+
+== Threat model
+
+[cols="2,3"]
+|===
+| Threat | Protection and remaining risk
+
+| A generated script reads the API key (keychain, Secret Service, `/proc/<ppid>/environ`) and sends it out
+| Network and writes outside the session folder are denied, and on macOS so is starting any program but the JDK and asking LaunchServices to open a link. *Reading stays possible*, so a script can still read the key; it cannot send it by network, by a program it starts, or by a file outside the session folder. Where there is no sandbox (Linux without `bwrap`, Windows), the script is not run at all.
+
+| The key leaves through the error text sent back to the model
+| Error lines sent to the provider are scrubbed (ADR-0056, D11). A candidate could still encode a key into an error message, which then goes to the provider that issued the key, not to a third party. Not closed in this wave.
+
+| Native code of a script calls other services
+| The Java foreign function API is a preview feature on JDK 21 and does not work without `--enable-preview`, which the worker does not set. The open path is JNI: a candidate writes a self-built `.dylib`/`.so` into the writable session or temp folder and loads it with `System.load`. That gives it native access to Mach/XPC services the profile does not name (for example job submission to `launchd`, which runs outside the sandbox). `file-map-executable` cannot simply be denied for the temp folder, because the native bridges are extracted there. Not covered; open and part of D6c.
+
+| A script changes the session folder so that the desktop itself writes outside it (confused deputy)
+| The sandbox must let the script write below the session folder, so it can replace `ai/` (or, on macOS, the session folder itself) by a link to a user-writable folder. Before every access, `SessionDirGuard` checks without following links that the session folder is still the real directory seen first and that `ai/` is no link; otherwise the run ends with `KSTEP-D-030` and nothing is written. Covered by a regression test. The check is only race-free if no sandboxed process runs while the desktop works in the folder. On Linux `bwrap --unshare-pid` ends every descendant with the worker. macOS has no PID namespace, so the profile denies `process-fork`: a candidate cannot start a second JVM that survives the worker (verified: with the profile before this change a detached child kept writing for 10 s; now `Process.start` fails with every launch mechanism), the worker stays one process, and `kill()` reaches all of it. The candidate file name is random, and a failure to create it ends the attempt with `KSTEP-D-030` instead of an uncaught exception. Residual risk: native code via JNI (see above) could create a thread but not a process; a process started through a system daemon is not covered.
+
+| A script writes outside the session folder through a system daemon on macOS
+| The profile denies `file-write*` only for the script's own process. Other services answer it: `cfprefsd` wrote `~/Library/Preferences/com.apple.java.util.prefs.plist` for `java.util.prefs`. `(deny user-preference-write)` closes this path. Other daemons that write on behalf of a client may exist; so "cannot write outside its session folder" holds for the script's own file operations, not for every service it can ask.
+
+| Terminal input injection (TIOCSTI) on macOS, when kSTEP was started from a terminal
+| Not covered on macOS (the Linux flags have `--new-session`). Part of D6c.
+
+| A key in the environment source on Linux and the live preview
+| The user's own scripts in the live preview run without a sandbox and can read `/proc/<ppid>/environ`. The provider dialog says so for the environment source on Linux.
+
+| The Linux variant works differently from what is written here
+| It was not run (see Status). The first CI run is the first evidence. The Linux CI job passes `-Pkstep.sandbox.require=true`, so `WorkerSandboxLinuxTest` and `WorkerSandboxOcctTest` fail (not skip) when bubblewrap is installed but unusable, for example under an AppArmor user-namespace restriction.
+|===
+
+There is no `jna` jar on the worker class path (checked with `./gradlew :kstep-cli:dependencies --configuration runtimeClasspath`), but this is no protection against the foreign function API of the JDK.
+
+== Consequences
+
+* The AI candidate check cannot send a key over the network or start another program on macOS. Where no sandbox exists it does not run the candidate, and the proposal says "not checked".
+* Reading is not blocked. The consent dialog says so ("It can still read your files").
+* The recommendation to use the session-only key source is gone from the dialog, the README and ADR-0056; the key source still matters for the live preview.
+* New error codes `KSTEP-D-029` (`AI_SANDBOX_UNAVAILABLE`) and `KSTEP-D-030` (`AI_SANDBOX_START_FAILED`). `RepairState.Proposal` carries a `NotVerifiedReason`; `CompileOutcome` has the variant `Refused`. No new dependency, no persisted setting, no migration; the render result of `kstep-cli` is unchanged (`kstep-cli` was not touched).
+
+== Follow-up D6c
+
+kstep-mcp tools as a vetted whitelist, more providers and free or local endpoints with an SSRF check, a prompt history, Windows Credential Manager (DPAPI) and a Windows sandbox (AppContainer), "new script from prompt" without an open file, the right-hand `Inspect | AI` tab pair, applying single hunks, the selection context from the inspection, read protection (a deny of the keychain Mach services, the Secret Service) and the key broker (D7), an optional sandbox for the live preview and the export, native code and further Mach services, TIOCSTI on macOS, Esc moving the focus to the editor, the entry of the key and consent in a compose scene test, the debounced diff refresh, and a Linux CI job with bubblewrap if the one added here is skipped.

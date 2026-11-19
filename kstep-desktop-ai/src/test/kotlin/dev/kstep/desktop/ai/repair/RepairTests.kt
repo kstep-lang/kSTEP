@@ -88,6 +88,24 @@ class RepairMachineTest :
             eff shouldBe emptyList()
         }
 
+        test("unverifiable because of a missing sandbox is a not-checked proposal with the reason") {
+            val s = answer(start().first).first
+            val (n, eff) =
+                compiled(s, CompileOutcome.Unverifiable("no sandbox", NotVerifiedReason.SANDBOX_UNAVAILABLE))
+            val p = n as RepairState.Proposal
+            p.verdict shouldBe Verdict.NOT_VERIFIED
+            p.notVerifiedReason shouldBe NotVerifiedReason.SANDBOX_UNAVAILABLE
+            p.attempts.last().text shouldBe "not checked (no worker sandbox on this system)"
+            eff shouldBe emptyList()
+        }
+
+        test("a refused check ends the run as failed without a second model call") {
+            val s = answer(start().first).first
+            val (n, eff) = compiled(s, CompileOutcome.Refused("KSTEP-D-030", "cannot start the worker sandbox"))
+            (n as RepairState.Failed).code shouldBe "KSTEP-D-030"
+            eff shouldBe emptyList()
+        }
+
         test("stop in Requesting and Compiling kills the worker; late answers are dropped") {
             val s1 = start().first
             val (st, eff) = m.reduce(s1, RepairEvent.Stop)

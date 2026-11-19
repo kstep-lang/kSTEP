@@ -66,6 +66,7 @@ val workerClasspathArg =
 // The native bridge overrides are plain strings read once at configuration time (no script references in lambdas).
 val occtBridgeLibrary: String? = providers.gradleProperty("kstep.occt.bridge.library").orNull
 val planeGcsBridgeLibrary: String? = providers.gradleProperty("kstep.planegcs.bridge.library").orNull
+val sandboxRequire: String = providers.gradleProperty("kstep.sandbox.require").getOrElse("false")
 val occtRequire: String = providers.gradleProperty("kstep.occt.require").getOrElse("false")
 val fixturesDir: String = file("src/test/resources").absolutePath
 
@@ -80,6 +81,7 @@ tasks.withType<Test>().configureEach {
     jvmArgumentProviders.add(workerClasspathArg)
     systemProperty("java.awt.headless", "true")
     systemProperty("kstep.occt.require", occtRequire)
+    systemProperty("kstep.sandbox.require", sandboxRequire)
     systemProperty("kstep.desktop.fixtures", fixturesDir)
     dependsOn(":kstep-cli:jar")
 }

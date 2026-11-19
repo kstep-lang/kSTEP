@@ -19,6 +19,7 @@ import dev.kstep.desktop.okf.KnowledgeWorkspaceController
 import dev.kstep.desktop.run.AiCandidateCompiler
 import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.WorkerRunner
+import dev.kstep.desktop.run.WorkerSandbox
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
 import java.awt.Dimension
 import java.awt.Frame
@@ -64,9 +65,14 @@ fun runDesktopApp(args: Array<String>) {
                 Runtime.getRuntime().addShutdownHook(
                     Thread({ WorkerTempDir.deleteRecursively(dir) }, "kstep-ai-cleanup"),
                 )
-                val runner = WorkerRunner(dir)
+                // The candidate check runs only inside an OS sandbox (ADR-0059); detected once, off the UI thread.
+                val detected = lazy { WorkerSandbox.detect(dir, dir) }
+                val runner = lazy { WorkerRunner(dir, sandbox = detected.value) }
                 AiController.production(
-                    AiCandidateCompiler(dir) { file, gen, started -> runner.run(file, gen, started) },
+                    AiCandidateCompiler(dir, sandbox = { detected.value }) { file, gen, started ->
+                        runner.value.run(file, gen, started)
+                    },
+                    sandbox = { detected.value },
                 )
             }
         // Own session directory and worker for exports: the live preview is never disturbed (ADR-0057).

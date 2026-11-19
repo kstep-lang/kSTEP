@@ -5,6 +5,7 @@ import dev.kstep.cli.ImportWorkerLaunch
 import dev.kstep.cli.ImportWorkerSupervisor
 import dev.kstep.cli.WorkerOutcome
 import dev.kstep.cli.diagnosticLine
+import dev.kstep.desktop.ai.AiErrorCodes
 import dev.kstep.desktop.model.GlbMeshReader
 import dev.kstep.desktop.model.GlbReadException
 import dev.kstep.desktop.model.PartTable
@@ -63,16 +64,38 @@ class WorkerRunner(
     private val workerClasspath: String = defaultWorkerClasspath(),
     private val extraJvmOptions: List<String> = emptyList(),
     private val clock: () -> Instant = Instant::now,
+    private val sandbox: WorkerSandbox? = null,
     private val supervisorFactory: (Long, Path, (Process) -> Unit) -> ImportWorkerSupervisor =
         { timeout, base, started ->
-            ImportWorkerSupervisor(timeout, tempBase = base, onStarted = started, start = WorkerEnvironment::start)
+            ImportWorkerSupervisor(
+                timeout,
+                tempBase = base,
+                onStarted = started,
+                start =
+                    if (sandbox == null) {
+                        WorkerEnvironment::start
+                    } else {
+                        { command -> WorkerEnvironment.startSandboxed(command, sandbox) }
+                    },
+            )
         },
 ) {
+    private val guard = SessionDirGuard(sessionDir)
+
     fun run(
         file: Path,
         generation: Long,
         onStarted: (Process) -> Unit,
     ): RunResult {
+        if (sandbox is WorkerSandbox.Unavailable) {
+            return failure(
+                AiErrorCodes.AI_SANDBOX_UNAVAILABLE,
+                "no worker sandbox on this system, the script is not run" + detail(sandbox.reason),
+            )
+        }
+        if (sandbox != null && !guard.intact()) {
+            return failure(AiErrorCodes.AI_SANDBOX_START_FAILED, SessionDirGuard.MESSAGE)
+        }
         FileArgument.validate(file)?.let { return failure(DesktopErrorCodes.FILE_MISSING, it) }
         val out = sessionDir.resolve("run-$generation.glb")
         Files.deleteIfExists(out)
@@ -129,8 +152,15 @@ class WorkerRunner(
                 )
             is WorkerOutcome.StartFailed ->
                 failure(
-                    DesktopErrorCodes.WORKER_START_FAILED,
-                    "cannot start the render worker" + detail(outcome.reason),
+                    if (sandbox !=
+                        null
+                    ) {
+                        AiErrorCodes.AI_SANDBOX_START_FAILED
+                    } else {
+                        DesktopErrorCodes.WORKER_START_FAILED
+                    },
+                    (if (sandbox != null) "cannot start the worker sandbox" else "cannot start the render worker") +
+                        detail(outcome.reason),
                 )
             is WorkerOutcome.IncompleteOutput ->
                 failure(
@@ -155,6 +185,12 @@ class WorkerRunner(
         }
         if (code > SIGNAL_BASE) {
             return failure(DesktopErrorCodes.RESULT_UNREADABLE, "worker terminated (signal ${code - SIGNAL_BASE})")
+        }
+        if (sandbox != null && code != 0 && code != 1 && sandboxRefusal(stderr)) {
+            return failure(
+                AiErrorCodes.AI_SANDBOX_START_FAILED,
+                "cannot start the worker sandbox" + detail(diagnosticLine(stderr)),
+            )
         }
         if (code != 0 && code != 1) {
             return failure(
@@ -298,6 +334,10 @@ class WorkerRunner(
         code: String,
         message: String,
     ): RunResult.Failure = RunResult.Failure(listOf(DesktopError(code, null, null, ErrorParser.sanitize(message))))
+
+    /** A line of the sandbox wrapper itself (`sandbox-exec:` / `bwrap:`), not of the script. */
+    private fun sandboxRefusal(stderr: String): Boolean =
+        stderr.lineSequence().any { it.trimStart().startsWith("sandbox-exec:") || it.trimStart().startsWith("bwrap:") }
 
     private fun detail(text: String?): String = if (text.isNullOrBlank()) "" else " (${ErrorParser.sanitize(text)})"
 

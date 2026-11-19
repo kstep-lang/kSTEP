@@ -19,11 +19,24 @@ sealed interface CompileOutcome {
         val diagnostics: List<Diagnostic>,
     ) : CompileOutcome
 
-    /** The geometry engine is missing: no verdict is possible; this is not a compile error. */
+    /** No verdict is possible (geometry engine or worker sandbox missing); this is not a compile error. */
     data class Unverifiable(
         val reason: String,
+        val why: NotVerifiedReason = NotVerifiedReason.GEOMETRY_ENGINE_UNAVAILABLE,
+    ) : CompileOutcome
+
+    /**
+     * The check itself was refused (the worker sandbox could not start, ADR-0059): not a compiler error, so nothing
+     * goes back to the model; the run ends with [RepairState.Failed].
+     */
+    data class Refused(
+        val code: String,
+        val message: String,
     ) : CompileOutcome
 }
+
+/** Why a proposal carries no verdict. */
+enum class NotVerifiedReason { GEOMETRY_ENGINE_UNAVAILABLE, SANDBOX_UNAVAILABLE }
 
 /** Compiles a candidate script. [onStarted] receives the worker process so a stop can kill its tree. */
 fun interface CandidateCompiler {
@@ -72,6 +85,7 @@ sealed interface RepairState {
         val verdict: Verdict,
         val attempts: List<AttemptLine>,
         val attemptsUsed: Int,
+        val notVerifiedReason: NotVerifiedReason? = null,
     ) : RepairState
 
     data class Failed(
@@ -245,6 +259,7 @@ class RepairMachine(
         fun proposal(
             v: Verdict,
             line: String,
+            why: NotVerifiedReason? = null,
         ): Pair<RepairState, List<RepairEffect>> =
             RepairState.Proposal(
                 candidate,
@@ -252,14 +267,26 @@ class RepairMachine(
                 v,
                 state.attempts + AttemptLine(n, limits.maxAttempts, line),
                 n,
+                why,
             ) to emptyList()
         return when (val o = e.outcome) {
             CompileOutcome.Ok -> proposal(Verdict.COMPILES, "compiles")
             is CompileOutcome.Unverifiable ->
                 proposal(
                     Verdict.NOT_VERIFIED,
-                    "not verified (geometry engine unavailable)",
+                    if (o.why == NotVerifiedReason.SANDBOX_UNAVAILABLE) {
+                        "not checked (no worker sandbox on this system)"
+                    } else {
+                        "not verified (geometry engine unavailable)"
+                    },
+                    o.why,
                 )
+            is CompileOutcome.Refused ->
+                RepairState.Failed(
+                    o.code,
+                    o.message,
+                    state.attempts + AttemptLine(n, limits.maxAttempts, "not checked (${o.code})"),
+                ) to emptyList()
             is CompileOutcome.Errors -> {
                 val first = o.diagnostics.firstOrNull()
                 val where =

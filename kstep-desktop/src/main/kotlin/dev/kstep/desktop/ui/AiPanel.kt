@@ -34,11 +34,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.desktop.ai.extract.DisplayText
 import dev.kstep.desktop.ai.repair.AiLimits
+import dev.kstep.desktop.ai.repair.NotVerifiedReason
 import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.ai.repair.Verdict
 import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.aiwire.AiUiState
 import dev.kstep.desktop.aiwire.KeyStatus
+import dev.kstep.desktop.aiwire.SandboxStatus
 
 private const val COUNTER_FROM = 3_500
 private const val PROMPT_MIN_LINES = 4
@@ -169,7 +171,7 @@ internal fun AiPanel(
             }
             if (!running && blockReason != null && prompt.isNotBlank()) Text(blockReason, fontSize = 11.sp, color = DIM)
             ui.notice?.let { Text(it, fontSize = 12.sp, color = WARN) }
-            Result(controller, repair, editorText, limits.maxAttempts, onApply)
+            Result(controller, repair, editorText, limits.maxAttempts, ui.sandbox, onApply)
         }
     }
 
@@ -205,12 +207,21 @@ private fun Result(
     repair: RepairState,
     editorText: String,
     maxAttempts: Int,
+    sandbox: SandboxStatus,
     onApply: (String) -> Unit,
 ) {
     when (repair) {
         is RepairState.Requesting -> Attempts(repair.attempts.map { it.text }, "asking the model…", maxAttempts)
         is RepairState.Compiling ->
-            Attempts(repair.attempts.map { it.text }, "checking the script in the worker…", maxAttempts)
+            Attempts(
+                repair.attempts.map { it.text },
+                if (sandbox == SandboxStatus.AVAILABLE) {
+                    "checking the script in the worker (sandbox: no network, writes only to the session folder)…"
+                } else {
+                    "preparing the check…"
+                },
+                maxAttempts,
+            )
         is RepairState.Failed -> {
             Attempts(repair.attempts.map { it.text }, null, maxAttempts)
             Text("${repair.code}: ${DisplayText.sanitize(repair.message)}", fontSize = 12.sp, color = WARN)
@@ -221,20 +232,32 @@ private fun Result(
                 when (repair.verdict) {
                     Verdict.COMPILES -> "Proposal · compiles ✓ (attempt ${repair.attemptsUsed}/$maxAttempts)"
                     Verdict.DOES_NOT_COMPILE -> "Proposal · does not compile (last attempt)"
-                    Verdict.NOT_VERIFIED -> "Proposal · not verified (geometry engine unavailable)"
+                    Verdict.NOT_VERIFIED ->
+                        if (repair.notVerifiedReason == NotVerifiedReason.SANDBOX_UNAVAILABLE) {
+                            "Proposal · not checked (no worker sandbox on this system)"
+                        } else {
+                            "Proposal · not verified (geometry engine unavailable)"
+                        }
                 }
             Text(
                 head,
                 fontSize = 13.sp,
                 color =
-                    if (repair.verdict ==
-                        Verdict.DOES_NOT_COMPILE
+                    if (repair.verdict == Verdict.DOES_NOT_COMPILE ||
+                        repair.notVerifiedReason == NotVerifiedReason.SANDBOX_UNAVAILABLE
                     ) {
                         WARN
                     } else {
                         Color.Unspecified
                     },
             )
+            if (repair.notVerifiedReason == NotVerifiedReason.SANDBOX_UNAVAILABLE) {
+                Text(
+                    "kSTEP does not run AI scripts without a sandbox. Read the diff before applying.",
+                    fontSize = 11.sp,
+                    color = DIM,
+                )
+            }
             if (editorText != repair.baseText) {
                 Text("Editor changed since request: the diff shows the current text.", fontSize = 11.sp, color = WARN)
             }

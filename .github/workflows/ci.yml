@@ -250,7 +250,7 @@ jobs:
           APT_DIR="$HOME/apt-archives"
           mkdir -p "$APT_DIR/partial"
           APT_OPTS=(-o Dir::Cache::Archives="$APT_DIR" -o APT::Sandbox::User=root -o Acquire::Retries=3 -o Acquire::http::Timeout=30)
-          PKGS=(libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev libocct-ocaf-dev libeigen3-dev libboost-dev libgl1 libfontconfig1 libfreetype6 libx11-6)
+          PKGS=(libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev libocct-ocaf-dev libeigen3-dev libboost-dev libgl1 libfontconfig1 libfreetype6 libx11-6 bubblewrap)
           downloaded=0
           for attempt in 1 2 3; do
             if sudo timeout 120 apt-get "${APT_OPTS[@]}" update \
@@ -313,6 +313,7 @@ jobs:
           ./gradlew clean check \
             -Pkstep.occt.require=true \
             -Pkstep.planegcs.require=true \
+            -Pkstep.sandbox.require=true \
             --stacktrace
 
       - name: Verify the OCCT-gated test suites actually ran (not skipped)
