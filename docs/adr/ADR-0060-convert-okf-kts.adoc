@@ -3,7 +3,7 @@
 
 == Status
 
-Accepted (Welle D8b). The pure conversion, the file handling and the command are covered by tests, including a round trip over the repository's scripts and hostile inputs. Not done: the Desktop menu entry `Convert...` and everything listed under "Follow-up (D8c)".
+Accepted (Welle D8b). The pure conversion, the file handling and the command are covered by tests, including a round trip over the repository's scripts and hostile inputs. D8c is done (ADR-0061: folders, `--output json`, `--title`, `--tag`). Not done: the Desktop menu entry `Convert...` and the rest of "Follow-up (D8d)".
 
 == Context
 
@@ -75,6 +75,6 @@ None added.
 * The Desktop okf logic is now in kstep-cli; the Desktop imports it from there.
 * The set of files of one conversion is not transactional (D9).
 
-== Follow-up (D8c)
+== Follow-up
 
-Directory sources, a marker file, the front matter vocabulary `type:` as in kUML, a `{name="..."}` attribute on blocks, `--tag` and `--title`, `--output json`, the Desktop entry `Convert...`, export and AI for one block, pick-to-source and a working directory for the worker.
+D8c done (ADR-0061): folder sources, `--tag` and `--title`, `--output json`. The rest moves to D8d: a marker file, the front matter vocabulary `type:` as in kUML, a `{name="..."}` attribute on blocks, the Desktop entry `Convert...`, export and AI for one block, pick-to-source and a working directory for the worker.

@@ -9,12 +9,19 @@ minor versions may contain breaking changes.
 
 === Added
 
+* `kstep convert` extensions (Welle D8c, ADR-0061): the input may be a folder (one level, no recursion, no links, hidden files skipped;
+  `--to okf` converts every `*.kstep.kts`, `--to kts` every `*.md`; empty scripts and notes without a `kstep` block are skipped, any
+  other failing file stops the whole run with nothing written; name clashes, also case-insensitive ones, and hard links to inputs are
+  refused); `--output json` prints one JSON document (new error codes `KSTEP-C-001` to `KSTEP-C-011`); `--title <text>` and
+  repeatable `--tag <tag>` set the metadata of the generated note (validated against control and bidirectional characters, length
+  and the front matter limits; without them the note is unchanged). Folder limits: 20,000 entries, 2,000 files, 64 MiB, 2,000 targets.
+  The release verification script now also runs a JSON and a folder convert. The Desktop `Convert...` entry is not part of this wave.
 * `kstep convert <file> --to okf|kts [--out <dir>] [--force]` (Welle D8b, ADR-0060): wraps a `*.kstep.kts` script as a Markdown note
   (front matter `title`/`tags`, one fenced `kstep` block) or extracts every `kstep` block of a note as `*.kstep.kts` files
   (`<stem>.kstep.kts` or `<stem>-N.kstep.kts`). Text only, a script is never run. The input must not be a link, `--out` must exist,
   all targets are checked before anything is written (a conflict without `--force` writes nothing), each file is written atomically
   with no fallback, names are shown with control and bidirectional characters escaped. kts to okf to kts is lossless; okf to kts to
-  okf is not. Directory sources, `type:` front matter, `--output json` and a Desktop `Convert...` entry follow in D8c.
+  okf is not. Folder sources, `--output json`, `--title` and `--tag` followed in D8c; `type:` front matter and a Desktop `Convert...` entry follow in D8d.
 
 * kSTEP Desktop knowledge workspace (Welle D8a, ADR-0058): `Open Folder...` (Cmd/Ctrl+Shift+O) opens a folder of Markdown notes; the
   fenced `kstep` block under the cursor is previewed with the same supervised worker and live preview (new Compose-free package

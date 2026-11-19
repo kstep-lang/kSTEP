@@ -133,6 +133,7 @@ holding it in a fenced `kstep` block, without running anything:
 ----
 kstep-cli/build/install/kstep-cli/bin/kstep-cli convert bracket.kstep.kts --to okf   # writes bracket.md
 kstep-cli/build/install/kstep-cli/bin/kstep-cli convert bracket.md --to kts          # writes bracket.kstep.kts
+kstep-cli/build/install/kstep-cli/bin/kstep-cli convert scripts --to okf --out notes --output json   # a whole folder, JSON report
 ----
 
 The same pipeline as a library, parsing an EXPRESS schema and

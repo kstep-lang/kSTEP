@@ -13,7 +13,9 @@ object OkfConverter {
     const val MAX_STEM_CHARS = 120
 
     /** Title budget: every code point shows as at most an 8 character marker, which keeps the header under its limit. */
-    private const val MAX_TITLE_CHARS = 100
+    const val MAX_TITLE_CODE_POINTS = 100
+    const val MAX_TAG_CODE_POINTS = 64
+    private const val MAX_TITLE_CHARS = MAX_TITLE_CODE_POINTS
     private const val MAX_RUN_FOR_WRAP = OkfLimits.MAX_FENCE_RUN - 1
 
     sealed interface WrapResult {
@@ -26,12 +28,26 @@ object OkfConverter {
         ) : WrapResult
     }
 
+    sealed interface MetadataCheck {
+        data class Ok(
+            val title: String?,
+            val tags: List<String>,
+        ) : MetadataCheck
+
+        data class Rejected(
+            val reason: String,
+        ) : MetadataCheck
+    }
+
     data class ExtractedScript(
         val blockIndex: Int,
         val fileName: String,
         val source: String,
         val openLine: Int,
     )
+
+    /** Why an extraction found nothing to write; a folder run skips the first two instead of failing (ADR-0061). */
+    enum class RejectKind { NO_BLOCK, ALL_EMPTY, OTHER }
 
     sealed interface ExtractResult {
         data class Ok(
@@ -42,7 +58,61 @@ object OkfConverter {
         data class Rejected(
             val reason: String,
             val line: Int?,
+            val kind: RejectKind = RejectKind.OTHER,
         ) : ExtractResult
+    }
+
+    /**
+     * Validates the user-chosen note metadata of `kstep convert --to okf` (ADR-0061). [title] null keeps the default
+     * title; [extraTags] come after the mandatory `kstep` tag, exact duplicates are dropped silently. Nothing that could
+     * break out of the YAML header or spoof the terminal (control, bidi, line separators, unpaired surrogates) passes.
+     */
+    fun checkMetadata(
+        title: String?,
+        extraTags: List<String>,
+    ): MetadataCheck {
+        var cleanTitle: String? = null
+        if (title != null) {
+            badCodePoint(title)?.let { return MetadataCheck.Rejected("the title contains $it") }
+            val t = title.trim(' ')
+            if (t.isEmpty() || t.isBlank()) return MetadataCheck.Rejected("the title is empty")
+            if (t.codePointCount(0, t.length) > MAX_TITLE_CODE_POINTS) {
+                return MetadataCheck.Rejected("the title is longer than $MAX_TITLE_CODE_POINTS characters")
+            }
+            cleanTitle = t
+        }
+        val tags = LinkedHashSet<String>()
+        tags += KSTEP_TAG
+        for (tag in extraTags) {
+            if (tag.isEmpty()) return MetadataCheck.Rejected("a tag is empty")
+            if (tag.startsWith("#")) return MetadataCheck.Rejected("write the tag without '#'")
+            badCodePoint(tag)?.let { return MetadataCheck.Rejected("a tag contains $it") }
+            if (tag.any { Character.isWhitespace(it) || Character.isSpaceChar(it) }) {
+                return MetadataCheck.Rejected("a tag must not contain whitespace")
+            }
+            if (tag.codePointCount(0, tag.length) > MAX_TAG_CODE_POINTS) {
+                return MetadataCheck.Rejected("a tag is longer than $MAX_TAG_CODE_POINTS characters")
+            }
+            tags += tag
+        }
+        if (tags.size > OkfLimits.FM_MAX_TAGS) {
+            return MetadataCheck.Rejected("there are more than ${OkfLimits.FM_MAX_TAGS} tags")
+        }
+        val flowLength = tags.joinToString(", ") { yamlTag(it) }.length + 2
+        if (flowLength > OkfLimits.FM_MAX_SCALAR * 4) return MetadataCheck.Rejected("the tags are too long together")
+        return MetadataCheck.Ok(cleanTitle, tags.toList())
+    }
+
+    private fun badCodePoint(s: String): String? {
+        var i = 0
+        while (i < s.length) {
+            val cp = s.codePointAt(i)
+            if (DisplayName.isSuspicious(cp) || cp == 0xFEFF || cp in 0xD800..0xDFFF) {
+                return "a character that is not allowed (U+${cp.toString(16).uppercase().padStart(4, '0')})"
+            }
+            i += Character.charCount(cp)
+        }
+        return null
     }
 
     fun wrapAsOkf(
@@ -76,7 +146,12 @@ object OkfConverter {
         // Defensive: the note must read back through the workspace's own parsers exactly as intended.
         val fm = FrontmatterParser.parse(note)
         val ex = MarkdownBlockExtractor.extract(note, fm.bodyStartLine)
-        if (fm.ignored || fm.title != title || ex.blocks.size != 1 || ex.blocks[0].state != BlockState.OK) {
+        if (fm.ignored ||
+            fm.title != title ||
+            fm.tags != tags ||
+            ex.blocks.size != 1 ||
+            ex.blocks[0].state != BlockState.OK
+        ) {
             return WrapResult.Rejected("the script cannot be wrapped into a readable note")
         }
         return WrapResult.Ok(note)
@@ -100,7 +175,7 @@ object OkfConverter {
                 it.openLine,
             )
         }
-        if (ex.blocks.isEmpty()) return ExtractResult.Rejected("no kstep block found", null)
+        if (ex.blocks.isEmpty()) return ExtractResult.Rejected("no kstep block found", null, RejectKind.NO_BLOCK)
         val stem = sanitizeStem(noteStem)
         val single = ex.blocks.size == 1
         val scripts = ArrayList<ExtractedScript>()
@@ -118,7 +193,7 @@ object OkfConverter {
                     .ifEmpty { lineEnding(content) }
             scripts += ExtractedScript(b.index, name, content + terminator, b.openLine)
         }
-        if (scripts.isEmpty()) return ExtractResult.Rejected("every kstep block is empty", null)
+        if (scripts.isEmpty()) return ExtractResult.Rejected("every kstep block is empty", null, RejectKind.ALL_EMPTY)
         return ExtractResult.Ok(scripts, skipped)
     }
 
@@ -161,7 +236,7 @@ object OkfConverter {
 
     internal fun yamlQuoted(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
-    private fun yamlTag(tag: String): String =
+    internal fun yamlTag(tag: String): String =
         if (tag.all {
                 it.isLetterOrDigit() || it == '-' || it == '_'
             }
@@ -224,7 +299,7 @@ object OkfConverter {
         return base.length == 4 && (base.startsWith("COM") || base.startsWith("LPT")) && base[3] in '1'..'9'
     }
 
-    private fun utf8Size(s: String): Long {
+    internal fun utf8Size(s: String): Long {
         var bytes = 0L
         var k = 0
         while (k < s.length) {

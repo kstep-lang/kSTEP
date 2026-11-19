@@ -1,0 +1,95 @@
+= ADR-0061: `kstep convert` folders, `--output json`, `--title` and `--tag` (Welle D8c)
+:toc:
+
+== Status
+
+Accepted (Welle D8c). Folder sources, the JSON report, the note metadata options and the error codes `KSTEP-C-001` to `KSTEP-C-011` are covered by tests, including hostile names and metadata. Not done: the Desktop menu entry `Convert...` and everything listed under "Follow-up (D8d)".
+
+== Context
+
+ADR-0060 converts one file. Real note folders hold many scripts or notes, scripts that call `kstep convert` need a stable machine-readable result, and the generated note had no way to choose its title or tags. This ADR extends the command in a backward compatible way: every command line that worked before gives the same result and the same bytes.
+
+== Decision
+
+D1. JSON report. `--output json` (any other value, a missing value or a second `--output` is a usage error) makes the command print exactly one line of JSON on stdout and nothing else: no `Wrote` lines and no skip hints on stderr, they are part of the document. Success: `{"status":"success","command":"convert","target":"okf|kts","written":[{"name","source","block"?}],"skipped":[{"source","reason","line"?}]}`. Error: `{"status":"error","command":"convert","errorKind","code","message","source"?,"errors"?,"moreErrors"?,"written"?,"skipped"?}`. The first failure decides `errorKind`, `code` and `message`; in folder mode `errors` lists every failure (at most 50, `moreErrors` counts the rest). `written` appears in an error only if files were written before it happened (D9 of ADR-0060: the set is not transactional). The format follows `export` and `import`; their output is not touched. A usage error stays plain usage text with exit 1, as for `export` and `render`.
+
+D2. Error codes. A new family `KSTEP-C-*`:
+
+[cols="1,2,3",options="header"]
+|===
+| Code | `errorKind` | Meaning
+| `KSTEP-C-001` | `invalid_path` | Path invalid, without a file name, missing or not resolvable
+| `KSTEP-C-002` | `wrong_input_type` | Wrong extension, or a folder without a matching file
+| `KSTEP-C-003` | `input_unreadable` | Link, not a regular file, not UTF-8, I/O error
+| `KSTEP-C-004` | `input_too_large` | Over the limit of the input kind
+| `KSTEP-C-005` | `conversion_rejected` | Empty script, unclosed block, too many blocks, no usable block, nothing to convert
+| `KSTEP-C-006` | `invalid_metadata` | `--title` or `--tag` not accepted, or `--title` with a folder
+| `KSTEP-C-007` | `output_folder_invalid` | `--out` missing, not a folder, not valid
+| `KSTEP-C-008` | `target_exists` | Target exists without `--force`, also when it appeared meanwhile
+| `KSTEP-C-009` | `target_invalid` | Target is a link or not regular, is an input, invalid name, or two sources give the same name
+| `KSTEP-C-010` | `write_failed` | The file could not be written
+| `KSTEP-C-011` | `limit_exceeded` | A folder limit was exceeded
+|===
+
+D3. Escaping. All names and sources in text and JSON go through `DisplayName.escaped` (ADR-0058). No absolute path and no file content appears in a message or in the JSON. The escaping is lossy for tools; it is the same trade-off as in ADR-0060 D10.
+
+D4. `--title` and `--tag` (only with `--to okf`; with `--to kts` a usage error, whatever the order of the flags). A value is taken verbatim even if it starts with `--`. The title: no control, bidirectional or line separator code point, no unpaired surrogate and no U+FEFF; trimmed of ASCII spaces; not empty or blank; at most 100 code points. A tag: the same character rules, no whitespace, no leading `#`, not empty, at most 64 code points. The tag list starts with `kstep`; exact duplicates, also of `kstep`, are dropped silently; at most 32 tags with `kstep`. The generated `tags: [...]` value must stay within 4096 UTF-16 characters, the limit after which the front matter reader would ignore the whole header, so a longer list is refused with a clear message instead of producing a note without front matter. Title and tags are quoted for YAML when needed; the note is read back through the parsers as in ADR-0060 D4, now including the tags. Without `--title` and `--tag` the note is byte for byte the note of D8b (pinned by a test). `--title` with a folder is refused: one title cannot fit many notes. `--tag` applies to every note.
+
+D5. Folder sources. If the input is a folder (a link to a folder chosen by the user is followed, as `--out` is), every file with the matching ending (`*.kstep.kts` for `--to okf`, `*.md` for `--to kts`, case insensitive) in that folder is converted. The folder is not searched recursively: targets are written flat into `--out` and `--out` is never created (ADR-0060 D8), so subfolders would need a mirrored target tree and merge name clashes. Subfolders are ignored without an entry in the report. Entries are visited in ordinal name order, so a run is deterministic on every system. Without `--out` the targets go into the input folder.
+
+D6. Skip and failure policy for folders. Skipped, with an entry in `skipped` and a hint on stderr: links, non-regular entries and hidden files (name starts with `.`) with the matching ending (reasons `symbolic_link`, `not_regular_file`, `hidden`); a `--to okf` script that is empty (`empty_script`); a `--to kts` note without `kstep` block (`no_kstep_block`) or with only empty blocks (`empty_block`), and each empty block of a note (`empty_block` with the line). In a notes folder, notes without code are normal. For a single file these cases stay errors, as in ADR-0060 D6. Everything else is a failure: unreadable or too large file, an unclosed block, more than 200 blocks. All failures are collected and, if there is one, nothing is written (all or nothing, as D9 of ADR-0060 for targets). If every file is skipped the result is `KSTEP-C-005`.
+
+D7. Name clashes. Target names are compared case insensitively (macOS and Windows file systems merge them). Two sources with the same target name, for example `a.md` with two blocks and `a-1.md`, or `ä.md` and `_.md`, are refused with `KSTEP-C-009` and nothing is written. No automatic suffixes: the name of a target must not depend on which other files are in the folder (ADR-0060 D5).
+
+D8. Inputs are never targets. A target is an input if it has the same file key (inode) as any input, or the same path; this catches hard links, with one lookup per target instead of one comparison per pair. Where the file system has no file keys, existing targets are compared with `isSameFile` instead.
+
+D9. Limits. At most 20,000 folder entries, 2,000 matching files, 64 MiB of content (counted on the bytes actually read, not on the sizes seen during the listing, so a file that grows meanwhile cannot exceed it) and 2,000 targets. A file over its own limit (256 KiB for `--to okf`, 1 MiB for `--to kts`) is a failure of that file. Every source is opened without following links again when it is read, so a file replaced by a link after the listing is refused. All sources are converted in memory before the first byte is written. The listing has no partial result: exceeding a limit fails the whole run with `KSTEP-C-011`.
+
+D10. Release scripts. `verify-dist.sh` runs a JSON convert (one line, `"status":"success"`) and a folder convert against the real zip, and `test-release-scripts.sh` has stub cases for both.
+
+[kuml, adr-0061-convert-dir-flow, svg]
+----
+activityDiagram(name = "kstep convert folder") {
+    val start = initialNode()
+    val list = action(name = "List one level, no links, bounded")
+    val read = action(name = "Read each file bounded, convert in memory")
+    val bad = decision(name = "any failure?")
+    val clash = action(name = "Check name clashes (case insensitive)")
+    val check = action(name = "Check all targets and inputs by file key")
+    val stop = decision(name = "refused or conflict?")
+    val write = action(name = "Write each file: temp + fsync + ATOMIC_MOVE")
+    val fail = action(name = "Exit 1, nothing written")
+    val done = finalNode()
+    edge(from = start, to = list)
+    edge(from = list, to = read)
+    edge(from = read, to = bad)
+    edge(from = bad, to = fail, guard = "yes")
+    edge(from = bad, to = clash, guard = "no")
+    edge(from = clash, to = check)
+    edge(from = check, to = stop)
+    edge(from = stop, to = fail, guard = "yes")
+    edge(from = stop, to = write, guard = "no")
+    edge(from = write, to = done)
+    edge(from = fail, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block was rendered once with `kuml render` to check it.
+
+== Threat model
+
+Folder contents, names, titles and tags are untrusted. A name or metadata with control, bidirectional or line separator characters cannot reach the YAML header, a file name or the terminal raw (D3, D4); a link anywhere cannot redirect a read or a write (D5, D6, D9 and ADR-0060 D8); a hard link to an input cannot be overwritten (D8); a huge folder, a growing file or a huge error list is bounded (D1, D9); case-folding systems cannot merge two targets (D7). Nothing is evaluated (ADR-0060 D2, pinned by the architecture test, which now also covers the command file).
+
+== Dependencies
+
+None added.
+
+== Consequences
+
+* The set of files of one conversion is still not transactional: if a later write fails, the earlier files stay and are listed (ADR-0060 D9).
+* The verification of a distribution zip now also needs a `kstep` that knows `--output json` and folders. `release.yml` runs `verify-dist.sh` from the tools checkout against the zip of the tag, so re-running the release of a tag from before D8b or D8c fails these checks; such a tag has to be released from its own scripts.
+* The folder mode is flat. A recursive mode would need a policy for the target tree and is left to D8d.
+
+== Follow-up (D8d)
+
+A marker file, the front matter vocabulary `type:` as in kUML, a `{name="..."}` attribute on blocks, export and AI for one block, pick-to-source, a working directory for the worker, the Desktop entry `Convert...` (dialog, design review, ADR-0058 rules) and possibly a recursive folder mode.

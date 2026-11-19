@@ -5,6 +5,7 @@ object OkfLimits {
     const val MAX_MD_FILES = 2_000
     const val MAX_DEPTH = 8
     const val MAX_DIR_ENTRIES = 20_000
+    const val MAX_CONVERT_TARGETS = 2_000
     const val MAX_SCAN_BYTES = 64L shl 20
     const val MAX_SCAN_MILLIS = 10_000L
 

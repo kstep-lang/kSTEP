@@ -801,19 +801,54 @@ stepFile(fileName = "two-boxes.step") {
 
 == Converting between scripts and notes
 
-`kstep convert <file> --to okf|kts [--out <dir>] [--force]` (ADR-0060) moves between a `*.kstep.kts` script and a Markdown note
-with a fenced `kstep` block, as used by the Desktop knowledge workspace. It only handles text; a script is never run.
+`kstep convert <file|dir> --to okf|kts [--out <dir>] [--force] [--output json] [--title <text>] [--tag <tag>]...` (ADR-0060,
+ADR-0061) moves between `*.kstep.kts` scripts and Markdown notes with a fenced `kstep` block, as used by the Desktop knowledge
+workspace. It only handles text; a script is never run.
 
 * `--to okf` wraps `part.kstep.kts` as `part.md`: front matter with `title` and `tags: [kstep]`, a heading and one `kstep` block.
   The script may be at most 256 KiB and must not be empty.
 * `--to kts` writes every non-empty `kstep` block of `part.md` as `part.kstep.kts` (one block) or `part-1.kstep.kts`,
   `part-2.kstep.kts`, ... (several). The note may be at most 1 MiB. A note with an unclosed block, a block over 256 KiB, more than
   200 blocks or no usable block is refused.
-* `--out <dir>` is the target folder; it must exist and defaults to the folder of the input file.
+* `--out <dir>` is the target folder; it must exist and defaults to the folder of the input.
 * An existing target is replaced only with `--force`. Without it nothing is written if any target exists. Links and
-  non-regular files are never replaced. The input must not be a symbolic link.
+  non-regular files are never replaced. A single input file must not be a symbolic link.
 * kts to okf to kts returns the script unchanged (a missing final line break is added). okf to kts to okf loses front matter,
   prose and other blocks.
+* `--title <text>` (not with a folder) and `--tag <tag>` (repeatable; `kstep` is always the first tag, duplicates are dropped)
+  set the note's front matter, only with `--to okf`. A value that starts with `--` is taken as the value. Titles may have up to 100
+  and tags up to 64 characters; tags have no spaces and no leading `#`; control and bidirectional characters are refused.
+* A folder converts every matching file directly in it (`*.kstep.kts` for `--to okf`, `*.md` for `--to kts`); subfolders, links
+  and hidden files are skipped. In a folder, empty scripts and notes without a `kstep` block are skipped with a hint; any other
+  problem in any file stops the run and nothing is written. Two sources that would write the same name (compared without regard
+  to case) are refused. At most 20,000 entries, 2,000 files, 64 MiB and 2,000 targets.
+* `--output json` prints exactly one JSON line instead of the text. A command line that is not valid prints the usage text and exits
+  1, also with `--output json`.
+
+[source,json]
+----
+{"status":"success","command":"convert","target":"kts","written":[{"name":"n-2.kstep.kts","source":"n.md","block":2}],"skipped":[{"source":"n.md","reason":"empty_block","line":1}]}
+{"status":"error","command":"convert","errorKind":"target_exists","code":"KSTEP-C-008","message":"n-2.kstep.kts already exists; use --force to replace it. Nothing was written."}
+----
+
+In a folder run an error also has `errors` (every failing file, at most 50, and `moreErrors`), and `written` lists files written
+before a late failure. Names are shown with control and bidirectional characters escaped; no absolute path is printed.
+
+[cols="1,3",options="header"]
+|===
+| Code | Meaning
+| `KSTEP-C-001` | Path invalid, without a file name, missing or not resolvable
+| `KSTEP-C-002` | Wrong file ending, or a folder without a matching file
+| `KSTEP-C-003` | Input is a link, not a regular file, not UTF-8, or cannot be read
+| `KSTEP-C-004` | Input is over its limit (256 KiB script, 1 MiB note)
+| `KSTEP-C-005` | Empty script, unclosed or too large block, too many blocks, no usable block, or every file of a folder skipped
+| `KSTEP-C-006` | `--title` or `--tag` refused, or `--title` with a folder
+| `KSTEP-C-007` | `--out` is missing, not a folder or not valid
+| `KSTEP-C-008` | A target exists and `--force` is missing (also when it appeared meanwhile)
+| `KSTEP-C-009` | A target is a link, not regular, an input, has an invalid name, or two sources give the same name
+| `KSTEP-C-010` | A file could not be written
+| `KSTEP-C-011` | A folder limit was exceeded
+|===
 
 == Desktop live preview
 

@@ -28,8 +28,11 @@ internal object ConvertFiles {
 
         data class Failed(
             val message: String,
+            val kind: ReadFailure = ReadFailure.UNREADABLE,
         ) : ReadResult
     }
+
+    enum class ReadFailure { MISSING, UNREADABLE, TOO_LARGE }
 
     sealed interface DirResult {
         data class Ok(
@@ -79,10 +82,15 @@ internal object ConvertFiles {
         maxBytes: Long,
     ): ReadResult {
         try {
-            val attrs = attributes(path) ?: return ReadResult.Failed("the input file does not exist")
+            val attrs =
+                attributes(path) ?: return ReadResult.Failed("the input file does not exist", ReadFailure.MISSING)
             if (attrs.isSymbolicLink) return ReadResult.Failed("the input is a symbolic link")
             if (!attrs.isRegularFile) return ReadResult.Failed("the input is not a regular file")
-            if (attrs.size() > maxBytes) return ReadResult.Failed("the input is larger than ${maxBytes / 1024} KiB")
+            if (attrs.size() >
+                maxBytes
+            ) {
+                return ReadResult.Failed("the input is larger than ${maxBytes / 1024} KiB", ReadFailure.TOO_LARGE)
+            }
             val buffer = ByteBuffer.allocate((maxBytes + 1).toInt())
             FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { ch ->
                 while (buffer.hasRemaining()) {
@@ -92,7 +100,7 @@ internal object ConvertFiles {
             if (buffer.position() >
                 maxBytes
             ) {
-                return ReadResult.Failed("the input is larger than ${maxBytes / 1024} KiB")
+                return ReadResult.Failed("the input is larger than ${maxBytes / 1024} KiB", ReadFailure.TOO_LARGE)
             }
             buffer.flip()
             val text =
@@ -133,6 +141,25 @@ internal object ConvertFiles {
         fileName: String,
         inputReal: Path,
     ): TargetCheck {
+        val key =
+            try {
+                attributes(inputReal)?.fileKey()
+            } catch (_: IOException) {
+                null
+            }
+        return checkTarget(outReal, fileName, if (key == null) emptySet() else setOf(key), setOf(inputReal))
+    }
+
+    /**
+     * Like the single-input variant, for a folder run: the input files are compared by file key (so a hard link to an
+     * input is caught, and no per-target scan over all inputs happens), by path where the file system has no keys.
+     */
+    fun checkTarget(
+        outReal: Path,
+        fileName: String,
+        inputKeys: Set<Any>,
+        inputReals: Set<Path>,
+    ): TargetCheck {
         if (fileName.isEmpty() ||
             fileName == "." ||
             fileName == ".." ||
@@ -152,12 +179,25 @@ internal object ConvertFiles {
             when {
                 attrs == null -> TargetCheck.Free(target)
                 attrs.isSymbolicLink || !attrs.isRegularFile -> TargetCheck.Invalid("the target is not a regular file")
-                Files.isSameFile(target, inputReal) -> TargetCheck.Invalid("the target is the input file")
+                isInput(target, attrs, inputKeys, inputReals) -> TargetCheck.Invalid("the target is the input file")
                 else -> TargetCheck.Exists(target)
             }
         } catch (_: IOException) {
             TargetCheck.Invalid("the target cannot be checked")
         }
+    }
+
+    private fun isInput(
+        target: Path,
+        attrs: BasicFileAttributes,
+        inputKeys: Set<Any>,
+        inputReals: Set<Path>,
+    ): Boolean {
+        val key = attrs.fileKey()
+        if (key != null && key in inputKeys) return true
+        if (target in inputReals) return true
+        // No file keys on this file system: fall back to a (rare, only for existing targets) per-input comparison.
+        return key == null && inputReals.any { Files.isSameFile(target, it) }
     }
 
     fun writeAtomic(

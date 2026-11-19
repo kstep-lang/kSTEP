@@ -75,12 +75,17 @@ Usage:
           --height <px>                    Default image height, 16..4096 (default: 768)
           --require-geometry               Fail instead of embedding a geometry-unavailable card
           --on-error <fail|card>           Invalid script: abort (default) or embed an error card
-  kstep convert <file> --to okf|kts [opts] Convert between a script and a Markdown note
+  kstep convert <file|dir> --to okf|kts [opts] Convert between a script and a Markdown note
       --to okf                             Wrap a *.kstep.kts script as a note (front matter title/tags,
                                             one ```kstep block)
       --to kts                             Extract every ```kstep block of a *.md note as *.kstep.kts files
       --out <dir>                          Target folder, must exist (default: the input file's folder)
       --force                              Replace existing target files (never a link or a non-regular file)
+      --output json                        Print one JSON document instead of text
+      --title <text>                       Note title (--to okf only, not with a folder; a value starting
+                                            with -- is taken as the value)
+      --tag <tag>                          Extra note tag, repeatable (--to okf only; "kstep" is always set)
+                                            A folder converts every matching file in it (one level, no links).
                                             Never runs a script. Exit 1 on any error; nothing is written then.
   kstep --version                          Print the kSTEP version
   kstep help                                Show this message
@@ -133,6 +138,9 @@ sealed interface CliCommand {
         val target: ConvertTarget,
         val outDir: String?,
         val force: Boolean,
+        val jsonOutput: Boolean = false,
+        val title: String? = null,
+        val tags: List<String> = emptyList(),
     ) : CliCommand
 
     data class ShowUsage(
@@ -227,15 +235,35 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
     )
 }
 
-// `convert <file> --to okf|kts [--out <dir>] [--force]`; any malformed combination -> ShowUsage(1).
+// `convert <file|dir> --to okf|kts [--out <dir>] [--force] [--output json] [--title <t>] [--tag <t>]...`; any malformed combination -> ShowUsage(1).
 private fun resolveConvertCommand(rest: List<String>): CliCommand {
     var input: String? = null
     var target: ConvertTarget? = null
     var outDir: String? = null
     var force = false
+    var jsonOutput = false
+    var outputSeen = false
+    var title: String? = null
+    val tags = ArrayList<String>()
     var i = 0
     while (i < rest.size) {
         when (rest[i]) {
+            "--output" -> {
+                if (outputSeen || rest.getOrNull(i + 1) != "json") return CliCommand.ShowUsage(1)
+                outputSeen = true
+                jsonOutput = true
+                i += 2
+            }
+            // The value of --title/--tag is taken verbatim, also when it starts with "--".
+            "--title" -> {
+                if (title != null) return CliCommand.ShowUsage(1)
+                title = rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
+            "--tag" -> {
+                tags += rest.getOrNull(i + 1) ?: return CliCommand.ShowUsage(1)
+                i += 2
+            }
             "--to" -> {
                 if (target != null) return CliCommand.ShowUsage(1)
                 target =
@@ -263,11 +291,17 @@ private fun resolveConvertCommand(rest: List<String>): CliCommand {
             }
         }
     }
+    val resolvedTarget = target ?: return CliCommand.ShowUsage(1)
+    // Checked after the loop so that the order of the flags does not matter.
+    if (resolvedTarget == ConvertTarget.KTS && (title != null || tags.isNotEmpty())) return CliCommand.ShowUsage(1)
     return CliCommand.Convert(
         inputPath = input ?: return CliCommand.ShowUsage(1),
-        target = target ?: return CliCommand.ShowUsage(1),
+        target = resolvedTarget,
         outDir = outDir,
         force = force,
+        jsonOutput = jsonOutput,
+        title = title,
+        tags = tags,
     )
 }
 

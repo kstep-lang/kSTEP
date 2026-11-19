@@ -110,4 +110,43 @@ class ConvertFilesTest :
                 ConvertFiles.WriteResult.Written
             Files.readString(d.resolve("t.md")) shouldBe "new"
         }
+
+        "checkTarget with several inputs: a hard link to an input is invalid, the single-input variant is unchanged" {
+            val d = tmp()
+            val a = Files.writeString(d.resolve("a.kstep.kts"), "x")
+            val b = Files.writeString(d.resolve("b.kstep.kts"), "y")
+            val hard = d.resolve("hard.md")
+            val linked =
+                try {
+                    Files.createLink(hard, b)
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+            val keys =
+                listOf(a, b)
+                    .mapNotNull {
+                        Files.readAttributes(it, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+                    }.toSet()
+            if (linked) {
+                ConvertFiles
+                    .checkTarget(d, "hard.md", keys, setOf(a, b))
+                    .shouldBeInstanceOf<ConvertFiles.TargetCheck.Invalid>()
+            }
+            ConvertFiles
+                .checkTarget(
+                    d,
+                    "free.md",
+                    keys,
+                    setOf(a, b),
+                ).shouldBeInstanceOf<ConvertFiles.TargetCheck.Free>()
+            ConvertFiles
+                .checkTarget(
+                    d,
+                    "a.kstep.kts",
+                    keys,
+                    setOf(a, b),
+                ).shouldBeInstanceOf<ConvertFiles.TargetCheck.Invalid>()
+            ConvertFiles.checkTarget(d, "b.kstep.kts", a).shouldBeInstanceOf<ConvertFiles.TargetCheck.Exists>()
+        }
     })

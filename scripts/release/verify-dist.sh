@@ -86,4 +86,15 @@ if [ -z "$(tail -c 1 "$FIXTURE")" ]; then
   cmp -s "$FIXTURE" "$TMP/kts/$STEM.kstep.kts" || fail "convert round trip changed the script"
 fi
 
-echo "OK: $ZIP verified (layout, no natives, --help, export, import and convert smoke tests)"
+# Convert JSON + folder smoke test (ADR-0061): --output json prints exactly one JSON line, and a folder converts too.
+# --out is never created by the command, so the folders exist beforehand.
+mkdir -p "$TMP/okf-json" "$TMP/kts-dir"
+J="$("$BIN" convert "$FIXTURE" --to okf --out "$TMP/okf-json" --output json --tag smoke)" \
+  || fail "kstep-cli convert --output json failed"
+[ "$(printf '%s\n' "$J" | wc -l | tr -d ' ')" = "1" ] || fail "convert json is not one line"
+{ printf '%s' "$J" | grep -q '"status":"success"' && printf '%s' "$J" | grep -q '"command":"convert"'; } \
+  || fail "convert json did not report success (got: $J)"
+"$BIN" convert "$TMP/okf" --to kts --out "$TMP/kts-dir" >/dev/null || fail "kstep-cli convert of a folder failed"
+[ -f "$TMP/kts-dir/$STEM.kstep.kts" ] || fail "folder convert produced no $STEM.kstep.kts"
+
+echo "OK: $ZIP verified (layout, no natives, --help, export, import, convert incl. json and folder smoke tests)"

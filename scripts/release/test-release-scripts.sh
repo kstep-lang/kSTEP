@@ -161,11 +161,34 @@ case "$1" in
     fi
     echo '{"status":"success","command":"import"}'; exit 0 ;;
   convert)
-    # kstep-cli convert <file> --to okf|kts --out <dir>: copies the file under the name the real command would use.
+    # kstep-cli convert <file|dir> --to okf|kts [--out <dir>] [--output json] [--tag t] [--title t]: copies each file
+    # under the name the real command would use. STUB_CONVERT=nojson prints text instead of JSON, nodir fails for a folder.
     in="$2"; shift 2
-    while [ "$#" -gt 0 ]; do [ "$1" = "--to" ] && to="$2"; [ "$1" = "--out" ] && out="$2"; shift; done
-    name="$(basename "$in")"
-    if [ "$to" = "okf" ]; then cp "$in" "$out/${name%.kstep.kts}.md"; else cp "$in" "$out/${name%.md}.kstep.kts"; fi
+    to=""; out=""; json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --to) to="$2"; shift 2 ;;
+        --out) out="$2"; shift 2 ;;
+        --tag|--title) shift 2 ;;
+        --output) json=1; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    conv() {
+      name="$(basename "$1")"
+      if [ "$to" = "okf" ]; then cp "$1" "$out/${name%.kstep.kts}.md"; else cp "$1" "$out/${name%.md}.kstep.kts"; fi
+    }
+    if [ -d "$in" ]; then
+      [ "${STUB_CONVERT:-}" = "nodir" ] && exit 1
+      for f in "$in"/*; do [ -f "$f" ] && conv "$f"; done
+    else
+      conv "$in"
+    fi
+    if [ "$json" = "1" ]; then
+      if [ "${STUB_CONVERT:-}" = "nojson" ]; then echo "Wrote converted file"; else
+        echo '{"status":"success","command":"convert","target":"'"$to"'","written":[],"skipped":[]}'
+      fi
+    fi
     exit 0 ;;
 esac
 exit 3
@@ -179,6 +202,12 @@ STUB
   STUB_IMPORT=success expect_rc "verify-dist rejects an import that does not report geometry_unavailable" 1 \
     bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
   contains "$WORK/err" "exited 0, expected 1"; check "reports unexpected import exit" $?
+  STUB_IMPORT=unavailable STUB_CONVERT=nojson expect_rc "verify-dist rejects convert --output json without JSON" 1 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
+  contains "$WORK/err" "did not report success"; check "reports convert json without success" $?
+  STUB_IMPORT=unavailable STUB_CONVERT=nodir expect_rc "verify-dist rejects a failing folder convert" 1 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
+  contains "$WORK/err" "convert of a folder failed"; check "reports failing folder convert" $?
 else
   echo "note: zip/unzip missing, skipping verify-dist negative tests" >&2
 fi

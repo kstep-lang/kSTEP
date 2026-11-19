@@ -10,7 +10,7 @@ class OkfPackageArchitectureTest :
         "the okf package is pure logic: no Compose, no UI, no process, no script evaluation, no network, no log" {
             val dir = File("src/main/kotlin/dev/kstep/cli/okf")
             val files = dir.listFiles { f -> f.name.endsWith(".kt") }!!.toList()
-            (files.size >= 6) shouldBe true
+            (files.size >= 7) shouldBe true
             val forbidden =
                 listOf(
                     "androidx.compose",
@@ -25,6 +25,13 @@ class OkfPackageArchitectureTest :
                 )
             files
                 .flatMap { f -> forbidden.filter { f.readText().contains(it) }.map { "${f.name} uses $it" } }
+                .shouldBeEmpty()
+        }
+
+        "the convert command never evaluates a script, starts a process, touches the network or the desktop" {
+            val text = File("src/main/kotlin/dev/kstep/cli/ConvertCommand.kt").readText()
+            listOf("KStepScriptHost", "ProcessBuilder", "java.net", "dev.kstep.desktop")
+                .filter { text.contains(it) }
                 .shouldBeEmpty()
         }
     })

@@ -520,6 +520,44 @@ class CliMainTest :
                 CliCommand.Convert("n.md", ConvertTarget.KTS, "d", true)
         }
 
+        "convert resolves output json, title and tags" {
+            resolveCommand(
+                arrayOf(
+                    "convert",
+                    "a.kstep.kts",
+                    "--to",
+                    "okf",
+                    "--output",
+                    "json",
+                    "--title",
+                    "--x",
+                    "--tag",
+                    "a",
+                    "--tag",
+                    "b",
+                ),
+            ) shouldBe
+                CliCommand.Convert("a.kstep.kts", ConvertTarget.OKF, null, false, true, "--x", listOf("a", "b"))
+            resolveCommand(arrayOf("convert", "d", "--to", "kts", "--output", "json")) shouldBe
+                CliCommand.Convert("d", ConvertTarget.KTS, null, false, true, null, emptyList())
+        }
+
+        "convert with malformed new flags resolves to ShowUsage(1)" {
+            val bad =
+                listOf(
+                    arrayOf("convert", "a", "--to", "okf", "--output"),
+                    arrayOf("convert", "a", "--to", "okf", "--output", "xml"),
+                    arrayOf("convert", "a", "--to", "okf", "--output", "json", "--output", "json"),
+                    arrayOf("convert", "a", "--to", "okf", "--title"),
+                    arrayOf("convert", "a", "--to", "okf", "--title", "x", "--title", "y"),
+                    arrayOf("convert", "a", "--to", "okf", "--tag"),
+                    arrayOf("convert", "a", "--to", "kts", "--title", "x"),
+                    arrayOf("convert", "a", "--to", "kts", "--tag", "x"),
+                    arrayOf("convert", "a", "--tag", "x", "--title", "y", "--to", "kts"),
+                )
+            for (args in bad) resolveCommand(args) shouldBe CliCommand.ShowUsage(1)
+        }
+
         "convert with malformed arguments resolves to ShowUsage(1)" {
             val bad =
                 listOf(
@@ -536,6 +574,9 @@ class CliMainTest :
         }
 
         "USAGE_TEXT documents convert" {
-            USAGE_TEXT shouldContain "kstep convert <file> --to okf|kts"
+            USAGE_TEXT shouldContain "kstep convert <file|dir> --to okf|kts"
+            USAGE_TEXT shouldContain "--output json"
+            USAGE_TEXT shouldContain "--title <text>"
+            USAGE_TEXT shouldContain "--tag <tag>"
         }
     })
