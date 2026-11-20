@@ -1,6 +1,8 @@
 package dev.kstep.desktop.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -20,6 +22,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -35,9 +40,15 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -58,6 +69,12 @@ import androidx.compose.ui.unit.sp
 import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.aiwire.AiController
+import dev.kstep.desktop.drop.DropAction
+import dev.kstep.desktop.drop.DropEvaluator
+import dev.kstep.desktop.drop.DropHint
+import dev.kstep.desktop.drop.DropPaths
+import dev.kstep.desktop.drop.PendingNote
+import dev.kstep.desktop.drop.PendingResolution
 import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorState
@@ -91,6 +108,13 @@ import dev.kstep.desktop.pick.VisibilityMachine
 import dev.kstep.desktop.pick.VisibilityScene
 import dev.kstep.desktop.pick.VisibilityState
 import dev.kstep.desktop.pick.visibilityStatusText
+import dev.kstep.desktop.recent.RecentCheck
+import dev.kstep.desktop.recent.RecentEntry
+import dev.kstep.desktop.recent.RecentFilesStore
+import dev.kstep.desktop.recent.RecentKind
+import dev.kstep.desktop.recent.RecentList
+import dev.kstep.desktop.recent.RecentMessages
+import dev.kstep.desktop.recent.RecentOpenCheck
 import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.DesktopState
@@ -107,9 +131,13 @@ import dev.kstep.viewer.ui.CanvasPicking
 import dev.kstep.viewer.ui.CanvasVisibility
 import dev.kstep.viewer.ui.ShapeCanvas
 import dev.kstep.viewer.ui.UnavailableNotice
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.awt.FileDialog
 import java.awt.Frame
 import java.nio.file.Path
@@ -117,6 +145,8 @@ import java.nio.file.Path
 internal val DIM = Color(0xFF8A8A8A)
 internal val WARN = Color(0xFFF9A825)
 private const val PROGRESS_DELAY_MS = 300L
+private const val NOTICE_MS = 6_000L
+private const val EMPTY_RECENT_SHOWN = 5
 private const val AI_TICK_MS = 1_000L
 private const val AI_PANEL_DP = 360
 private const val AI_MIN_WINDOW_DP = 900
@@ -131,6 +161,7 @@ private const val EDITOR_DIVIDER_DP = 7 // the 1 dp line and the 6 dp drag handl
  * The whole window content: toolbar, script editor | canvas with badge and progress line, error bar (ADR-0051,
  * ADR-0052). Opening a file and closing the window first ask about unsaved changes.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun DesktopApp(
     controller: LiveRunController,
@@ -151,6 +182,39 @@ fun DesktopApp(
     val knowledgeError by knowledge.error.collectAsState()
     val knowledgeOpen = workspace is WorkspaceState.Open
     var lastCaret by remember { mutableStateOf(0) }
+    // Recent files and folders (ADR-0066): loaded off the UI thread, saved in order, checked only when clicked.
+    val scope = rememberCoroutineScope()
+    val recentStore = remember { RecentFilesStore() }
+    var recent by remember { mutableStateOf(RecentList.empty()) }
+    var recentSave by remember { mutableStateOf<Job?>(null) }
+    val updateRecent: ((RecentList) -> RecentList) -> Unit = { change ->
+        val next = change(recent)
+        recent = next
+        val before = recentSave
+        recentSave =
+            scope.launch(Dispatchers.IO) {
+                before?.join()
+                recentStore.save(next)
+            }
+    }
+    LaunchedEffect(Unit) {
+        val loaded = withContext(Dispatchers.IO) { recentStore.load() }
+        // entries touched before the file was read stay in front
+        recent = RecentList.of(recent.entries + loaded.entries)
+    }
+    var actionError by remember { mutableStateOf<DesktopError?>(null) }
+    var transientNotice by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(transientNotice) {
+        if (transientNotice != null) {
+            delay(NOTICE_MS)
+            transientNotice = null
+        }
+    }
+    var dragHint by remember { mutableStateOf<DropHint?>(null) }
+    var pendingNote by remember { mutableStateOf<Path?>(null) }
+    var pendingRoot by remember { mutableStateOf<Path?>(null) }
+    var pendingSawScan by remember { mutableStateOf(false) }
+    var pendingErrorBefore by remember { mutableStateOf<DesktopError?>(null) }
     // AI panel (ADR-0056): hidden by default; nothing is sent before the user asks and agrees.
     val aiUi by ai.ui.collectAsState()
     val aiRepair by ai.repair.collectAsState()
@@ -338,12 +402,15 @@ fun DesktopApp(
             if (answer == 0) knowledge.trustFolder()
         }
     }
-    val openPath: (Path) -> Unit = { path ->
+    val openPath: (Path) -> Boolean = { path ->
         if (confirmUnsaved(window, session)) {
             // a script replaces the workspace: the editor and the run belong to one mode at a time
             if (workspace !is WorkspaceState.None) knowledge.closeWorkspace()
             session.open(path)
             controller.open(path)
+            true
+        } else {
+            false
         }
     }
     val openNote: (WorkspaceEntry) -> Unit = { entry ->
@@ -357,18 +424,149 @@ fun DesktopApp(
             }
         }
     }
-    val chooseFolder: () -> Unit = {
-        chooseFolderDialog(window)?.let { dir ->
-            // a new folder replaces the old workspace: the open note of the old one must not stay in the editor or the run
-            if (workspace is WorkspaceState.None) {
-                knowledge.openFolder(dir)
-            } else if (confirmUnsaved(window, session)) {
-                knowledge.closeWorkspace()
-                session.clear()
-                controller.clear()
-                knowledge.openFolder(dir)
+    // false when the user kept the unsaved changes instead
+    val openFolderPath: (Path) -> Boolean = { dir ->
+        // a new folder replaces the old workspace: the open note of the old one must not stay in the editor or the run
+        if (workspace is WorkspaceState.None) {
+            knowledge.openFolder(dir)
+            true
+        } else if (confirmUnsaved(window, session)) {
+            knowledge.closeWorkspace()
+            session.clear()
+            controller.clear()
+            knowledge.openFolder(dir)
+            true
+        } else {
+            false
+        }
+    }
+    val chooseFolder: () -> Unit = { chooseFolderDialog(window)?.let { openFolderPath(it) } }
+    val openFromRecent: (RecentEntry) -> Unit = { entry ->
+        scope.launch {
+            val check = withContext(Dispatchers.IO) { RecentOpenCheck.check(entry) }
+            val problem = RecentMessages.forCheck(entry, check)
+            if (problem != null) {
+                // the editor stays as it is; the entry goes
+                actionError = problem
+                updateRecent { it.remove(entry.path) }
+            } else {
+                actionError = null
+                if (entry.kind == RecentKind.SCRIPT) openPath(entry.path) else openFolderPath(entry.path)
             }
         }
+    }
+    val openDroppedNote: (Path) -> Boolean = { note ->
+        val open = workspace as? WorkspaceState.Open
+        if (open != null && note.startsWith(open.scan.root)) {
+            val found = PendingNote.resolve(note, open.scan.root, open, false, false)
+            if (found is PendingResolution.Open) {
+                openNote(found.entry)
+                true
+            } else {
+                actionError = DropEvaluator.reject(notInFolderText(note))
+                false
+            }
+        } else {
+            val parent = note.parent
+            if (parent != null && openFolderPath(parent)) {
+                pendingErrorBefore = knowledge.error.value
+                pendingSawScan = false
+                pendingRoot = parent
+                pendingNote = note
+                true
+            } else {
+                false
+            }
+        }
+    }
+    val handleDrop: (List<Path>) -> Unit = { dropped ->
+        scope.launch {
+            val decision = withContext(Dispatchers.IO) { DropEvaluator.evaluate(dropped) }
+            val started =
+                when (val action = decision.action) {
+                    is DropAction.Rejected -> {
+                        actionError = action.error
+                        false
+                    }
+                    is DropAction.OpenScript -> openPath(action.path).also { if (it) actionError = null }
+                    is DropAction.OpenFolder -> openFolderPath(action.path).also { if (it) actionError = null }
+                    is DropAction.OpenNote -> openDroppedNote(action.path).also { if (it) actionError = null }
+                }
+            if (started) {
+                val name =
+                    when (val action = decision.action) {
+                        is DropAction.OpenScript -> action.path
+                        is DropAction.OpenFolder -> action.path
+                        is DropAction.OpenNote -> action.path
+                        is DropAction.Rejected -> null
+                    }?.fileName?.toString().orEmpty()
+                DropEvaluator.openedNotice(name, decision.ignoredCount)?.let { transientNotice = it }
+            }
+        }
+    }
+    val currentHandleDrop by rememberUpdatedState(handleDrop)
+    val dropTarget =
+        remember {
+            object : DragAndDropTarget {
+                override fun onEntered(event: DragAndDropEvent) {
+                    // some platforms hide the names while the pointer is still over the window: then the hint stays neutral
+                    val names =
+                        DropPaths
+                            .fromTransferable(
+                                event.awtTransferable,
+                            ).map { it.fileName?.toString().orEmpty() }
+                    dragHint = DropEvaluator.hint(names)
+                }
+
+                override fun onExited(event: DragAndDropEvent) {
+                    dragHint = null
+                }
+
+                override fun onEnded(event: DragAndDropEvent) {
+                    dragHint = null
+                }
+
+                override fun onDrop(event: DragAndDropEvent): Boolean {
+                    dragHint = null
+                    val paths = DropPaths.fromTransferable(event.awtTransferable)
+                    currentHandleDrop(paths)
+                    return paths.isNotEmpty()
+                }
+            }
+        }
+    // a note dropped from outside the workspace waits for the scan of its folder
+    LaunchedEffect(workspace, pendingNote, knowledgeError) {
+        val note = pendingNote ?: return@LaunchedEffect
+        if (workspace is WorkspaceState.Scanning) pendingSawScan = true
+        val newError = knowledgeError != null && knowledgeError !== pendingErrorBefore
+        when (val r = PendingNote.resolve(note, pendingRoot, workspace, newError, pendingSawScan)) {
+            is PendingResolution.Open -> {
+                pendingNote = null
+                openNote(r.entry)
+            }
+            PendingResolution.Drop -> {
+                pendingNote = null
+                actionError = DropEvaluator.reject(notInFolderText(note))
+            }
+            PendingResolution.Wait -> Unit
+        }
+    }
+    // Recent (ADR-0066): a script counts once it is really shown, a folder once its scan has succeeded.
+    val shownScript = (editorView.state as? EditorState.Editing)?.path
+    LaunchedEffect(shownScript) {
+        val path = shownScript ?: return@LaunchedEffect
+        if (path.fileName
+                ?.toString()
+                ?.lowercase()
+                ?.endsWith(SCRIPT_FILTER_SUFFIX) != true
+        ) {
+            return@LaunchedEffect
+        }
+        val ok = withContext(Dispatchers.IO) { RecentOpenCheck.checkPath(path, false) is RecentCheck.Ok }
+        if (ok) updateRecent { it.touch(RecentEntry(path, RecentKind.SCRIPT)) }
+    }
+    LaunchedEffect(openRoot) {
+        openRoot?.let { root -> updateRecent { it.touch(RecentEntry(root, RecentKind.FOLDER)) } }
     }
     val closeWorkspace: () -> Unit = {
         if (confirmUnsaved(window, session)) {
@@ -459,77 +657,87 @@ fun DesktopApp(
 
     MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
         Surface(
-            Modifier.fillMaxSize().onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                val command = event.isMetaPressed || event.isCtrlPressed
-                when {
-                    command && event.isShiftPressed && event.key == Key.O -> {
-                        chooseFolder()
-                        true
-                    }
-                    knowledgeOpen &&
-                        command &&
-                        event.isAltPressed &&
-                        (event.key == Key.DirectionUp || event.key == Key.DirectionDown) -> {
-                        jumpBlock(event.key == Key.DirectionDown)
-                        true
-                    }
-                    command && event.key == Key.O -> {
-                        openFile()
-                        true
-                    }
-                    command && event.key == Key.R -> {
-                        controller.forceRun()
-                        true
-                    }
-                    command && event.key == Key.S -> {
-                        session.save()
-                        true
-                    }
-                    command && event.key == Key.E -> {
-                        if (!knowledgeOpen) openExport()
-                        true
-                    }
-                    command && event.key == Key.K -> {
-                        if (!knowledgeOpen) {
-                            aiVisible = true
-                            aiFocus++
+            Modifier
+                .fillMaxSize()
+                .dragAndDropTarget(shouldStartDragAndDrop = { true }, target = dropTarget)
+                .onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    val command = event.isMetaPressed || event.isCtrlPressed
+                    when {
+                        command && event.isShiftPressed && event.key == Key.O -> {
+                            chooseFolder()
+                            true
                         }
-                        true
-                    }
-                    !command && !editorFocused && event.key == Key.H -> {
-                        home()
-                        true
-                    }
-                    else ->
-                        when (
-                            visibilityAction(
-                                event.key,
-                                event.isShiftPressed,
-                                command,
-                                event.isAltPressed,
-                                editorFocused,
-                                inTree = false,
-                            )
-                        ) {
-                            // a key that has no selection to act on is not consumed
-                            VisibilityAction.ToggleTransparent ->
-                                hasTarget.also { if (it) applyVisibility(target, VisibilityMachine::toggleTransparent) }
-                            VisibilityAction.ToggleHidden ->
-                                hasTarget.also { if (it) applyVisibility(target, VisibilityMachine::toggleHidden) }
-                            VisibilityAction.Isolate ->
-                                hasTarget.also { if (it) applyVisibility(target, VisibilityMachine::isolate) }
-                            VisibilityAction.ShowAll ->
-                                somethingChanged.also {
-                                    if (it) {
-                                        visibilityState =
-                                            VisibilityMachine.showAll(visibilityState)
+                        knowledgeOpen &&
+                            command &&
+                            event.isAltPressed &&
+                            (event.key == Key.DirectionUp || event.key == Key.DirectionDown) -> {
+                            jumpBlock(event.key == Key.DirectionDown)
+                            true
+                        }
+                        command && event.key == Key.O -> {
+                            openFile()
+                            true
+                        }
+                        command && event.key == Key.R -> {
+                            controller.forceRun()
+                            true
+                        }
+                        command && event.key == Key.S -> {
+                            session.save()
+                            true
+                        }
+                        command && event.key == Key.E -> {
+                            if (!knowledgeOpen) openExport()
+                            true
+                        }
+                        command && event.key == Key.K -> {
+                            if (!knowledgeOpen) {
+                                aiVisible = true
+                                aiFocus++
+                            }
+                            true
+                        }
+                        !command && !editorFocused && event.key == Key.H -> {
+                            home()
+                            true
+                        }
+                        else ->
+                            when (
+                                visibilityAction(
+                                    event.key,
+                                    event.isShiftPressed,
+                                    command,
+                                    event.isAltPressed,
+                                    editorFocused,
+                                    inTree = false,
+                                )
+                            ) {
+                                // a key that has no selection to act on is not consumed
+                                VisibilityAction.ToggleTransparent ->
+                                    hasTarget.also {
+                                        if (it) {
+                                            applyVisibility(
+                                                target,
+                                                VisibilityMachine::toggleTransparent,
+                                            )
+                                        }
                                     }
-                                }
-                            else -> false
-                        }
-                }
-            },
+                                VisibilityAction.ToggleHidden ->
+                                    hasTarget.also { if (it) applyVisibility(target, VisibilityMachine::toggleHidden) }
+                                VisibilityAction.Isolate ->
+                                    hasTarget.also { if (it) applyVisibility(target, VisibilityMachine::isolate) }
+                                VisibilityAction.ShowAll ->
+                                    somethingChanged.also {
+                                        if (it) {
+                                            visibilityState =
+                                                VisibilityMachine.showAll(visibilityState)
+                                        }
+                                    }
+                                else -> false
+                            }
+                    }
+                },
         ) {
             if (exportVisible) {
                 ExportDialog(
@@ -587,6 +795,10 @@ fun DesktopApp(
                                 "Knowledge · " + DisplayName.escaped(it.fileName?.toString() ?: it.toString(), 48)
                             },
                         onOpenFolder = chooseFolder,
+                        recent = recent.entries,
+                        onRecent = openFromRecent,
+                        onClearRecent = { updateRecent { it.clear() } },
+                        transientNotice = transientNotice,
                         onCloseWorkspace = closeWorkspace,
                         sandboxNotice = sandboxNotice,
                         exportNotice = exportNotice,
@@ -706,6 +918,8 @@ fun DesktopApp(
                                     highlight,
                                     picking,
                                     canvasVisibility,
+                                    if (workspace is WorkspaceState.None) recent.entries else emptyList(),
+                                    openFromRecent,
                                 )
                                 Badge(state)
                                 selectedPart?.let {
@@ -753,6 +967,7 @@ fun DesktopApp(
                         ErrorBar(error.errors, dark, maxHeight = errorBarMax, onSelect = selectError)
                     }
                     knowledgeError?.let { ErrorBar(listOf(it), dark, maxHeight = errorBarMax) }
+                    actionError?.let { ErrorBar(listOf(it), dark, maxHeight = errorBarMax) }
                     // A non-fatal problem of the shown model, e.g. an invalid part list (KSTEP-D-012): the run stays "ok".
                     val okWarnings = (state as? DesktopState.Ok)?.model?.warnings.orEmpty()
                     if (okWarnings.isNotEmpty()) {
@@ -760,6 +975,7 @@ fun DesktopApp(
                     }
                 }
             }
+            dragHint?.let { DropOverlay(it, editorView.dirty) }
         }
     }
 }
@@ -791,6 +1007,10 @@ private fun Toolbar(
     knowledgeOpen: Boolean,
     knowledgeLabel: String?,
     onOpenFolder: () -> Unit,
+    recent: List<RecentEntry>,
+    onRecent: (RecentEntry) -> Unit,
+    onClearRecent: () -> Unit,
+    transientNotice: String?,
     onCloseWorkspace: () -> Unit,
     sandboxNotice: SandboxNotice? = null,
 ) {
@@ -800,6 +1020,7 @@ private fun Toolbar(
     ) {
         TextButton(onClick = onOpen) { Text("Open", fontSize = 13.sp) }
         WithTip(openFolderTip()) { TextButton(onClick = onOpenFolder) { Text("Open Folder…", fontSize = 13.sp) } }
+        RecentMenu(recent, onRecent, onClearRecent)
         if (knowledgeOpen) {
             TextButton(onClick = onCloseWorkspace) { Text("Close Workspace", fontSize = 13.sp) }
         }
@@ -837,6 +1058,7 @@ private fun Toolbar(
                 listOfNotNull(
                     knowledgeLabel,
                     statusText(state),
+                    transientNotice,
                     aiStatus,
                     visibilityStatusText(counts),
                 ).filter { it.isNotEmpty() }.joinToString(StatusLineText.SEPARATOR) +
@@ -870,6 +1092,8 @@ private fun Canvas(
     highlight: State<CanvasHighlight?>,
     picking: CanvasPicking?,
     visibility: State<CanvasVisibility?>,
+    recent: List<RecentEntry>,
+    onRecent: (RecentEntry) -> Unit,
 ) {
     val modifier = Modifier.fillMaxSize()
     when {
@@ -895,6 +1119,17 @@ private fun Canvas(
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp),
                 )
+                if (recent.isNotEmpty()) {
+                    Text(
+                        "Recent",
+                        color = DIM,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 20.dp, bottom = 4.dp),
+                    )
+                    recent.take(EMPTY_RECENT_SHOWN).forEach { entry ->
+                        TextButton(onClick = { onRecent(entry) }) { RecentLabel(entry) }
+                    }
+                }
             }
         state is DesktopState.NativeUnavailable ->
             UnavailableNotice(
@@ -942,6 +1177,83 @@ private fun Badge(state: DesktopState) {
                 modifier = Modifier.padding(start = 6.dp),
             )
         }
+    }
+}
+
+private fun notInFolderText(note: Path): String =
+    "${DisplayName.escaped(note.fileName?.toString() ?: note.toString(), 80)} is not part of the scanned folder."
+
+/** A Recent line: the name in normal colour, the shortened folder dimmed. Names are escaped, never raw. */
+@Composable
+private fun RecentLabel(entry: RecentEntry) {
+    val label = RecentMessages.label(entry)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label.name, fontSize = 13.sp)
+        if (label.parent.isNotEmpty()) {
+            Text(
+                label.parent,
+                fontSize = 11.sp,
+                color = DIM,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecentMenu(
+    recent: List<RecentEntry>,
+    onRecent: (RecentEntry) -> Unit,
+    onClear: () -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        WithTip(if (recent.isEmpty()) "No recent files" else null) {
+            TextButton(onClick = { open = true }, enabled = recent.isNotEmpty()) { Text("Recent ▾", fontSize = 13.sp) }
+        }
+        DropdownMenu(expanded = open && recent.isNotEmpty(), onDismissRequest = { open = false }) {
+            recent.forEach { entry ->
+                DropdownMenuItem(
+                    text = { RecentLabel(entry) },
+                    onClick = {
+                        open = false
+                        onRecent(entry)
+                    },
+                )
+            }
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("Clear Recent", fontSize = 13.sp) },
+                onClick = {
+                    open = false
+                    onClear()
+                },
+            )
+        }
+    }
+}
+
+/** The hint while items are dragged over the window: a frame and one line on a faint background, never a full cover. */
+@Composable
+private fun DropOverlay(
+    hint: DropHint,
+    dirty: Boolean,
+) {
+    val ok = hint == DropHint.ACCEPT
+    val frame = if (ok) MaterialTheme.colorScheme.primary else DIM
+    Box(Modifier.fillMaxSize().border(2.dp, frame), contentAlignment = Alignment.Center) {
+        Text(
+            when {
+                !ok -> "Only .kstep.kts, .md or folders"
+                dirty -> "Drop to open — unsaved changes will be asked about"
+                else -> "Drop to open"
+            },
+            fontSize = 14.sp,
+            modifier =
+                Modifier
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+        )
     }
 }
 

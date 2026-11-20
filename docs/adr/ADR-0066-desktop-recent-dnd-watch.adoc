@@ -1,0 +1,58 @@
+= ADR-0066: Desktop: recent files and folders, drag and drop (Welle D1b)
+:toc:
+
+== Status
+
+Accepted (Welle D1b), implemented on a local branch. Tested without a window: the Recent model, the store (untrusted load, atomic save), the click-time check, the drop rules and the rule for a note that waits for its folder. The window itself (the Recent menu, the empty-window list, the drop overlay, a real drop from the file manager) was not exercised by hand in this wave.
+
+== Context
+
+ADR-0051 announced a follow-up wave D1b: drag and drop, recently opened files and watching dependent files. The first two fit the existing open paths of `DesktopApp` (ADR-0052 `confirmUnsaved`, ADR-0058 workspace). The third does not: see D9. Both new features take paths from outside the program (a JSON file in the config folder, a drag from another application), so both are treated as untrusted input, like the knowledge workspace (ADR-0058, D13).
+
+== Decisions
+
+D1. Recent model. An entry is a path and a kind, `SCRIPT` or `FOLDER`. Notes are never entries: opening a note is part of a workspace, and the workspace folder is the thing to come back to. The list holds at most ten entries, newest first. Two entries are the same when their `toAbsolutePath().normalize()` strings are equal, compared case-insensitively on macOS and Windows only; a script and a folder with the same path are one entry. The list is immutable (`touch`, `remove`, `clear` return a new list); the comparison mode is a parameter so the tests do not depend on the machine.
+
+D2. What counts as "opened". A script is recorded once the editor really shows it (state `Editing`) and a check says that it is a regular file whose real path equals its path; a script that failed to load, or that was reached through a link, is not recorded. A folder is recorded when its scan has succeeded (state `Open`), with the real root. Scripts given on the command line are recorded like any other, because they go through the same editor state. Trust is never recorded: every folder from Recent asks the trust question again (ADR-0058, D5), because `openFolder` resets it.
+
+D3. Store (`recent.json` in the desktop config folder, `RecentFilesStore`). Format: `{"version":1,"entries":[{"kind":"script|folder","path":"..."}]}`; nothing else is stored. The file is untrusted on load: it must be a regular file that is not a link, at most 16 KiB; any parse error, a non-object or another version gives an empty list; at most ten entries are read; each entry needs a known kind and a string path that is absolute, equal to its normalized form, at most 4096 characters, free of control characters (U+0000 to U+001F, U+007F), and a script path ends in `.kstep.kts`. An invalid entry is dropped alone. The load does not touch the file system for the entries: a missing file is found when it is clicked (D4). Writes are atomic (temporary file plus move), mode 0600 and folder 0700 where supported; every failure is swallowed and logged at debug level without a path. The app saves from one chain of jobs so two saves cannot overtake each other.
+
+D4. Check when clicked, not when the menu opens. A menu that checks every entry would do file I/O on the UI thread and stall on a slow network share. `RecentOpenCheck` reads the attributes without following links, on an I/O dispatcher: missing, a link (the path itself or any folder above it, found by `toRealPath` differing from the normalized path), wrong type (a folder where a script was expected or the reverse), or fine. On a problem the entry is removed from the list, the error bar shows `KSTEP-D-032` ("... is no longer available / is a link / is no longer a folder and was removed from Recent."), and the editor, the run and the unsaved-changes dialog are not touched.
+
+D5. Where it shows. Toolbar: a "Recent" menu after "Open Folder..." (disabled with the tooltip "No recent files" while the list is empty), with the entries (name normal, folder dimmed, folders with a trailing `/`) and "Clear Recent". Empty window: below the shortcut hint a "Recent" heading and at most five entries as plain buttons. No keyboard shortcut and no menu bar: a native menu bar with File > Open Recent belongs to D1c. Every name goes through `DisplayName` (ADR-0058): control and bidirectional characters appear as `‹U+202E›` markers in the menu, the empty window, the error bar and the status line, never raw. The name is cut at 80 characters, the parent folder at 60 characters from the left.
+
+D6. Open paths are shared. The part of "Open Folder..." after the dialog became one function used by the dialog, by Recent and by a drop (unsaved-changes question, close the old workspace, clear editor and run, open the folder). It returns whether the open was started, so a cancelled unsaved-changes question starts nothing else.
+
+D7. Drag and drop. The whole window is a drop target (Compose's experimental `dragAndDropTarget`). A drop is read from the AWT transfer data: a file list, or a `text/uri-list` with `file:` URIs; text, web links and anything else give an empty list. Evaluation does file I/O and runs off the UI thread; the action runs back on the UI thread.
+* The extension decides, without regard to case: `.kstep.kts` is a script, `.md` a note, any other directory a folder; everything else is not usable. Links are refused with their name (`KSTEP-D-033`, "... is a link and was not opened."), never followed.
+* With several items, the first usable one opens. All others count as ignored, including unusable ones before it; the status line says "Opened X; N other item(s) ignored." for six seconds. At most 1000 items are looked at. Nothing usable gives `KSTEP-D-033`: "Only .kstep.kts scripts, .md notes or folders can be opened."
+* A script and a folder use the same paths as Open and Recent, so they ask about unsaved changes, close the other mode and enter Recent.
+* A note inside the open workspace opens like a click in the sidebar. A note elsewhere opens its parent folder as the workspace and waits for the scan (`PendingNote`): it opens when the scan has the note, and is dropped with "... is not part of the scanned folder." when the scan fails, ends without a workspace, or does not list it (a hidden folder, a limit). An old workspace that is just being replaced is not mistaken for the answer (the expected root is compared), and an error that was already there before the drop is not mistaken for a new one. A note inside the open workspace that the scan does not list is an error and does not switch the workspace. `resolveForOpen` is not used for these questions because it records an error (`KSTEP-D-026`) as a side effect.
+
+D8. Hover overlay. While items are dragged over the window, a two-pixel frame and one line of text appear on a faint surface behind the text only (no full cover): "Drop to open", "Drop to open - unsaved changes will be asked about", or, with a muted frame, "Only .kstep.kts, .md or folders". The hint judges by names only (`DropEvaluator.hint`, no file access; a name without an extension may be a folder and is accepted). Platforms differ in whether the names are readable before the drop (for security); when they are not, the hint is the neutral "Drop to open". This behaviour was not observed on a real platform in this wave.
+
+D9. Watching dependent files is not done. A script can read other files, but the script layer reports no list of the files it read: `kstep render`, the worker JSON and the preview carry no dependency list, there is no evaluation of `@file:Import`, and scripts read through plain `java.io`. A heuristic (guessing paths from the source) would miss files (false negatives, a stale preview) and invent others (false positives, needless runs), and the preview is only worth something when it is right. The honest solution needs a hook in `kstep-script` and an additive `dependencies` field in the worker result; it moves to D1c.
+
+D10. Error codes. `KSTEP-D-032` (a Recent entry is unavailable) and `KSTEP-D-033` (a drop was refused); D-029 and D-030 belong to the AI check, D-031 to the sandbox.
+
+== Security
+
+* `recent.json` is written by this program but readable and writable by every program of the user: it is parsed as untrusted (D3), bounded, never followed through a link, and its entries are never opened without the check of D4 and the usual open paths (the trust question for folders, the editor's own file rules for scripts).
+* Dropped paths come from another application: type and link checks use `NOFOLLOW_LINKS`, a path through a linked folder is refused, the count is bounded, and nothing is executed by a drop. A dropped script only opens in the editor, where the existing run rules apply (sandboxed worker where the system has one, ADR-0062); a dropped folder asks the trust question before any block runs.
+* Names are escaped everywhere they are shown (D5); the config file never receives a name from a log line.
+* Not covered: a path that changes between the check and the open (a race) is no new risk, the open paths repeat their own checks (ADR-0052, ADR-0058 D13).
+
+== Consequences
+
+New packages `dev.kstep.desktop.recent` and `dev.kstep.desktop.drop` contain no Compose (`DesktopArchitectureTest`); the Compose parts are in `DesktopApp`. No change to the worker, the sandbox, the export or the CLI zip; no new dependency. The drag-and-drop API of Compose Desktop is experimental and may change with the Compose version.
+
+== D1c (follow-up)
+
+* A `kstep desktop` launcher without a Compose dependency in the CLI.
+* A warm worker against cold starts.
+* Packaging with jpackage.
+* Watching dependent files: an additive `dependencies: List<String>` in the worker result, a read hook in `kstep-script`, polling in the rhythm of the D6 watcher.
+* A native menu bar with File > Open Recent / Clear Menu and keyboard shortcuts.
+* Recent entries for single notes.
+
+References: ADR-0051 (live preview, the original follow-up note), ADR-0052 (editor, unsaved changes), ADR-0058 (knowledge workspace, D13 paths and names), ADR-0062 (sandbox), ADR-0064 (status line).

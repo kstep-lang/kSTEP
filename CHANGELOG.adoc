@@ -17,6 +17,12 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop remembers recently opened scripts and folders (Welle D1b, ADR-0066): a "Recent" menu in the toolbar and a
+  list of up to five entries on the empty window, at most ten kept in `recent.json` (untrusted when read, no file access
+  until an entry is clicked; a vanished entry or a link is removed with `KSTEP-D-032`). Scripts, notes and folders can be
+  dropped on the window; the first usable item opens, the others are counted in the status line, anything else is refused
+  with `KSTEP-D-033`. A note dropped from outside the open workspace opens its folder first. Watching dependent files is
+  not part of this wave: the script layer reports no dependency list, so it moves to Welle D1c.
 * `kstep export --target <step|glb|stl|3mf|name>` and `--all-targets` write the targets a script declares in its `export { }`
   block (Welle D7c, ADR-0065), with `--out-dir`, `--force` and `--tolerance` (STL/3MF). Targets and names are validated again,
   everything is produced before the first write, each file is written atomically through the writer of `kstep convert`, and an

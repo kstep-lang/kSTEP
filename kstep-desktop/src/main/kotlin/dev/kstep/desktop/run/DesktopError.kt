@@ -43,4 +43,8 @@ object DesktopErrorCodes {
 
     // The sandbox of the user's own flows (ADR-0062); D-029 and D-030 belong to the AI check (AiErrorCodes).
     const val SANDBOX_START_FAILED = "KSTEP-D-031"
+
+    // Recent and drag-and-drop (ADR-0066).
+    const val RECENT_UNAVAILABLE = "KSTEP-D-032"
+    const val DROP_REJECTED = "KSTEP-D-033"
 }

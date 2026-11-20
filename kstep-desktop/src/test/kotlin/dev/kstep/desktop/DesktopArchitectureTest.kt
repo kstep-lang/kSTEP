@@ -131,4 +131,17 @@ class DesktopArchitectureTest :
                     forbidden.filter { text.contains(it) }.map { "${root.relativize(path)} uses $it" }
                 }.shouldBeEmpty()
         }
+        "the recent and drop packages are pure logic: no Compose, no UI, no process start, no script evaluation" {
+            sources()
+                .filter { (path, _) ->
+                    val rel = root.relativize(path).toString().replace('\\', '/')
+                    rel.startsWith("dev/kstep/desktop/recent/") || rel.startsWith("dev/kstep/desktop/drop/")
+                }.filter { (_, text) ->
+                    text.contains("dev.kstep.desktop.ui") ||
+                        text.contains("androidx.compose") ||
+                        text.contains("org.jetbrains.compose") ||
+                        text.contains("ProcessBuilder")
+                }.map { root.relativize(it.first).toString() }
+                .shouldBeEmpty()
+        }
     })
