@@ -24,7 +24,22 @@ internal object NameSanitizer {
         return cleaned
     }
 
-    private fun isUnsafe(c: Char): Boolean =
+    /** Display text for a message: ANSI removed, tabs and line breaks become spaces, unsafe characters U+FFFD. */
+    internal fun cleanText(raw: String): String {
+        val sb = StringBuilder(raw.length)
+        for (ch in ansi.replace(raw, "")) {
+            sb.append(
+                when {
+                    ch == '\t' || ch == '\n' || ch == '\r' -> ' '
+                    isUnsafe(ch) -> '\uFFFD'
+                    else -> ch
+                },
+            )
+        }
+        return sb.toString()
+    }
+
+    internal fun isUnsafe(c: Char): Boolean =
         c.code < 0x20 ||
             c.code == 0x7f ||
             c.code in 0x80..0x9f ||

@@ -1,5 +1,7 @@
 package dev.kstep.desktop.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -9,7 +11,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -22,6 +26,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -53,6 +59,8 @@ fun ErrorBar(
     initiallyExpanded: Boolean = false,
     warning: Boolean = false,
     onSelect: (DesktopError) -> Unit = {},
+    /** The entry whose line is marked in the editor (ADR-0067); drawn with a stronger background. */
+    selected: DesktopError? = null,
 ) {
     var expanded by remember(errors) { mutableStateOf(initiallyExpanded) }
     val textColor =
@@ -80,14 +88,16 @@ fun ErrorBar(
                 Modifier.fillMaxWidth().heightIn(min = 32.dp).padding(start = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    ErrorBarText.headline(errors),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    color = textColor,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).clickable { errors.firstOrNull()?.let(onSelect) },
+                val first = errors.firstOrNull()
+                EntryText(
+                    ErrorBarText.displayHeadline(errors),
+                    first,
+                    selected != null && first == selected,
+                    textColor,
+                    dark,
+                    onSelect,
+                    Modifier.weight(1f),
+                    singleLine = true,
                 )
                 ErrorBarText.moreLabel(errors)?.let { label ->
                     Text(
@@ -103,12 +113,15 @@ fun ErrorBar(
             Column(Modifier.fillMaxWidth().padding(start = 8.dp)) {
                 Column(Modifier.heightIn(max = maxHeight).verticalScroll(rememberScrollState())) {
                     errors.forEach { error ->
-                        Text(
-                            ErrorBarText.copyText(listOf(error)),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = textColor,
-                            modifier = Modifier.clickable { onSelect(error) }.padding(vertical = 2.dp),
+                        EntryText(
+                            ErrorBarText.displayLine(error),
+                            error,
+                            selected != null && error == selected,
+                            textColor,
+                            dark,
+                            onSelect,
+                            Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            singleLine = false,
                         )
                     }
                 }
@@ -118,6 +131,53 @@ fun ErrorBar(
                 }
             }
         }
+    }
+}
+
+/**
+ * One entry: clickable only when the error has a line (ADR-0067); otherwise it explains why with a tooltip. The marked
+ * entry gets a stronger background.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun EntryText(
+    text: String,
+    error: DesktopError?,
+    marked: Boolean,
+    textColor: Color,
+    dark: Boolean,
+    onSelect: (DesktopError) -> Unit,
+    modifier: Modifier,
+    singleLine: Boolean,
+) {
+    val clickable = error?.line != null && error != null
+    val tint =
+        Modifier.background(
+            if (marked) textColor.copy(alpha = if (dark) 0.28f else 0.16f) else Color.Transparent,
+        )
+    val body: @Composable (Modifier) -> Unit = { m ->
+        Text(
+            text,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            color = textColor,
+            maxLines = if (singleLine) 1 else Int.MAX_VALUE,
+            overflow = TextOverflow.Ellipsis,
+            modifier = m,
+        )
+    }
+    if (clickable && error != null) {
+        body(modifier.then(tint).pointerHoverIcon(PointerIcon.Hand).clickable { onSelect(error) })
+    } else {
+        TooltipArea(
+            tooltip = {
+                Surface(shape = RoundedCornerShape(4.dp), shadowElevation = 4.dp) {
+                    Text("No position known", fontSize = 12.sp, modifier = Modifier.padding(6.dp))
+                }
+            },
+            delayMillis = 500,
+            modifier = modifier,
+        ) { body(Modifier.fillMaxWidth().then(tint)) }
     }
 }
 

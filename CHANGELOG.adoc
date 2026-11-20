@@ -17,6 +17,15 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop editor leftovers (Welle D2b, ADR-0067): a click on an error-bar entry with a position marks its line in the
+  editor until the text changes or Esc is pressed (an entry without a position is not clickable and says so); hover tooltips
+  on the gutter marks (code, position, message; at most three errors, 120 characters per line); go to line (Cmd/Ctrl+L) with
+  live validation; find and replace without regular expressions (Cmd/Ctrl+F; Cmd+Alt+F or Ctrl+H with the replace row;
+  Enter, F3 and Cmd/Ctrl+G for the next match, with Shift backwards) with a case toggle, at most 256 characters to find,
+  4096 to replace with, 10,000 matches, and a result that keeps the 1 MiB and 20,000-characters-per-line limits; "Replace
+  all" is one undo step; the split between editor and viewer is remembered in `layout.json` (at most 1 KiB, untrusted when
+  read). The crash-safe draft of an unsaved buffer moves to Welle D2c. The window itself (focus changes between the bar and
+  the editor, input methods, shortcuts on Windows and Linux) was not exercised by hand.
 * kSTEP Desktop remembers recently opened scripts and folders (Welle D1b, ADR-0066): a "Recent" menu in the toolbar and a
   list of up to five entries on the empty window, at most ten kept in `recent.json` (untrusted when read, no file access
   until an entry is clicked; a vanished entry or a link is removed with `KSTEP-D-032`). Scripts, notes and folders can be

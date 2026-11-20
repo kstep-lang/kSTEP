@@ -53,6 +53,20 @@ class DesktopArchitectureTest :
                 .shouldBeEmpty()
         }
 
+        "the settings package is pure logic: no Compose and no UI package" {
+            sources()
+                .filter { (path, _) ->
+                    root
+                        .relativize(path)
+                        .toString()
+                        .replace('\\', '/')
+                        .startsWith("dev/kstep/desktop/settings/")
+                }.filter { (_, text) ->
+                    text.contains("dev.kstep.desktop.ui") || text.contains("androidx.compose")
+                }.map { root.relativize(it.first).toString() }
+                .shouldBeEmpty()
+        }
+
         "the export package is pure logic: no Compose and no UI package" {
             sources()
                 .filter { (path, _) ->

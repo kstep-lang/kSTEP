@@ -123,6 +123,8 @@ import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.SandboxNotice
 import dev.kstep.desktop.run.UserSandboxState
 import dev.kstep.desktop.run.sandboxNotice
+import dev.kstep.desktop.settings.LayoutPreferences
+import dev.kstep.desktop.settings.LayoutPreferencesStore
 import dev.kstep.desktop.status.StatusLineText
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.viewer.camera.ViewerCameraState
@@ -152,7 +154,6 @@ private const val AI_PANEL_DP = 360
 private const val AI_MIN_WINDOW_DP = 900
 private const val ERROR_BAR_MAX_FRACTION = 0.4f
 private const val SCRIPT_FILTER_SUFFIX = ".kstep.kts"
-private const val INITIAL_EDITOR_FRACTION = 0.45f
 private const val MIN_PANE_DP = 240
 private const val TREE_DIVIDER_DP = 1
 private const val EDITOR_DIVIDER_DP = 7 // the 1 dp line and the 6 dp drag handle between editor and viewer
@@ -248,7 +249,8 @@ fun DesktopApp(
     var editorFocused by remember { mutableStateOf(false) }
     var jump by remember { mutableStateOf<EditorJump?>(null) }
     var jumpNonce by remember { mutableStateOf(0) }
-    var editorFraction by remember { mutableStateOf(INITIAL_EDITOR_FRACTION) }
+    val layoutStore = remember { LayoutPreferencesStore() }
+    var editorFraction by remember { mutableStateOf(layoutStore.load().editorFraction.toFloat()) }
     val dark = isSystemInDarkTheme()
     val state by controller.state.collectAsState()
     val openCount by controller.openCount.collectAsState()
@@ -642,9 +644,11 @@ fun DesktopApp(
     LaunchedEffect(exportState.generation, exportState is ExportState.Running) {
         (exportState as? ExportState.Running)?.let { lastExportFormat = it.format }
     }
+    var selectedError by remember(state) { mutableStateOf<DesktopError?>(null) }
     val selectError: (DesktopError) -> Unit = { error ->
         val offset = CaretMapper.toOffset(editorView.text, error.line, error.column)
         if (offset != null) {
+            selectedError = error
             session.requestCaret(offset)
             jumpNonce++
             jump = EditorJump(CaretMapper.lineColumn(editorView.text, offset).first, jumpNonce)
@@ -825,6 +829,7 @@ fun DesktopApp(
 
                     val totalPx = with(LocalDensity.current) { windowWidth.toPx() }
                     val minFraction = (MIN_PANE_DP.dp / windowWidth).coerceIn(0.1f, 0.5f)
+                    val effectiveFraction = editorFraction.coerceIn(minFraction, 1f - minFraction)
                     val errors = (state as? DesktopState.Error)?.errors.orEmpty()
                     val sidebarWidth = if (workspace is WorkspaceState.None) 0.dp else SIDEBAR_WIDTH + 1.dp
                     Row(Modifier.weight(1f).fillMaxWidth()) {
@@ -839,7 +844,10 @@ fun DesktopApp(
                             dark,
                             jump,
                             onFocusChanged = { editorFocused = it },
-                            modifier = Modifier.width(windowWidth * editorFraction).fillMaxHeight(),
+                            modifier = Modifier.width(windowWidth * effectiveFraction).fillMaxHeight(),
+                            errorLine = selectedError?.line,
+                            onUserEdit = { selectedError = null },
+                            onEscape = { selectedError = null },
                             knowledge = knowledgeOpen && state.file?.let { knowledge.isWorkspaceFile(it) } == true,
                             activeBlock = blockHeader?.takeIf { it.count > 0 }?.index,
                             onCaret =
@@ -869,12 +877,19 @@ fun DesktopApp(
                                     state =
                                         rememberDraggableState { dx ->
                                             editorFraction =
-                                                (editorFraction + dx / totalPx).coerceIn(minFraction, 1f - minFraction)
+                                                (effectiveFraction + dx / totalPx).coerceIn(
+                                                    minFraction,
+                                                    1f - minFraction,
+                                                )
                                         },
+                                    onDragStopped = {
+                                        val saved = editorFraction.toDouble()
+                                        scope.launch(Dispatchers.IO) { layoutStore.save(LayoutPreferences(saved)) }
+                                    },
                                 ),
                         )
                         // the tree needs its own width and still leaves the canvas at least the minimum pane width
-                        val viewerWidth = windowWidth * (1f - editorFraction) - EDITOR_DIVIDER_DP.dp - sidebarWidth
+                        val viewerWidth = windowWidth * (1f - effectiveFraction) - EDITOR_DIVIDER_DP.dp - sidebarWidth
                         val showTree =
                             treeVisible &&
                                 treeAvailable &&
@@ -964,7 +979,13 @@ fun DesktopApp(
                         }
                     }
                     (state as? DesktopState.Error)?.let { error ->
-                        ErrorBar(error.errors, dark, maxHeight = errorBarMax, onSelect = selectError)
+                        ErrorBar(
+                            error.errors,
+                            dark,
+                            maxHeight = errorBarMax,
+                            onSelect = selectError,
+                            selected = selectedError,
+                        )
                     }
                     knowledgeError?.let { ErrorBar(listOf(it), dark, maxHeight = errorBarMax) }
                     actionError?.let { ErrorBar(listOf(it), dark, maxHeight = errorBarMax) }

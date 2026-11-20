@@ -45,4 +45,4 @@ D12. Error codes. `KSTEP-D-009` file larger than 1 MiB (preview only), `KSTEP-D-
 
 == Follow-up (D2b)
 
-Crash-draft recovery; a live preview of the unsaved buffer; error marks that move with edits; an incremental tokenizer (only if a 1 MiB file ever measures over 50 ms); DSL names generated from the EXPRESS schema; find/replace and go to line; bracket pairs; soft wrap; a persisted split ratio; hover tooltips on gutter marks and click-to-select of the matching error-bar entry. The window behaviour was not exercised by hand in D2 (focus, IME, the Swing dialog on every platform).
+Done in D2b (ADR-0067): click-to-select of the error-bar entry with a persistent line highlight, hover tooltips on gutter marks, go to line, find and replace, persisted split ratio. Moved to D2c (ADR-0067 D6, D7): crash-draft recovery, live preview of the unsaved buffer, error marks that move with edits, incremental tokenizer (only if a 1 MiB file ever measures over 50 ms), DSL names from the EXPRESS schema, bracket pairs, soft wrap. The window behaviour is still not exercised by hand (focus, IME, shortcuts on Windows/Linux).

@@ -60,4 +60,14 @@ class CaretMapperTest :
                 )
             marks shouldBe mapOf(2 to Severity.ERROR)
         }
+
+        "the clamp rule in one place: past the end, past the line, below one, null line" {
+            val t = "ab\ncd"
+            CaretMapper.toOffset(t, 99, 1) shouldBe 3
+            CaretMapper.toOffset(t, 1, 99) shouldBe 2
+            CaretMapper.toOffset(t, 0, 1) shouldBe 0
+            CaretMapper.toOffset(t, -3, -3) shouldBe 0
+            CaretMapper.toOffset(t, null, null) shouldBe null
+            CaretMapper.toOffset("😀x\nz", 1, 99) shouldBe 3
+        }
     })

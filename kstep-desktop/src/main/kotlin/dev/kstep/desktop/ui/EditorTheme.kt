@@ -15,6 +15,11 @@ internal class EditorColors(
     val number: Color,
     val annotation: Color,
     val dsl: Color,
+    /** Find bar (ADR-0067): background of the bar, of every match and of the current match; tint of the error line. */
+    val bar: Color,
+    val matchBackground: Color,
+    val currentMatchBackground: Color,
+    val errorLineBackground: Color,
 ) {
     private val comment = Color(0xFF8A8A8A)
 
@@ -40,6 +45,10 @@ internal class EditorColors(
                 number = Color(0xFF1750EB),
                 annotation = Color(0xFF9E880D),
                 dsl = Color(0xFF871094),
+                bar = Color(0xFFEFEFEF),
+                matchBackground = Color(0xFFFFE9A0),
+                currentMatchBackground = Color(0xFFFFB74D),
+                errorLineBackground = Color(0xFFC62828).copy(alpha = 0.14f),
             )
         val DARK =
             EditorColors(
@@ -51,6 +60,10 @@ internal class EditorColors(
                 number = Color(0xFF2AACB8),
                 annotation = Color(0xFFBBB529),
                 dsl = Color(0xFFC77DBB),
+                bar = Color(0xFF2B2B2B),
+                matchBackground = Color(0xFF51451A),
+                currentMatchBackground = Color(0xFF8A6A1A),
+                errorLineBackground = Color(0xFFFF6B6B).copy(alpha = 0.22f),
             )
     }
 }

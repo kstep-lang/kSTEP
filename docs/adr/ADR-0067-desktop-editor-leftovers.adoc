@@ -1,0 +1,45 @@
+= ADR-0067: Desktop: editor leftovers, find and replace, go to line (Welle D2b)
+:toc:
+
+== Status
+
+Accepted (Welle D2b), implemented on a local branch. Tested without a window: the search, the replace (limits, one undo step), the line parser, the scroll rule, the tooltip texts, the layout store (untrusted load, atomic save) and the bar sizes in a headless composition. Not exercised by hand: focus changes between the bars and the editor, input methods in the fields, the shortcuts on Windows and Linux, the tooltip delay in a real window, the scroll jump in a very long file. All UI texts are English, like the rest of the desktop UI ("No script open"); the design team's German wording was translated.
+
+== Context
+
+ADR-0052 listed leftovers for a wave D2b. This wave takes the ones that need no new safety surface. The crash draft does need one (D6) and moves, together with the larger editor work (D7), to D2c.
+
+== Decisions
+
+D1. Click on an error. A click on the headline or an entry with a line jumps to the caret position (`CaretMapper.toOffset`, which already clamps: a line past the end is the last line, a column past the line end is the line end, values below one count as one, no column means the first non-blank character) and marks the line with a tint that stays until the text changes, Esc is pressed or a new run result arrives. This replaces the 600 ms flash: a mark that disappears while the eye is still on the error bar helps little. The scroll keeps three lines of margin and does nothing if the line is already comfortably visible (`ScrollTarget`). An entry without a line is not clickable (no hand cursor, no silent nothing), shows a dash as position and the tooltip "No position known". The marked entry in the bar has a stronger background. Identical duplicate errors are marked together (data-class equality); harmless.
+
+D2. Gutter tooltips. A hover of 500 ms on a marked gutter line shows `CODE · Z:S · message` for at most three errors of that line, then `+N more`; each line has at most 120 characters (cut by UTF-16 length without splitting a surrogate pair, ended with an ellipsis). Code and message go through `NameSanitizer.cleanText` (ANSI removed, tab and line breaks become spaces, control and bidirectional characters become U+FFFD). Only marked, visible lines get an area (at most 200), so the empty gutter has no tooltip. The bar entries show the same cleaned text (`displayLine`, dash for a missing position); `headline`, `copyText` and the clipboard stay raw so existing behaviour and tests do not move.
+
+D3. Go to line. Cmd/Ctrl+L opens a one-line bar with a field "Line (1-N)". It is a field of its own, not a `:42` in the search bar: two meanings in one field are harder to learn. The input is validated while typing: only ASCII digits, one to nine of them (no signs, no Unicode digits, no overflow); out of range or not a number shows a message next to the field ("Line 1 to N", "Please enter a whole number") so the bar keeps its height. Enter with a valid number puts the caret at the line start, scrolls and gives the focus back to the editor; Esc closes without a jump.
+
+D4. Find and replace.
+* Cmd/Ctrl+F opens the find bar, Cmd+Alt+F (macOS) or Ctrl+H the bar with the replace row. A selection of one line and at most 256 characters becomes the query. Enter, F3 and Cmd/Ctrl+G go to the next match, with Shift to the previous; the search wraps around. Esc closes the bar, keeps the caret on the match, returns the focus to the editor and also clears the error-line mark.
+* The bar is one 32 dp line (two with the replace row) between the banner and the text. It pushes the text down instead of covering it. No scroll compensation is needed: the bar sits outside the scroll area, so the top visible line stays the same and only the lower edge moves.
+* Literal search only. No regular expression and no whole-word switch, not even greyed out (D7). The toggle "Aa" (match case) is a labelled button with a filled background when on, so the state is not only a colour. Without match case the comparison is `regionMatches(ignoreCase)`, which never changes the length, so the match length is the query length (the "ß", "İ" and "ǅ" tests pin this).
+* Limits: the query has at most 256 characters, the replacement 4096, at most 10,000 matches are found (the counter then reads "10,000+"; "Replace all" is disabled then), and no line break goes into either field. A result must keep the editor's own limits: 1 MiB in UTF-8 bytes and 20,000 characters per line, otherwise saving and reloading would fail. The size is predicted as a number before anything is built, so 10,000 matches times 4096 characters never allocates 40 million characters; after building, the UTF-8 size and the longest line are checked in one pass.
+* The search is linear (`indexOf`, or a first-character filter plus `regionMatches`), O(n times m) with m at most 256, matches do not overlap, a match that would split a surrogate pair is skipped. It runs off the UI thread 150 ms after the last change, is cancelled by a newer one and is not repeated on every recomposition.
+* Highlight: only the matches in the visible lines are drawn (at most 500, found by binary search over the sorted starts), the current one stronger. Colours are tokens in `EditorColors` for light and dark.
+* Replace. "Replace all" makes one `EditorSession.replaceText`, which records one snapshot, so it is one undo step and needs no change in the history. "Replace" replaces the match at the caret. Both search again at the moment of the click instead of trusting the debounced result, after syncing the text field with the session. Read-only buffers cannot replace.
+* The caret moves with `requestCaret`; the matched text is not selected because `EditorView` knows no selection (D7).
+
+D5. Split ratio. The share of the window the editor takes is stored in `layout.json` in the desktop config folder: `{"version":1,"editorFraction":0.455}` (three decimals). Untrusted on load: a regular file, not a link, at most 1 KiB (read with a limit, since it may grow after the size check), strict UTF-8, version 1 as a number, `editorFraction` a finite number (a string, `1e309`, null give the default), clamped to 0.20 to 0.80. A hostile deep nesting is bounded by the size limit; a `StackOverflowError` is caught anyway. Written atomically, 0600 and 0700 where supported, every failure swallowed and logged at debug level without a path. It is loaded once at start (at most 1 KiB, like the export preferences) and saved when the drag ends, not per pixel, on the I/O dispatcher. The value that was dragged is kept; a narrow window only clamps what is used, so the preference survives a small window. This is the third copy of the atomic-write pattern (export, recent, layout); a shared helper is listed in D7.
+
+D6. Crash draft: not in this wave. Writing the content of an unsaved buffer to disk is a new safety surface (another place where user text and paths lie, restore logic that must never overwrite silently). The design is settled for D2c: a folder `drafts/` (0700) in the config folder, the name is the SHA-256 of the normalized script path; the file has a header (version, path, mtime, size of the file when the draft began) and the buffer, mode 0600, at most 1 MiB; written two seconds after the last change; on opening a file with a draft a banner offers "Restore" or "Discard", never automatic, not offered when the draft equals the file; "Restore" replaces only the buffer, as one undo step; the draft is deleted after a save or a discard; a broken, oversized or foreign draft is ignored and deleted.
+
+D7. Moved to D2c: live preview of the unsaved buffer; error marks that move with edits (the marks and the line tint refer to the saved file, which is why the tint is cleared by an edit); an incremental tokenizer (only if a 1 MiB file ever measures over 50 ms); DSL names from the EXPRESS schema; bracket pairs; soft wrap; regular-expression search (only with an engine that cannot backtrack catastrophically, or a time limit) and a whole-word switch; the crash draft (D6); a shared helper for the three JSON preference files; sanitising the raw error texts of the bar (D2 only cleans the display line and the tooltip); a selection in `EditorView` so a match can be selected instead of only the caret.
+
+== Security
+
+* `layout.json` is parsed as untrusted (D5), bounded, never followed through a link; a bad value gives the default.
+* Search and replace work on the text of the editor only, with the bounds of D4; no query or replacement is logged.
+* Tooltip and bar texts come from error messages that may contain a hostile file name or script text; they are cleaned (D2).
+
+== Not covered
+
+* The window behaviour listed in the status.
+* Windows and Linux shortcuts (Ctrl instead of Cmd, as for the existing editor keys).
