@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
@@ -16,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -238,6 +240,32 @@ fun ShapeCanvas(
 private fun androidx.compose.ui.input.pointer.PointerButtons.anyPressed(): Boolean =
     isPrimaryPressed || isSecondaryPressed || isTertiaryPressed
 
+/** Test hook (ADR-0068): counts compositions per scope ("canvas", "body", "cursor"). Null outside tests. */
+internal var recompositionProbe: ((String) -> Unit)? = null
+
+private val HAND_CURSOR_ICON = PointerIcon(Cursor(Cursor.HAND_CURSOR))
+private val MOVE_CURSOR_ICON = PointerIcon(Cursor(Cursor.MOVE_CURSOR))
+
+/**
+ * A [Box] that sets the hover cursor from [picking]. Not inline on purpose: the hover state is read here, in this
+ * scope, so a cursor change recomposes only this function while [content] (the same lambda instance) is skipped.
+ */
+@Composable
+private fun CursorHost(
+    picking: CanvasPicking?,
+    modifier: Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    SideEffect { recompositionProbe?.invoke("cursor") }
+    val icon =
+        when {
+            picking == null -> PointerIcon.Hand
+            picking.isOverPart() -> HAND_CURSOR_ICON
+            else -> MOVE_CURSOR_ICON
+        }
+    Box(modifier.pointerHoverIcon(icon), content = content)
+}
+
 private class FrameHolder {
     var frame: ScreenFrame? = null
 }
@@ -303,7 +331,11 @@ private fun ShapeCanvasInternal(
     // phase instead of the composable tree.
     val showHint by remember { derivedStateOf { state.value == ViewerCameraState.HOME } }
 
-    Box(modifier) {
+    SideEffect { recompositionProbe?.invoke("canvas") }
+    // The cursor depends on the hover state; it is read inside CursorHost only (ADR-0068), so a hover change
+    // recomposes that small scope and never this function.
+    CursorHost(picking, modifier) {
+        SideEffect { recompositionProbe?.invoke("body") }
         Canvas(
             Modifier
                 .fillMaxSize()
@@ -423,13 +455,7 @@ private fun ShapeCanvasInternal(
                     } else {
                         false
                     }
-                }.pointerHoverIcon(
-                    when {
-                        picking == null -> PointerIcon.Hand
-                        picking.isOverPart() -> PointerIcon(Cursor(Cursor.HAND_CURSOR))
-                        else -> PointerIcon(Cursor(Cursor.MOVE_CURSOR))
-                    },
-                ),
+                },
         ) {
             // MeshProjection.project() requires a positive canvas size (see its own `require`).
             // A layout pass can legitimately hand this scope a zero-sized `size` -- e.g. a

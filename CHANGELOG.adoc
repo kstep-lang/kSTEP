@@ -17,6 +17,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop selection leftovers (Welle D3b, ADR-0068): "Show in Script" in the part and group inspection panels and
+  as a double click on a part in the assembly tree. It looks for the literal `"name"` in the editor buffer; exactly one
+  hit moves the caret and scrolls there, several hits show a message with a Find action that opens the find bar, no hit
+  or an unsearchable name shows a message. The button is disabled with a reason when there is no script, no name or a
+  knowledge note is open. Name heuristic only: variables, templates and run-time names are not found.
+* The viewer canvas no longer recomposes when the hover cursor changes (ADR-0068): the cursor is read in a small
+  composable of its own, checked by a recomposition-count test.
+
 * kSTEP Desktop editor leftovers (Welle D2b, ADR-0067): a click on an error-bar entry with a position marks its line in the
   editor until the text changes or Esc is pressed (an entry without a position is not clickable and says so); hover tooltips
   on the gutter marks (code, position, message; at most three errors, 120 characters per line); go to line (Cmd/Ctrl+L) with

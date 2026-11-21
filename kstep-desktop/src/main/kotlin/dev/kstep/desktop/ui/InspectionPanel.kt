@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,9 +25,22 @@ import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.pick.GroupInfo
 import dev.kstep.desktop.pick.GroupInspection
 import dev.kstep.desktop.pick.InspectionText
+import dev.kstep.desktop.pick.ShowInScriptMessage
 
 private val LABEL = Color(0xFF8A8A8A)
 private const val HEX_PREFIX_LENGTH = 1
+
+/**
+ * The "Show in Script" action of an inspection panel (ADR-0068): the button, why it is disabled, and the message of the
+ * last attempt. [onFind] receives the query of an ambiguous name.
+ */
+internal class ShowInScriptUi(
+    val enabled: Boolean = false,
+    val disabledReason: String? = null,
+    val onClick: () -> Unit = {},
+    val message: ShowInScriptMessage? = null,
+    val onFind: (String) -> Unit = {},
+)
 
 /**
  * The inspection panel of the selected part (ADR-0053): a quiet overlay in the top right corner of the canvas, only
@@ -35,10 +49,11 @@ private const val HEX_PREFIX_LENGTH = 1
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun InspectionPanel(
+internal fun InspectionPanel(
     part: PartInfo,
     background: Color,
     modifier: Modifier = Modifier,
+    action: ShowInScriptUi? = null,
 ) {
     Column(
         modifier
@@ -76,16 +91,18 @@ fun InspectionPanel(
                 modifier = Modifier.padding(start = 6.dp),
             )
         }
+        action?.let { ShowInScriptRow(it) }
     }
 }
 
 /** The inspection panel of a selected assembly group (ADR-0054): name, part count, triangles, size and centre. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun GroupInspectionPanel(
+internal fun GroupInspectionPanel(
     info: GroupInfo,
     background: Color,
     modifier: Modifier = Modifier,
+    action: ShowInScriptUi? = null,
 ) {
     Column(
         modifier
@@ -113,6 +130,36 @@ fun GroupInspectionPanel(
         Line("Triangles", GroupInspection.triangles(info))
         Line("Size", GroupInspection.size(info))
         Line("Center", InspectionText.point(info.center))
+        action?.let { ShowInScriptRow(it) }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ShowInScriptRow(action: ShowInScriptUi) {
+    val button: @Composable () -> Unit = {
+        TextButton(onClick = action.onClick, enabled = action.enabled) { Text("Show in Script", fontSize = 12.sp) }
+    }
+    val reason = action.disabledReason
+    if (!action.enabled && reason != null) {
+        TooltipArea(
+            tooltip = {
+                Box(Modifier.background(Color.Black.copy(alpha = 0.8f)).padding(6.dp)) {
+                    Text(reason, color = Color.White, fontSize = 12.sp)
+                }
+            },
+            modifier = Modifier.padding(top = 2.dp),
+        ) { button() }
+    } else {
+        Box(Modifier.padding(top = 2.dp)) { button() }
+    }
+    action.message?.let { message ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(message.text, color = LABEL, fontSize = 11.sp, maxLines = 3, modifier = Modifier.weight(1f))
+            message.findQuery?.let { query ->
+                TextButton(onClick = { action.onFind(query) }) { Text("Find", fontSize = 11.sp) }
+            }
+        }
     }
 }
 

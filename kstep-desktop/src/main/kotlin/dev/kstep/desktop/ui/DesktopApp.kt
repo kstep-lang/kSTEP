@@ -79,6 +79,8 @@ import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
+import dev.kstep.desktop.edit.PartSourceLocator
+import dev.kstep.desktop.edit.SourceLocation
 import dev.kstep.desktop.export.ExportController
 import dev.kstep.desktop.export.ExportFormat
 import dev.kstep.desktop.export.ExportNotice
@@ -101,6 +103,8 @@ import dev.kstep.desktop.pick.PickIndex
 import dev.kstep.desktop.pick.SelectionEvent
 import dev.kstep.desktop.pick.SelectionMachine
 import dev.kstep.desktop.pick.SelectionState
+import dev.kstep.desktop.pick.ShowInScriptMessage
+import dev.kstep.desktop.pick.ShowInScriptMessages
 import dev.kstep.desktop.pick.TreeViewLogic
 import dev.kstep.desktop.pick.TreeViewState
 import dev.kstep.desktop.pick.VisibilityCounts
@@ -654,6 +658,57 @@ fun DesktopApp(
             jump = EditorJump(CaretMapper.lineColumn(editorView.text, offset).first, jumpNonce)
         }
     }
+    // "Show in Script" (ADR-0068): a name heuristic on the live buffer, only ever started by the user.
+    var showNotice by remember { mutableStateOf<Pair<String, ShowInScriptMessage>?>(null) }
+    var findRequest by remember { mutableStateOf<FindRequest?>(null) }
+    var findNonce by remember { mutableStateOf(0) }
+    LaunchedEffect(showNotice) {
+        if (showNotice != null) {
+            delay(NOTICE_MS)
+            showNotice = null
+        }
+    }
+    val showInScriptReason: (String) -> String? = { name ->
+        when {
+            knowledgeOpen -> ShowInScriptMessages.DISABLED_KNOWLEDGE
+            editorView.state !is EditorState.Editing -> ShowInScriptMessages.DISABLED_NO_SCRIPT
+            name.isEmpty() -> ShowInScriptMessages.DISABLED_NO_NAME
+            else -> null
+        }
+    }
+    val showInScript: (String) -> Unit = { name ->
+        if (showInScriptReason(name) == null) {
+            val snapshot = editorView
+            val text = snapshot.text
+            val differs = snapshot.dirty
+            showNotice = null
+            scope.launch {
+                val location = withContext(Dispatchers.Default) { PartSourceLocator.locate(text, name) }
+                // the buffer may have changed while searching: offsets would no longer be valid
+                if (session.view.value.revision == snapshot.revision) {
+                    if (location is SourceLocation.Found) {
+                        session.requestCaret(location.offset)
+                        jumpNonce++
+                        jump = EditorJump(CaretMapper.lineColumn(text, location.offset).first, jumpNonce)
+                    }
+                    ShowInScriptMessages.of(location, name, differs)?.let { showNotice = name to it }
+                }
+            }
+        }
+    }
+    val showInScriptUi: (String) -> ShowInScriptUi = { name ->
+        val reason = showInScriptReason(name)
+        ShowInScriptUi(
+            enabled = reason == null,
+            disabledReason = reason,
+            onClick = { showInScript(name) },
+            message = showNotice?.takeIf { it.first == name }?.second,
+            onFind = { query ->
+                findNonce++
+                findRequest = FindRequest(query, findNonce)
+            },
+        )
+    }
     val home: () -> Unit = {
         camera.value = ViewerCameraState.HOME
         fitReference = displayMesh
@@ -846,6 +901,7 @@ fun DesktopApp(
                             onFocusChanged = { editorFocused = it },
                             modifier = Modifier.width(windowWidth * effectiveFraction).fillMaxHeight(),
                             errorLine = selectedError?.line,
+                            findRequest = findRequest,
                             onUserEdit = { selectedError = null },
                             onEscape = { selectedError = null },
                             knowledge = knowledgeOpen && state.file?.let { knowledge.isWorkspaceFile(it) } == true,
@@ -912,6 +968,7 @@ fun DesktopApp(
                                 },
                                 onCycleSelected = { applyVisibility(target, VisibilityMachine::cycle) },
                                 modifier = Modifier.fillMaxHeight(),
+                                onShowInScript = showInScript,
                             )
                             Box(Modifier.width(TREE_DIVIDER_DP.dp).fillMaxHeight().background(DIM.copy(alpha = 0.5f)))
                         }
@@ -942,6 +999,7 @@ fun DesktopApp(
                                         it,
                                         MaterialTheme.colorScheme.background,
                                         Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                        action = showInScriptUi(it.name),
                                     )
                                 }
                                 selectedGroup?.let {
@@ -949,6 +1007,7 @@ fun DesktopApp(
                                         it,
                                         MaterialTheme.colorScheme.background,
                                         Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                        action = showInScriptUi(it.name),
                                     )
                                 }
                                 if (showProgress) {

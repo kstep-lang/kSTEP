@@ -1,0 +1,41 @@
+= ADR-0068: Desktop: selection leftovers, Show in Script, hover cursor (Welle D3b)
+:toc:
+
+== Status
+
+Accepted (Welle D3b), implemented on a local branch. Tested without a window: the name-to-literal search (limits, case, prefixes, surrogate pairs, CRLF, one MiB, expired deadline), the message texts (clipping, escaping), the button, the Find action and the tree double click in a headless composition, and the recomposition count of the viewer canvas. Not exercised by hand: the tooltip of the disabled button in a real window, the hover cursor feel on every platform, focus after the jump, Escape focus.
+
+== Context
+
+ADR-0053 listed two leftovers of the selection work: a jump from the selection to its place in the script, and the hover cursor that recomposed the whole canvas. The worker reports no source positions, so the first can only be a heuristic by name.
+
+== Decisions
+
+D1. "Show in Script". A text button "Show in Script" in the part and the group inspection panel, and a double click on a part (leaf) in the assembly tree. A double click on a group keeps its fold and unfold. It only ever starts on a user action, never by itself.
+
+D2. What is searched. The literal `"name"` (with the quotes), case sensitive, in the current editor buffer, through `TextSearch` (linear, no regular expression, at most two matches) with a time budget of 0.5 s (`PartSourceLocator`). The buffer is searched, not the saved file, although the preview shows the saved file: only in the buffer do the offsets match what the user sees. If the buffer is not saved, the message says "script changed since last preview". The search runs off the UI thread and its result is applied only if the buffer is unchanged (same revision) when it returns.
+
+D3. Outcomes. Exactly one literal: the caret goes after the opening quote (`requestCaret`, no selection API exists) and the editor scrolls with the usual rule of ADR-0067 (line comfortably visible with three lines of margin, not necessarily centred) and takes the focus. More than one: no jump; the message says so and offers "Find", which opens the find bar with `"name"` filled in and does not move the caret (`FindRequest`); the bar counts the matches and steps through them. None, a name over 254 characters, a name with a quote, backslash, dollar sign or control character (cannot be a plain literal), or a timeout: a message, no jump. The name is never interpreted and never put into a regular expression.
+
+D4. Message place. A line below the button in the inspection panel instead of the transient status line: the Find action needs a button and the message stays next to the control that caused it. It disappears after six seconds and when the selection changes. Names in messages go through `DisplayName.escaped` and are clipped to 64 characters; the "too long" message does not repeat the name.
+
+D5. Disabled states. The button is disabled with a tooltip reason when there is no script (an imported model), when the selection has no name, and in a knowledge workspace (the buffer is a Markdown note with several blocks; a name may stand in prose or in another block). Nothing fails silently.
+
+D6. Hover cursor. `pointerHoverIcon` moved from the modifier chain of the canvas into a small non-inline composable `CursorHost` that owns the `Box` and reads the hover state itself. A hover change recomposes only `CursorHost`; `ShapeCanvasInternal` and the canvas body lambda (the same lambda instance) are skipped. Layout, size and gesture modifiers are unchanged, so the pixel mapping of picking is unchanged. `ViewerCanvasRecompositionTest` counts compositions through an `internal` probe hook: ten toggles leave the canvas and body counts unchanged and raise the cursor count; a second test shows the probe counts a scope that does recompose.
+
+== Honest limits
+
+* Only literals: no variables, templates, string concatenation or loops. A name built at run time is not found.
+* The same literal in several places (including comments and other strings) is ambiguous; a name that occurs several times as instances ("occurrence n") cannot be told apart.
+* Names that need escaping in Kotlin source are not searched.
+* The buffer may differ from the last preview; the message says so.
+* `TextSearch` checks the time every 8192 characters and a case-sensitive `indexOf` is one call, so the budget is a guard for pathological input, not a promise of exact timing; one MiB is searched in milliseconds.
+* The scroll puts the line in view, it does not centre it.
+
+== Security
+
+Names come from an untrusted script or worker output. Length is bounded (254), the search is linear and bounded in time and matches, texts are escaped and clipped, names are not logged, no worker, sandbox or export code is touched. No automatic jump. A late result for a changed buffer is dropped. The viewer change is internal only (no public signature changed); the probe hook is `internal` and null by default.
+
+== Follow-up (Welle D3c)
+
+Source positions per part in the worker JSON (additive in `PreviewOutcome`/`RenderedPart`), selecting the name in the editor, a 3D context menu or shortcut, multi-select, BVH or GPU picking, an outline instead of a tint, a `Modifier.Node` cursor when the API is stable, support in knowledge notes, hand-testing of cursor, tooltip and Escape focus on every platform.

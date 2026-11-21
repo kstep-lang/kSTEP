@@ -81,6 +81,15 @@ internal data class EditorJump(
 )
 
 /**
+ * A request to open the find bar with [query] filled in (ADR-0068, "Show in Script" on an ambiguous name). The caret
+ * does not move; the find bar counts the matches and steps through them. [nonce] makes equal queries distinct.
+ */
+internal data class FindRequest(
+    val query: String,
+    val nonce: Int,
+)
+
+/**
  * The script editor (ADR-0052): a plain `BasicTextField` with syntax colouring as a visual transformation, a gutter
  * and one shared vertical scroll. Edits go through the [EditorSession] (its own undo history), never Compose's undo.
  * The line height is fixed, so the gutter lines up with the text without measuring the field.
@@ -104,6 +113,7 @@ internal fun ScriptEditor(
     /** The user typed, pasted or replaced text: marks that refer to the saved file are stale. */
     onUserEdit: () -> Unit = {},
     onEscape: () -> Unit = {},
+    findRequest: FindRequest? = null,
 ) {
     val colors = if (dark) EditorColors.DARK else EditorColors.LIGHT
     val state = view.state
@@ -161,6 +171,13 @@ internal fun ScriptEditor(
     var scrollNonce by remember { mutableStateOf(0) }
     val layoutHolder = remember { LayoutHolder() }
     val findOpen = bar is EditorBar.Find
+    LaunchedEffect(findRequest?.nonce) {
+        val request = findRequest ?: return@LaunchedEffect
+        query = TextSearch.sanitizeQuery(request.query)
+        barNonce++
+        pendingNavigate = false
+        bar = EditorBar.Find(false, barNonce)
+    }
 
     LaunchedEffect(findOpen, query, matchCase, field.text) {
         if (!findOpen || query.isEmpty()) {
