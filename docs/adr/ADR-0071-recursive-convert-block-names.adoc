@@ -1,0 +1,68 @@
+= ADR-0071: `kstep convert --recursive` and the block attribute `{name=...}` (Welle D8d)
+:toc:
+
+== Status
+
+Accepted (Welle D8d). Recursive folder conversion, the block attribute `{name=...}` (read by the shared block extractor, used by `kstep convert --to kts` and shown in the Desktop block header) and the error codes `KSTEP-C-012` to `KSTEP-C-015` plus the warning codes `KSTEP-C-016` and `KSTEP-C-017` are covered by tests. Not done: see "Open / not verified".
+
+== Context
+
+ADR-0061 left two things for D8d: a recursive folder mode and a way to name a block (`{name="..."}`). Real note folders have sub-folders (a vault has topics), and a note with several blocks should produce file names that say what a block is, not only its number. Every command line that worked before must give the same bytes: the existing output of folder and single-file runs is pinned by `ConvertGoldenTest`, which was recorded before this change.
+
+== Decision
+
+D1. Switch. `kstep convert <dir> --recursive ...`. No short form. Given twice, or with a file as input, it is an error (usage error for the double flag, `KSTEP-C-002` "--recursive expects a folder" for a file). Without the switch nothing changes: the one-level scanner `ConvertSourceScanner` is not touched.
+
+D2. Bounds. Depth 8 (the root is level 0, files in a folder of level 8 are read, a folder of level 9 is an error `KSTEP-C-012`), and over the whole tree: 20,000 entries, 2,000 matching files, 64 MiB, 2,000 targets (`KSTEP-C-011`). No partial result: if a bound is hit, nothing is written.
+
+D3. Scan. `ConvertTreeScanner`: breadth first with an explicit queue (no recursion, no `Files.walk`); attributes are read without following links. Links are never followed and are reported as skipped with the existing reason `symbolic_link`, for file links and folder links, whatever their name. A folder whose name starts with `.` is not entered (`hidden_dir`). The output folder is not entered when it lies below the input folder (`output_dir`), so a second run does not read its own results; when `--out` is the input folder itself (the default) nothing is skipped. Hidden files and non-regular files with the matching ending are skipped as in ADR-0061 (`hidden`, `not_regular_file`). The skip checks run before the depth check, so a hidden folder at level 9 is not an error. Skipped folders are reported with a trailing `/` in `source`.
+
+D4. Containment. Every folder is resolved with `toRealPath()` before it is queued and must lie below the real input folder (`Path.startsWith`, never a string prefix), else `KSTEP-C-013`. After a folder is opened it is resolved once more and must be unchanged. Every matching file is checked the same way. Targets are built only from the segments the scanner produced; `ConvertFiles.checkTargetDir` and `ensureDir` also refuse `.`, `..`, separators and NUL.
+
+D5. Order. Sources and skip entries are sorted by relative path (`String.compareTo`), so a run is deterministic on every system. The relative path is built from file names joined with `/`, also on Windows.
+
+D6. Target tree. The sub-folders are mirrored below `--out`: `notes/a/b.md` becomes `<out>/a/b.kstep.kts` (relative to the input folder). `--out` itself must exist (ADR-0060 D8). Missing sub-folders are created, but only below the real `--out` and only in the write phase, after every target has been checked; each created folder is checked again (no link, still below `--out`). Existing segments in the way that are files or links are `KSTEP-C-009`. The mirrored folders are not removed when a later write fails: the run is not transactional (ADR-0060 D9).
+
+D7. Name clashes. The key is the complete relative target path in lower case (also the folder segments), `KSTEP-C-009` as for flat folders (ADR-0061 D7). `KSTEP-C-008` stays for "exists on disk". This rule is the same in every mode.
+
+D8. Block attribute. The info string of a block is ```` ```kstep {name=bracket} ````. A hand written parser reads at most 256 characters behind the `{` in one pass (no regular expression). Tokens are separated by blanks or `,`; a token is `key` or `key = value`, a value is `"..."` (no escapes) or runs to the next separator. Only `name` is known. A name is 1 to 48 characters of `A-Z a-z 0-9 . _ -`, starts with a letter or a digit, has no `..` and does not end with `.`; so it cannot contain a path separator, NUL or a non-ASCII character. Names are unique per note, compared without regard to case.
+
+D9. Old notes keep working. Every other key and every token without `=` (for example Pandoc style `{.numberLines #id}`) is an unknown key: a warning, never an error. A `{` without `}` within 256 characters is a warning "unterminated block attribute ignored" if no `name` was seen, otherwise malformed. Malformed (`KSTEP-C-014`) means: a `name` without `=` or without a value, an unclosed quote, a second `name`, or the unterminated case with a name. Invalid value `KSTEP-C-014`, duplicate name in a note `KSTEP-C-015`. The extractor records at most 8 unknown keys per block, each cut to 32 characters. A block with a name problem has no name at all.
+
+D10. File names. One block: `<stem>.kstep.kts`, as before (the block name does not change the file or its bytes). Several blocks: `<stem>-<name>.kstep.kts` for a named block, `<stem>-<n>.kstep.kts` (n is the position) otherwise. A name equal to a block number that is also a file name in the same note (`{name=2}` next to an unnamed block 2) is `KSTEP-C-015`. Because of the `<stem>-` prefix a name such as `con` is harmless on Windows.
+
+D11. Checks run in the whole note, also in empty blocks: a name problem in an empty block is an error, not a skip. The name is only used for the file name and the JSON field; the script content is not touched (so the byte identity of the round trip holds).
+
+D12. Report. Without `--recursive` the JSON and text output are byte-identical to ADR-0061 for notes without attributes. With it: `"recursive":true` after `command` (success and error), `written[].target` (relative path with `/`), `source` is the relative path of the source. A named block adds `written[].blockName` (the key `name` already holds the file name). Warnings appear as `warnings:[{source,kind,code,line?,message}]` only when there are some (at most 50, `moreWarnings` counts the rest) and as `kstep convert: ...` lines on stderr in text mode. Warnings never change the exit code. New skip reasons: `hidden_dir`, `output_dir`.
+
+D13. Error and warning codes.
+
+[cols="1,2,3",options="header"]
+|===
+| Code | `errorKind` / `kind` | Meaning
+| `KSTEP-C-012` | `depth_exceeded` | A folder is deeper than 8 levels
+| `KSTEP-C-013` | `path_escape` | A folder or file leads outside the input folder, or a folder changed while it was read, or a target folder leaves `--out`
+| `KSTEP-C-014` | `invalid_block_name` | A block attribute is malformed or the name is not valid
+| `KSTEP-C-015` | `duplicate_block_name` | A name is used twice in a note, or collides with a block number
+| `KSTEP-C-016` | `unknown_block_attribute` (warning) | An unknown key was ignored
+| `KSTEP-C-017` | `unterminated_block_attribute` (warning) | A `{` without `}` was ignored
+|===
+
+D14. Desktop. The block header of the knowledge workspace shows the name (`Block 2 of 3 . bracket . lines 14-38`; without a name the line is the old one). A name problem or an unknown key is added as a warning-coloured part (`Invalid block name (line N): use 1-48 of A-Z a-z 0-9 . _ -`, `Name "x" already used in line M`, `Malformed block attribute (line N)`, `Unknown block attribute "type" ignored`). The preview still runs. Both consumers use the same extractor, so they cannot disagree.
+
+D15. Security. No script is run. Path containment on real paths; no link is followed at any step; temp files are created with `CREATE_NEW` and without following links (ADR-0060); every name, path and key goes through `DisplayName.escaped`; no absolute path in any output; no new dependency.
+
+== Consequences
+
+* A note that has a bad `{name=...}` now fails `convert --to kts` (also in single-file and one-level folder mode). Old notes are not affected: only `name` is checked strictly.
+* The mirrored target folders make a recursive run create directories, the first time `convert` does so.
+* `verify-dist.sh` now needs a `kstep` that knows `--recursive` (same tag rule as in ADR-0061); the smoke test and the stub of `test-release-scripts.sh` were extended.
+
+== Open / not verified
+
+* The Desktop menu entry `Convert...`, a marker file, the `type:` vocabulary, export and AI for one block, pick-to-source and a working directory for the worker are still open.
+* The way back: `--to okf` does not write `{name=...}` and the name is not put into a script header (it would change the bytes of the script).
+* Windows: symbolic links, junctions and reparse points were not tested; the link tests are skipped where links cannot be created. The case-insensitive clash rule is tested on macOS only through names that differ in case after sanitising.
+* Between the check of a folder and the opening of its stream a small time window remains (no `SecureDirectoryStream`); the second `toRealPath()` after opening narrows it but does not close it.
+* A write over many files and folders is not transactional (ADR-0060 D9); created folders stay.
+* Hard links inside the tree are not detected, only hard links to an existing target (file key, ADR-0061 D8).

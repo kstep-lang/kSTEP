@@ -17,6 +17,17 @@ minor versions may contain breaking changes.
 
 === Added
 
+* `kstep convert --recursive` (Welle D8d, ADR-0071): converts a whole folder tree (depth 8) and mirrors the sub-folders
+  below `--out`. Links are never followed (reported as `symbolic_link`), hidden folders and an output folder inside the
+  input are skipped (`hidden_dir`, `output_dir`), every folder must stay below the input folder (`KSTEP-C-013`),
+  depth over 8 is `KSTEP-C-012`; the JSON report gets `"recursive":true` and `written[].target`, output without the switch
+  is byte-identical to before. Created target folders are not removed if a later write fails (not transactional). Windows
+  links and junctions are untested.
+* Block attribute `{name=...}` (Welle D8d, ADR-0071): ```` ```kstep {name=bracket} ```` names a block; `convert --to kts`
+  writes `<note>-bracket.kstep.kts` instead of `<note>-2.kstep.kts` (a single block keeps `<note>.kstep.kts`), the
+  Desktop block header shows the name. Invalid, malformed or duplicate names are `KSTEP-C-014` / `KSTEP-C-015`; unknown keys
+  (for example Pandoc style attributes) are warnings `KSTEP-C-016` (`warnings` in the JSON), so existing notes keep working.
+  The name is not written back by `--to okf` and not put into the script.
 * kSTEP Desktop export dialog (Welle D7d, ADR-0070): the running export shows a step line ("Step 2 of 4") and, while
   writing a file of 8 MiB or more, a real progress bar and percentage; the dialog remembers format, folder and the
   declared target per script (32 scripts, `export.json` version 2), and the script's export block keeps precedence.

@@ -831,8 +831,8 @@ stepFile(fileName = "two-boxes.step") {
 
 == Converting between scripts and notes
 
-`kstep convert <file|dir> --to okf|kts [--out <dir>] [--force] [--output json] [--title <text>] [--tag <tag>]...` (ADR-0060,
-ADR-0061) moves between `*.kstep.kts` scripts and Markdown notes with a fenced `kstep` block, as used by the Desktop knowledge
+`kstep convert <file|dir> --to okf|kts [--out <dir>] [--force] [--recursive] [--output json] [--title <text>] [--tag <tag>]...` (ADR-0060,
+ADR-0061, ADR-0071) moves between `*.kstep.kts` scripts and Markdown notes with a fenced `kstep` block, as used by the Desktop knowledge
 workspace. It only handles text; a script is never run.
 
 * `--to okf` wraps `part.kstep.kts` as `part.md`: front matter with `title` and `tags: [kstep]`, a heading and one `kstep` block.
@@ -852,6 +852,16 @@ workspace. It only handles text; a script is never run.
   and hidden files are skipped. In a folder, empty scripts and notes without a `kstep` block are skipped with a hint; any other
   problem in any file stops the run and nothing is written. Two sources that would write the same name (compared without regard
   to case) are refused. At most 20,000 entries, 2,000 files, 64 MiB and 2,000 targets.
+* `--recursive` (folders only) also converts sub-folders, up to 8 levels deep, and mirrors them below `--out`
+  (`notes/a/b.md` gives `<out>/a/b.kstep.kts`; missing sub-folders are created, `--out` itself must exist). Links are never
+  followed (skipped as `symbolic_link`), folders starting with `.` and an output folder inside the input are skipped
+  (`hidden_dir`, `output_dir`). Every folder must stay below the input folder. The JSON gets `"recursive":true` and a relative
+  `target` per file; the bounds count over the whole tree. Folders created in the output stay if a later write fails.
+* A block can be named: ```` ```kstep {name=bracket} ````. With several blocks in a note `--to kts` writes `part-bracket.kstep.kts`
+  instead of `part-2.kstep.kts`; one block keeps `part.kstep.kts`. A name is 1 to 48 of `A-Z a-z 0-9 . _ -`, starts with a
+  letter or digit, and is unique in the note (case does not matter). Other attributes (also Pandoc style `{.numberLines}`) are
+  ignored with a warning (`warnings` in the JSON, lines on stderr); the exit code stays 0. The name is not written back by
+  `--to okf`.
 * `--output json` prints exactly one JSON line instead of the text. A command line that is not valid prints the usage text and exits
   1, also with `--output json`.
 
@@ -878,7 +888,13 @@ before a late failure. Names are shown with control and bidirectional characters
 | `KSTEP-C-009` | A target is a link, not regular, an input, has an invalid name, or two sources give the same name
 | `KSTEP-C-010` | A file could not be written
 | `KSTEP-C-011` | A folder limit was exceeded
+| `KSTEP-C-012` | `--recursive`: a folder is deeper than 8 levels
+| `KSTEP-C-013` | `--recursive`: a folder or file leads outside the input folder (or changed while it was read)
+| `KSTEP-C-014` | A block attribute is malformed or the block name is not valid
+| `KSTEP-C-015` | A block name is used twice in a note, or equals the number of another block
 |===
+
+Warnings (exit code stays 0): `KSTEP-C-016` unknown block attribute ignored, `KSTEP-C-017` unterminated block attribute ignored.
 
 == Desktop live preview
 

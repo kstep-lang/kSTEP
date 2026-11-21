@@ -92,4 +92,6 @@ None added.
 
 == Follow-up (D8d)
 
+Partly done in ADR-0071 (the `{name=...}` block attribute and the recursive folder mode).
+
 A marker file, the front matter vocabulary `type:` as in kUML, a `{name="..."}` attribute on blocks, export and AI for one block, pick-to-source, a working directory for the worker, the Desktop entry `Convert...` (dialog, design review, ADR-0058 rules) and possibly a recursive folder mode.

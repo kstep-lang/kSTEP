@@ -1,6 +1,18 @@
 package dev.kstep.cli.okf
 
+import java.util.Locale
+
 enum class BlockState { OK, EMPTY, UNCLOSED, TOO_LARGE }
+
+enum class BlockNameIssueKind { INVALID, DUPLICATE, MALFORMED }
+
+/** Why the `{name=...}` of a block is not usable (ADR-0071); [value] is the raw value, at most 64 characters. */
+data class BlockNameIssue(
+    val kind: BlockNameIssueKind,
+    val line: Int,
+    val firstLine: Int? = null,
+    val value: String? = null,
+)
 
 /**
  * One fenced `kstep` block. Lines are 1-based; [contentEndLine] is inclusive (empty content: end < start). Offsets are
@@ -17,6 +29,10 @@ data class FenceBlock(
     val openLineRange: IntRange,
     val closeLineRange: IntRange?,
     val state: BlockState,
+    val name: String? = null,
+    val nameIssue: BlockNameIssue? = null,
+    val unknownKeys: List<String> = emptyList(),
+    val attrUnterminated: Boolean = false,
 )
 
 /** A fenced block of another language: only kept so the highlighter can dim it. */
@@ -54,6 +70,7 @@ object MarkdownBlockExtractor {
         val lineStart: Int,
         val lineEnd: Int,
         val contentStart: Int,
+        val attrs: BlockAttributes.Parsed,
     )
 
     fun extract(
@@ -64,6 +81,7 @@ object MarkdownBlockExtractor {
         val blocks = ArrayList<FenceBlock>()
         val others = ArrayList<OtherFence>()
         var tooMany = false
+        val namesSeen = HashMap<String, Int>()
         var open: Open? = null
         var lineStart = 0
         var lineNo = 1
@@ -98,6 +116,22 @@ object MarkdownBlockExtractor {
                     isBlank(text, o.contentStart, contentEnd) -> BlockState.EMPTY
                     else -> BlockState.OK
                 }
+            val attrs = o.attrs
+            var name = attrs.name
+            var issue: BlockNameIssue? =
+                when {
+                    attrs.malformed -> BlockNameIssue(BlockNameIssueKind.MALFORMED, o.line)
+                    attrs.invalidValue != null ->
+                        BlockNameIssue(BlockNameIssueKind.INVALID, o.line, value = attrs.invalidValue)
+                    else -> null
+                }
+            if (name != null) {
+                val first = namesSeen.putIfAbsent(name.lowercase(Locale.ROOT), o.line)
+                if (first != null) {
+                    issue = BlockNameIssue(BlockNameIssueKind.DUPLICATE, o.line, firstLine = first, value = name)
+                    name = null
+                }
+            }
             blocks +=
                 FenceBlock(
                     index = blocks.size,
@@ -110,6 +144,10 @@ object MarkdownBlockExtractor {
                     openLineRange = o.lineStart until o.lineEnd,
                     closeLineRange = if (closeLine != null) closeStart until closeEnd else null,
                     state = state,
+                    name = name,
+                    nameIssue = issue,
+                    unknownKeys = attrs.unknownKeys,
+                    attrUnterminated = attrs.unterminated && issue == null,
                 )
         }
 
@@ -129,14 +167,20 @@ object MarkdownBlockExtractor {
                 if (current == null) {
                     val fence = parseFence(text, from, lineEnd)
                     if (fence != null && isOpening(text, fence, lineEnd)) {
+                        val kstep = isKstepInfo(text, fence.afterRun, lineEnd)
                         open =
                             Open(
                                 fence,
-                                isKstepInfo(text, fence.afterRun, lineEnd),
+                                kstep,
                                 lineNo,
                                 lineStart,
                                 lineEnd,
                                 next,
+                                if (kstep) {
+                                    BlockAttributes.parse(text, kstepEnd(text, fence.afterRun), lineEnd)
+                                } else {
+                                    BlockAttributes.NONE
+                                },
                             )
                     }
                 } else {
@@ -225,6 +269,16 @@ object MarkdownBlockExtractor {
     }
 
     private const val KSTEP = "kstep"
+
+    /** The position right behind the `kstep` word of an info string already known to be a kstep one. */
+    private fun kstepEnd(
+        text: String,
+        from: Int,
+    ): Int {
+        var p = from
+        while (text[p] == ' ' || text[p] == '\t') p++
+        return p + KSTEP.length
+    }
 
     private fun isBlank(
         text: String,

@@ -136,6 +136,102 @@ internal object ConvertFiles {
             DirResult.Failed("the output folder does not exist")
         }
 
+    sealed interface DirCheck {
+        /** [exists] is false from the first missing segment on; nothing has been created. */
+        data class Ready(
+            val dir: Path,
+            val exists: Boolean,
+        ) : DirCheck
+
+        data class Invalid(
+            val message: String,
+        ) : DirCheck
+    }
+
+    sealed interface EnsureResult {
+        data class Ok(
+            val dir: Path,
+        ) : EnsureResult
+
+        data class Failed(
+            val message: String,
+        ) : EnsureResult
+
+        data class Escaped(
+            val message: String,
+        ) : EnsureResult
+    }
+
+    private fun validSegment(seg: String): Boolean =
+        seg.isNotEmpty() && seg != "." && seg != ".." && seg.none { it == '/' || it == '\\' || it == '\u0000' }
+
+    /**
+     * Planning-phase check of a mirrored sub-folder of the output folder (ADR-0071): every segment that exists must be a
+     * real folder (never a link or a file). Creates nothing.
+     */
+    fun checkTargetDir(
+        outReal: Path,
+        relDir: List<String>,
+    ): DirCheck {
+        var cur = outReal
+        var exists = true
+        for (seg in relDir) {
+            if (!validSegment(seg)) return DirCheck.Invalid("the target folder name is not valid")
+            val next =
+                try {
+                    cur.resolve(seg)
+                } catch (_: RuntimeException) {
+                    return DirCheck.Invalid("the target folder name is not valid")
+                }
+            if (exists) {
+                val attrs =
+                    try {
+                        attributes(next)
+                    } catch (_: IOException) {
+                        return DirCheck.Invalid("the target folder cannot be checked")
+                    }
+                when {
+                    attrs == null -> exists = false
+                    attrs.isSymbolicLink || !attrs.isDirectory ->
+                        return DirCheck.Invalid("the target folder is not a plain folder")
+                }
+            }
+            cur = next
+        }
+        return DirCheck.Ready(cur, exists)
+    }
+
+    /** Write-phase counterpart: creates the missing segments below [outReal] only, re-checking after every step. */
+    fun ensureDir(
+        outReal: Path,
+        relDir: List<String>,
+    ): EnsureResult {
+        var cur = outReal
+        try {
+            for (seg in relDir) {
+                if (!validSegment(seg)) return EnsureResult.Failed("the target folder name is not valid")
+                val next = cur.resolve(seg)
+                val attrs = attributes(next)
+                if (attrs == null) {
+                    Files.createDirectory(next)
+                } else if (attrs.isSymbolicLink || !attrs.isDirectory) {
+                    return EnsureResult.Failed("the target folder is not a plain folder")
+                }
+                val after = attributes(next)
+                if (after == null || after.isSymbolicLink || !after.isDirectory) {
+                    return EnsureResult.Failed("the target folder is not a plain folder")
+                }
+                if (!next.toRealPath().startsWith(outReal)) {
+                    return EnsureResult.Escaped("the target folder leaves the output folder")
+                }
+                cur = next
+            }
+        } catch (_: IOException) {
+            return EnsureResult.Failed("the target folder cannot be created")
+        }
+        return EnsureResult.Ok(cur)
+    }
+
     fun checkTarget(
         outReal: Path,
         fileName: String,

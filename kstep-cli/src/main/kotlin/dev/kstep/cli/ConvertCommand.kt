@@ -2,6 +2,7 @@ package dev.kstep.cli
 
 import dev.kstep.cli.okf.ConvertFiles
 import dev.kstep.cli.okf.ConvertSourceScanner
+import dev.kstep.cli.okf.ConvertTreeScanner
 import dev.kstep.cli.okf.DisplayName
 import dev.kstep.cli.okf.OkfConverter
 import dev.kstep.cli.okf.OkfLimits
@@ -34,7 +35,27 @@ internal enum class ConvertErrorKind(
     TARGET_INVALID("KSTEP-C-009", "target_invalid"),
     WRITE_FAILED("KSTEP-C-010", "write_failed"),
     LIMIT_EXCEEDED("KSTEP-C-011", "limit_exceeded"),
+    DEPTH_EXCEEDED("KSTEP-C-012", "depth_exceeded"),
+    PATH_ESCAPE("KSTEP-C-013", "path_escape"),
+    INVALID_BLOCK_NAME("KSTEP-C-014", "invalid_block_name"),
+    DUPLICATE_BLOCK_NAME("KSTEP-C-015", "duplicate_block_name"),
 }
+
+/** Warnings never change the exit code (ADR-0071). */
+internal enum class ConvertWarningKind(
+    val code: String,
+    val jsonKind: String,
+) {
+    UNKNOWN_BLOCK_ATTRIBUTE("KSTEP-C-016", "unknown_block_attribute"),
+    UNTERMINATED_BLOCK_ATTRIBUTE("KSTEP-C-017", "unterminated_block_attribute"),
+}
+
+internal data class ConvertWarning(
+    val kind: ConvertWarningKind,
+    val source: String,
+    val line: Int?,
+    val message: String,
+)
 
 internal data class ConvertFailure(
     val kind: ConvertErrorKind,
@@ -47,6 +68,8 @@ internal data class WrittenFile(
     val name: String,
     val source: String,
     val block: Int?,
+    val target: String? = null,
+    val blockName: String? = null,
 )
 
 internal enum class SkipReason(
@@ -58,6 +81,8 @@ internal enum class SkipReason(
     SYMBOLIC_LINK("symbolic_link"),
     NOT_REGULAR("not_regular_file"),
     HIDDEN("hidden"),
+    HIDDEN_DIR("hidden_dir"),
+    OUTPUT_DIR("output_dir"),
 }
 
 internal data class Skipped(
@@ -67,17 +92,27 @@ internal data class Skipped(
 )
 
 internal sealed interface ConvertReport {
+    val warnings: List<ConvertWarning>
+
     data class Success(
         val written: List<WrittenFile>,
         val skipped: List<Skipped>,
+        override val warnings: List<ConvertWarning> = emptyList(),
     ) : ConvertReport
 
     data class Failed(
         val failures: List<ConvertFailure>,
         val written: List<WrittenFile>,
         val skipped: List<Skipped>,
+        override val warnings: List<ConvertWarning> = emptyList(),
     ) : ConvertReport
 }
+
+private fun ConvertReport.withWarnings(w: List<ConvertWarning>): ConvertReport =
+    when (this) {
+        is ConvertReport.Success -> copy(warnings = w)
+        is ConvertReport.Failed -> copy(warnings = w)
+    }
 
 /** Injectable so that tests can run with tiny bounds instead of thousands of files. */
 internal data class ConvertDirLimits(
@@ -86,6 +121,7 @@ internal data class ConvertDirLimits(
     val maxBytes: Long = OkfLimits.MAX_SCAN_BYTES,
     val maxTargets: Int = OkfLimits.MAX_CONVERT_TARGETS,
     val maxReportedErrors: Int = 50,
+    val maxDepth: Int = OkfLimits.MAX_DEPTH,
 )
 
 /** What `kstep convert` writes; see ADR-0060 and ADR-0061. */
@@ -94,12 +130,17 @@ private class PlannedFile(
     val bytes: ByteArray,
     val source: String,
     val block: Int?,
-)
+    val relDir: List<String> = emptyList(),
+    val blockName: String? = null,
+) {
+    val relPath: String get() = (relDir + name).joinToString("/")
+}
 
 private sealed interface One {
     class Ok(
         val files: List<PlannedFile>,
         val skipped: List<Skipped>,
+        val warnings: List<ConvertWarning> = emptyList(),
     ) : One
 
     class Fail(
@@ -117,26 +158,38 @@ internal fun runConvert(
     err: PrintStream = System.err,
     beforeMove: () -> Unit = {},
     limits: ConvertDirLimits = ConvertDirLimits(),
+    beforeDescend: (Path) -> Unit = {},
 ): Int {
     val json = command.jsonOutput
     val dirMode = isFolderInput(command.inputPath)
+    val warnings = ArrayList<ConvertWarning>()
     val report =
         executeConvert(
             command,
             dirMode,
             limits,
             beforeMove,
-            onWritten = { w -> if (!json) out.println("Wrote ${w.name}") },
+            onWritten = { w -> if (!json) out.println("Wrote ${w.target ?: w.name}") },
             onPlanned = { skipped -> if (!json) printSkipHints(err, skipped, dirMode) },
-        )
+            warnings = warnings,
+            beforeDescend = beforeDescend,
+        ).withWarnings(warnings)
     if (json) {
-        out.println(convertReportJson(command.target, dirMode, report, limits.maxReportedErrors).toString())
-    } else if (report is ConvertReport.Failed) {
+        out.println(
+            convertReportJson(command.target, dirMode, report, limits.maxReportedErrors, command.recursive).toString(),
+        )
+    } else {
+        for (w in report.warnings.take(limits.maxReportedErrors)) err.println("kstep convert: ${w.message}")
+        if (report.warnings.size > limits.maxReportedErrors) {
+            err.println("kstep convert: ... and ${report.warnings.size - limits.maxReportedErrors} more warnings")
+        }
+    }
+    if (!json && report is ConvertReport.Failed) {
         val max = limits.maxReportedErrors
         for (f in report.failures.take(max)) err.println("kstep convert: ${f.message}")
         if (report.failures.size > max) err.println("kstep convert: ... and ${report.failures.size - max} more errors")
         if (report.written.isNotEmpty()) {
-            err.println("kstep convert: already written: ${report.written.joinToString(", ") { it.name }}")
+            err.println("kstep convert: already written: ${report.written.joinToString(", ") { it.target ?: it.name }}")
         } else if (report.failures.size > 1) {
             err.println("kstep convert: nothing was written")
         }
@@ -172,6 +225,8 @@ private fun printSkipHints(
                 SkipReason.SYMBOLIC_LINK -> "skipped ${s.source} (symbolic link)"
                 SkipReason.NOT_REGULAR -> "skipped ${s.source} (not a regular file)"
                 SkipReason.HIDDEN -> "skipped ${s.source} (hidden file)"
+                SkipReason.HIDDEN_DIR -> "skipped ${s.source} (hidden folder)"
+                SkipReason.OUTPUT_DIR -> "skipped ${s.source} (output folder)"
             }
         err.println("kstep convert: $text")
     }
@@ -183,6 +238,7 @@ internal fun convertReportJson(
     dirMode: Boolean,
     report: ConvertReport,
     maxReportedErrors: Int = 50,
+    recursive: Boolean = false,
 ): JsonObject =
     buildJsonObject {
         fun writtenJson(w: WrittenFile) =
@@ -190,7 +246,30 @@ internal fun convertReportJson(
                 put("name", w.name)
                 put("source", w.source)
                 if (w.block != null) put("block", w.block)
+                if (w.target != null) put("target", w.target)
+                if (w.blockName != null) put("blockName", w.blockName)
             }
+
+        fun warningsJson() {
+            if (report.warnings.isEmpty()) return
+            put(
+                "warnings",
+                buildJsonArray {
+                    for (w in report.warnings.take(maxReportedErrors)) {
+                        add(
+                            buildJsonObject {
+                                put("source", w.source)
+                                put("kind", w.kind.jsonKind)
+                                put("code", w.kind.code)
+                                if (w.line != null) put("line", w.line)
+                                put("message", w.message)
+                            },
+                        )
+                    }
+                },
+            )
+            if (report.warnings.size > maxReportedErrors) put("moreWarnings", report.warnings.size - maxReportedErrors)
+        }
 
         fun skippedJson(s: Skipped) =
             buildJsonObject {
@@ -203,13 +282,16 @@ internal fun convertReportJson(
                 put("status", "success")
                 put("command", "convert")
                 put("target", target.name.lowercase(Locale.ROOT))
+                if (recursive) put("recursive", true)
                 put("written", buildJsonArray { report.written.forEach { add(writtenJson(it)) } })
                 put("skipped", buildJsonArray { report.skipped.forEach { add(skippedJson(it)) } })
+                warningsJson()
             }
             is ConvertReport.Failed -> {
                 val first = report.failures.first()
                 put("status", "error")
                 put("command", "convert")
+                if (recursive) put("recursive", true)
                 put("errorKind", first.kind.jsonKind)
                 put("code", first.kind.code)
                 put("message", first.message)
@@ -240,6 +322,7 @@ internal fun convertReportJson(
                 if (report.skipped.isNotEmpty()) {
                     put("skipped", buildJsonArray { report.skipped.forEach { add(skippedJson(it)) } })
                 }
+                warningsJson()
             }
         }
     }
@@ -252,6 +335,8 @@ private fun executeConvert(
     beforeMove: () -> Unit,
     onWritten: (WrittenFile) -> Unit,
     onPlanned: (List<Skipped>) -> Unit,
+    warnings: MutableList<ConvertWarning>,
+    beforeDescend: (Path) -> Unit,
 ): ConvertReport {
     fun failed(
         kind: ConvertErrorKind,
@@ -266,6 +351,9 @@ private fun executeConvert(
         } catch (_: InvalidPathException) {
             return failed(ConvertErrorKind.INVALID_PATH, "the input path is not valid")
         }
+    if (command.recursive && !dirMode) {
+        return failed(ConvertErrorKind.WRONG_INPUT_TYPE, "--recursive expects a folder")
+    }
     val okf = command.target == ConvertTarget.OKF
     var title: String? = null
     var tags: List<String> = listOf(OkfConverter.KSTEP_TAG)
@@ -312,6 +400,7 @@ private fun executeConvert(
         text: String,
         stem: String,
         shown: String,
+        relDir: List<String> = emptyList(),
     ): One {
         if (okf) {
             if (dirMode && text.isBlank()) {
@@ -327,6 +416,7 @@ private fun executeConvert(
                                 w.note.toByteArray(StandardCharsets.UTF_8),
                                 shown,
                                 null,
+                                relDir,
                             ),
                         ),
                         emptyList(),
@@ -345,9 +435,12 @@ private fun executeConvert(
                             it.source.toByteArray(StandardCharsets.UTF_8),
                             shown,
                             if (it.fileName == single) null else it.blockIndex + 1,
+                            relDir,
+                            it.blockName,
                         )
                     },
                     x.skippedEmptyLines.map { Skipped(shown, SkipReason.EMPTY_BLOCK, it) },
+                    x.scripts.flatMap { blockWarnings(shown, it) },
                 )
             }
             is OkfConverter.ExtractResult.Rejected ->
@@ -359,7 +452,11 @@ private fun executeConvert(
                     else ->
                         One.Fail(
                             ConvertFailure(
-                                ConvertErrorKind.CONVERSION_REJECTED,
+                                when (x.kind) {
+                                    OkfConverter.RejectKind.INVALID_NAME -> ConvertErrorKind.INVALID_BLOCK_NAME
+                                    OkfConverter.RejectKind.DUPLICATE_NAME -> ConvertErrorKind.DUPLICATE_BLOCK_NAME
+                                    else -> ConvertErrorKind.CONVERSION_REJECTED
+                                },
                                 "$shown: ${x.reason}" + (x.line?.let { " (line $it)" } ?: ""),
                                 shown,
                             ),
@@ -408,6 +505,7 @@ private fun executeConvert(
             is One.Ok -> {
                 planned += one.files
                 skipped += one.skipped
+                warnings += one.warnings
             }
             is One.Fail -> return ConvertReport.Failed(listOf(one.failure), emptyList(), emptyList())
         }
@@ -437,36 +535,92 @@ private fun executeConvert(
             is Resolved.Ok -> o.real
             is Resolved.Bad -> return failed(ConvertErrorKind.OUTPUT_FOLDER, o.message)
         }
-    val listing =
-        when (
-            val l =
-                ConvertSourceScanner.list(inputReal, suffix, limits.maxEntries, limits.maxFiles, limits.maxBytes)
-        ) {
-            is ConvertSourceScanner.Outcome.Ok -> l
+
+    class Item(
+        val relDir: List<String>,
+        val name: String,
+        val path: Path,
+        val fileKey: Any?,
+    )
+
+    val items = ArrayList<Item>()
+    if (command.recursive) {
+        // Recursive mode (ADR-0071): own scanner; the flat branch below stays as it was.
+        val skipOut = if (outReal != inputReal && outReal.startsWith(inputReal)) outReal else null
+        val l =
+            ConvertTreeScanner.list(
+                inputReal,
+                suffix,
+                skipOut,
+                limits.maxDepth,
+                limits.maxEntries,
+                limits.maxFiles,
+                limits.maxBytes,
+                beforeDescend,
+            )
+        when (l) {
+            is ConvertTreeScanner.Outcome.Failed ->
+                return failed(
+                    when (l.kind) {
+                        ConvertTreeScanner.FailKind.LIMIT -> ConvertErrorKind.LIMIT_EXCEEDED
+                        ConvertTreeScanner.FailKind.UNREADABLE -> ConvertErrorKind.INPUT_UNREADABLE
+                        ConvertTreeScanner.FailKind.DEPTH -> ConvertErrorKind.DEPTH_EXCEEDED
+                        ConvertTreeScanner.FailKind.ESCAPE -> ConvertErrorKind.PATH_ESCAPE
+                    },
+                    l.message,
+                )
+            is ConvertTreeScanner.Outcome.Ok -> {
+                for (ig in l.ignored) {
+                    val dirKind =
+                        ig.kind == ConvertTreeScanner.SkipKind.HIDDEN_DIR ||
+                            ig.kind == ConvertTreeScanner.SkipKind.OUTPUT_DIR
+                    skipped +=
+                        Skipped(
+                            DisplayName.escaped(ig.relPath) + if (dirKind) "/" else "",
+                            when (ig.kind) {
+                                ConvertTreeScanner.SkipKind.SYMBOLIC_LINK -> SkipReason.SYMBOLIC_LINK
+                                ConvertTreeScanner.SkipKind.NOT_REGULAR -> SkipReason.NOT_REGULAR
+                                ConvertTreeScanner.SkipKind.HIDDEN -> SkipReason.HIDDEN
+                                ConvertTreeScanner.SkipKind.HIDDEN_DIR -> SkipReason.HIDDEN_DIR
+                                ConvertTreeScanner.SkipKind.OUTPUT_DIR -> SkipReason.OUTPUT_DIR
+                            },
+                        )
+                }
+                for (c in l.candidates) items += Item(c.relDir, c.name, c.path, c.fileKey)
+            }
+        }
+    } else {
+        val l =
+            ConvertSourceScanner.list(inputReal, suffix, limits.maxEntries, limits.maxFiles, limits.maxBytes)
+        when (l) {
             is ConvertSourceScanner.Outcome.Failed ->
                 return failed(
                     if (l.limit) ConvertErrorKind.LIMIT_EXCEEDED else ConvertErrorKind.INPUT_UNREADABLE,
                     l.message,
                 )
+            is ConvertSourceScanner.Outcome.Ok -> {
+                for (ig in l.ignored) {
+                    skipped +=
+                        Skipped(
+                            DisplayName.escaped(ig.name),
+                            when (ig.reason) {
+                                ConvertSourceScanner.IgnoredReason.SYMBOLIC_LINK -> SkipReason.SYMBOLIC_LINK
+                                ConvertSourceScanner.IgnoredReason.NOT_REGULAR -> SkipReason.NOT_REGULAR
+                                ConvertSourceScanner.IgnoredReason.HIDDEN -> SkipReason.HIDDEN
+                            },
+                        )
+                }
+                for (c in l.candidates) items += Item(emptyList(), c.name, c.path, c.fileKey)
+            }
         }
-    for (ig in listing.ignored) {
-        skipped +=
-            Skipped(
-                DisplayName.escaped(ig.name),
-                when (ig.reason) {
-                    ConvertSourceScanner.IgnoredReason.SYMBOLIC_LINK -> SkipReason.SYMBOLIC_LINK
-                    ConvertSourceScanner.IgnoredReason.NOT_REGULAR -> SkipReason.NOT_REGULAR
-                    ConvertSourceScanner.IgnoredReason.HIDDEN -> SkipReason.HIDDEN
-                },
-            )
     }
-    if (listing.candidates.isEmpty()) {
+    if (items.isEmpty()) {
         onPlanned(skipped)
         val which = if (okf) "*.kstep.kts" else "*.md"
         return failed(ConvertErrorKind.WRONG_INPUT_TYPE, "no $which files in the input folder", skipped = skipped)
     }
-    for (c in listing.candidates) {
-        val shown = DisplayName.escaped(c.name)
+    for (c in items) {
+        val shown = DisplayName.escaped((c.relDir + c.name).joinToString("/"))
         c.fileKey?.let { inputKeys += it }
         inputReals.add(c.path)
         val text =
@@ -486,10 +640,11 @@ private fun executeConvert(
                 skipped = skipped,
             )
         }
-        when (val one = convertOne(text, c.name.substring(0, c.name.length - suffix.length), shown)) {
+        when (val one = convertOne(text, c.name.substring(0, c.name.length - suffix.length), shown, c.relDir)) {
             is One.Ok -> {
                 planned += one.files
                 skipped += one.skipped
+                warnings += one.warnings
             }
             is One.Fail -> failures += one.failure
         }
@@ -549,11 +704,15 @@ private fun finish(
     onWritten: (WrittenFile) -> Unit,
     onPlanned: (List<Skipped>) -> Unit,
 ): ConvertReport {
+    val recursive = command.recursive
+
     fun failed(
         kind: ConvertErrorKind,
         message: String,
         source: String? = null,
     ) = ConvertReport.Failed(listOf(ConvertFailure(kind, message, source)), emptyList(), skipped)
+
+    fun shownTarget(p: PlannedFile) = DisplayName.escaped(if (recursive) p.relPath else p.name)
 
     onPlanned(skipped)
     if (planned.size > limits.maxTargets) {
@@ -562,24 +721,48 @@ private fun finish(
     // Case-insensitive: macOS and Windows would silently merge such names.
     val byName = HashMap<String, PlannedFile>()
     for (p in planned) {
-        val other = byName.put(p.name.lowercase(Locale.ROOT), p)
+        val other = byName.put(p.relPath.lowercase(Locale.ROOT), p)
         if (other != null) {
             val message =
                 if (other.source == p.source) {
                     "the converted file names are not unique"
                 } else {
-                    "${other.source} and ${p.source} would both write ${DisplayName.escaped(p.name)}"
+                    "${other.source} and ${p.source} would both write ${shownTarget(p)}"
                 }
             return failed(ConvertErrorKind.TARGET_INVALID, message, p.source)
         }
     }
+    // A planned file must not share its name with a planned folder (any prefix of any relDir), case-insensitively.
+    val folderKeys = HashSet<String>()
+    for (p in planned) {
+        for (i in 1..p.relDir.size) {
+            val prefix = p.relDir.subList(0, i)
+            folderKeys += prefix.joinToString("/").lowercase(Locale.ROOT)
+        }
+    }
+    for (p in planned) {
+        if (p.relPath.lowercase(Locale.ROOT) in folderKeys) {
+            return failed(
+                ConvertErrorKind.TARGET_INVALID,
+                "${shownTarget(p)}: the same name is also needed as a target folder",
+                p.source,
+            )
+        }
+    }
     val conflicts = ArrayList<String>()
     for (p in planned) {
-        when (val c = ConvertFiles.checkTarget(outReal, p.name, inputKeys, inputReals)) {
+        val dirCheck =
+            when (val d = ConvertFiles.checkTargetDir(outReal, p.relDir)) {
+                is ConvertFiles.DirCheck.Invalid ->
+                    return failed(ConvertErrorKind.TARGET_INVALID, "${shownTarget(p)}: ${d.message}", p.source)
+                is ConvertFiles.DirCheck.Ready -> d
+            }
+        if (!dirCheck.exists) continue
+        when (val c = ConvertFiles.checkTarget(dirCheck.dir, p.name, inputKeys, inputReals)) {
             is ConvertFiles.TargetCheck.Free -> Unit
-            is ConvertFiles.TargetCheck.Exists -> if (!command.force) conflicts += DisplayName.escaped(p.name)
+            is ConvertFiles.TargetCheck.Exists -> if (!command.force) conflicts += shownTarget(p)
             is ConvertFiles.TargetCheck.Invalid ->
-                return failed(ConvertErrorKind.TARGET_INVALID, "${DisplayName.escaped(p.name)}: ${c.message}", p.source)
+                return failed(ConvertErrorKind.TARGET_INVALID, "${shownTarget(p)}: ${c.message}", p.source)
         }
     }
     if (conflicts.isNotEmpty()) {
@@ -595,10 +778,33 @@ private fun finish(
 
     val written = ArrayList<WrittenFile>()
     for (p in planned) {
-        val shownName = DisplayName.escaped(p.name)
-        when (val r = ConvertFiles.writeAtomic(outReal, p.name, p.bytes, command.force, beforeMove = beforeMove)) {
+        val shownName = shownTarget(p)
+        val dir =
+            when (val d = ConvertFiles.ensureDir(outReal, p.relDir)) {
+                is ConvertFiles.EnsureResult.Ok -> d.dir
+                is ConvertFiles.EnsureResult.Escaped ->
+                    return ConvertReport.Failed(
+                        listOf(ConvertFailure(ConvertErrorKind.PATH_ESCAPE, "$shownName: ${d.message}", p.source)),
+                        written,
+                        skipped,
+                    )
+                is ConvertFiles.EnsureResult.Failed ->
+                    return ConvertReport.Failed(
+                        listOf(ConvertFailure(ConvertErrorKind.WRITE_FAILED, "$shownName: ${d.message}", p.source)),
+                        written,
+                        skipped,
+                    )
+            }
+        when (val r = ConvertFiles.writeAtomic(dir, p.name, p.bytes, command.force, beforeMove = beforeMove)) {
             ConvertFiles.WriteResult.Written -> {
-                val w = WrittenFile(shownName, p.source, p.block)
+                val w =
+                    WrittenFile(
+                        DisplayName.escaped(p.name),
+                        p.source,
+                        p.block,
+                        if (recursive) DisplayName.escaped(p.relPath) else null,
+                        p.blockName,
+                    )
                 written += w
                 onWritten(w)
             }
@@ -623,4 +829,30 @@ private fun finish(
         }
     }
     return ConvertReport.Success(written, skipped)
+}
+
+private fun blockWarnings(
+    shown: String,
+    script: OkfConverter.ExtractedScript,
+): List<ConvertWarning> {
+    val result = ArrayList<ConvertWarning>()
+    for (key in script.unknownKeys) {
+        result +=
+            ConvertWarning(
+                ConvertWarningKind.UNKNOWN_BLOCK_ATTRIBUTE,
+                shown,
+                script.openLine,
+                "$shown: unknown block attribute \"${DisplayName.escaped(key, 32)}\" ignored (line ${script.openLine})",
+            )
+    }
+    if (script.attrUnterminated) {
+        result +=
+            ConvertWarning(
+                ConvertWarningKind.UNTERMINATED_BLOCK_ATTRIBUTE,
+                shown,
+                script.openLine,
+                "$shown: unterminated block attribute ignored (line ${script.openLine})",
+            )
+    }
+    return result
 }

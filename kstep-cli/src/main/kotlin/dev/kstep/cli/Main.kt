@@ -83,11 +83,12 @@ Usage:
       --to kts                             Extract every ```kstep block of a *.md note as *.kstep.kts files
       --out <dir>                          Target folder, must exist (default: the input file's folder)
       --force                              Replace existing target files (never a link or a non-regular file)
+      --recursive                          Also convert sub-folders (depth 8, no links, hidden folders skipped)
       --output json                        Print one JSON document instead of text
       --title <text>                       Note title (--to okf only, not with a folder; a value starting
                                             with -- is taken as the value)
       --tag <tag>                          Extra note tag, repeatable (--to okf only; "kstep" is always set)
-                                            A folder converts every matching file in it (one level, no links).
+                                            A folder converts every matching file in it (one level unless --recursive, no links).
                                             Never runs a script. Exit 1 on any error; nothing is written then.
   kstep --version                          Print the kSTEP version
   kstep help                                Show this message
@@ -155,6 +156,7 @@ sealed interface CliCommand {
         val jsonOutput: Boolean = false,
         val title: String? = null,
         val tags: List<String> = emptyList(),
+        val recursive: Boolean = false,
     ) : CliCommand
 
     data class ShowUsage(
@@ -309,7 +311,7 @@ private fun resolveExportCommand(rest: List<String>): CliCommand {
 
 private const val MAX_EXPORT_TARGET_SELECTORS = 4
 
-// `convert <file|dir> --to okf|kts [--out <dir>] [--force] [--output json] [--title <t>] [--tag <t>]...`; any malformed combination -> ShowUsage(1).
+// `convert <file|dir> --to okf|kts [--out <dir>] [--force] [--recursive] [--output json] [--title <t>] [--tag <t>]...`; any malformed combination -> ShowUsage(1).
 private fun resolveConvertCommand(rest: List<String>): CliCommand {
     var input: String? = null
     var target: ConvertTarget? = null
@@ -318,10 +320,16 @@ private fun resolveConvertCommand(rest: List<String>): CliCommand {
     var jsonOutput = false
     var outputSeen = false
     var title: String? = null
+    var recursive = false
     val tags = ArrayList<String>()
     var i = 0
     while (i < rest.size) {
         when (rest[i]) {
+            "--recursive" -> {
+                if (recursive) return CliCommand.ShowUsage(1)
+                recursive = true
+                i += 1
+            }
             "--output" -> {
                 if (outputSeen || rest.getOrNull(i + 1) != "json") return CliCommand.ShowUsage(1)
                 outputSeen = true
@@ -376,6 +384,7 @@ private fun resolveConvertCommand(rest: List<String>): CliCommand {
         jsonOutput = jsonOutput,
         title = title,
         tags = tags,
+        recursive = recursive,
     )
 }
 

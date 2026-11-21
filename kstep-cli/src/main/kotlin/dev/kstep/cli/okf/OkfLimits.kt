@@ -21,6 +21,12 @@ object OkfLimits {
 
     /** Only this much of an info string is looked at; the rest of a (hostile) line belongs to the content. */
     const val MAX_INFO_CHARS = 64 * 1024
+
+    /** Block attribute `{name=...}` (ADR-0071): how far the attribute list is read, and the bounds of what it yields. */
+    const val MAX_ATTR_CHARS = 256
+    const val MAX_NAME_CHARS = 48
+    const val MAX_UNKNOWN_KEYS = 8
+    const val MAX_UNKNOWN_KEY_CHARS = 32
     const val FM_MAX_BYTES = 16 * 1024
     const val FM_MAX_LINES = 200
     const val FM_MAX_KEYS = 64

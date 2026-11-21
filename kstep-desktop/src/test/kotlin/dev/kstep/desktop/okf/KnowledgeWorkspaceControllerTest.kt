@@ -182,6 +182,38 @@ class KnowledgeWorkspaceControllerTest :
             }
         }
 
+        "the header carries the block name and the name problems, and the preview still runs" {
+            val h = Harness()
+            try {
+                val text =
+                    "```kstep {name=bracket, type=x}\nshape(a)\n```\n\n" +
+                        "```kstep {name=Bracket}\nshape(b)\n```\n\n" +
+                        "```kstep {name=../x}\nshape(c)\n```\n\n" +
+                        "```kstep {name=\n```\n"
+                h.open("n.md" to text)
+                val md = h.root.resolve("n.md")
+                h.controller.onFileOpened(md)
+                h.controller.onBuffer(text, text.indexOf("shape(a)"))
+                h.controller.header.value!!
+                    .name shouldBe "bracket"
+                h.controller.header.value!!
+                    .nameHint shouldBe BlockHint.UnknownAttribute("type")
+                h.controller.onBuffer(text, text.indexOf("shape(b)"))
+                h.controller.header.value!!
+                    .name shouldBe null
+                h.controller.header.value!!
+                    .nameHint shouldBe BlockHint.DuplicateName("Bracket", 1)
+                h.controller.runBlock(md, 1) {}.shouldBeInstanceOf<RunResult.Success>()
+                h.controller.onBuffer(text, text.indexOf("shape(c)"))
+                h.controller.header.value!!
+                    .nameHint shouldBe BlockHint.InvalidName(9)
+                h.controller.header.value!!
+                    .name shouldBe null
+            } finally {
+                h.cleanup()
+            }
+        }
+
         "a run keeps the caret-outside flag of the header" {
             val h = Harness()
             try {

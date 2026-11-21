@@ -1,5 +1,7 @@
 package dev.kstep.cli.okf
 
+import java.util.Locale
+
 /**
  * Pure text conversion between a `*.kstep.kts` script and a Markdown note holding it in a fenced `kstep` block
  * (ADR-0060). No I/O and, above all, no script evaluation: scripts are only ever treated as text.
@@ -44,10 +46,13 @@ object OkfConverter {
         val fileName: String,
         val source: String,
         val openLine: Int,
+        val blockName: String? = null,
+        val unknownKeys: List<String> = emptyList(),
+        val attrUnterminated: Boolean = false,
     )
 
     /** Why an extraction found nothing to write; a folder run skips the first two instead of failing (ADR-0061). */
-    enum class RejectKind { NO_BLOCK, ALL_EMPTY, OTHER }
+    enum class RejectKind { NO_BLOCK, ALL_EMPTY, OTHER, INVALID_NAME, DUPLICATE_NAME }
 
     sealed interface ExtractResult {
         data class Ok(
@@ -175,23 +180,75 @@ object OkfConverter {
                 it.openLine,
             )
         }
+        for (b in ex.blocks) {
+            val issue = b.nameIssue ?: continue
+            return when (issue.kind) {
+                BlockNameIssueKind.MALFORMED ->
+                    ExtractResult.Rejected(
+                        "the block attribute in line ${issue.line} is malformed",
+                        issue.line,
+                        RejectKind.INVALID_NAME,
+                    )
+                BlockNameIssueKind.INVALID ->
+                    ExtractResult.Rejected(
+                        "the kstep block in line ${issue.line} has an invalid name: " +
+                            "use 1-${OkfLimits.MAX_NAME_CHARS} of A-Z a-z 0-9 . _ -",
+                        issue.line,
+                        RejectKind.INVALID_NAME,
+                    )
+                BlockNameIssueKind.DUPLICATE ->
+                    ExtractResult.Rejected(
+                        "block name \"${DisplayName.escaped(issue.value.orEmpty(), 64)}\" in line ${issue.line} " +
+                            "is already used in line ${issue.firstLine}",
+                        issue.line,
+                        RejectKind.DUPLICATE_NAME,
+                    )
+            }
+        }
         if (ex.blocks.isEmpty()) return ExtractResult.Rejected("no kstep block found", null, RejectKind.NO_BLOCK)
         val stem = sanitizeStem(noteStem)
         val single = ex.blocks.size == 1
         val scripts = ArrayList<ExtractedScript>()
         val skipped = ArrayList<Int>()
+        val usedNames = HashMap<String, Int>()
         for (b in ex.blocks) {
             if (b.state == BlockState.EMPTY) {
                 skipped += b.openLine
                 continue
             }
             val content = MarkdownBlockExtractor.content(note, b)
-            val name = if (single) "$stem$SCRIPT_SUFFIX" else "$stem-${b.index + 1}$SCRIPT_SUFFIX"
+            val name =
+                when {
+                    single -> "$stem$SCRIPT_SUFFIX"
+                    b.name != null -> "$stem-${b.name}$SCRIPT_SUFFIX"
+                    else -> "$stem-${b.index + 1}$SCRIPT_SUFFIX"
+                }
             val closeStart = b.closeLineRange?.first
             val terminator =
                 (if (closeStart != null && closeStart >= b.contentEnd) note.substring(b.contentEnd, closeStart) else "")
                     .ifEmpty { lineEnding(content) }
-            scripts += ExtractedScript(b.index, name, content + terminator, b.openLine)
+            scripts +=
+                ExtractedScript(
+                    b.index,
+                    name,
+                    content + terminator,
+                    b.openLine,
+                    b.name,
+                    b.unknownKeys,
+                    b.attrUnterminated,
+                )
+        }
+        // A name such as `2` next to the unnamed block 2 would write the same file twice.
+        for (s in scripts) {
+            val first = usedNames.putIfAbsent(s.fileName.lowercase(Locale.ROOT), s.openLine)
+            if (first != null) {
+                return ExtractResult.Rejected(
+                    "the kstep blocks in line $first and line ${s.openLine} would write the same file " +
+                        "(a block name equals a block number)",
+                    s.openLine,
+                    RejectKind.DUPLICATE_NAME,
+                )
+            }
         }
         if (scripts.isEmpty()) return ExtractResult.Rejected("every kstep block is empty", null, RejectKind.ALL_EMPTY)
         return ExtractResult.Ok(scripts, skipped)

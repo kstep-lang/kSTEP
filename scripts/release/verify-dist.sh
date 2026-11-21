@@ -99,6 +99,17 @@ J="$("$BIN" convert "$FIXTURE" --to okf --out "$TMP/okf-json" --output json --ta
 "$BIN" convert "$TMP/okf" --to kts --out "$TMP/kts-dir" >/dev/null || fail "kstep-cli convert of a folder failed"
 [ -f "$TMP/kts-dir/$STEM.kstep.kts" ] || fail "folder convert produced no $STEM.kstep.kts"
 
+# Recursive folder convert (ADR-0071): sub-folders are mirrored below --out, the JSON says so and names the relative target.
+mkdir -p "$TMP/tree/a/b" "$TMP/tree-out"
+cp "$TMP/okf/$STEM.md" "$TMP/tree/a/b/x.md"
+J="$("$BIN" convert "$TMP/tree" --to kts --out "$TMP/tree-out" --recursive --output json)" \
+  || fail "kstep-cli convert --recursive failed"
+[ "$(printf '%s\n' "$J" | wc -l | tr -d ' ')" = "1" ] || fail "convert --recursive json is not one line"
+printf '%s' "$J" | grep -q '"recursive":true' || fail "convert --recursive json does not say recursive (got: $J)"
+printf '%s' "$J" | grep -q '"target":"a/b/x.kstep.kts"' \
+  || fail "convert --recursive json names no relative target (got: $J)"
+[ -f "$TMP/tree-out/a/b/x.kstep.kts" ] || fail "convert --recursive did not mirror a/b/x.kstep.kts"
+
 # Declared export targets (ADR-0065): STEP only (the zip ships no native bridge). One JSON line, the declared file is
 # written, and a second run over the existing file must fail (exit 1) without --force.
 [ -f "$TARGETS_FIXTURE" ] || fail "targets fixture $TARGETS_FIXTURE not found"
@@ -115,4 +126,4 @@ rc=0
 "$BIN" export "$TARGETS_FIXTURE" --all-targets --out-dir "$TMP/targets" >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 1 ] || fail "export --all-targets over an existing file exited $rc, expected 1 (no --force)"
 
-echo "OK: $ZIP verified (layout, no natives, --help, export, export targets, import, convert incl. json and folder smoke tests)"
+echo "OK: $ZIP verified (layout, no natives, --help, export, export targets, import, convert incl. json, folder and recursive smoke tests)"

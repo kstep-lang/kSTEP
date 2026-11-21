@@ -1,7 +1,9 @@
 package dev.kstep.desktop.okf
 
 import dev.kstep.cli.WorkerTempDir
+import dev.kstep.cli.okf.BlockNameIssueKind
 import dev.kstep.cli.okf.BlockState
+import dev.kstep.cli.okf.DisplayName
 import dev.kstep.cli.okf.FenceBlock
 import dev.kstep.cli.okf.FrontmatterParser
 import dev.kstep.cli.okf.MarkdownBlockExtractor
@@ -60,6 +62,24 @@ sealed interface BlockHint {
 
     data object Untrusted : BlockHint
 
+    /** The `{name=...}` of the block is not usable (ADR-0071); the preview still runs. */
+    data class InvalidName(
+        val line: Int,
+    ) : BlockHint
+
+    data class DuplicateName(
+        val name: String,
+        val firstLine: Int,
+    ) : BlockHint
+
+    data class MalformedAttribute(
+        val line: Int,
+    ) : BlockHint
+
+    data class UnknownAttribute(
+        val key: String,
+    ) : BlockHint
+
     fun text(): String =
         when (this) {
             NoBlocks -> "No ```kstep blocks in this note."
@@ -69,6 +89,10 @@ sealed interface BlockHint {
             TooLarge -> "Block too large to preview"
             TooMany -> "Too many blocks (only the first ${OkfLimits.MAX_BLOCKS} are available)"
             Untrusted -> "Blocks in this folder are not run (not trusted)"
+            is InvalidName -> "Invalid block name (line $line): use 1-${OkfLimits.MAX_NAME_CHARS} of A-Z a-z 0-9 . _ -"
+            is DuplicateName -> "Name \"${DisplayName.escaped(name, 64)}\" already used in line $firstLine"
+            is MalformedAttribute -> "Malformed block attribute (line $line)"
+            is UnknownAttribute -> "Unknown block attribute \"${DisplayName.escaped(key, 32)}\" ignored"
         }
 }
 
@@ -80,6 +104,8 @@ data class BlockHeader(
     val lastLine: Int,
     val cursorOutside: Boolean,
     val hint: BlockHint?,
+    val name: String? = null,
+    val nameHint: BlockHint? = null,
 )
 
 /**
@@ -314,6 +340,16 @@ class KnowledgeWorkspaceController(
                 ex.tooManyBlocks && index == ex.blocks.size - 1 -> BlockHint.TooMany
                 else -> null
             }
+        val issue = block.nameIssue
+        val nameHint =
+            when {
+                issue?.kind == BlockNameIssueKind.INVALID -> BlockHint.InvalidName(issue.line)
+                issue?.kind == BlockNameIssueKind.MALFORMED -> BlockHint.MalformedAttribute(issue.line)
+                issue?.kind == BlockNameIssueKind.DUPLICATE ->
+                    BlockHint.DuplicateName(issue.value.orEmpty(), issue.firstLine ?: 0)
+                block.unknownKeys.isNotEmpty() -> BlockHint.UnknownAttribute(block.unknownKeys.first())
+                else -> null
+            }
         mutableHeader.value =
             BlockHeader(
                 index,
@@ -322,6 +358,8 @@ class KnowledgeWorkspaceController(
                 maxOf(block.contentStartLine, block.contentEndLine),
                 outside,
                 hint,
+                name = if (issue == null) block.name else null,
+                nameHint = nameHint,
             )
     }
 

@@ -192,9 +192,10 @@ case "$1" in
     # kstep-cli convert <file|dir> --to okf|kts [--out <dir>] [--output json] [--tag t] [--title t]: copies each file
     # under the name the real command would use. STUB_CONVERT=nojson prints text instead of JSON, nodir fails for a folder.
     in="$2"; shift 2
-    to=""; out=""; json=0
+    to=""; out=""; json=0; rec=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
+        --recursive) rec=1; shift ;;
         --to) to="$2"; shift 2 ;;
         --out) out="$2"; shift 2 ;;
         --tag|--title) shift 2 ;;
@@ -206,7 +207,22 @@ case "$1" in
       name="$(basename "$1")"
       if [ "$to" = "okf" ]; then cp "$1" "$out/${name%.kstep.kts}.md"; else cp "$1" "$out/${name%.md}.kstep.kts"; fi
     }
-    if [ -d "$in" ]; then
+    written=""
+    if [ -d "$in" ] && [ "$rec" = "1" ]; then
+      # recursive: mirror the sub-folders below --out; STUB_CONVERT=norecursive writes only the top level
+      [ "${STUB_CONVERT:-}" = "norecursive" ] && { for f in "$in"/*; do [ -f "$f" ] && conv "$f"; done; rec=0; }
+      if [ "$rec" = "1" ]; then
+        for f in $(cd "$in" && find . -type f | sed 's|^\./||'); do
+          mkdir -p "$out/$(dirname "$f")"
+          name="$(basename "$f")"
+          rel="$(dirname "$f")"; [ "$rel" = "." ] && rel="" || rel="$rel/"
+          if [ "$to" = "okf" ]; then tn="${name%.kstep.kts}.md"; else tn="${name%.md}.kstep.kts"; fi
+          cp "$in/$f" "$out/$rel$tn"
+          written="$written{\"name\":\"$tn\",\"source\":\"$f\",\"target\":\"$rel$tn\"},"
+        done
+        written="${written%,}"
+      fi
+    elif [ -d "$in" ]; then
       [ "${STUB_CONVERT:-}" = "nodir" ] && exit 1
       for f in "$in"/*; do [ -f "$f" ] && conv "$f"; done
     else
@@ -214,7 +230,11 @@ case "$1" in
     fi
     if [ "$json" = "1" ]; then
       if [ "${STUB_CONVERT:-}" = "nojson" ]; then echo "Wrote converted file"; else
-        echo '{"status":"success","command":"convert","target":"'"$to"'","written":[],"skipped":[]}'
+        if [ "$rec" = "1" ]; then
+          echo '{"status":"success","command":"convert","target":"'"$to"'","recursive":true,"written":['"$written"'],"skipped":[]}'
+        else
+          echo '{"status":"success","command":"convert","target":"'"$to"'","written":[],"skipped":[]}'
+        fi
       fi
     fi
     exit 0 ;;
@@ -236,6 +256,9 @@ STUB
   STUB_IMPORT=unavailable STUB_CONVERT=nodir expect_rc "verify-dist rejects a failing folder convert" 1 \
     bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
   contains "$WORK/err" "convert of a folder failed"; check "reports failing folder convert" $?
+  STUB_IMPORT=unavailable STUB_CONVERT=norecursive expect_rc "verify-dist rejects a convert --recursive that does not mirror" 1 \
+    bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
+  contains "$WORK/err" "recursive"; check "reports convert --recursive that does not mirror" $?
   STUB_IMPORT=unavailable STUB_EXPORT=nojson expect_rc "verify-dist rejects export --all-targets without JSON" 1 \
     bash "$D" "$WORK/ok.zip" 1.0.0 "$WORK/fixture.kts"
   contains "$WORK/err" "did not report success"; check "reports export targets json without success" $?
