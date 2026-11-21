@@ -302,13 +302,15 @@ class AiController(
                         currentOwned = oldOwned
                         if (newOwned && old !== lookup.secret) lookup.secret.wipe()
                     }
-                    if (result == GenerateResult.Started) recordHistory(prompt)
+                    // Publish first, then write the history: the disk write must not delay the UI state, or a later
+                    // call's notice can be overwritten by this call's late publish.
                     when (result) {
                         GenerateResult.Started -> publish(KeyStatus.PRESENT)
                         GenerateResult.NoConsent -> publish(notice = "Consent is required before anything is sent")
                         GenerateResult.NoKey -> publish(KeyStatus.MISSING, "No API key set")
                         GenerateResult.NotAllowed -> publish(notice = "The request is empty or too large")
                     }
+                    if (result == GenerateResult.Started) recordHistory(prompt)
                 }
                 KeyLookup.Missing -> publish(KeyStatus.MISSING, "No API key set")
                 is KeyLookup.StoreFailed -> publish(KeyStatus.UNKNOWN, storeNotice(lookup.reason))

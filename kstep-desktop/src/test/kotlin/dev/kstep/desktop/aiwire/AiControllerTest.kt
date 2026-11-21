@@ -200,6 +200,9 @@ class AiControllerTest :
                 f.waitRepair { it is RepairState.Requesting }
                 f.usedKeys.size shouldBe 1
                 val first = f.usedKeys[0]
+                // The first call publishes its state after the history write; wait for it, or it can land after the
+                // second call's notice and wipe it.
+                f.waitUi { it.keyStatus == KeyStatus.PRESENT }
 
                 // consent is gone: the second call is refused, the first run keeps its key
                 f.controller.revokeConsent()
