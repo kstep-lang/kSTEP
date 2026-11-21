@@ -64,6 +64,9 @@ data class RunContext(
     val lastCandidate: String? = null,
 )
 
+/** Where a proposal comes from: the model, or a subset of the model's change groups the user chose (ADR-0069). */
+enum class ProposalOrigin { MODEL, SELECTION }
+
 sealed interface RepairState {
     data object Idle : RepairState
 
@@ -86,12 +89,27 @@ sealed interface RepairState {
         val attempts: List<AttemptLine>,
         val attemptsUsed: Int,
         val notVerifiedReason: NotVerifiedReason? = null,
+        val origin: ProposalOrigin = ProposalOrigin.MODEL,
+        /** For a [ProposalOrigin.SELECTION] proposal: the model's proposal "Back to proposal" returns to. */
+        val original: Proposal? = null,
+    ) : RepairState
+
+    /** The user's subset is being re-checked in the worker sandbox (no model call, ADR-0069). */
+    data class CheckingSelection(
+        val original: Proposal,
+        val selected: Set<Int>,
+        val total: Int,
+        val buffer: String,
+        val baseSnapshot: String,
+        val startedMs: Long,
     ) : RepairState
 
     data class Failed(
         val code: String,
         val message: String,
         val attempts: List<AttemptLine>,
+        /** The proposal "Back to proposal" returns to, if this failure came from checking a subset. */
+        val back: Proposal? = null,
     ) : RepairState
 
     data object Stopped : RepairState

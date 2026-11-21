@@ -56,4 +56,23 @@ class EditorSessionReplaceTest :
                 session.close()
             }
         }
+
+        "applyProposalIf applies only to the expected text, as one undo step".config(timeout = 60.seconds) {
+            val file = TestSupport.script(TestSupport.newDir(), "r3", "one two")
+            val session = EditorSession()
+            try {
+                session.open(file)
+                TestSupport.await(30_000) { session.view.value.state is EditorState.Editing } shouldBe true
+                session.applyProposalIf("one two", "one 2") shouldBe true
+                text(session) shouldBe "one 2"
+                session.view.value.dirty shouldBe true
+                // the editor moved on: a stale expectation changes nothing
+                session.applyProposalIf("one two", "zzz") shouldBe false
+                text(session) shouldBe "one 2"
+                session.undo()
+                text(session) shouldBe "one two"
+            } finally {
+                session.close()
+            }
+        }
     })

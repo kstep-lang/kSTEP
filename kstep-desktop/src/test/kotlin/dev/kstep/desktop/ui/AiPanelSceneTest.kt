@@ -19,6 +19,7 @@ import dev.kstep.desktop.ai.repair.AttemptLine
 import dev.kstep.desktop.ai.repair.CandidateCompiler
 import dev.kstep.desktop.ai.repair.CompileOutcome
 import dev.kstep.desktop.ai.repair.NotVerifiedReason
+import dev.kstep.desktop.ai.repair.ProposalOrigin
 import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.ai.repair.RunContext
 import dev.kstep.desktop.ai.repair.Verdict
@@ -28,6 +29,7 @@ import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.aiwire.AiUiState
 import dev.kstep.desktop.aiwire.KeyStatus
 import dev.kstep.desktop.aiwire.SandboxStatus
+import dev.kstep.desktop.recent.PromptHistoryStore
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
@@ -64,6 +66,7 @@ class AiPanelSceneTest :
         fun render(
             repair: RepairState,
             sandbox: SandboxStatus = SandboxStatus.AVAILABLE,
+            editorText: String = "val a = 1\n",
         ) {
             val controller =
                 AiController(
@@ -72,6 +75,7 @@ class AiPanelSceneTest :
                     SessionKeyStore(),
                     env = { null },
                     compiler = CandidateCompiler { _, _ -> CompileOutcome.Ok },
+                    historyStore = PromptHistoryStore(TestSupport.newDir()),
                 )
             val p = AiProvider.ANTHROPIC
             val ui =
@@ -91,10 +95,11 @@ class AiPanelSceneTest :
                         controller = controller,
                         ui = ui,
                         repair = repair,
-                        editorText = "val a = 1\n",
+                        editorText = editorText,
                         hasFile = true,
                         focusNonce = 0,
                         onApply = {},
+                        onApplyIf = { _, _ -> true },
                         onEscapeToEditor = {},
                         modifier = Modifier.width(420.dp).fillMaxHeight().verticalScroll(rememberScrollState()),
                     )
@@ -145,5 +150,38 @@ class AiPanelSceneTest :
         "the status line uses the configured attempt limit".config(timeout = 30.seconds) {
             aiStatusText(RepairState.Requesting(ctx, 2, emptyList()), 3_000, 6) shouldBe "AI: attempt 2/6 · 3 s"
             aiStatusText(RepairState.Compiling(ctx, 1, emptyList()), 0) shouldBe "AI: attempt 1/4 · 0 s"
+        }
+
+        "a proposal with several change groups composes with and without a sandbox, while checking and after a failure"
+            .config(timeout = 90.seconds) {
+                val base = (1..40).joinToString("\n") { "l$it" } + "\n"
+                val changed =
+                    base
+                        .trimEnd('\n')
+                        .split('\n')
+                        .toMutableList()
+                        .also {
+                            it[4] = "X5"
+                            it[19] = "X20"
+                            it[34] = "X35"
+                        }.joinToString("\n") + "\n"
+                val proposal = RepairState.Proposal(changed, base, Verdict.COMPILES, lines, 2)
+                SandboxStatus.entries.forEach { render(proposal, it, base) }
+                render(RepairState.CheckingSelection(proposal, setOf(0, 2), 3, changed, base, 0), editorText = base)
+                render(RepairState.Failed("KSTEP-D-034", "needs the sandbox", lines, proposal), editorText = base)
+                val subset =
+                    proposal.copy(
+                        verdict = Verdict.DOES_NOT_COMPILE,
+                        origin = ProposalOrigin.SELECTION,
+                        original = proposal,
+                    )
+                render(subset, editorText = base)
+                render(RepairState.Proposal(base, base, Verdict.COMPILES, lines, 1), editorText = base) // identical
+            }
+
+        "the status line names the subset check".config(timeout = 30.seconds) {
+            val p = RepairState.Proposal("a", "b", Verdict.COMPILES, emptyList(), 1)
+            aiStatusText(RepairState.CheckingSelection(p, setOf(0, 1), 3, "x", "b", 0), 0) shouldBe
+                "AI: checking 2 of 3 changes"
         }
     })

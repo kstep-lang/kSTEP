@@ -296,4 +296,93 @@ class RepairSessionTest :
                 (s.state.value as RepairState.Failed).code shouldBe AiErrorCodes.AI_PROVIDER_UNREACHABLE
             }
         }
+
+        test("checkSelection refuses a stale proposal, Stop returns to the proposal, a late result is dropped") {
+            runBlocking {
+                val scope = CoroutineScope(Dispatchers.Default)
+                val gate = CompletableDeferred<Unit>()
+                val s =
+                    session(
+                        FakeLlm(mutableListOf()),
+                        compiler =
+                            CandidateCompiler { script, _ ->
+                                if (script == "slow") runBlocking { gate.await() }
+                                CompileOutcome.Ok
+                            },
+                        scope = scope,
+                    )
+                s.generate("p", "b", false)
+                s.settle()
+                val prop = s.state.value as RepairState.Proposal
+                // not the current state
+                s.checkSelection(prop.copy(script = "other"), "x", setOf(0), 2, "b") { RepairState.Idle } shouldBe false
+                var called = 0
+                s.checkSelection(prop, "slow", setOf(0), 2, "b") {
+                    called++
+                    RepairState.Idle
+                } shouldBe true
+                s.state.value.shouldBeInstanceOf<RepairState.CheckingSelection>()
+                s.stop()
+                s.state.value shouldBe prop
+                gate.complete(Unit)
+                delay(200)
+                called shouldBe 0
+                s.state.value shouldBe prop
+                // a normal check hands the outcome to the callback and takes its state
+                s.checkSelection(prop, "ok", setOf(0), 2, "b") { o ->
+                    o shouldBe CompileOutcome.Ok
+                    RepairState.Idle
+                } shouldBe true
+                withTimeout(30_000) { while (s.state.value != RepairState.Idle) delay(10) }
+            }
+        }
+
+        test("a check that overruns the total time ends in D-017 with the way back") {
+            runBlocking {
+                val lim = AiLimits(totalMillis = 300)
+                val s =
+                    session(
+                        FakeLlm(mutableListOf()),
+                        compiler =
+                            CandidateCompiler { script, _ ->
+                                if (script == "hang") Thread.sleep(5_000)
+                                CompileOutcome.Ok
+                            },
+                        scope = CoroutineScope(Dispatchers.Default),
+                        lim = lim,
+                    )
+                s.generate("p", "b", false)
+                s.settle()
+                val prop = s.state.value as RepairState.Proposal
+                s.checkSelection(prop, "hang", setOf(0), 2, "b") { RepairState.Idle } shouldBe true
+                withTimeout(30_000) { while (s.state.value !is RepairState.Failed) delay(10) }
+                val f = s.state.value as RepairState.Failed
+                f.code shouldBe AiErrorCodes.AI_LIMIT_REACHED
+                f.back shouldBe prop
+            }
+        }
+
+        test("a throwing compiler during a selection check reaches the callback as a D-030 refusal") {
+            runBlocking {
+                val s =
+                    session(
+                        FakeLlm(mutableListOf()),
+                        compiler =
+                            CandidateCompiler { script, _ ->
+                                if (script == "boom") error("boom")
+                                CompileOutcome.Ok
+                            },
+                        scope = CoroutineScope(Dispatchers.Default),
+                    )
+                s.generate("p", "b", false)
+                s.settle()
+                val prop = s.state.value as RepairState.Proposal
+                s.checkSelection(prop, "boom", setOf(0), 2, "b") { o ->
+                    val r = o.shouldBeInstanceOf<CompileOutcome.Refused>()
+                    RepairState.Failed(r.code, r.message, emptyList(), prop)
+                }
+                withTimeout(30_000) { while (s.state.value !is RepairState.Failed) delay(10) }
+                (s.state.value as RepairState.Failed).code shouldBe AiErrorCodes.AI_SANDBOX_START_FAILED
+            }
+        }
     })

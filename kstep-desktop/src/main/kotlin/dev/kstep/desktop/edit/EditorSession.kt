@@ -135,6 +135,23 @@ class EditorSession(
         synchronized(lock) { replaceText(text, minOf(caret, text.length)) }
     }
 
+    /**
+     * Applies [text] only if the editor text still equals [expected], atomically under the lock (ADR-0069): a subset
+     * of an AI proposal was checked against [expected], so it must not land on a text that changed meanwhile. One undo
+     * step. Returns false and changes nothing otherwise.
+     */
+    fun applyProposalIf(
+        expected: String,
+        text: String,
+    ): Boolean {
+        synchronized(lock) {
+            val editing = state as? EditorState.Editing ?: return false
+            if (editing.text != expected) return false
+            replaceText(text, minOf(caret, text.length))
+            return true
+        }
+    }
+
     /** Moves the caret (an error-bar click) without changing the text. */
     fun requestCaret(offset: Int) {
         synchronized(lock) {

@@ -1027,6 +1027,7 @@ fun DesktopApp(
                                 hasFile = editorView.state is EditorState.Editing,
                                 focusNonce = aiFocus,
                                 onApply = session::applyProposal,
+                                onApplyIf = session::applyProposalIf,
                                 onEscapeToEditor = {},
                                 modifier =
                                     Modifier

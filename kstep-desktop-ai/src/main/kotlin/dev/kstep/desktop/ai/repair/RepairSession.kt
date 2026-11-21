@@ -1,5 +1,6 @@
 package dev.kstep.desktop.ai.repair
 
+import dev.kstep.desktop.ai.AiErrorCodes
 import dev.kstep.desktop.ai.llm.FailureKind
 import dev.kstep.desktop.ai.llm.LlmClient
 import dev.kstep.desktop.ai.llm.LlmReply
@@ -123,6 +124,80 @@ class RepairSession(
         }
     }
 
+    /**
+     * Re-checks a buffer the user built from a subset of the proposal's change groups, with the same compiler (sandbox,
+     * fail-closed). No model call, no attempt count, and nothing is applied here. Returns false (and does nothing)
+     * unless [original] is still the current state.
+     */
+    fun checkSelection(
+        original: RepairState.Proposal,
+        buffer: String,
+        selected: Set<Int>,
+        total: Int,
+        baseSnapshot: String,
+        onResult: (CompileOutcome) -> RepairState,
+    ): Boolean {
+        synchronized(lock) {
+            if (_state.value !== original) return false
+            job?.cancel()
+            kill()
+            val id = ++runId
+            _state.value = RepairState.CheckingSelection(original, selected, total, buffer, baseSnapshot, clock())
+            job =
+                scope.launch {
+                    val outcome =
+                        try {
+                            withTimeout(limits.totalMillis) { compile(buffer) }
+                        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                            null
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            CompileOutcome.Refused(AiErrorCodes.AI_SANDBOX_START_FAILED, "the check could not run")
+                        }
+                    // Under the lock, so a Stop cannot slip in between "still current" and "result applied".
+                    synchronized(lock) {
+                        if (runId == id) {
+                            _state.value =
+                                if (outcome == null) {
+                                    kill()
+                                    RepairState.Failed(
+                                        AiErrorCodes.AI_LIMIT_REACHED,
+                                        "time limit reached (${limits.totalMillis / MS} s)",
+                                        original.attempts,
+                                        original,
+                                    )
+                                } else {
+                                    try {
+                                        onResult(outcome)
+                                    } catch (e: Exception) {
+                                        RepairState.Failed(
+                                            AiErrorCodes.AI_SANDBOX_START_FAILED,
+                                            "the check could not be completed",
+                                            original.attempts,
+                                            original,
+                                        )
+                                    }
+                                }
+                        }
+                    }
+                }
+            return true
+        }
+    }
+
+    /** Moves from [from] to [to] only if [from] is still the current state (the UI acted on a stale one otherwise). */
+    fun transition(
+        from: RepairState,
+        to: RepairState,
+    ): Boolean {
+        synchronized(lock) {
+            if (_state.value !== from) return false
+            _state.value = to
+            return true
+        }
+    }
+
     private fun apply(event: RepairEvent): Pair<RepairState, List<RepairEffect>> = machine.reduce(_state.value, event)
 
     private suspend fun call(
@@ -147,8 +222,13 @@ class RepairSession(
 
     fun stop() {
         synchronized(lock) {
-            val (s, _) = machine.reduce(_state.value, RepairEvent.Stop)
-            _state.value = s
+            val cur = _state.value
+            if (cur is RepairState.CheckingSelection) {
+                _state.value = cur.original
+            } else {
+                val (s, _) = machine.reduce(cur, RepairEvent.Stop)
+                _state.value = s
+            }
             runId++ // late answers of the old run are dropped
             job?.cancel()
         }
@@ -166,5 +246,9 @@ class RepairSession(
 
     override fun close() {
         stop()
+    }
+
+    private companion object {
+        const val MS = 1000
     }
 }

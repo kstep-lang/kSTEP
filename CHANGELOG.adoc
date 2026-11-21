@@ -17,6 +17,15 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop AI panel (Welle D6d, ADR-0069): partial apply. A proposal with several changes shows one checkbox per
+  change group; "Apply k of n changes" builds the chosen subset, checks it again in the worker sandbox and applies it
+  atomically only if it compiles ("Apply anyway" if the geometry engine is missing or it does not compile, with the
+  verdict shown). Without a sandbox the choice is not offered (`KSTEP-D-034`); if the editor changed during the check
+  nothing is applied (`KSTEP-D-035`).
+* kSTEP Desktop AI prompt history (ADR-0069): the last 50 prompts, arrow up/down in the prompt field and a list with
+  "Clear history". Prompts only, stored as plain text in the config folder (mode 0600 where supported); a prompt that
+  contains the API key in use is not stored.
+
 * kSTEP Desktop selection leftovers (Welle D3b, ADR-0068): "Show in Script" in the part and group inspection panels and
   as a double click on a part in the assembly tree. It looks for the literal `"name"` in the editor buffer; exactly one
   hit moves the caret and scrolls there, several hits show a message with a Find action that opens the find bar, no hit

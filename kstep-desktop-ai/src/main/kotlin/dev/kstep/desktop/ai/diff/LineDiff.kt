@@ -22,6 +22,94 @@ object LineDiff {
         return hunks(ops, a, b)
     }
 
+    /**
+     * The same diff as [compute], but split into independently selectable change groups (ADR-0069). [compute] returns
+     * ONE [Hunk] whose groups are only separated by `Collapsed` markers, so the groups are formed here: a group ends
+     * when more than 2 x CONTEXT unchanged lines follow a change, exactly where the display collapses.
+     */
+    fun plan(
+        old: String,
+        new: String,
+        maxLines: Int = 50_000,
+        maxEdits: Int = 5_000,
+        cancelled: () -> Boolean = { false },
+    ): HunkPlan {
+        val a = lines(old)
+        val b = lines(new)
+        if (a.size > maxLines || b.size > maxLines) return HunkPlan.TooLarge(a.size, b.size)
+        val ops = myers(a, b, maxEdits, cancelled) ?: return HunkPlan.TooLarge(a.size, b.size)
+        val flat = flatten(ops, a, b)
+        val planned = ArrayList<PlannedHunk>()
+        var totalAdded = 0
+        var totalRemoved = 0
+        var i = 0
+        var j = 0
+        var open = false
+        var oldStart = 0
+        var newStart = 0
+        var endOld = 0
+        var endNew = 0
+        var firstFlat = 0
+        var lastFlat = 0
+        var added = 0
+        var removed = 0
+        var keepRun = 0
+
+        fun close() {
+            val from = maxOf(0, firstFlat - CONTEXT)
+            val to = minOf(flat.size - 1, lastFlat + CONTEXT)
+            planned.add(
+                PlannedHunk(
+                    planned.size,
+                    oldStart,
+                    endOld,
+                    b.subList(newStart, endNew).toList(),
+                    added,
+                    removed,
+                    Hunk(flat.subList(from, to + 1).toList()),
+                ),
+            )
+            open = false
+        }
+        for ((idx, op) in ops.withIndex()) {
+            when (op) {
+                Op.KEEP -> {
+                    i++
+                    j++
+                    if (open) {
+                        keepRun++
+                        if (keepRun > 2 * CONTEXT) close()
+                    }
+                }
+                Op.ADD, Op.DEL -> {
+                    if (!open) {
+                        open = true
+                        oldStart = i
+                        newStart = j
+                        firstFlat = idx
+                        added = 0
+                        removed = 0
+                    }
+                    if (op == Op.ADD) {
+                        j++
+                        added++
+                        totalAdded++
+                    } else {
+                        i++
+                        removed++
+                        totalRemoved++
+                    }
+                    keepRun = 0
+                    endOld = i
+                    endNew = j
+                    lastFlat = idx
+                }
+            }
+        }
+        if (open) close()
+        return HunkPlan.Ready(old, new, planned, totalAdded, totalRemoved)
+    }
+
     internal fun lines(s: String): List<String> {
         if (s.isEmpty()) return emptyList()
         val parts = s.split('\n')
@@ -105,17 +193,14 @@ object LineDiff {
         return ops.asReversed()
     }
 
-    private fun hunks(
+    private fun flatten(
         ops: List<Op>,
         a: List<String>,
         b: List<String>,
-    ): DiffResult {
-        // flat line list first
+    ): List<DiffLine> {
         val flat = ArrayList<DiffLine>()
         var i = 0
         var j = 0
-        var added = 0
-        var removed = 0
         for (op in ops) {
             when (op) {
                 Op.KEEP -> {
@@ -126,15 +211,24 @@ object LineDiff {
                 Op.ADD -> {
                     flat.add(DiffLine.Added(j + 1, b[j]))
                     j++
-                    added++
                 }
                 Op.DEL -> {
                     flat.add(DiffLine.Removed(i + 1, a[i]))
                     i++
-                    removed++
                 }
             }
         }
+        return flat
+    }
+
+    private fun hunks(
+        ops: List<Op>,
+        a: List<String>,
+        b: List<String>,
+    ): DiffResult {
+        val flat = flatten(ops, a, b)
+        val added = flat.count { it is DiffLine.Added }
+        val removed = flat.count { it is DiffLine.Removed }
         if (added == 0 && removed == 0) return DiffResult.Hunks(emptyList(), 0, 0)
         val keep = BooleanArray(flat.size)
         for ((idx, line) in flat.withIndex()) {

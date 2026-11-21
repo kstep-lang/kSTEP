@@ -1,6 +1,9 @@
 package dev.kstep.desktop.aiwire
 
 import dev.kstep.desktop.ai.AiErrorCodes
+import dev.kstep.desktop.ai.diff.HunkPlan
+import dev.kstep.desktop.ai.diff.HunkSelection
+import dev.kstep.desktop.ai.diff.SelectionBuild
 import dev.kstep.desktop.ai.keys.KeyLookup
 import dev.kstep.desktop.ai.keys.KeyResolver
 import dev.kstep.desktop.ai.keys.KeySource
@@ -18,13 +21,19 @@ import dev.kstep.desktop.ai.provider.KoogAnthropicClient
 import dev.kstep.desktop.ai.provider.ProviderCatalog
 import dev.kstep.desktop.ai.repair.AiLimits
 import dev.kstep.desktop.ai.repair.CandidateCompiler
+import dev.kstep.desktop.ai.repair.CompileOutcome
 import dev.kstep.desktop.ai.repair.GenerateResult
+import dev.kstep.desktop.ai.repair.NotVerifiedReason
+import dev.kstep.desktop.ai.repair.ProposalOrigin
 import dev.kstep.desktop.ai.repair.RepairMachine
 import dev.kstep.desktop.ai.repair.RepairSession
 import dev.kstep.desktop.ai.repair.RepairState
+import dev.kstep.desktop.ai.repair.Verdict
 import dev.kstep.desktop.ai.settings.AiSettings
 import dev.kstep.desktop.ai.settings.SettingsStore
 import dev.kstep.desktop.edit.EditorText
+import dev.kstep.desktop.recent.PromptHistory
+import dev.kstep.desktop.recent.PromptHistoryStore
 import dev.kstep.desktop.run.WorkerSandbox
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.CoroutineScope
@@ -72,6 +81,7 @@ class AiController(
     private val clientFactory: (AiModel, Secret) -> LlmClient = { m, k ->
         KoogAnthropicClient(m.id, k, JdkHttpTransport(), limits)
     },
+    private val historyStore: PromptHistoryStore = PromptHistoryStore(),
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val resolver = KeyResolver(keychain, session, env)
@@ -101,7 +111,25 @@ class AiController(
     private val state = MutableStateFlow(computeUi(KeyStatus.UNKNOWN, null))
     val ui: StateFlow<AiUiState> get() = state
 
+    // The in-memory list is authoritative (guarded by historyLock); the file always gets the whole list (ADR-0069).
+    private val historyLock = Any()
+    private var historyValue = PromptHistory.empty()
+    private val historyFlow = MutableStateFlow<List<String>>(emptyList())
+
+    /** Past prompts, newest first; never holds a key or an answer. */
+    val history: StateFlow<List<String>> get() = historyFlow
+
+    val sandboxAvailable: Boolean get() = sandboxStatus == SandboxStatus.AVAILABLE
+
     init {
+        scope.launch {
+            val loaded = historyStore.load()
+            synchronized(historyLock) {
+                // A prompt recorded before the load finished stays first.
+                historyValue = PromptHistory.of(historyValue.entries + loaded.entries)
+                historyFlow.value = historyValue.entries
+            }
+        }
         // The detection runs one probe process: once per session, never on the UI thread.
         scope.launch {
             sandboxStatus =
@@ -274,6 +302,7 @@ class AiController(
                         currentOwned = oldOwned
                         if (newOwned && old !== lookup.secret) lookup.secret.wipe()
                     }
+                    if (result == GenerateResult.Started) recordHistory(prompt)
                     when (result) {
                         GenerateResult.Started -> publish(KeyStatus.PRESENT)
                         GenerateResult.NoConsent -> publish(notice = "Consent is required before anything is sent")
@@ -285,6 +314,160 @@ class AiController(
                 is KeyLookup.StoreFailed -> publish(KeyStatus.UNKNOWN, storeNotice(lookup.reason))
             }
         }
+    }
+
+    private fun recordHistory(prompt: String) {
+        // Check the text that would really be stored (control/bidi characters removed): a key with an invisible
+        // character inserted must not slip past the check on the raw prompt.
+        val stored = PromptHistory.sanitize(prompt) ?: return
+        val key = current
+        if (key != null && (key.occursIn(prompt) || key.occursIn(stored))) return
+        synchronized(historyLock) {
+            historyValue = historyValue.record(prompt)
+            historyFlow.value = historyValue.entries
+            historyStore.save(historyValue)
+        }
+    }
+
+    fun clearHistory() {
+        scope.launch {
+            synchronized(historyLock) {
+                historyValue = PromptHistory.empty()
+                historyFlow.value = emptyList()
+                historyStore.clear()
+            }
+        }
+    }
+
+    /**
+     * Applies a chosen subset of the proposal's change groups (ADR-0069). A full selection is the plain apply path; a
+     * real subset is built, re-checked in the worker sandbox and applied only if it COMPILES. Without a sandbox, or on
+     * any doubt, nothing is applied (fail-closed). [applyIf] compares the editor text with the one the plan was made
+     * from and applies atomically.
+     */
+    fun applySelection(
+        proposal: RepairState.Proposal,
+        plan: HunkPlan.Ready,
+        selected: Set<Int>,
+        applyIf: (expected: String, text: String) -> Boolean,
+    ) {
+        if (selected.isEmpty()) return
+        scope.launch {
+            fun fail(
+                code: String,
+                message: String,
+            ) = repairSession.transition(
+                proposal,
+                RepairState.Failed(code, message, proposal.attempts, proposal),
+            )
+            if (HunkSelection.isAll(plan, selected)) {
+                if (applyIf(plan.old, plan.new)) {
+                    repairSession.transition(proposal, RepairState.Idle)
+                } else {
+                    fail(AiErrorCodes.AI_EDITOR_CHANGED, "the editor changed; nothing was applied")
+                }
+                return@launch
+            }
+            if (!sandboxAvailable) {
+                fail(AiErrorCodes.AI_PARTIAL_NEEDS_SANDBOX, "choosing single changes needs the worker sandbox")
+                return@launch
+            }
+            val buffer =
+                try {
+                    HunkSelection.build(plan.old, plan.new, plan, selected, limits.maxScriptBytes)
+                } catch (_: IllegalArgumentException) {
+                    fail(AiErrorCodes.AI_EDITOR_CHANGED, "the changes no longer match the editor text")
+                    return@launch
+                }
+            val text =
+                when (buffer) {
+                    is SelectionBuild.Built -> buffer.text
+                    SelectionBuild.TooLarge -> {
+                        fail(AiErrorCodes.AI_LIMIT_REACHED, "the chosen changes make the script too large")
+                        return@launch
+                    }
+                }
+            repairSession.checkSelection(proposal, text, selected, plan.hunks.size, plan.old) { outcome ->
+                selectionResult(outcome, proposal, plan, selected, text, applyIf)
+            }
+        }
+    }
+
+    private fun selectionResult(
+        outcome: CompileOutcome,
+        proposal: RepairState.Proposal,
+        plan: HunkPlan.Ready,
+        selected: Set<Int>,
+        buffer: String,
+        applyIf: (String, String) -> Boolean,
+    ): RepairState {
+        fun failed(
+            code: String,
+            message: String,
+        ) = RepairState.Failed(code, message, proposal.attempts, proposal)
+
+        fun selection(
+            verdict: Verdict,
+            why: NotVerifiedReason? = null,
+        ) = RepairState.Proposal(
+            buffer,
+            plan.old,
+            verdict,
+            proposal.attempts,
+            proposal.attemptsUsed,
+            why,
+            ProposalOrigin.SELECTION,
+            proposal,
+        )
+        return when (outcome) {
+            CompileOutcome.Ok ->
+                if (applyIf(plan.old, buffer)) {
+                    RepairState.Idle
+                } else {
+                    failed(AiErrorCodes.AI_EDITOR_CHANGED, "the editor changed during the check; nothing was applied")
+                }
+            is CompileOutcome.Errors -> selection(Verdict.DOES_NOT_COMPILE)
+            is CompileOutcome.Unverifiable ->
+                if (outcome.why == NotVerifiedReason.SANDBOX_UNAVAILABLE) {
+                    failed(AiErrorCodes.AI_PARTIAL_NEEDS_SANDBOX, "choosing single changes needs the worker sandbox")
+                } else {
+                    selection(Verdict.NOT_VERIFIED, outcome.why)
+                }
+            is CompileOutcome.Refused -> failed(outcome.code, outcome.message)
+        }
+    }
+
+    /** "Apply anyway" for a subset the check could not confirm; the user has seen the verdict. */
+    fun applyChecked(
+        p: RepairState.Proposal,
+        applyIf: (expected: String, text: String) -> Boolean,
+    ) {
+        if (p.origin != ProposalOrigin.SELECTION) return
+        if (applyIf(p.baseText, p.script)) {
+            discard()
+        } else {
+            repairSession.transition(
+                p,
+                RepairState.Failed(
+                    AiErrorCodes.AI_EDITOR_CHANGED,
+                    "the editor changed; nothing was applied",
+                    p.attempts,
+                    p.original,
+                ),
+            )
+        }
+    }
+
+    /** Returns from a subset result or a failed subset check to the model's proposal. */
+    fun backToProposal() {
+        val cur = repair.value
+        val target =
+            when (cur) {
+                is RepairState.Failed -> cur.back
+                is RepairState.Proposal -> cur.original
+                else -> null
+            } ?: return
+        repairSession.transition(cur, target)
     }
 
     fun stop() = repairSession.stop()

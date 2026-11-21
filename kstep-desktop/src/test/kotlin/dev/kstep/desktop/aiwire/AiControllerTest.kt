@@ -15,6 +15,7 @@ import dev.kstep.desktop.ai.repair.CandidateCompiler
 import dev.kstep.desktop.ai.repair.CompileOutcome
 import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.ai.settings.SettingsStore
+import dev.kstep.desktop.recent.PromptHistoryStore
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
@@ -87,6 +88,7 @@ class AiControllerTest :
                         usedKeys += k
                         llm
                     },
+                    historyStore = PromptHistoryStore(dir),
                 )
 
             fun waitUi(cond: (AiUiState) -> Boolean) {

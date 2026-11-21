@@ -1,0 +1,41 @@
+= ADR-0069: Desktop AI: partial apply and prompt history (Welle D6d)
+:toc:
+
+== Status
+
+Accepted (Welle D6d), implemented on a local branch. Tested without a window: the change-group planner and the buffer builder (grouping rule, newline at the end, CRLF, empty editor, all lines removed, size limit, a property test over every subset of up to four groups), the repair session re-check (stale state, Stop, late result, timeout, throwing compiler), the controller flows with a fake compiler (compiles, does not compile, not verified, refused, no sandbox, editor changed, Stop), the atomic apply in the editor session, the prompt history (pure logic, store, cursor) and the headless composition of every new panel state. Not exercised by hand: the keyboard focus of the change rows and the space key in a real window, the up/down arrows with an input method editor composing text, the look of the faded rows on every platform.
+
+== Context
+
+ADR-0059 and ADR-0062 made every AI proposal pass a sandbox check before it can be applied. The panel still offered only the whole proposal. A model often changes several places of which the user wants only some. A second wish: prompts are typed again and again.
+
+== Decisions
+
+D1. Change groups. `LineDiff.compute` returns one `Hunk` whose groups are only separated by `Collapsed` markers, so the groups are formed in a new function `LineDiff.plan`: a group ends when more than six unchanged lines (2 x the context of 3) follow a change, which is exactly where the display collapses. A group knows the old range it replaces (`oldStart` to `oldEnd`), the new lines, its counts and its own display lines. `compute` is unchanged; a test shows that the display lines of all groups equal its output without the markers. The plan holds the two texts it was made from and is not a data class (no `equals` over two texts of up to 1 MiB on every recomposition).
+
+D2. The buffer of a subset. `HunkSelection.build` replaces the chosen old ranges from back to front in the lines of the editor text, so the offsets stay valid. CRLF stays because the carriage return is part of the line. The newline at the end of the file comes from the proposal only when a chosen group touches the end, otherwise from the editor text. All groups chosen gives the proposal byte for byte (before any size check), none gives the editor text. The result is limited to the script size of the AI limits (`maxScriptBytes`, UTF-8); over it the result is `TooLarge`. Unknown ids and texts that are not the plan's texts throw.
+
+D3. Fail-closed check. A real subset is never applied unchecked. It is compiled again through the same `CandidateCompiler` (worker sandbox, ADR-0059), with no model call and without counting an attempt. `COMPILES` applies. `DOES_NOT_COMPILE` and a missing geometry engine (`NOT_VERIFIED`) give a new proposal with origin `SELECTION` that offers "Apply anyway", the same rule as for a whole proposal. A missing sandbox is different: the compiler reports `Unverifiable(SANDBOX_UNAVAILABLE)` and that is a failure `KSTEP-D-034` here, never "Apply anyway" (it would otherwise be the one way to apply unchecked code). A refused check, an exception and a timeout end in a failure with a way back. The panel does not even offer the checkboxes without a sandbox and says why.
+
+D4. Atomic apply. `EditorSession.applyProposalIf(expected, text)` compares the editor text with the one the plan was made from and applies under the editor lock, as one undo step, or changes nothing. A subset result is applied only through it; if the editor changed during the check the result is `KSTEP-D-035` and nothing is applied. The result callback of the session runs under the session lock and only if the run is still current, so a Stop cannot slip in between. A whole proposal keeps the old unconditional apply and the "Editor changed since request" note, as before.
+
+D5. Prompt history. The last 50 distinct prompts (at most 4000 characters each, control and bidi characters removed) are kept in `ai-prompt-history.json` in the config folder. Only the prompt text is passed to the history: never a key, provider, model, script or answer. A prompt is recorded only when the run actually started (not without consent, key or allowed size) and not when it contains the key in use (`Secret.occursIn`). The file is read as untrusted (regular file, no symlink, at most 256 KiB, version 1, strings only) and written atomically with mode 0600 where supported; the oldest entries are dropped until the file fits the load limit. It lives in `kstep-desktop` (package `recent`) because the AI module may write files only in its settings store. The in-memory list is authoritative and the whole list is written; the last write wins. "Clear history" removes the file. No log line carries prompt text.
+
+D6. Panel. Several groups show one checkbox row each ("@ line n +a -r", the whole row toggles and is focusable), unchosen groups are faded, "All"/"None" in the diff header. The primary button reads "Apply" for all, "Apply k of n changes" for a subset (disabled for none), "Apply anyway" for a subset result that did not pass. While checking: "Checking k of n changes..." with Stop, which returns to the model's proposal with the choice kept. A failed subset check offers "Back to proposal". The choice lives outside the state switch so it survives the round trip. The prompt field takes the arrow up key in its first line and arrow down in its last line (only with no selection) to walk the history and back to the draft; a button opens a list with "Clear history".
+
+== Honest limits
+
+* The history is plain text on disk (mode 0600, not encrypted). A prompt that contains a secret other than the current key is stored; no pattern filter exists.
+* Mode 0600 is not enforced on Windows and not verified there.
+* Single lines inside a group cannot be chosen, only whole groups.
+* Arrow up/down while an input method composes text is not tested.
+* The planner is limited like the diff (50,000 lines, 5,000 edits); beyond that the panel says "too many changes" and only the whole proposal can be applied.
+* A subset that compiles can still be a different program than either side; the check only proves that it compiles.
+
+== Security
+
+The only new way to change the editor is the subset path, and it applies only a buffer that the sandboxed worker accepted, against the text it was checked for, or an explicit "Apply anyway" the user saw the verdict for. No new process, network access, or file write outside the history file. Names, paths and prompts are not logged.
+
+== Open / not verified
+
+More providers, MCP tool allow-lists, a credential manager and AppContainer, a new script from a prompt, a tab pair for Inspect and AI, a key broker, hand-testing of focus and keyboard behaviour in a real window, the prompt history under Windows.
