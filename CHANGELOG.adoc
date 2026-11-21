@@ -17,6 +17,9 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop export dialog (Welle D7d, ADR-0070): the running export shows a step line ("Step 2 of 4") and, while
+  writing a file of 8 MiB or more, a real progress bar and percentage; the dialog remembers format, folder and the
+  declared target per script (32 scripts, `export.json` version 2), and the script's export block keeps precedence.
 * kSTEP Desktop AI panel (Welle D6d, ADR-0069): partial apply. A proposal with several changes shows one checkbox per
   change group; "Apply k of n changes" builds the chosen subset, checks it again in the worker sandbox and applies it
   atomically only if it compiles ("Apply anyway" if the geometry engine is missing or it does not compile, with the

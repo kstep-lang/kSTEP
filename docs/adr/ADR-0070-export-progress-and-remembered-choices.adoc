@@ -1,0 +1,47 @@
+= ADR-0070: Desktop export dialog: progress and remembered choices (Welle D7d)
+:toc:
+
+== Status
+
+Accepted (Welle D7d), implemented on a local branch. Tested without a window: the step line and the percentage rule, the progress events in the state machine (phase, generation, clamping, monotonic, reset), the write progress of the atomic writer (per block, cancel, throwing callback, empty file), the throttle, the preferences store (versions, per-script entries, limits, hostile files, parallel merge, key) and the pre-fill rule. Not exercised by hand: the look of the progress bar and the step line in a real window on every platform, and a very large export on real hardware.
+
+== Context
+
+ADR-0057 and ADR-0063 gave the export dialog a phase line and remembered the last format and folder. Two wishes remained (follow-up D7d of ADR-0065): show that something is happening and how far the write is, and open the dialog with what was used for this script last time.
+
+== Decisions
+
+D1. No weighted percentage. Only the write (phase 4) knows real bytes. Phases 1 to 3 have no honest progress, so they show the step ("Step 2 of 4 - Running script - 12 s of max. 120 s") and an indeterminate bar. A percentage is shown only while writing and only from 8 MiB on (`ExportText.PROGRESS_PERCENT_MIN_BYTES`); smaller files are written in an instant. It is rounded down and never 100: 100 % appears only as the success state.
+
+D2. Write progress. `ExportAtomicWriter.write` takes an additive `onProgress(written, total)` before `isCancelled`; it is called after each 1 MiB block, `total` is the size of the validated worker output (0 = unknown). A callback never breaks the export (exceptions are swallowed) and is not called after a cancel. The controller throttles to at most ten dispatches per second on its injected clock; the final report always passes. `ExportEvent.WriteProgress` is accepted only for the current generation and only while writing, is clamped to 0..total and is monotonic. Leaving the phase or the run drops the fields.
+
+D3. No target counter. The desktop dialog exports one target per run (ADR-0063 D7); a "target 2 of 5" counter would show something that does not exist. Not built.
+
+D4. Remembered per script. `export.json` gets version 2 with an entry per script: format, folder and the declared target's file name, plus a last-used time. The key is the SHA-256 of the absolute, normalized script path (not resolved through links). At most 32 entries are kept (most recently used, ties by key). Nothing else is remembered: no typed file name, no options (the dialog has none).
+
+D5. Precedence. With an `export { }` block the remembered target is marked if the block still declares it, otherwise the first one, and the format is that target's; the remembered format and the global last format do not count. Without a block: the script's format, else the last format overall, else the default. Folder: the script's, else the last overall, else the script's own folder. The block never decides a folder.
+
+D6. Untrusted file. At most 64 KiB (was 4 KiB), checked before parsing. A file without a version is read as version 1 (format and folder only), an unknown version gives defaults. Keys must be 64 lowercase hex characters; per entry every field is validated alone (known format, absolute existing directory without a link and at most 1024 characters, a target that is a valid declared name for the entry's format, a time clamped to 0 up to now plus one day) and a bad field is dropped, not repaired. Saving reloads the file first and merges, so two desktop instances do not delete each other's entries.
+
+D7. Reset. No "forget" button: deleting `export.json` resets everything.
+
+== Honest limits
+
+* Phases 1 to 3 carry no real progress information; the bar is indeterminate there.
+* The memory is lost when the script is moved or renamed (the key is the path).
+* The hash is a pseudonym, not a secret: someone who knows a path can check whether an entry exists.
+* The path is not normalized for case, so the same file opened with different capitalization on Windows or macOS can get two entries.
+* The write progress is the copy into the target's temporary file; the final move is instant.
+* Several desktop instances write the file last-wins per save; entries are merged, the global last format and folder are not.
+
+== Security
+
+No new process, network access or file location. The file is read as untrusted (size, version, keys, fields) and written atomically with mode 0600 where supported. Only counts and codes are logged, never paths, names, hashes or script text.
+
+== Open / not verified
+
+* An own file and folder dialog (the double replace question on macOS), a watertight check of the write path, and options of the formats in the desktop dialog (they would then be remembered too).
+* "Export all" with a target counter, only after a new design decision.
+* Real progress from the worker in the script phase.
+* Very large exports (above 8 MiB) on real hardware are covered by tests only.
+* See ADR-0057, ADR-0063 and ADR-0065 (follow-up D7d).

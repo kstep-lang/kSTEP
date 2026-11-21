@@ -55,6 +55,7 @@ class ExportAtomicWriter(
         source: Path,
         target: Path,
         replaceConfirmed: Boolean,
+        onProgress: (written: Long, total: Long) -> Unit = { _, _ -> },
         isCancelled: () -> Boolean,
     ): WriteResult {
         var temp: Path? = null
@@ -62,7 +63,7 @@ class ExportAtomicWriter(
             val dir =
                 target.parent ?: return failed(DesktopErrorCodes.EXPORT_TARGET_INVALID, "the target has no folder")
             temp = createTemp(dir)
-            val bytes = copy(source, temp, isCancelled) ?: return WriteResult.Cancelled
+            val bytes = copy(source, temp, onProgress, isCancelled) ?: return WriteResult.Cancelled
             beforeMove()
             if (isCancelled()) return WriteResult.Cancelled
             val existing = attributes(target)
@@ -130,13 +131,20 @@ class ExportAtomicWriter(
         return path
     }
 
-    /** Copies in chunks, checking [isCancelled] between them; `null` if stopped. */
+    /** Copies in chunks, checking [isCancelled] between them and reporting after each written block; `null` if stopped. */
     private fun copy(
         source: Path,
         temp: Path,
+        onProgress: (written: Long, total: Long) -> Unit,
         isCancelled: () -> Boolean,
     ): Long? {
         var total = 0L
+        val expected =
+            try {
+                Files.size(source)
+            } catch (_: IOException) {
+                0L
+            }
         FileChannel.open(source, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { input ->
             FileChannel.open(temp, StandardOpenOption.WRITE).use { output ->
                 val buffer = ByteBuffer.allocate(chunkBytes)
@@ -146,6 +154,12 @@ class ExportAtomicWriter(
                     if (input.read(buffer) < 0) break
                     buffer.flip()
                     while (buffer.hasRemaining()) total += output.write(buffer)
+                    // a progress callback never breaks an export
+                    try {
+                        onProgress(total, expected)
+                    } catch (_: Exception) {
+                        // ignored
+                    }
                 }
                 output.force(true)
             }

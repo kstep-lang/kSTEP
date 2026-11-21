@@ -84,11 +84,12 @@ import dev.kstep.desktop.edit.SourceLocation
 import dev.kstep.desktop.export.ExportController
 import dev.kstep.desktop.export.ExportFormat
 import dev.kstep.desktop.export.ExportNotice
-import dev.kstep.desktop.export.ExportPreferences
 import dev.kstep.desktop.export.ExportPreferencesStore
+import dev.kstep.desktop.export.ExportPrefill
 import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
+import dev.kstep.desktop.export.ScriptExportPreference
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
@@ -243,6 +244,8 @@ fun DesktopApp(
     val savedExportPreferences = remember { exportPreferences.load() }
     var lastExportFormat by remember { mutableStateOf(savedExportPreferences.lastFormat ?: ExportFormat.DEFAULT) }
     var lastExportDir by remember { mutableStateOf(savedExportPreferences.lastDir) }
+    // the declared target (an `export { }` name) of the last started export, remembered per script (ADR-0070)
+    var lastExportTargetName by remember { mutableStateOf<String?>(null) }
     val exportRunning = exportState is ExportState.Running
     LaunchedEffect(exportRunning) {
         while (exportRunning) {
@@ -612,11 +615,24 @@ fun DesktopApp(
             exportNotice =
                 ExportNotice.retain(exportNotice, state.file, state, knowledgeOpen, exportDialogOpened = true)
             exportSaveError = null
+            val declared = (state as? DesktopState.Ok)?.model?.scriptExportTargets.orEmpty()
+            val saved = exportPreferences.load()
+            val prefill =
+                ExportPrefill.resolve(
+                    declared,
+                    saved.scripts[ExportPreferencesStore.scriptKey(exportScript)],
+                    saved.copy(
+                        lastDir = lastExportDir ?: saved.lastDir,
+                        lastFormat =
+                            saved.lastFormat ?: lastExportFormat,
+                    ),
+                )
             exporter.begin(
                 exportScript,
-                lastExportFormat,
-                lastExportDir ?: exportScript.toAbsolutePath().parent ?: exportScript.toAbsolutePath(),
-                (state as? DesktopState.Ok)?.model?.scriptExportTargets.orEmpty(),
+                prefill.format,
+                prefill.dir ?: exportScript.toAbsolutePath().parent ?: exportScript.toAbsolutePath(),
+                declared,
+                prefill.selectedScriptTarget,
             )
             exportVisible = true
         }
@@ -639,14 +655,30 @@ fun DesktopApp(
                 )
         }
         lastExportDir = done.dir
-        exportPreferences.save(ExportPreferences(lastExportFormat, done.dir))
+        val script = state.file
+        exportPreferences.remember(
+            lastExportFormat,
+            done.dir,
+            script?.let(ExportPreferencesStore::scriptKey),
+            script?.let {
+                ScriptExportPreference(
+                    lastExportFormat,
+                    done.dir,
+                    lastExportTargetName,
+                    System.currentTimeMillis() / 1_000,
+                )
+            },
+        )
         exportVisible = false
     }
     LaunchedEffect(state, knowledgeOpen) {
         exportNotice = ExportNotice.retain(exportNotice, state.file, state, knowledgeOpen, exportDialogOpened = false)
     }
     LaunchedEffect(exportState.generation, exportState is ExportState.Running) {
-        (exportState as? ExportState.Running)?.let { lastExportFormat = it.format }
+        (exportState as? ExportState.Running)?.let { run ->
+            lastExportFormat = run.format
+            lastExportTargetName = run.selectedScriptTarget?.let { run.scriptTargets.getOrNull(it)?.fileName }
+        }
     }
     var selectedError by remember(state) { mutableStateOf<DesktopError?>(null) }
     val selectError: (DesktopError) -> Unit = { error ->

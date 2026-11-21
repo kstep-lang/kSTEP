@@ -118,4 +118,54 @@ class ExportAtomicWriterTest :
                 dir.toFile().deleteRecursively()
             }
         }
+
+        "progress is reported after each block, monotonic, ending at the file size" {
+            withDirs { work, target ->
+                val source = Files.write(work.resolve("s"), ByteArray(100) { it.toByte() })
+                val seen = mutableListOf<Pair<Long, Long>>()
+                val result =
+                    ExportAtomicWriter(chunkBytes = 16)
+                        .write(source, target.resolve("a.step"), false, { w, t -> seen += w to t }) { false }
+                result shouldBe WriteResult.Written(100)
+                seen.size shouldBe 7
+                seen.all { it.second == 100L } shouldBe true
+                seen.map { it.first } shouldBe seen.map { it.first }.sorted()
+                seen.last() shouldBe (100L to 100L)
+            }
+        }
+
+        "an empty file reports no progress and still succeeds" {
+            withDirs { work, target ->
+                val source = Files.write(work.resolve("s"), ByteArray(0))
+                var calls = 0
+                ExportAtomicWriter(chunkBytes = 16)
+                    .write(source, target.resolve("a.step"), false, { _, _ -> calls++ }) { false } shouldBe
+                    WriteResult.Written(0)
+                calls shouldBe 0
+            }
+        }
+
+        "no progress is reported after a cancel and a throwing callback does not break the write" {
+            withDirs { work, target ->
+                val source = Files.write(work.resolve("s"), ByteArray(100) { it.toByte() })
+                var calls = 0
+                var cancelled = false
+                val result =
+                    ExportAtomicWriter(chunkBytes = 16).write(
+                        source,
+                        target.resolve("a.step"),
+                        false,
+                        { _, _ ->
+                            calls++
+                            cancelled = true
+                        },
+                    ) { cancelled }
+                result shouldBe WriteResult.Cancelled
+                calls shouldBe 1
+                entries(target) shouldBe emptyList()
+                ExportAtomicWriter(chunkBytes = 16)
+                    .write(source, target.resolve("b.step"), false, { _, _ -> error("boom") }) { false } shouldBe
+                    WriteResult.Written(100)
+            }
+        }
     })

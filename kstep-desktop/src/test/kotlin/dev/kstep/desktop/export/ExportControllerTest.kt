@@ -215,4 +215,18 @@ class ExportControllerTest :
                 h.cleanup()
             }
         }
+
+        "the progress throttle lets at most ten reports per second pass and never swallows the last one" {
+            var now = 0L
+            val throttle = ProgressThrottle { now }
+            throttle.admit(1, 100) shouldBe true
+            now = 50
+            throttle.admit(2, 100) shouldBe false
+            now = 99
+            throttle.admit(3, 100) shouldBe false
+            now = 100
+            throttle.admit(4, 100) shouldBe true
+            now = 110
+            throttle.admit(100, 100) shouldBe true
+        }
     })

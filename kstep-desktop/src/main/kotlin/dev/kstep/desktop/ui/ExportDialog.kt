@@ -26,6 +26,11 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,6 +39,7 @@ import androidx.compose.ui.unit.sp
 import dev.kstep.cli.DesktopExportWorker
 import dev.kstep.desktop.export.ExportFormat
 import dev.kstep.desktop.export.ExportPathText
+import dev.kstep.desktop.export.ExportPhase
 import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
@@ -294,16 +300,35 @@ private fun RunningBody(
     state: ExportState.Running,
     context: ExportDialogContext,
 ) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        LinearProgressIndicator(Modifier.fillMaxWidth())
-        Text(
-            ExportText.phaseLine(
-                state.phase,
-                context.elapsedSince(state.startedAtMs),
-                DesktopExportWorker.EXPORT_TIMEOUT_MILLIS,
-            ),
-            fontSize = 13.sp,
+    val fraction =
+        if (state.phase ==
+            ExportPhase.WRITING
+        ) {
+            ExportText.progressFraction(state.writtenBytes, state.totalBytes)
+        } else {
+            null
+        }
+    val line =
+        ExportText.stepLine(
+            state.phase,
+            context.elapsedSince(state.startedAtMs),
+            DesktopExportWorker.EXPORT_TIMEOUT_MILLIS,
+            state.writtenBytes,
+            state.totalBytes,
         )
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val barModifier =
+            Modifier.fillMaxWidth().semantics {
+                contentDescription = line
+                progressBarRangeInfo =
+                    if (fraction != null) ProgressBarRangeInfo(fraction, 0f..1f) else ProgressBarRangeInfo.Indeterminate
+            }
+        if (fraction != null) {
+            LinearProgressIndicator(progress = { fraction }, modifier = barModifier)
+        } else {
+            LinearProgressIndicator(modifier = barModifier)
+        }
+        Text(line, fontSize = 13.sp, style = TextStyle(fontFeatureSettings = "tnum"))
         Text(
             state.target.fileName
                 ?.toString()

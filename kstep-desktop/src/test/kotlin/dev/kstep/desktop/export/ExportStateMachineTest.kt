@@ -137,4 +137,60 @@ class ExportStateMachineTest :
             reduce(configured(), ExportEvent.Close).effects shouldBe listOf(ExportEffect.CloseDialog)
             reduce(running(), ExportEvent.Close).effects shouldBe emptyList()
         }
+
+        fun writing(): ExportState.Running =
+            reduce(running(), ExportEvent.PhaseChanged(1, ExportPhase.WRITING)).state as ExportState.Running
+
+        "write progress is taken only while writing" {
+            val before = reduce(running(), ExportEvent.WriteProgress(1, 5, 10)).state as ExportState.Running
+            before.writtenBytes shouldBe null
+            val after = reduce(writing(), ExportEvent.WriteProgress(1, 5, 10)).state as ExportState.Running
+            after.writtenBytes shouldBe 5
+            after.totalBytes shouldBe 10
+        }
+
+        "write progress of an older generation is ignored" {
+            val w = writing()
+            reduce(w, ExportEvent.WriteProgress(0, 5, 10)).state shouldBe w
+        }
+
+        "write progress is clamped, monotonic and unknown for an empty file" {
+            val w = writing()
+            val a = reduce(w, ExportEvent.WriteProgress(1, 50, 10)).state as ExportState.Running
+            a.writtenBytes shouldBe 10
+            val b = reduce(a, ExportEvent.WriteProgress(1, 3, 10)).state as ExportState.Running
+            b.writtenBytes shouldBe 10
+            val c = reduce(w, ExportEvent.WriteProgress(1, -4, 10)).state as ExportState.Running
+            c.writtenBytes shouldBe 0
+            val d = reduce(w, ExportEvent.WriteProgress(1, 0, 0)).state as ExportState.Running
+            d.writtenBytes shouldBe null
+            d.totalBytes shouldBe null
+        }
+
+        "a phase change clears the progress" {
+            val w = reduce(writing(), ExportEvent.WriteProgress(1, 5, 10)).state
+            val next = reduce(w, ExportEvent.PhaseChanged(1, ExportPhase.VALIDATING)).state as ExportState.Running
+            next.writtenBytes shouldBe null
+            next.totalBytes shouldBe null
+        }
+
+        "Stop while writing does nothing, Stop earlier returns to Configuring and drops the progress" {
+            val w = reduce(writing(), ExportEvent.WriteProgress(1, 5, 10)).state
+            reduce(w, ExportEvent.Stop).state shouldBe w
+            val stopped = reduce(running(), ExportEvent.Stop)
+            stopped.state.shouldBeInstanceOf<ExportState.Configuring>()
+            stopped.effects shouldBe listOf(ExportEffect.CancelRun(1))
+        }
+
+        "the suggestion marks the remembered declared target and ignores an out-of-range one" {
+            val targets =
+                listOf(
+                    ScriptExportTarget(ExportFormat.STEP, "a.step"),
+                    ScriptExportTarget(ExportFormat.STL, "b.stl"),
+                )
+            ExportStateMachine.suggestion("s.kstep.kts", targets, null, 1).fileName shouldBe "b.stl"
+            ExportStateMachine.suggestion("s.kstep.kts", targets, null, 1).selectedScriptTarget shouldBe 1
+            ExportStateMachine.suggestion("s.kstep.kts", targets, null, 7).fileName shouldBe "a.step"
+            ExportStateMachine.suggestion("s.kstep.kts", targets, null).selectedScriptTarget shouldBe 0
+        }
     })

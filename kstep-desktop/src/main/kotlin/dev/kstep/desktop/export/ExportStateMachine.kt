@@ -43,6 +43,9 @@ sealed interface ExportState {
         /** Carried through a run so that a stopped or failed run returns to the same dialog (ADR-0063). */
         val scriptTargets: List<ScriptExportTarget> = emptyList(),
         val selectedScriptTarget: Int? = null,
+        /** Bytes written so far and the size of the file being written; only while [phase] is WRITING (else `null`). */
+        val writtenBytes: Long? = null,
+        val totalBytes: Long? = null,
     ) : ExportState
 
     data class Succeeded(
@@ -103,6 +106,13 @@ sealed interface ExportEvent {
     data class PhaseChanged(
         val generation: Long,
         val phase: ExportPhase,
+    ) : ExportEvent
+
+    /** Bytes copied so far into the target's temporary file (ADR-0070); ignored outside the writing phase. */
+    data class WriteProgress(
+        val generation: Long,
+        val written: Long,
+        val total: Long,
     ) : ExportEvent
 
     data class Finished(
@@ -173,9 +183,11 @@ object ExportStateMachine {
         scriptFileName: String,
         scriptTargets: List<ScriptExportTarget>,
         lastFormat: ExportFormat?,
+        preferredTarget: Int? = null,
     ): Suggestion {
-        val first = scriptTargets.firstOrNull()
-        if (first != null) return Suggestion(first.format, 0, first.fileName)
+        val index = preferredTarget?.takeIf { it in scriptTargets.indices } ?: 0
+        val first = scriptTargets.getOrNull(index)
+        if (first != null) return Suggestion(first.format, index, first.fileName)
         val format = lastFormat ?: ExportFormat.DEFAULT
         return Suggestion(format, null, ExportNaming.defaultFileName(scriptFileName, format))
     }
@@ -303,10 +315,11 @@ object ExportStateMachine {
         when (event) {
             is ExportEvent.PhaseChanged ->
                 if (event.generation == state.generation) {
-                    ExportTransition(state.copy(phase = event.phase))
+                    ExportTransition(state.copy(phase = event.phase, writtenBytes = null, totalBytes = null))
                 } else {
                     ExportTransition(state)
                 }
+            is ExportEvent.WriteProgress -> ExportTransition(writeProgress(state, event))
             is ExportEvent.Finished ->
                 if (event.generation ==
                     state.generation
@@ -335,6 +348,17 @@ object ExportStateMachine {
                 }
             else -> ExportTransition(state)
         }
+
+    private fun writeProgress(
+        state: ExportState.Running,
+        event: ExportEvent.WriteProgress,
+    ): ExportState.Running {
+        if (event.generation != state.generation || state.phase != ExportPhase.WRITING) return state
+        if (event.total <= 0) return state.copy(writtenBytes = null, totalBytes = null)
+        // monotonic: a late or repeated report never moves the bar back
+        val written = event.written.coerceIn(0, event.total).coerceAtLeast(state.writtenBytes ?: 0)
+        return state.copy(writtenBytes = written.coerceAtMost(event.total), totalBytes = event.total)
+    }
 
     private fun finished(
         state: ExportState.Running,

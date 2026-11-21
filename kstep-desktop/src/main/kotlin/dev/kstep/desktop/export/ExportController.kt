@@ -22,6 +22,26 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private val logger = KotlinLogging.logger {}
 
+/** Lets at most ten progress reports per second through; the final report (written == total) always passes. */
+internal class ProgressThrottle(
+    private val clock: () -> Long,
+) {
+    private var last: Long? = null
+
+    fun admit(
+        written: Long,
+        total: Long,
+    ): Boolean {
+        val now = clock()
+        val previous = last
+        val pass = previous == null || now - previous >= MIN_INTERVAL_MS || (total > 0 && written >= total)
+        if (pass) last = now
+        return pass
+    }
+}
+
+private const val MIN_INTERVAL_MS = 100L
+
 /**
  * Wires the pure [ExportStateMachine] to the export worker and the atomic writer (ADR-0057). Compose-free. Every event
  * goes through one lock; the pipeline (check target, run worker, validate output, write atomically) runs on a single
@@ -65,9 +85,11 @@ class ExportController(
         format: ExportFormat,
         directory: Path,
         scriptTargets: List<ScriptExportTarget> = emptyList(),
+        preferredScriptTarget: Int? = null,
     ) {
         // a declared name wins over the last used format (ADR-0063); the folder is always the caller's, never the script's
-        val suggestion = ExportStateMachine.suggestion(scriptPath.fileName.toString(), scriptTargets, format)
+        val suggestion =
+            ExportStateMachine.suggestion(scriptPath.fileName.toString(), scriptTargets, format, preferredScriptTarget)
         synchronized(lock) {
             if (mutableState.value is ExportState.Running) return
             script = scriptPath.toAbsolutePath().normalize()
@@ -218,7 +240,14 @@ class ExportController(
                 return failed(DesktopErrorCodes.EXPORT_OUTPUT_INVALID, it.reason)
             }
             dispatch(ExportEvent.PhaseChanged(generation, ExportPhase.WRITING))
-            return when (val written = writer.write(file, ok.file, effect.replaceConfirmed) { !isActive(generation) }) {
+            val throttle = ProgressThrottle(clock)
+            val onProgress: (Long, Long) -> Unit = { written, total ->
+                if (throttle.admit(written, total)) dispatch(ExportEvent.WriteProgress(generation, written, total))
+            }
+            return when (
+                val written =
+                    writer.write(file, ok.file, effect.replaceConfirmed, onProgress) { !isActive(generation) }
+            ) {
                 is WriteResult.Written ->
                     PipelineOutcome.Success(ok.file.fileName.toString(), written.bytes, ok.dir)
                 is WriteResult.NeedsReplace -> PipelineOutcome.NeedsReplace(written.existingBytes)
