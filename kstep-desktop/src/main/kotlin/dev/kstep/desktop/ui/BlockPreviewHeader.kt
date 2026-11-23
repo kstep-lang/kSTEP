@@ -1,19 +1,18 @@
 package dev.kstep.desktop.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.desktop.okf.BlockHeader
@@ -44,18 +43,25 @@ internal fun BlockPreviewHeader(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier.fillMaxWidth().height(28.dp).padding(horizontal = 8.dp),
+        modifier.fillMaxWidth().heightIn(min = 28.dp).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        val text =
-            buildAnnotatedString {
-                blockHeaderSegments(header).forEachIndexed { i, (part, warn) ->
-                    if (i > 0) append(" · ")
-                    if (warn) withStyle(SpanStyle(color = WARN)) { append(part) } else append(part)
-                }
+        val segments = blockHeaderSegments(header)
+        // The name warning has its own, wrapping line: the full text (the allowed characters, the line number) must be readable.
+        Column(Modifier.weight(1f)) {
+            Text(
+                segments.filter { !it.second }.joinToString(" · ") { it.first },
+                fontSize = 12.sp,
+                color = DIM,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            segments.filter { it.second }.forEach { (part, _) ->
+                Text(part, fontSize = 12.sp, color = WARN, fontFamily = FontFamily.Monospace, maxLines = 3)
             }
-        Text(text, fontSize = 12.sp, color = DIM, fontFamily = FontFamily.Monospace, maxLines = 1)
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             WithTip("Previous block (${shortcutLabel()}↑)") {
                 TextButton(onClick = onPrevious, enabled = (header?.count ?: 0) > 1) { Text("‹", fontSize = 14.sp) }
