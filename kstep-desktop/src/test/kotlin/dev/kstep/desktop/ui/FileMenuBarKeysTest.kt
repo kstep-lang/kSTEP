@@ -51,7 +51,8 @@ class FileMenuBarKeysTest :
 
         "FileMenuBar registers shortcuts only from FileAction.shortcut" {
             val text = Files.readString(root.resolve("FileMenuBar.kt"))
-            text.contains("action.shortcut?.let { keyShortcutOf(it, os) }") shouldBe true
+            // registeredShortcut returns action.shortcut while the entry is enabled, and nothing while it is disabled
+            text.contains("registeredShortcut(action, ctx)?.let { keyShortcutOf(it, os) }") shouldBe true
             Regex("""KeyShortcut\(""").findAll(text).count() shouldBe 1
         }
     })

@@ -14,6 +14,29 @@ class StateOfTest :
                 }
             }
 
+        "a disabled entry registers no native shortcut, so its key press reaches the key handler" {
+            for (ctx in contexts) {
+                for (action in FileAction.entries) {
+                    val registered = registeredShortcut(action, ctx)
+                    if (stateOf(action, ctx).enabled) {
+                        registered shouldBe action.shortcut
+                    } else {
+                        registered shouldBe null
+                    }
+                }
+            }
+            // every disabled entry that owns a shortcut is routed to a reason by the key handler
+            for (ctx in contexts) {
+                for (action in FileAction.entries) {
+                    val sc = action.shortcut ?: continue
+                    if (!stateOf(action, ctx).enabled) {
+                        ShortcutRouting.route(sc.key, true, sc.shift, false, MenuOs.MAC, ctx) shouldBe
+                            ShortcutRouting.Route.ShowReason(checkNotNull(stateOf(action, ctx).reason))
+                    }
+                }
+            }
+        }
+
         "the reason texts are the ones the toolbar always had" {
             MenuReasons.KNOWLEDGE_UNAVAILABLE shouldBe "Not available in a knowledge workspace yet (planned)"
             MenuReasons.OPEN_SCRIPT_FIRST shouldBe "Open a script first"

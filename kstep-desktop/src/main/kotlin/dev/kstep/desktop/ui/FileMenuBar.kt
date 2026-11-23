@@ -13,6 +13,7 @@ import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.menu.MenuReasons
 import dev.kstep.desktop.menu.Shortcut
 import dev.kstep.desktop.menu.fileMenu
+import dev.kstep.desktop.menu.registeredShortcut
 import dev.kstep.desktop.menu.stateOf
 import dev.kstep.desktop.recent.RecentEntry
 import dev.kstep.desktop.recent.RecentList
@@ -82,7 +83,7 @@ private fun MenuScope.actionItem(
     Item(
         action.label,
         enabled = stateOf(action, ctx).enabled,
-        shortcut = action.shortcut?.let { keyShortcutOf(it, os) },
+        shortcut = registeredShortcut(action, ctx)?.let { keyShortcutOf(it, os) },
         onClick = { onAction(action) },
     )
 }

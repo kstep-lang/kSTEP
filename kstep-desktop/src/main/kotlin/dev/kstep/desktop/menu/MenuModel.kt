@@ -94,6 +94,16 @@ fun stateOf(
             }
     }
 
+/**
+ * The shortcut the native menu registers for [action]: only while the entry is enabled. A disabled entry registers none,
+ * so the native menu cannot swallow the key press; it reaches the window's key handler, which shows the reason
+ * ([ShortcutRouting], ADR-0072). Without this a disabled shortcut could fail silently.
+ */
+fun registeredShortcut(
+    action: FileAction,
+    ctx: MenuContext,
+): Shortcut? = if (stateOf(action, ctx).enabled) action.shortcut else null
+
 /** Keeps Swing from reading a menu text as HTML (`<html>...`): a leading `<` (after blanks) becomes `‹`. */
 object MenuText {
     fun safe(s: String): String {
