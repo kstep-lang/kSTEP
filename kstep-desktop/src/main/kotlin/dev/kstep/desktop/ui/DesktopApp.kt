@@ -63,7 +63,9 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.FrameWindowScope
@@ -93,6 +95,7 @@ import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.export.ScriptExportPreference
 import dev.kstep.desktop.menu.EditAction
 import dev.kstep.desktop.menu.FileAction
+import dev.kstep.desktop.menu.FocusTarget
 import dev.kstep.desktop.menu.MenuContext
 import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.menu.MenuReasons
@@ -264,6 +267,16 @@ fun FrameWindowScope.DesktopApp(
         }
     }
     var editorFocused by remember { mutableStateOf(false) }
+    var editorFocusTarget by remember { mutableStateOf(false) }
+    var textSelected by remember { mutableStateOf(false) }
+    var clipboardHasText by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboard.current
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
+    val refreshClipboard: () -> Unit = { scope.launch { clipboardHasText = ClipboardText.hasText(clipboard) } }
+    LaunchedEffect(windowFocused) {
+        editorFocusTarget = FocusTarget.next(editorFocusTarget, editorFocused, windowFocused)
+        if (windowFocused) clipboardHasText = ClipboardText.hasText(clipboard)
+    }
     var editorCommand by remember { mutableStateOf<EditorCommand?>(null) }
     var editorCommandNonce by remember { mutableStateOf(0) }
     var jump by remember { mutableStateOf<EditorJump?>(null) }
@@ -774,6 +787,9 @@ fun FrameWindowScope.DesktopApp(
             visibilityAvailable = visibilityScene != null,
             hasSelection = hasTarget,
             nothingChanged = !somethingChanged,
+            textSelected = textSelected,
+            clipboardHasText = clipboardHasText,
+            editorFocusTarget = editorFocusTarget,
         )
     val onEditAction: (EditAction) -> Unit = {
         editorCommandNonce++
@@ -787,6 +803,10 @@ fun FrameWindowScope.DesktopApp(
                     session.redo()
                     EditorCommandKind.REFOCUS
                 }
+                EditAction.CUT -> EditorCommandKind.CUT
+                EditAction.COPY -> EditorCommandKind.COPY
+                EditAction.PASTE -> EditorCommandKind.PASTE
+                EditAction.SELECT_ALL -> EditorCommandKind.SELECT_ALL
                 EditAction.FIND -> EditorCommandKind.FIND
                 EditAction.REPLACE -> EditorCommandKind.REPLACE
                 EditAction.GO_TO_LINE -> EditorCommandKind.GO_TO
@@ -997,7 +1017,14 @@ fun FrameWindowScope.DesktopApp(
                             errors,
                             dark,
                             jump,
-                            onFocusChanged = { editorFocused = it },
+                            onFocusChanged = {
+                                editorFocused = it
+                                editorFocusTarget = FocusTarget.next(editorFocusTarget, it, windowFocused)
+                                if (it) refreshClipboard()
+                            },
+                            onSelectionChanged = { textSelected = it },
+                            onClipboardChanged = { clipboardHasText = it },
+                            onNotice = { transientNotice = it },
                             modifier = Modifier.width(windowWidth * effectiveFraction).fillMaxHeight(),
                             errorLine = selectedError?.line,
                             findRequest = findRequest,
@@ -1451,6 +1478,10 @@ private fun menuKey(key: Key): ShortcutKey? =
         Key.L -> ShortcutKey.Letter('L')
         Key.R -> ShortcutKey.Letter('R')
         Key.K -> ShortcutKey.Letter('K')
+        Key.X -> ShortcutKey.Letter('X')
+        Key.C -> ShortcutKey.Letter('C')
+        Key.V -> ShortcutKey.Letter('V')
+        Key.A -> ShortcutKey.Letter('A')
         Key.DirectionUp -> ShortcutKey.Up
         Key.DirectionDown -> ShortcutKey.Down
         else -> null

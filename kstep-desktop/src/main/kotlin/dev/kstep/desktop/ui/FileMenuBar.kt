@@ -43,6 +43,10 @@ internal fun keyFor(key: ShortcutKey): Key =
                 'L' -> Key.L
                 'R' -> Key.R
                 'K' -> Key.K
+                'X' -> Key.X
+                'C' -> Key.C
+                'V' -> Key.V
+                'A' -> Key.A
                 else -> error("No Compose key mapped for menu shortcut '${key.c}'")
             }
     }

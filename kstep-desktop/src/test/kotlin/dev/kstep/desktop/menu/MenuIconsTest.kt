@@ -21,8 +21,8 @@ class MenuIconsTest :
 
         "every Edit and View action has its own icon" {
             val ids = EditAction.entries.map { iconOf(it) } + ViewAction.entries.map { iconOf(it) }
-            ids.size shouldBe 14
-            ids.toSet().size shouldBe 14
+            ids.size shouldBe 18
+            ids.toSet().size shouldBe 18
         }
 
         "no icon is orphaned: actions plus the two extra entries cover all icons" {
@@ -30,6 +30,13 @@ class MenuIconsTest :
                 FileAction.entries.map { iconOf(it) } + EditAction.entries.map { iconOf(it) } +
                     ViewAction.entries.map { iconOf(it) } + MenuIcons.OPEN_RECENT_SUBMENU + MenuIcons.CLEAR_RECENT_ITEM
             used.toSet() shouldBe MenuIconId.entries.toSet()
+        }
+
+        "the clipboard entries map to their own icons" {
+            iconOf(EditAction.CUT) shouldBe MenuIconId.CUT
+            iconOf(EditAction.COPY) shouldBe MenuIconId.COPY
+            iconOf(EditAction.PASTE) shouldBe MenuIconId.PASTE
+            iconOf(EditAction.SELECT_ALL) shouldBe MenuIconId.SELECT_ALL
         }
 
         "dynamic recent entries have deliberately no icon" {

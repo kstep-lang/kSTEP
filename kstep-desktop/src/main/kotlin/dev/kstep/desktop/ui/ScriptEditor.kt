@@ -19,6 +19,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,6 +40,7 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
@@ -60,13 +62,19 @@ import dev.kstep.desktop.edit.ScrollTarget
 import dev.kstep.desktop.edit.SearchBarText
 import dev.kstep.desktop.edit.TextReplace
 import dev.kstep.desktop.edit.TextSearch
+import dev.kstep.desktop.menu.ClipboardKeys
+import dev.kstep.desktop.menu.EditAction
 import dev.kstep.desktop.menu.MenuOs
+import dev.kstep.desktop.menu.MenuReasons
+import dev.kstep.desktop.menu.PasteText
+import dev.kstep.desktop.menu.ShortcutKey
 import dev.kstep.desktop.okf.NoteAnalyzer
 import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.ErrorBarText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val FONT_SIZE_SP = 13f
@@ -82,7 +90,7 @@ internal data class EditorJump(
 )
 
 /** What an Edit-menu command asks of the editor. */
-internal enum class EditorCommandKind { FIND, REPLACE, GO_TO, REFOCUS }
+internal enum class EditorCommandKind { FIND, REPLACE, GO_TO, REFOCUS, CUT, COPY, PASTE, SELECT_ALL }
 
 /** Ctrl+H stays the Replace key on macOS, where the menu uses Option+Cmd+F (ADR-0074). */
 internal fun isMacReplaceAlias(
@@ -142,6 +150,12 @@ internal fun ScriptEditor(
     findRequest: FindRequest? = null,
     /** An Edit-menu command for the editor (ADR-0074): open a bar, or take the focus back. */
     editorCommand: EditorCommand? = null,
+    /** The editor selection became empty or not (ADR-0075): Cut and Copy need a selection. */
+    onSelectionChanged: (Boolean) -> Unit = {},
+    /** The clipboard is known to hold text after a copy or cut. */
+    onClipboardChanged: (Boolean) -> Unit = {},
+    /** A message for the status line (a failed or refused clipboard command). */
+    onNotice: (String) -> Unit = {},
 ) {
     val os = remember { MenuOs.current() }
     val colors = if (dark) EditorColors.DARK else EditorColors.LIGHT
@@ -264,8 +278,73 @@ internal fun ScriptEditor(
         goToInput = ""
         bar = EditorBar.GoTo(barNonce)
     }
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(field.selection.collapsed) { onSelectionChanged(!field.selection.collapsed) }
+    // One path for the menu click and the key (ADR-0075): the semantics cannot drift apart.
+    val runClipboard: (EditAction) -> Unit = { kind ->
+        if (editing != null) {
+            scope.launch {
+                val sel = field.selection
+                when (kind) {
+                    EditAction.COPY ->
+                        if (!sel.collapsed) {
+                            if (ClipboardText.write(clipboard, field.text.substring(sel.min, sel.max))) {
+                                onClipboardChanged(true)
+                            } else {
+                                onNotice(ClipboardNotices.NOT_COPIED)
+                            }
+                        }
+                    EditAction.CUT ->
+                        if (!sel.collapsed) {
+                            if (ClipboardText.write(clipboard, field.text.substring(sel.min, sel.max))) {
+                                onClipboardChanged(true)
+                                session.onTextChanged(field.text, field.selection.end)
+                                session.replaceText(field.text.removeRange(sel.min, sel.max), sel.min)
+                                onUserEdit()
+                            } else {
+                                onNotice(ClipboardNotices.NOT_COPIED)
+                            }
+                        }
+                    EditAction.PASTE ->
+                        when (val read = ClipboardText.read(clipboard)) {
+                            is ClipboardRead.Text -> {
+                                val text = PasteText.normalize(read.text)
+                                if (text == null) {
+                                    onNotice(ClipboardNotices.TOO_LARGE)
+                                } else {
+                                    session.onTextChanged(field.text, field.selection.end)
+                                    val result = field.text.replaceRange(sel.min, sel.max, text)
+                                    if (TextReplace.withinLimits(result)) {
+                                        session.replaceText(result, sel.min + text.length)
+                                        onUserEdit()
+                                    } else {
+                                        onNotice(
+                                            SearchBarText.replaceError(TextReplace.Outcome.TooLarge)
+                                                ?: ClipboardNotices.TOO_LARGE,
+                                        )
+                                    }
+                                }
+                            }
+                            ClipboardRead.Empty -> {
+                                onClipboardChanged(false)
+                                onNotice(MenuReasons.CLIPBOARD_EMPTY)
+                            }
+                            ClipboardRead.Failed -> onNotice(ClipboardNotices.UNREADABLE)
+                        }
+                    EditAction.SELECT_ALL -> field = field.copy(selection = TextRange(0, field.text.length))
+                    else -> Unit
+                }
+                runCatching { focus.requestFocus() }
+            }
+        }
+    }
     LaunchedEffect(editorCommand?.nonce) {
         when (editorCommand?.kind) {
+            EditorCommandKind.CUT -> runClipboard(EditAction.CUT)
+            EditorCommandKind.COPY -> runClipboard(EditAction.COPY)
+            EditorCommandKind.PASTE -> runClipboard(EditAction.PASTE)
+            EditorCommandKind.SELECT_ALL -> runClipboard(EditAction.SELECT_ALL)
             EditorCommandKind.FIND -> openFind(false)
             EditorCommandKind.REPLACE -> openFind(true)
             EditorCommandKind.GO_TO -> openGoTo()
@@ -519,7 +598,21 @@ internal fun ScriptEditor(
                                         return@onPreviewKeyEvent false
                                     }
                                     val command = event.isMetaPressed || event.isCtrlPressed
+                                    val primary = if (os == MenuOs.MAC) event.isMetaPressed else event.isCtrlPressed
+                                    val clipboardAction =
+                                        if (primary && !event.isShiftPressed && !event.isAltPressed) {
+                                            clipboardLetter(event.key)?.let(ClipboardKeys::actionOf)
+                                        } else {
+                                            null
+                                        }
                                     when {
+                                        // Cut, Copy, Paste, Select All (ADR-0075): the menu let the key through.
+                                        clipboardAction != null -> {
+                                            if (ClipboardKeys.of(os) == ClipboardKeys.Handling.DISPATCH) {
+                                                runClipboard(clipboardAction)
+                                            }
+                                            true
+                                        }
                                         // Aliases the menu does not own (ADR-0074): Redo on the other key of the platform.
                                         command && isRedoAlias(event.key, event.isShiftPressed, os) -> {
                                             session.redo()
@@ -564,3 +657,12 @@ private data class ScrollRequest(
     val nonce: Int,
     val focusEditor: Boolean,
 )
+
+private fun clipboardLetter(key: Key): ShortcutKey? =
+    when (key) {
+        Key.X -> ShortcutKey.Letter('X')
+        Key.C -> ShortcutKey.Letter('C')
+        Key.V -> ShortcutKey.Letter('V')
+        Key.A -> ShortcutKey.Letter('A')
+        else -> null
+    }

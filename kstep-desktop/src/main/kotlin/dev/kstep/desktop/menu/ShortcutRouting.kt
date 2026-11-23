@@ -58,9 +58,8 @@ object ShortcutRouting {
     ): Route {
         if (!primary) return Route.NotMenuOwned
         val owned = menuOwnedShortcuts(os)[Shortcut(key, shift, alt)] ?: return Route.NotMenuOwned
-        // A focused text field keeps its own undo: without the editor focus Undo and Redo are not ours.
-        val undoOrRedo = owned is MenuOwned.Edit && (owned.action == EditAction.UNDO || owned.action == EditAction.REDO)
-        if (undoOrRedo && !ctx.editorFocused) return Route.NotMenuOwned
+        // A focused text field keeps its own undo and clipboard keys: without the editor focus they are not ours.
+        if (owned is MenuOwned.Edit && owned.action in FOCUS_OWNED && !ctx.editorFocused) return Route.NotMenuOwned
         val state = stateOf(owned, ctx)
         return if (state.enabled) Route.PassToMenu else Route.ShowReason(checkNotNull(state.reason))
     }
@@ -82,4 +81,28 @@ object EditorOwnedShortcuts {
                 setOf(Shortcut(ShortcutKey.Letter('Z'), shift = true))
             }
     }
+}
+
+/**
+ * What the editor does with a Cut, Copy, Paste or Select All key that the menu lets through (ADR-0075). On macOS the
+ * native menu runs the entry itself, so the editor only swallows the key; elsewhere the editor runs the action.
+ */
+object ClipboardKeys {
+    enum class Handling {
+        SWALLOW,
+        DISPATCH,
+    }
+
+    val ACTIONS: Set<EditAction> = CLIPBOARD_ACTIONS
+
+    fun of(os: MenuOs): Handling = if (os == MenuOs.MAC) Handling.SWALLOW else Handling.DISPATCH
+
+    fun actionOf(key: ShortcutKey): EditAction? =
+        when ((key as? ShortcutKey.Letter)?.c) {
+            'X' -> EditAction.CUT
+            'C' -> EditAction.COPY
+            'V' -> EditAction.PASTE
+            'A' -> EditAction.SELECT_ALL
+            else -> null
+        }
 }

@@ -1,0 +1,57 @@
+= ADR-0075: Cut, Copy, Paste and Select All (Welle M3a)
+:toc:
+
+== Status
+
+Accepted (Welle M3a of the menu bar plan). Scope: the four clipboard entries of the Edit menu of kSTEP Desktop, their states, shortcuts, icons and the clipboard access. The Help and Script menus follow later. The model, the routing and the icon data are covered by unit tests; the key handling on the real operating systems was not tried by hand. See "Open / not verified".
+
+== Context
+
+ADR-0074 gave the Edit menu Undo, Redo, Find, Replace and Go to Line. Cut, Copy, Paste and Select All were left to the text field's built-in key handling and had no menu entry, no state and no reason. A menu entry that acts on the editor must also not fire twice: a key press can reach both the native menu accelerator and the text field.
+
+== Decision
+
+D1. Model. `EditAction` gets `CUT`, `COPY`, `PASTE` and `SELECT_ALL` (shortcuts X, C, V, A with the primary key on every system, no Shift or Alt). `MenuContext` gets `textSelected` (the editor selection, not the part selection `hasSelection`), `clipboardHasText` and `editorFocusTarget`. The Edit menu is Undo, Redo, separator, Cut, Copy, Paste, Select All, separator, Find, Replace, Go to Line.
+
+D2. States and reasons, checked in this order: no editor open ("Open a script first"); a clipboard entry without the focus target ("Click into the editor first"); Cut or Copy without a selection ("Select text first"); Paste with an empty clipboard ("Clipboard is empty"). Select All is enabled with an empty buffer. The fourth reason is new; it is needed because the entries are disabled outside the editor and a disabled entry always has a reason.
+
+D3. Difference to Undo. Undo and Redo stay enabled without the editor focus (the session history is the target). The clipboard entries are disabled: Paste would otherwise change the wrong target (the search field, the AI prompt). With the menu clicked while a search field has the focus, Edit > Paste is therefore grey.
+
+D4. Focus target. The state is measured at the focus target, not at the real focus, because opening a menu may take the focus from the editor and the entries would turn grey just by opening it. `FocusTarget.next(current, editorFocused, windowFocused)`: the editor focused makes it the target; a focused window whose editor is not focused clears it; an unfocused window keeps the previous value. The shortcut itself is registered and routed only while the editor really has the focus (`FOCUS_OWNED`), so a focused text field keeps its own keys and no reason appears in it.
+
+D5. Keys per system.
+
+[cols="2,3,3"]
+|===
+|System |Menu accelerator |Editor on a key the menu let through
+
+|macOS |fires natively, enabled entries only |swallows the key (`SWALLOW`), runs nothing
+|Windows, Linux |not run when the event is consumed |runs the action itself (`DISPATCH`)
+|===
+
+Only the exact primary key without Shift and Alt is taken, so Ctrl+C on macOS, Ctrl+Shift+V, Ctrl+Insert and Shift+Insert stay with the text field. A disabled entry registers no accelerator; the key reaches the window handler, which shows the reason and takes it.
+
+D6. One execution path. The menu click and the key both call `runClipboard` in the editor. Copy writes the selection; Cut copies and removes it as one undo step; Paste replaces the selection by the clipboard text as one undo step and puts the caret after it; Select All selects the whole text. A failure of the clipboard access shows a notice and never throws; the clipboard text is never logged.
+
+D7. Paste text. `PasteText.normalize` turns CRLF and lone CR into LF in one pass and refuses text over 4 194 304 characters after normalisation (notice "Clipboard text is too large to paste (over 4 MB)"). A raw length over twice the limit is refused before copying. The result must also pass `TextReplace.withinLimits`.
+
+D8. No polling. The clipboard is asked whether it holds text (flavor check, no content read) when the editor gets the focus, when the window gets the focus and after a copy or cut. A change by another application is therefore seen when the focus returns, not before.
+
+D9. Clipboard access. `LocalClipboard` with `ClipEntry(StringSelection)` and the entry's `Transferable` (Compose Multiplatform 1.11.1); `LocalClipboardManager` is deprecated and not used.
+
+D10. Icons follow ADR-0073: scissors (two rings, two blades), two sheets, a board with a clip, four corner brackets with two text lines.
+
+== Consequences
+
+* A new `EditAction` does not compile without a state, a shortcut decision and an icon.
+* `EditorOwnedShortcuts` does not contain X, C, V, A (a test checks it); the menu table has no collision.
+* Source tests pin the key mapping in `DesktopApp.menuKey` and the order of the editor key branches (clipboard before the redo alias).
+
+== Open / not verified
+
+* The assumption per operating system (the macOS screen menu fires natively while Java still sees the event; on Windows and Linux the accelerator does not run when the event is consumed) is untested. Hand test matrix: Cmd or Ctrl+V in the editor pastes exactly once; Cmd or Ctrl+V in the search field pastes exactly once; Cmd+C without a selection shows "Select text first"; Edit > Paste with the mouse pastes exactly once; the same for X and A.
+* The order of window focus loss and editor focus loss when a menu is clicked on Windows and Linux (`FocusTarget`) is unverified. If the order differs, the entries turn grey when the menu opens.
+* Cmd+Z on macOS may fire the text field's built-in undo as well as the menu; not part of M3a.
+* Reading the clipboard synchronously may block under X11.
+* The look of the four icons in dark mode was not seen.
+* The clipboard is not polled; a change by another application shows only after the focus returns.

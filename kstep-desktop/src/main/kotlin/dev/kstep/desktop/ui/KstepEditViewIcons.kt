@@ -12,6 +12,91 @@ internal object KstepEditViewIcons {
         when (id) {
             MenuIconId.UNDO -> undoRedo(mirror = false)
             MenuIconId.REDO -> undoRedo(mirror = true)
+            MenuIconId.CUT ->
+                listOf(
+                    {
+                        moveTo(2.5f, 12.5f)
+                        arcTo(2f, 2f, 0f, false, true, 6.5f, 12.5f)
+                        arcTo(2f, 2f, 0f, false, true, 2.5f, 12.5f)
+                        close()
+                    },
+                    {
+                        moveTo(9.5f, 12.5f)
+                        arcTo(2f, 2f, 0f, false, true, 13.5f, 12.5f)
+                        arcTo(2f, 2f, 0f, false, true, 9.5f, 12.5f)
+                        close()
+                    },
+                    {
+                        moveTo(5.8f, 10.8f)
+                        lineTo(11.5f, 2.5f)
+                    },
+                    {
+                        moveTo(10.2f, 10.8f)
+                        lineTo(4.5f, 2.5f)
+                    },
+                )
+            MenuIconId.COPY ->
+                listOf(
+                    {
+                        moveTo(2.5f, 10.5f)
+                        verticalLineTo(2.5f)
+                        horizontalLineTo(10.5f)
+                    },
+                    {
+                        moveTo(5.5f, 5.5f)
+                        horizontalLineTo(13.5f)
+                        verticalLineTo(13.5f)
+                        horizontalLineTo(5.5f)
+                        close()
+                    },
+                )
+            MenuIconId.PASTE ->
+                listOf(
+                    {
+                        moveTo(6.5f, 3.5f)
+                        horizontalLineTo(3.5f)
+                        verticalLineTo(14.5f)
+                        horizontalLineTo(12.5f)
+                        verticalLineTo(3.5f)
+                        horizontalLineTo(9.5f)
+                    },
+                    {
+                        moveTo(6.5f, 2.5f)
+                        horizontalLineTo(9.5f)
+                        verticalLineTo(4.5f)
+                        horizontalLineTo(6.5f)
+                        close()
+                    },
+                )
+            MenuIconId.SELECT_ALL ->
+                listOf(
+                    {
+                        moveTo(2.5f, 5.5f)
+                        verticalLineTo(2.5f)
+                        horizontalLineTo(5.5f)
+                    },
+                    {
+                        moveTo(10.5f, 2.5f)
+                        horizontalLineTo(13.5f)
+                        verticalLineTo(5.5f)
+                    },
+                    {
+                        moveTo(13.5f, 10.5f)
+                        verticalLineTo(13.5f)
+                        horizontalLineTo(10.5f)
+                    },
+                    {
+                        moveTo(5.5f, 13.5f)
+                        horizontalLineTo(2.5f)
+                        verticalLineTo(10.5f)
+                    },
+                    {
+                        moveTo(5.5f, 6.5f)
+                        horizontalLineTo(10.5f)
+                        moveTo(5.5f, 9.5f)
+                        horizontalLineTo(10.5f)
+                    },
+                )
             MenuIconId.FIND ->
                 listOf(
                     {

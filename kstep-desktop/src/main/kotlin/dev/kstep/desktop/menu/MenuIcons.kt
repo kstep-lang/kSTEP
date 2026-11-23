@@ -12,6 +12,10 @@ enum class MenuIconId {
     QUIT,
     UNDO,
     REDO,
+    CUT,
+    COPY,
+    PASTE,
+    SELECT_ALL,
     FIND,
     REPLACE,
     GO_TO_LINE,
@@ -42,6 +46,10 @@ fun iconOf(action: EditAction): MenuIconId =
     when (action) {
         EditAction.UNDO -> MenuIconId.UNDO
         EditAction.REDO -> MenuIconId.REDO
+        EditAction.CUT -> MenuIconId.CUT
+        EditAction.COPY -> MenuIconId.COPY
+        EditAction.PASTE -> MenuIconId.PASTE
+        EditAction.SELECT_ALL -> MenuIconId.SELECT_ALL
         EditAction.FIND -> MenuIconId.FIND
         EditAction.REPLACE -> MenuIconId.REPLACE
         EditAction.GO_TO_LINE -> MenuIconId.GO_TO_LINE

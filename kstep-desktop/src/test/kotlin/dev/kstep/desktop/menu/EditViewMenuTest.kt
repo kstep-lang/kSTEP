@@ -15,9 +15,13 @@ class EditViewMenuTest :
                     MenuEntry.EditItem(EditAction.UNDO),
                     MenuEntry.EditItem(EditAction.REDO),
                     MenuEntry.Separator,
+                    MenuEntry.EditItem(EditAction.CUT),
+                    MenuEntry.EditItem(EditAction.COPY),
+                    MenuEntry.EditItem(EditAction.PASTE),
+                    MenuEntry.EditItem(EditAction.SELECT_ALL),
+                    MenuEntry.Separator,
                     MenuEntry.EditItem(EditAction.FIND),
                     MenuEntry.EditItem(EditAction.REPLACE),
-                    MenuEntry.Separator,
                     MenuEntry.EditItem(EditAction.GO_TO_LINE),
                 )
             MenuTitles.EDIT shouldBe "Edit"

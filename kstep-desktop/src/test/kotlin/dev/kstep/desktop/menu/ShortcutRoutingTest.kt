@@ -110,4 +110,75 @@ class ShortcutRoutingTest :
             ShortcutRouting.route(l('E'), true, false, false, MenuOs.LINUX, workspace) shouldBe
                 Route.ShowReason(MenuReasons.KNOWLEDGE_UNAVAILABLE)
         }
+
+        "the clipboard keys belong to the editor only with the real editor focus" {
+            val ctx = script.copy(editorOpen = true, editorFocusTarget = true)
+            for (os in MenuOs.entries) {
+                for (k in listOf('X', 'C', 'V', 'A')) {
+                    ShortcutRouting.route(l(k), true, false, false, os, ctx) shouldBe Route.NotMenuOwned
+                    ShortcutRouting.route(l(k), true, false, false, os, ctx.copy(editorFocused = true)) shouldNotBe
+                        Route.NotMenuOwned
+                }
+            }
+        }
+
+        "a disabled clipboard entry with the editor focus shows its reason" {
+            val ctx = script.copy(editorOpen = true, editorFocused = true, editorFocusTarget = true)
+            val mac = MenuOs.MAC
+            ShortcutRouting.route(l('X'), true, false, false, mac, ctx) shouldBe
+                Route.ShowReason(MenuReasons.SELECT_TEXT_FIRST)
+            ShortcutRouting.route(l('C'), true, false, false, mac, ctx) shouldBe
+                Route.ShowReason(MenuReasons.SELECT_TEXT_FIRST)
+            ShortcutRouting.route(l('V'), true, false, false, mac, ctx) shouldBe
+                Route.ShowReason(MenuReasons.CLIPBOARD_EMPTY)
+            ShortcutRouting.route(l('A'), true, false, false, mac, ctx) shouldBe Route.PassToMenu
+            val full = ctx.copy(textSelected = true, clipboardHasText = true)
+            for (k in listOf('X', 'C', 'V', 'A')) {
+                ShortcutRouting.route(l(k), true, false, false, MenuOs.WINDOWS, full) shouldBe Route.PassToMenu
+            }
+            val noTarget = ctx.copy(editorFocusTarget = false)
+            ShortcutRouting.route(l('V'), true, false, false, mac, noTarget) shouldBe
+                Route.ShowReason(MenuReasons.CLICK_INTO_EDITOR)
+        }
+
+        "the clipboard shortcuts do not collide with File, View or each other" {
+            for (os in MenuOs.entries) {
+                val all =
+                    FileAction.entries.mapNotNull { it.shortcut } +
+                        EditAction.entries.mapNotNull {
+                            shortcutOf(
+                                it,
+                                os,
+                            )
+                        } +
+                        ViewAction.entries.mapNotNull { shortcutOf(it, os) }
+                all.toSet().size shouldBe all.size
+                for (k in listOf('X', 'C', 'V', 'A')) {
+                    EditorOwnedShortcuts.of(os).contains(Shortcut(l(k))) shouldBe false
+                }
+            }
+        }
+
+        "Ctrl+Shift+V and the Alt variants are not menu-owned" {
+            for (os in MenuOs.entries) {
+                for (k in listOf('X', 'C', 'V', 'A')) {
+                    ShortcutRouting.route(l(k), true, true, false, os, script) shouldBe Route.NotMenuOwned
+                    ShortcutRouting.route(l(k), true, false, true, os, script) shouldBe Route.NotMenuOwned
+                }
+            }
+        }
+
+        "ClipboardKeys swallow on macOS and dispatch elsewhere" {
+            ClipboardKeys.of(MenuOs.MAC) shouldBe ClipboardKeys.Handling.SWALLOW
+            ClipboardKeys.of(MenuOs.WINDOWS) shouldBe ClipboardKeys.Handling.DISPATCH
+            ClipboardKeys.of(MenuOs.LINUX) shouldBe ClipboardKeys.Handling.DISPATCH
+            ClipboardKeys.actionOf(l('A')) shouldBe EditAction.SELECT_ALL
+            ClipboardKeys.actionOf(l('C')) shouldBe EditAction.COPY
+            ClipboardKeys.actionOf(l('V')) shouldBe EditAction.PASTE
+            ClipboardKeys.actionOf(l('X')) shouldBe EditAction.CUT
+            ClipboardKeys.actionOf(l('Z')) shouldBe null
+            ClipboardKeys.actionOf(ShortcutKey.Up) shouldBe null
+            ClipboardKeys.ACTIONS shouldBe
+                setOf(EditAction.CUT, EditAction.COPY, EditAction.PASTE, EditAction.SELECT_ALL)
+        }
     })

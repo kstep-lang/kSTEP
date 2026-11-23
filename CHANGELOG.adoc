@@ -17,6 +17,11 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop Edit menu: Cut, Copy, Paste and Select All (Welle M3a, ADR-0075) with icons and native shortcuts
+  (Cmd or Ctrl plus X, C, V, A). An entry is disabled with a reason in the status line when the editor is not the focus
+  target ("Click into the editor first"), nothing is selected ("Select text first") or the clipboard is empty
+  ("Clipboard is empty"). Paste normalises CRLF and lone CR to LF and refuses clipboard text over 4 MB with a notice;
+  Cut and Paste are one undo step each.
 * kSTEP Desktop Edit and View menus (Welle M2, ADR-0074): Undo, Redo, Find, Replace, Go to Line and Run Script, Home,
   Previous and Next Block, Toggle Transparent, Toggle Hidden, Isolate, Show All, Show AI Panel are menu entries with
   state (disabled with a reason in the status line), icons and native shortcuts; the single-key entries show their key
