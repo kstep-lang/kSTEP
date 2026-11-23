@@ -67,6 +67,23 @@ class DesktopArchitectureTest :
                 .shouldBeEmpty()
         }
 
+        "the menu package is pure logic: no Compose, no AWT, no Swing and no UI package" {
+            sources()
+                .filter { (path, _) ->
+                    root
+                        .relativize(path)
+                        .toString()
+                        .replace('\\', '/')
+                        .startsWith("dev/kstep/desktop/menu/")
+                }.filter { (_, text) ->
+                    text.contains("dev.kstep.desktop.ui") ||
+                        text.contains("androidx.compose") ||
+                        text.contains("java.awt") ||
+                        text.contains("javax.swing")
+                }.map { root.relativize(it.first).toString() }
+                .shouldBeEmpty()
+        }
+
         "the export package is pure logic: no Compose and no UI package" {
             sources()
                 .filter { (path, _) ->

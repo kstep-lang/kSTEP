@@ -66,6 +66,7 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.FrameWindowScope
 import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.aiwire.AiController
@@ -90,6 +91,11 @@ import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.export.ScriptExportPreference
+import dev.kstep.desktop.menu.FileAction
+import dev.kstep.desktop.menu.MenuContext
+import dev.kstep.desktop.menu.MenuOs
+import dev.kstep.desktop.menu.MenuReasons
+import dev.kstep.desktop.menu.ShortcutRouting
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
@@ -169,7 +175,7 @@ private const val EDITOR_DIVIDER_DP = 7 // the 1 dp line and the 6 dp drag handl
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-fun DesktopApp(
+fun FrameWindowScope.DesktopApp(
     controller: LiveRunController,
     session: EditorSession,
     initialFile: Path?,
@@ -177,6 +183,7 @@ fun DesktopApp(
     ai: AiController,
     exporter: ExportController,
     knowledge: KnowledgeWorkspaceController,
+    onQuit: () -> Unit,
     userSandbox: StateFlow<UserSandboxState> = MutableStateFlow(UserSandboxState.Unknown),
 ) {
     val sandboxState by userSandbox.collectAsState()
@@ -610,6 +617,8 @@ fun DesktopApp(
 
     val openFile: () -> Unit = { chooseScript(window)?.let(openPath) }
     val exportScript: Path? = state.file
+    // One expression for the toolbar and the menu: they must never disagree.
+    val exportEnabled = !knowledgeOpen && exportScript != null && editorView.state is EditorState.Editing
     val openExport: () -> Unit = {
         if (exportScript != null && editorView.state is EditorState.Editing && !exportRunning) {
             exportNotice =
@@ -746,6 +755,32 @@ fun DesktopApp(
         fitReference = displayMesh
     }
 
+    val menuOs = remember { MenuOs.current() }
+    val menuContext =
+        MenuContext(
+            scriptOpen = state.file != null && editorView.state is EditorState.Editing,
+            knowledgeOpen = knowledgeOpen,
+            exportEnabled = exportEnabled,
+        )
+    val onFileAction: (FileAction) -> Unit = {
+        when (it) {
+            FileAction.OPEN -> openFile()
+            FileAction.OPEN_FOLDER -> chooseFolder()
+            FileAction.CLOSE_WORKSPACE -> closeWorkspace()
+            FileAction.SAVE -> session.save()
+            FileAction.EXPORT -> openExport()
+            FileAction.QUIT -> onQuit()
+        }
+    }
+    FileMenuBar(
+        os = menuOs,
+        ctx = menuContext,
+        recent = recent,
+        onAction = onFileAction,
+        onRecent = openFromRecent,
+        onClearRecent = { updateRecent { it.clear() } },
+    )
+
     MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
         Surface(
             Modifier
@@ -754,9 +789,22 @@ fun DesktopApp(
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     val command = event.isMetaPressed || event.isCtrlPressed
+                    // Open, Open Folder, Save and Export belong to the menu (ADR-0072): never run here.
+                    val menuRoute =
+                        menuLetter(event.key)?.let { letter ->
+                            ShortcutRouting.route(
+                                letter,
+                                if (menuOs == MenuOs.MAC) event.isMetaPressed else event.isCtrlPressed,
+                                event.isShiftPressed,
+                                event.isAltPressed,
+                                menuOs,
+                                menuContext,
+                            )
+                        }
                     when {
-                        command && event.isShiftPressed && event.key == Key.O -> {
-                            chooseFolder()
+                        menuRoute is ShortcutRouting.Route.PassToMenu -> false
+                        menuRoute is ShortcutRouting.Route.ShowReason -> {
+                            transientNotice = menuRoute.reason
                             true
                         }
                         knowledgeOpen &&
@@ -766,20 +814,8 @@ fun DesktopApp(
                             jumpBlock(event.key == Key.DirectionDown)
                             true
                         }
-                        command && event.key == Key.O -> {
-                            openFile()
-                            true
-                        }
                         command && event.key == Key.R -> {
                             controller.forceRun()
-                            true
-                        }
-                        command && event.key == Key.S -> {
-                            session.save()
-                            true
-                        }
-                        command && event.key == Key.E -> {
-                            if (!knowledgeOpen) openExport()
                             true
                         }
                         command && event.key == Key.K -> {
@@ -878,8 +914,7 @@ fun DesktopApp(
                         editorView,
                         onOpen = openFile,
                         onExport = openExport,
-                        exportEnabled =
-                            !knowledgeOpen && exportScript != null && editorView.state is EditorState.Editing,
+                        exportEnabled = exportEnabled,
                         knowledgeOpen = knowledgeOpen,
                         knowledgeLabel =
                             (workspace as? WorkspaceState.Open)?.scan?.root?.let {
@@ -1139,11 +1174,11 @@ private fun Toolbar(
         }
         WithTip(
             if (knowledgeOpen) {
-                KNOWLEDGE_UNAVAILABLE
+                MenuReasons.KNOWLEDGE_UNAVAILABLE
             } else if (exportEnabled) {
                 null
             } else {
-                "Open a script first"
+                MenuReasons.OPEN_SCRIPT_FIRST
             },
         ) {
             TextButton(onClick = onExport, enabled = exportEnabled) { Text("Export…", fontSize = 13.sp) }
@@ -1154,7 +1189,7 @@ private fun Toolbar(
                 Text("Tree", fontSize = 13.sp, color = if (treeOn) Color.Unspecified else DIM)
             }
         }
-        WithTip(if (knowledgeOpen) KNOWLEDGE_UNAVAILABLE else null) {
+        WithTip(if (knowledgeOpen) MenuReasons.KNOWLEDGE_UNAVAILABLE else null) {
             TextButton(onClick = onAi, enabled = !knowledgeOpen) {
                 Text("AI", fontSize = 13.sp, color = if (aiOn) Color.Unspecified else DIM)
             }
@@ -1370,7 +1405,14 @@ private fun DropOverlay(
     }
 }
 
-private const val KNOWLEDGE_UNAVAILABLE = "Not available in a knowledge workspace yet (planned)"
+/** The letter of the keys a menu shortcut can use; any other key is not menu-owned. */
+private fun menuLetter(key: Key): Char? =
+    when (key) {
+        Key.O -> 'O'
+        Key.S -> 'S'
+        Key.E -> 'E'
+        else -> null
+    }
 
 private fun openFolderTip(): String = "Open a folder of Markdown notes (${if (isMac()) "⇧⌘O" else "Ctrl+Shift+O"})"
 

@@ -15,23 +15,34 @@ import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.edit.AtomicSaver
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.export.ExportController
+import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
 import dev.kstep.desktop.run.AiCandidateCompiler
 import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.UserScriptSandbox
 import dev.kstep.desktop.run.WorkerRunner
 import dev.kstep.desktop.run.WorkerSandbox
+import io.github.oshai.kotlinlogging.KotlinLogging
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
+import java.awt.Desktop
 import java.awt.Dimension
 import java.awt.Frame
 import java.nio.file.Path
+import javax.swing.SwingUtilities
 
 private const val INITIAL_WIDTH = 1200
 private const val INITIAL_HEIGHT = 800
 private const val MIN_WIDTH = 640
 private const val MIN_HEIGHT = 480
 
+private val logger = KotlinLogging.logger {}
+
 fun runDesktopApp(args: Array<String>) {
+    // Must run before the first AWT or Compose use: the menu bar goes to the macOS system menu, named "kSTEP Desktop".
+    if (MenuOs.current() == MenuOs.MAC) {
+        System.setProperty("apple.laf.useScreenMenuBar", "true")
+        System.setProperty("apple.awt.application.name", "kSTEP Desktop")
+    }
     // Same reason as in the CLI: kotlin-logging's start-up banner is noise.
     KotlinLoggingConfiguration.logStartupMessage = false
     val initial = args.firstOrNull()?.let { Path.of(it) }
@@ -86,6 +97,22 @@ fun runDesktopApp(args: Array<String>) {
         val editor by session.view.collectAsState()
         val frame = remember { arrayOfNulls<Frame>(1) }
         val windowState = rememberWindowState(size = DpSize(INITIAL_WIDTH.dp, INITIAL_HEIGHT.dp))
+        // A failed save (or Cancel) keeps the window open: the buffer is never lost. Used by the close button, File > Quit
+        // and the macOS Cmd+Q quit handler alike.
+        val requestQuit: () -> Boolean = {
+            if (confirmUnsaved(frame[0], session)) {
+                controller.close()
+                session.close()
+                ai.close()
+                exporter.close()
+                knowledge.close()
+                exitApplication()
+                true
+            } else {
+                false
+            }
+        }
+        remember { installMacQuitHandler(requestQuit) }
         Window(
             title =
                 state.file?.fileName?.let {
@@ -93,17 +120,7 @@ fun runDesktopApp(args: Array<String>) {
                 }
                     ?: "kSTEP Desktop",
             state = windowState,
-            onCloseRequest = {
-                // A failed save (or Cancel) keeps the window open: the buffer is never lost.
-                if (confirmUnsaved(frame[0], session)) {
-                    controller.close()
-                    session.close()
-                    ai.close()
-                    exporter.close()
-                    knowledge.close()
-                    exitApplication()
-                }
-            },
+            onCloseRequest = { requestQuit() },
         ) {
             window.minimumSize = Dimension(MIN_WIDTH, MIN_HEIGHT)
             frame[0] = window
@@ -119,8 +136,40 @@ fun runDesktopApp(args: Array<String>) {
                 ai = ai,
                 exporter = exporter,
                 knowledge = knowledge,
+                onQuit = { requestQuit() },
                 userSandbox = userSandbox.state,
             )
         }
+    }
+}
+
+/**
+ * Cmd+Q on macOS goes to the application, not to the window: without this handler it would exit at once and lose
+ * unsaved text. The handler runs on a non-UI thread, so the question (a Swing dialog) is asked on the event thread.
+ * Registered on macOS only; a failure is logged, never swallowed.
+ */
+private fun installMacQuitHandler(requestQuit: () -> Boolean) {
+    if (MenuOs.current() != MenuOs.MAC) return
+    try {
+        if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.APP_QUIT_HANDLER)) {
+            logger.warn { "No macOS quit handler available: Cmd+Q will not ask about unsaved changes." }
+            return
+        }
+        Desktop.getDesktop().setQuitHandler { _, response ->
+            val quit =
+                if (SwingUtilities.isEventDispatchThread()) {
+                    requestQuit()
+                } else {
+                    var result = false
+                    SwingUtilities.invokeAndWait { result = requestQuit() }
+                    result
+                }
+            // exitApplication() has already started the shutdown when quit is true; performQuit is harmless then.
+            if (quit) response.performQuit() else response.cancelQuit()
+        }
+    } catch (e: UnsupportedOperationException) {
+        logger.warn(e) { "Could not install the macOS quit handler." }
+    } catch (e: SecurityException) {
+        logger.warn(e) { "Could not install the macOS quit handler." }
     }
 }

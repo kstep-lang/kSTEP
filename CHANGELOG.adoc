@@ -17,6 +17,10 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop native File menu bar (Welle M1, ADR-0072): Open, Open Folder, Open Recent (with "No Recent Items" and
+  Clear Recent), Close Workspace, Save, Export and, on Windows and Linux, Quit. Cmd+Q on macOS asks about unsaved changes
+  like the close button. A disabled menu shortcut reports its reason in the status line. Ctrl+O/S/E on macOS and
+  Meta+O/S/E on Windows and Linux no longer act.
 * `kstep convert --recursive` (Welle D8d, ADR-0071): converts a whole folder tree (depth 8) and mirrors the sub-folders
   below `--out`. Links are never followed (reported as `symbolic_link`), hidden folders and an output folder inside the
   input are skipped (`hidden_dir`, `output_dir`), every folder must stay below the input folder (`KSTEP-C-013`),

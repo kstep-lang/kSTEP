@@ -1,0 +1,42 @@
+= ADR-0072: Native menu bar, File menu (Welle M1)
+:toc:
+
+== Status
+
+Accepted (Welle M1 of the menu bar plan). Scope: the frame of the menu bar and the File menu only. The model (`dev.kstep.desktop.menu`), the shortcut routing and the quit path are covered by unit tests; the window itself was not driven by hand. See "Open / not verified".
+
+== Context
+
+The desktop had a toolbar and four window-wide shortcuts (Open, Open Folder, Save, Export) handled in one key handler. There was no menu bar, so on macOS there was also no Cmd+Q path that asked about unsaved changes. M1 adds a native File menu without adding a second place that decides what a shortcut does.
+
+== Decision
+
+D1. One owner for four shortcuts. The menu owns Open (`O`), Open Folder (Shift+`O`), Save (`S`) and Export (`E`). The window key handler no longer runs them. For such a key it asks `ShortcutRouting.route`: an enabled entry returns `PassToMenu` (the handler returns false, the menu runs it), a disabled one returns `ShowReason` (the handler shows the reason in the status line and consumes the key). Alt combinations are never menu owned. The primary key is Cmd on macOS and Ctrl elsewhere.
+
+D2. Pure model. `dev.kstep.desktop.menu` has no Compose, AWT or Swing import (checked by `DesktopArchitectureTest`). It holds the actions, their state (`stateOf`), the menu layout per operating system (`fileMenu`), the Recent submenu and the routing. `ui/FileMenuBar.kt` only draws it.
+
+D3. Save is enabled as soon as a script or a note is open. Export keeps the toolbar logic: a workspace gives the reason "Not available in a knowledge workspace yet (planned)", a missing script "Open a script first". The toolbar and the menu use one `exportEnabled` expression and one set of reason texts (`MenuReasons`); the toolbar texts are unchanged.
+
+D4. Quit. On Windows and Linux Quit is the last File entry, without a shortcut. On macOS the menu has no Quit entry; Cmd+Q comes from the system and is routed through `Desktop.setQuitHandler` to `requestQuit`, the same function as the close button, so unsaved text is asked about. The handler is registered on macOS only, runs the question on the event thread and logs a failure to install it.
+
+D5. Open Recent is always open. An empty list shows a grey "No Recent Items", "Clear Recent" is then disabled. Entry texts are `name  —  parent` from `RecentMessages.label` (already escaped); a text that starts with `<` (after blanks or control characters) has these characters replaced by `‹` so that Swing never reads it as HTML.
+
+D6. Close Workspace stays visible and is disabled without a folder (the toolbar still shows its button only while a workspace is open). There is no Cmd+W.
+
+D7. Intended removals: Ctrl+O/S/E on macOS and Meta+O/S/E on Windows and Linux no longer act, because only the primary key of the platform belongs to the menu. R, K, Alt+arrows and the visibility keys are untouched.
+
+== Consequences
+
+* A new menu entry needs a `FileAction`, a state rule and a handler lambda; a test fails when a shortcut letter has no key mapping.
+* `DesktopApp` is now an extension of `FrameWindowScope` (needed for `MenuBar`) and takes `onQuit`.
+* `apple.laf.useScreenMenuBar` and the application name are set before any AWT or Compose use.
+
+== Open / not verified
+
+* The window and the macOS system menu were not looked at or tried by hand.
+* Cmd+S and Cmd+O with the focus in the editor (also with an input method) were not tried.
+* Whether a disabled macOS menu entry passes its shortcut on to the window (needed for the status-line reason) was not tried. If it does not, the key is silently ignored.
+* The Cmd+Q quit handler was not tried, including whether it runs on the event thread (the code handles both cases).
+* Windows and Linux (menu bar inside the window, mnemonic) were only compiled.
+* The reason texts of disabled entries are not visible in the menu itself, only as a status line message after the shortcut.
+* Not part of M1: Edit and View menus (M2), Help menu and thinning the toolbar (M3), Convert (M4).
