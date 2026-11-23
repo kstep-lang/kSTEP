@@ -9,6 +9,7 @@ import androidx.compose.ui.window.MenuBar
 import androidx.compose.ui.window.MenuScope
 import dev.kstep.desktop.menu.EditAction
 import dev.kstep.desktop.menu.FileAction
+import dev.kstep.desktop.menu.HelpAction
 import dev.kstep.desktop.menu.MenuContext
 import dev.kstep.desktop.menu.MenuEntry
 import dev.kstep.desktop.menu.MenuIcons
@@ -63,11 +64,13 @@ internal fun keyShortcutOf(
         alt = shortcut.alt,
     )
 
+private fun mnemonicOf(title: String): Char = MenuTitles.MNEMONICS.getValue(title)
+
 private const val SUBMENU_ICON_ATTEMPTS = 10
 private const val SUBMENU_ICON_RETRY_MS = 100L
 
 /**
- * The native menu bar with the File menu (ADR-0072). The menu's items are all always present; a disabled one shows
+ * The native menu bar with the File, Edit, View and Help menus (ADR-0072, ADR-0076). The menu's items are all always present; a disabled one shows
  * greyed. The key handling lives here only: [onAction] merely routes to the lambdas the toolbar uses as well.
  */
 @Composable
@@ -80,6 +83,8 @@ fun FrameWindowScope.FileMenuBar(
     onClearRecent: () -> Unit,
     onEdit: (EditAction) -> Unit,
     onView: (ViewAction) -> Unit,
+    aboutInAppMenu: Boolean,
+    onHelp: (HelpAction) -> Unit,
 ) {
     // The Compose Menu has no icon parameter: the icon of the submenu is set on the Swing menu (ADR-0073).
     val recentIcon = menuIconToSwing(MenuIcons.OPEN_RECENT_SUBMENU, enabled = true)
@@ -91,7 +96,7 @@ fun FrameWindowScope.FileMenuBar(
         }
     }
     MenuBar {
-        Menu(MenuTitles.FILE, mnemonic = 'F') {
+        Menu(MenuTitles.FILE, mnemonic = mnemonicOf(MenuTitles.FILE)) {
             for (entry in fileMenu(os, recent)) {
                 when (entry) {
                     is MenuEntry.Separator -> Separator()
@@ -116,8 +121,9 @@ fun FrameWindowScope.FileMenuBar(
                 }
             }
         }
-        Menu(MenuTitles.EDIT, mnemonic = 'E') { editMenuItems(os, ctx, onEdit) }
-        Menu(MenuTitles.VIEW, mnemonic = 'V') { viewMenuItems(os, ctx, onView) }
+        Menu(MenuTitles.EDIT, mnemonic = mnemonicOf(MenuTitles.EDIT)) { editMenuItems(os, ctx, onEdit) }
+        Menu(MenuTitles.VIEW, mnemonic = mnemonicOf(MenuTitles.VIEW)) { viewMenuItems(os, ctx, onView) }
+        Menu(MenuTitles.HELP, mnemonic = mnemonicOf(MenuTitles.HELP)) { helpMenuItems(os, aboutInAppMenu, onHelp) }
     }
 }
 

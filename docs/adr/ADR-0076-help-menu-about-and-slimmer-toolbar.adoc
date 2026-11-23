@@ -1,0 +1,45 @@
+= ADR-0076: Help menu, About and a slimmer toolbar (Welle M3b)
+:toc:
+
+== Status
+
+Accepted (Welle M3b of the menu bar plan). Scope: the Help menu of kSTEP Desktop (Keyboard Shortcuts, About), the About entry of the macOS application menu, the removal of three toolbar buttons that the File menu covers, and one key fix. The model, the overview and the icon data are covered by unit tests; the window itself was not looked at by hand. See "Open / not verified".
+
+== Context
+
+ADR-0072 to ADR-0075 gave the menu bar File, Edit and View with state, reasons, icons and native shortcuts. There was no place that lists the keys, no About, and the toolbar still repeated Open Folder, Recent and Close Workspace, all of which are File menu entries.
+
+== Decision
+
+D1. Help menu with two entries, `HelpAction.SHORTCUTS` ("Keyboard Shortcuts") and `HelpAction.ABOUT` ("About kSTEP Desktop"), always enabled. Mnemonics are F, E, V, H (`MenuTitles.MNEMONICS`, one source for the menu bar and its test).
+
+D2. The shortcut overview is built from the menu model (`shortcutOverview(os)`: `FileAction`, `EditAction`, `ViewAction`, and the new `EditorShortcut` enum for the keys only the editor handles). It cannot drift from the real keys; a test checks that every registered key, every single-key hint and every editor key appears exactly once and that no key text repeats. Labels are the menu labels, not `menuText`. Entries without key and hint (Quit, Close Workspace, Run Script has a key) have no row. No new shortcut was added: Cmd+/ belongs to the editor and every new key changes the routing tables.
+
+D3. `EditorShortcut` (Find Next, Find Previous, Redo alias) is the single source of `EditorOwnedShortcuts`; the values are the same as before.
+
+D4. About placement. On macOS the entry belongs in the application menu: `installMacAboutHandler` registers `Desktop.setAboutHandler` once (`LaunchedEffect`). If it cannot be installed, About stays in Help (`helpMenuEntries(os, aboutInAppMenu)`), so it is never missing. On Windows and Linux About is always in Help, after a separator. The handler runs off the UI thread and only sets Compose state.
+
+D5. Version. `kstepVersion()` in `kstep-cli` is a public wrapper around the existing `cliVersion()` (the jar's version resource); no second mechanism. The unit test in `kstep-desktop` asserts it is not "unknown", which proves the resource reaches the desktop test classpath.
+
+D6. Dialogs. Material `AlertDialog` (as in `AiDialogs`), one state `helpDialog` so two never show at once, focus on "Close", Esc closes. The link opens the fixed URL of `AboutInfo` (no user input) off the UI thread; failures are logged without paths and shown as "Could not open the browser: <url>".
+
+D7. Toolbar. Open Folder, Recent and Close Workspace are removed from the toolbar. Recent was checked: the toolbar menu and the File submenu use the same labels and both only offer Clear Recent, so nothing is lost. The folder chooser titles now read "Open a folder of Markdown notes" (replaces the removed tooltip). Close Workspace stays in the File menu, disabled with "No folder is open".
+
+D8. Fix. The window's Home key (H) ignored Alt, so Alt+H on Windows and Linux ran Home instead of opening the Help menu. It now uses `isPlainKey(command, alt)`. T, V and I already pass Alt to `visibilityAction`.
+
+D9. Two icons, drawn like the others (ADR-0073, ADR-0074): `KEYBOARD` and `INFO`, stroke 1.0, half pixels.
+
+== Consequences
+
+* A new `HelpAction` does not compile without an icon.
+* A new key in a menu table shows up in the overview without further work, and a test fails if an editor key is missing.
+* The toolbar is shorter; the File menu is the one place for folders and recent items.
+
+== Open / not verified
+
+* The macOS Help menu search field with the Compose `MenuBar` was not seen.
+* `setAboutHandler` was not tried by hand; the fallback to Help is by code only.
+* Windows and Linux: compiled and unit tested only (mnemonics F, E, V, H and Alt+H).
+* The dialogs have no rendering test; the look in dark mode was not seen.
+* A filter line in the overview (suggestion from the design team) is not done.
+* A visible check of the window needs a hand test with a capture of the window area only.

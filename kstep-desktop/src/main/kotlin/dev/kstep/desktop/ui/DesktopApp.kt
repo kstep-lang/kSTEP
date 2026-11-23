@@ -22,9 +22,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -69,6 +66,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.FrameWindowScope
+import dev.kstep.cli.kstepVersion
 import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.aiwire.AiController
@@ -93,15 +91,18 @@ import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.export.ScriptExportPreference
+import dev.kstep.desktop.menu.AboutInfo
 import dev.kstep.desktop.menu.EditAction
 import dev.kstep.desktop.menu.FileAction
 import dev.kstep.desktop.menu.FocusTarget
+import dev.kstep.desktop.menu.HelpAction
 import dev.kstep.desktop.menu.MenuContext
 import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.menu.MenuReasons
 import dev.kstep.desktop.menu.ShortcutKey
 import dev.kstep.desktop.menu.ShortcutRouting
 import dev.kstep.desktop.menu.ViewAction
+import dev.kstep.desktop.menu.isPlainKey
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
@@ -249,6 +250,10 @@ fun FrameWindowScope.DesktopApp(
     }
     // Export dialog (ADR-0057): the controller owns the run; the last format and folder live only for this session.
     val exportState by exporter.state.collectAsState()
+    var helpDialog by remember { mutableStateOf<HelpAction?>(null) }
+    var aboutInAppMenu by remember { mutableStateOf(false) }
+    val aboutInfo = remember { AboutInfo.of(kstepVersion()) }
+    LaunchedEffect(Unit) { aboutInAppMenu = installMacAboutHandler { helpDialog = HelpAction.ABOUT } }
     var exportVisible by remember { mutableStateOf(false) }
     var exportNow by remember { mutableStateOf(0L) }
     var exportSaveError by remember { mutableStateOf<String?>(null) }
@@ -849,6 +854,8 @@ fun FrameWindowScope.DesktopApp(
         onClearRecent = { updateRecent { it.clear() } },
         onEdit = onEditAction,
         onView = onViewAction,
+        aboutInAppMenu = aboutInAppMenu,
+        onHelp = { helpDialog = it },
     )
 
     MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
@@ -877,7 +884,7 @@ fun FrameWindowScope.DesktopApp(
                             transientNotice = menuRoute.reason
                             true
                         }
-                        !command && !editorFocused && event.key == Key.H -> {
+                        isPlainKey(command, event.isAltPressed) && !editorFocused && event.key == Key.H -> {
                             home()
                             true
                         }
@@ -918,6 +925,11 @@ fun FrameWindowScope.DesktopApp(
                     }
                 },
         ) {
+            when (helpDialog) {
+                HelpAction.SHORTCUTS -> ShortcutsDialog(menuOs) { helpDialog = null }
+                HelpAction.ABOUT -> AboutDialog(aboutInfo) { helpDialog = null }
+                null -> Unit
+            }
             if (exportVisible) {
                 ExportDialog(
                     sandboxNotice = sandboxNotice,
@@ -972,12 +984,7 @@ fun FrameWindowScope.DesktopApp(
                             (workspace as? WorkspaceState.Open)?.scan?.root?.let {
                                 "Knowledge · " + DisplayName.escaped(it.fileName?.toString() ?: it.toString(), 48)
                             },
-                        onOpenFolder = chooseFolder,
-                        recent = recent.entries,
-                        onRecent = openFromRecent,
-                        onClearRecent = { updateRecent { it.clear() } },
                         transientNotice = transientNotice,
-                        onCloseWorkspace = closeWorkspace,
                         sandboxNotice = sandboxNotice,
                         exportNotice = exportNotice,
                         onShowInFolder = { exportNotice?.let { showInFolder(it.dir) } },
@@ -1214,12 +1221,7 @@ private fun Toolbar(
     aiStatus: String,
     knowledgeOpen: Boolean,
     knowledgeLabel: String?,
-    onOpenFolder: () -> Unit,
-    recent: List<RecentEntry>,
-    onRecent: (RecentEntry) -> Unit,
-    onClearRecent: () -> Unit,
     transientNotice: String?,
-    onCloseWorkspace: () -> Unit,
     sandboxNotice: SandboxNotice? = null,
 ) {
     Row(
@@ -1227,11 +1229,6 @@ private fun Toolbar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TextButton(onClick = onOpen) { Text("Open", fontSize = 13.sp) }
-        WithTip(openFolderTip()) { TextButton(onClick = onOpenFolder) { Text("Open Folder…", fontSize = 13.sp) } }
-        RecentMenu(recent, onRecent, onClearRecent)
-        if (knowledgeOpen) {
-            TextButton(onClick = onCloseWorkspace) { Text("Close Workspace", fontSize = 13.sp) }
-        }
         WithTip(
             if (knowledgeOpen) {
                 MenuReasons.KNOWLEDGE_UNAVAILABLE
@@ -1408,39 +1405,6 @@ private fun RecentLabel(entry: RecentEntry) {
     }
 }
 
-@Composable
-private fun RecentMenu(
-    recent: List<RecentEntry>,
-    onRecent: (RecentEntry) -> Unit,
-    onClear: () -> Unit,
-) {
-    var open by remember { mutableStateOf(false) }
-    Box {
-        WithTip(if (recent.isEmpty()) "No recent files" else null) {
-            TextButton(onClick = { open = true }, enabled = recent.isNotEmpty()) { Text("Recent ▾", fontSize = 13.sp) }
-        }
-        DropdownMenu(expanded = open && recent.isNotEmpty(), onDismissRequest = { open = false }) {
-            recent.forEach { entry ->
-                DropdownMenuItem(
-                    text = { RecentLabel(entry) },
-                    onClick = {
-                        open = false
-                        onRecent(entry)
-                    },
-                )
-            }
-            HorizontalDivider()
-            DropdownMenuItem(
-                text = { Text("Clear Recent", fontSize = 13.sp) },
-                onClick = {
-                    open = false
-                    onClear()
-                },
-            )
-        }
-    }
-}
-
 /** The hint while items are dragged over the window: a frame and one line on a faint background, never a full cover. */
 @Composable
 private fun DropOverlay(
@@ -1487,8 +1451,6 @@ private fun menuKey(key: Key): ShortcutKey? =
         else -> null
     }
 
-private fun openFolderTip(): String = "Open a folder of Markdown notes (${if (isMac()) "⇧⌘O" else "Ctrl+Shift+O"})"
-
 private fun isMac(): Boolean =
     System
         .getProperty("os.name")
@@ -1505,7 +1467,7 @@ private fun chooseFolderDialog(parent: Frame): Path? {
         val key = "apple.awt.fileDialogForDirectories"
         System.setProperty(key, "true")
         try {
-            val dialog = FileDialog(parent, "Open a folder of notes", FileDialog.LOAD)
+            val dialog = FileDialog(parent, "Open a folder of Markdown notes", FileDialog.LOAD)
             dialog.isVisible = true
             val name = dialog.file ?: return null
             return Path.of(dialog.directory ?: "", name)
@@ -1515,7 +1477,7 @@ private fun chooseFolderDialog(parent: Frame): Path? {
     }
     val chooser = javax.swing.JFileChooser()
     chooser.fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
-    chooser.dialogTitle = "Open a folder of notes"
+    chooser.dialogTitle = "Open a folder of Markdown notes"
     return if (chooser.showOpenDialog(parent) ==
         javax.swing.JFileChooser.APPROVE_OPTION
     ) {

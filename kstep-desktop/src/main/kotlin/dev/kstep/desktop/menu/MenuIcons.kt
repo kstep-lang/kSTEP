@@ -28,6 +28,8 @@ enum class MenuIconId {
     ISOLATE,
     SHOW_ALL,
     AI_PANEL,
+    KEYBOARD,
+    INFO,
 }
 
 /** The icon of a File action. Exhaustive: a new [FileAction] does not compile without an icon. */
@@ -69,6 +71,13 @@ fun iconOf(action: ViewAction): MenuIconId =
         ViewAction.AI_PANEL -> MenuIconId.AI_PANEL
     }
 
+/** The icon of a Help action. Exhaustive. */
+fun iconOf(action: HelpAction): MenuIconId =
+    when (action) {
+        HelpAction.SHORTCUTS -> MenuIconId.KEYBOARD
+        HelpAction.ABOUT -> MenuIconId.INFO
+    }
+
 /** The icons of the entries that are not a [FileAction]. */
 object MenuIcons {
     val OPEN_RECENT_SUBMENU: MenuIconId = MenuIconId.OPEN_RECENT
@@ -84,5 +93,9 @@ object MenuTitles {
     const val FILE = "File"
     const val EDIT = "Edit"
     const val VIEW = "View"
+    const val HELP = "Help"
+
+    /** The mnemonic (Alt+letter on Windows and Linux) of every menu; all different. */
+    val MNEMONICS: Map<String, Char> = mapOf(FILE to 'F', EDIT to 'E', VIEW to 'V', HELP to 'H')
     const val OPEN_RECENT = "Open Recent"
 }

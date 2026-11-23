@@ -284,7 +284,50 @@ internal object KstepEditViewIcons {
                         horizontalLineTo(11.5f)
                     },
                 )
-            else -> error("Not an Edit or View icon: $id")
+            MenuIconId.KEYBOARD ->
+                listOf(
+                    {
+                        moveTo(3f, 4.5f)
+                        horizontalLineTo(13f)
+                        arcTo(1.5f, 1.5f, 0f, false, true, 14.5f, 6f)
+                        verticalLineTo(10f)
+                        arcTo(1.5f, 1.5f, 0f, false, true, 13f, 11.5f)
+                        horizontalLineTo(3f)
+                        arcTo(1.5f, 1.5f, 0f, false, true, 1.5f, 10f)
+                        verticalLineTo(6f)
+                        arcTo(1.5f, 1.5f, 0f, false, true, 3f, 4.5f)
+                        close()
+                    },
+                    {
+                        // Four keys as dots, then the space bar.
+                        moveTo(4.5f, 6.5f)
+                        lineTo(4.5f, 6.5f)
+                        moveTo(6.5f, 6.5f)
+                        lineTo(6.5f, 6.5f)
+                        moveTo(9.5f, 6.5f)
+                        lineTo(9.5f, 6.5f)
+                        moveTo(11.5f, 6.5f)
+                        lineTo(11.5f, 6.5f)
+                        moveTo(5.5f, 9.5f)
+                        horizontalLineTo(10.5f)
+                    },
+                )
+            MenuIconId.INFO ->
+                listOf(
+                    {
+                        moveTo(2.5f, 8.5f)
+                        arcTo(6f, 6f, 0f, false, true, 14.5f, 8.5f)
+                        arcTo(6f, 6f, 0f, false, true, 2.5f, 8.5f)
+                        close()
+                    },
+                    {
+                        moveTo(8.5f, 5.5f)
+                        lineTo(8.5f, 5.5f)
+                        moveTo(8.5f, 7.5f)
+                        verticalLineTo(11.5f)
+                    },
+                )
+            else -> error("Not an Edit, View or Help icon: $id")
         }
 
     private fun PathBuilder.eye() {

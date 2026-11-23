@@ -15,7 +15,8 @@ class MenuIconsTest :
         "icons are pairwise different" {
             val ids =
                 FileAction.entries.map { iconOf(it) } + EditAction.entries.map { iconOf(it) } +
-                    ViewAction.entries.map { iconOf(it) } + MenuIcons.OPEN_RECENT_SUBMENU + MenuIcons.CLEAR_RECENT_ITEM
+                    ViewAction.entries.map { iconOf(it) } + HelpAction.entries.map { iconOf(it) } +
+                    MenuIcons.OPEN_RECENT_SUBMENU + MenuIcons.CLEAR_RECENT_ITEM
             ids.toSet().size shouldBe ids.size
         }
 
@@ -28,7 +29,8 @@ class MenuIconsTest :
         "no icon is orphaned: actions plus the two extra entries cover all icons" {
             val used =
                 FileAction.entries.map { iconOf(it) } + EditAction.entries.map { iconOf(it) } +
-                    ViewAction.entries.map { iconOf(it) } + MenuIcons.OPEN_RECENT_SUBMENU + MenuIcons.CLEAR_RECENT_ITEM
+                    ViewAction.entries.map { iconOf(it) } + HelpAction.entries.map { iconOf(it) } +
+                    MenuIcons.OPEN_RECENT_SUBMENU + MenuIcons.CLEAR_RECENT_ITEM
             used.toSet() shouldBe MenuIconId.entries.toSet()
         }
 
@@ -54,6 +56,7 @@ class MenuIconsTest :
             text.contains("Menu(MenuTitles.FILE") shouldBe true
             text.contains("Menu(MenuTitles.EDIT") shouldBe true
             text.contains("Menu(MenuTitles.VIEW") shouldBe true
+            text.contains("Menu(MenuTitles.HELP") shouldBe true
             text.contains("\"Open Recent\"") shouldBe false
             MenuTitles.OPEN_RECENT shouldBe "Open Recent"
             MenuTitles.FILE shouldBe "File"

@@ -65,22 +65,40 @@ object ShortcutRouting {
     }
 }
 
+/** The keys only the editor handles (ADR-0074, ADR-0076): the one source of the table and of the shortcut overview. */
+enum class EditorShortcut(
+    val label: String,
+) {
+    FIND_NEXT("Find Next"),
+    FIND_PREVIOUS("Find Previous"),
+    REDO_ALTERNATE("Redo"),
+}
+
+/** The key of an [EditorShortcut] on [os]. */
+fun shortcutOf(
+    shortcut: EditorShortcut,
+    os: MenuOs,
+): Shortcut {
+    val g = ShortcutKey.Letter('G')
+    return when (shortcut) {
+        EditorShortcut.FIND_NEXT -> Shortcut(g)
+        EditorShortcut.FIND_PREVIOUS -> Shortcut(g, shift = true)
+        EditorShortcut.REDO_ALTERNATE ->
+            if (os == MenuOs.MAC) {
+                Shortcut(ShortcutKey.Letter('Y'))
+            } else {
+                Shortcut(ShortcutKey.Letter('Z'), shift = true)
+            }
+    }
+}
+
 /**
  * Aliases only the editor handles (ADR-0074): they are no menu entry and are never registered with the menu. Per
  * operating system, so the tables of the menu and of the editor never overlap. F3 and Shift+F3 (without the primary
  * key) and Ctrl+H on macOS (the old Replace key, kept as an editor alias) are not part of these tables.
  */
 object EditorOwnedShortcuts {
-    fun of(os: MenuOs): Set<Shortcut> {
-        val g = ShortcutKey.Letter('G')
-        val find = setOf(Shortcut(g), Shortcut(g, shift = true))
-        return find +
-            if (os == MenuOs.MAC) {
-                setOf(Shortcut(ShortcutKey.Letter('Y')))
-            } else {
-                setOf(Shortcut(ShortcutKey.Letter('Z'), shift = true))
-            }
-    }
+    fun of(os: MenuOs): Set<Shortcut> = EditorShortcut.entries.map { shortcutOf(it, os) }.toSet()
 }
 
 /**

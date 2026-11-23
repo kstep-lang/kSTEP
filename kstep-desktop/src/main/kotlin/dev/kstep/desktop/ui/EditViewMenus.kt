@@ -3,12 +3,14 @@ package dev.kstep.desktop.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.window.MenuScope
 import dev.kstep.desktop.menu.EditAction
+import dev.kstep.desktop.menu.HelpAction
 import dev.kstep.desktop.menu.MenuContext
 import dev.kstep.desktop.menu.MenuEntry
 import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.menu.MenuText
 import dev.kstep.desktop.menu.ViewAction
 import dev.kstep.desktop.menu.editMenu
+import dev.kstep.desktop.menu.helpMenuEntries
 import dev.kstep.desktop.menu.iconOf
 import dev.kstep.desktop.menu.registeredShortcut
 import dev.kstep.desktop.menu.stateOf
@@ -63,5 +65,22 @@ internal fun MenuScope.viewMenuItems(
             }
             else -> Unit
         }
+    }
+}
+
+/** The items of the Help menu (ADR-0076); a separator sits before About when both entries stand here. */
+@Composable
+internal fun MenuScope.helpMenuItems(
+    os: MenuOs,
+    aboutInAppMenu: Boolean,
+    onHelp: (HelpAction) -> Unit,
+) {
+    for (a in helpMenuEntries(os, aboutInAppMenu)) {
+        if (a == HelpAction.ABOUT) Separator()
+        Item(
+            a.label,
+            icon = menuIcon(iconOf(a), enabled = true),
+            onClick = { onHelp(a) },
+        )
     }
 }

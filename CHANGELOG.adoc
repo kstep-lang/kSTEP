@@ -9,6 +9,8 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* kSTEP Desktop toolbar (Welle M3b, ADR-0076): Open Folder, Recent and Close Workspace are only in the File menu now;
+  the folder chooser is titled "Open a folder of Markdown notes".
 * kSTEP Desktop UI polish (Welle D9a, ADR-0064): the status line puts separators only between parts that are shown and
   shortens a long file name in the middle (extension kept) before it pushes the export line, the sandbox notice or the run
   status out; the export dialog shows the target as file name (always whole) and folder (shortened) with the full path as
@@ -16,6 +18,10 @@ minor versions may contain breaking changes.
   starts, a workspace opens or the next export dialog opens.
 
 === Added
+
+* kSTEP Desktop Help menu (Welle M3b, ADR-0076): Keyboard Shortcuts (an overview built from the menu model) and
+  About kSTEP Desktop (version, link to kstep.dev); on macOS About is in the application menu when the system handler
+  is available.
 
 * kSTEP Desktop Edit menu: Cut, Copy, Paste and Select All (Welle M3a, ADR-0075) with icons and native shortcuts
   (Cmd or Ctrl plus X, C, V, A). An entry is disabled with a reason in the status line when the editor is not the focus
@@ -211,6 +217,10 @@ minor versions may contain breaking changes.
 
 * The OCCT install hint of `kstep-viewer` showed the apt command on every operating system; on macOS it now shows Homebrew and the
   native archive.
+
+=== Fixed
+
+* kSTEP Desktop: Alt+H no longer runs Home outside the editor, so the mnemonic of the Help menu works.
 
 == 0.5.0 — 2026-11-17 (pre-release)
 

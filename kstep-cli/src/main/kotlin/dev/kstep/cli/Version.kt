@@ -18,6 +18,9 @@ internal fun cliVersion(): String =
         }
     }.getOrNull()?.takeIf { it.isNotBlank() } ?: "unknown"
 
+/** The kSTEP version baked into this jar, for callers outside the CLI (the desktop About dialog). "unknown" if absent. */
+public fun kstepVersion(): String = cliVersion()
+
 /** Prints `kstep <version>`; in the native distribution additionally one line per native bridge. */
 internal fun printVersion() {
     println("kstep ${cliVersion()}")
