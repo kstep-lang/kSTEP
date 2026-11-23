@@ -1,0 +1,40 @@
+= ADR-0073: Icons in the File menu (Welle M1b)
+:toc:
+
+== Status
+
+Accepted (Welle M1b of the menu bar plan). Scope: icons for the entries of the File menu only. The model, the drawing data, the tint and the submenu workaround are covered by unit and headless render tests; the menu itself was not looked at by hand. See "Open / not verified".
+
+== Context
+
+The File menu of ADR-0072 had text only. The wish was for icons on as many entries as sensible. The Compose `Item` takes a `Painter`, but `Menu` (a submenu) has no icon parameter.
+
+== Decision
+
+D1. Grid and stroke. 16 x 16 viewport, stroke 1.0, round caps and joins, usable area 1.5 to 14.5, axis-parallel segments on a half pixel so that they are sharp. Stroke only, no fills. All symbols were drawn for kSTEP; nothing was copied from another project, and `kstep-desktop` does not depend on `kuml-desktop`.
+
+D2. Symbols. Open: page with a folded corner. Open Folder: folder. Open Recent: clock. Clear Recent: list with a cross. Close Workspace: folder with a cross. Save: arrow down into a tray. Export: arrow leaving a box towards the upper right. Quit: door frame with an arrow to the right.
+
+D3. Model. `MenuIconId` and `iconOf(FileAction)` in the pure package `dev.kstep.desktop.menu` (exhaustive `when`, a new action does not compile without an icon). `MenuIcons` names the two non-action entries (submenu, Clear Recent) and holds `null` for the dynamic recent entries and the "No Recent Items" placeholder. `MenuTitles` is the only source of the texts "File" and "Open Recent", used by the menu and by the submenu lookup. The drawing (`KstepMenuIcons`, `ImageVector`, memoised) lives in `ui`.
+
+D4. Colour. One tint per state with `SrcIn`, so the drawing's alpha is kept. macOS: `#2B2B2B` in the light and `#E0E0E0` in the dark system appearance (the screen menu bar is drawn by the system). Windows and Linux: `Menu.foreground` of the Swing look and feel, `#2B2B2B` if there is none. Disabled entries: alpha 0.35.
+
+D5. Submenu icon. `Menu` has no icon parameter, so after composition the icon is set on the Swing `JMenu` (`applySubmenuIcons`). It only looks at direct submenus of the top menu "File", finds them by text, sets an icon only if it is not already the same object (idempotent, no flicker) and never touches a `JMenuItem`. The Swing menu bar is built after composition, so a `LaunchedEffect` tries ten times at 100 ms; it starts again when the icon object changes (for example after a system appearance change) and when the number of recent entries changes. The icon is rendered into a bitmap of 16 x density pixels and drawn at 16 logical pixels.
+
+D6. Recent entries without icon. The icon of each recent entry would be the same for every row and repeats what the text says (the Rams argument against decoration); the case for it (every row visibly belongs to the menu, Tesler) was weighed and lost. Decision after the final review: no icons on the dynamic entries and the placeholder.
+
+D7. Rejected alternatives: broom or bin for Clear Recent (a bin suggests deleting files), a power symbol for Quit (it means switching off a device), an open folder for Open (it looks like Open Folder), stroke 1.25 (blurry on a 16 pixel grid), a 24 viewport as in other projects (every segment would need re-scaling), icons for the recent rows.
+
+== Consequences
+
+* A new `FileAction` needs an icon (compile error otherwise); a test fails when an icon has no use or two entries share one.
+* A raster guard test fails when a drawing leaves the usable area, uses a stroke other than 1.0 or puts an axis-parallel segment off a half pixel.
+* The submenu depends on the text lookup; the shared `MenuTitles` constants and a source test prevent a silent mismatch.
+
+== Open / not verified
+
+* The look in light and dark mode, the sharpness on Retina and the submenu icon were not looked at in the real window.
+* The text alignment inside the Open Recent submenu (Clear Recent with icon, recent rows without) was not seen.
+* Whether the macOS screen menu bar shows a `JMenu` icon at all, and at which size, was not tried.
+* Windows and Linux were only compiled; the `Menu.foreground` tint was not seen there.
+* The system dark mode is read by `isSystemInDarkTheme`; its behaviour on a change at run time was not tried, only the pure tint function is tested.

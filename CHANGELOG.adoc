@@ -17,6 +17,9 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop menu icons (Welle M1b, ADR-0073): the File menu entries (Open, Open Folder, Open Recent, Clear Recent,
+  Close Workspace, Save, Export, Quit) show small stroke icons that follow the system appearance on macOS and the menu
+  colour elsewhere; disabled entries are dimmed. Recent files themselves have no icon. Not looked at in the real window yet.
 * kSTEP Desktop native File menu bar (Welle M1, ADR-0072): Open, Open Folder, Open Recent (with "No Recent Items" and
   Clear Recent), Close Workspace, Save, Export and, on Windows and Linux, Quit. Cmd+Q on macOS asks about unsaved changes
   like the close button. A disabled menu shortcut reports its reason in the status line. Ctrl+O/S/E on macOS and
