@@ -1,0 +1,60 @@
+= ADR-0074: Edit and View menus (Welle M2)
+:toc:
+
+== Status
+
+Accepted (Welle M2 of the menu bar plan). Scope: the Edit and View menus of the native menu bar of kSTEP Desktop, their states, shortcuts and icons. Cut, Copy, Paste, Select All and the Script menu follow in M3. The model, the routing and the icon data are covered by unit tests; the menus were not looked at or tried by hand. See "Open / not verified".
+
+== Context
+
+ADR-0072 added the File menu and the rule that the menu owns its shortcuts: the window's key handler never runs a menu action, it passes the key on or shows why the entry is disabled. Find, Replace, Go to Line, Undo and Redo lived as key branches in the editor, Run, the AI panel, the block jump, Home and the visibility keys as branches in the window handler. They had no menu entry and no visible state.
+
+== Decision
+
+D1. Model. `Shortcut` is now `(ShortcutKey, shift, alt)`; `ShortcutKey` is a letter or the Up and Down arrows. `display(os)` shows Shift, Option or Alt, the primary key and the key (`⇧⌥⌘F`, `Ctrl+Alt+Up`). `EditAction` (Undo, Redo, Find, Replace, Go to Line) and `ViewAction` (Run Script, Home, Previous Block, Next Block, Toggle Transparent, Toggle Hidden, Isolate, Show All, Show AI Panel) have a state (`stateOf`), a registered shortcut (`registeredShortcut`) and an icon (`iconOf`), all pure and in the package `dev.kstep.desktop.menu`.
+
+D2. Single-key entries. Home (H), Toggle Transparent (T), Toggle Hidden (V), Isolate (I) and Show All (Shift+V) keep their single keys in the window handler, which only runs while the editor has no focus. They have no menu shortcut; the key is shown in the text in brackets (`Home  (H)`), through `MenuText.safe`.
+
+D3. States and reasons. The reasons are the texts of the toolbar (`MenuReasons`, now also used by `VisibilityToolbar`), plus "Nothing to undo" and "Nothing to redo". Visibility entries check the model first, then the selection; Show All checks the model, then "nothing changed".
+
+D4. Routing. `menuOwnedShortcuts(os)` maps a shortcut to File, Edit or View. Undo and Redo are routed only while the editor has the focus: otherwise they are not menu-owned, and a focused text field keeps its own undo. A disabled entry registers no native shortcut, so its key reaches the window handler, which shows the reason in the status line and takes the key (also Undo with no history while the editor is focused).
+
+D5. Ownership per system.
+
+[cols="2,3,3,3"]
+|===
+|Function |Menu owns (macOS) |Menu owns (Windows, Linux) |Editor alias (not in the menu)
+
+|Undo |Cmd+Z |Ctrl+Z |-
+|Redo |Shift+Cmd+Z |Ctrl+Y |Cmd+Y (macOS), Ctrl+Shift+Z (Windows, Linux)
+|Find |Cmd+F |Ctrl+F |-
+|Replace |Option+Cmd+F |Ctrl+H |Ctrl+H (macOS, the former key)
+|Go to Line |Cmd+L |Ctrl+L |-
+|Run Script |Cmd+R |Ctrl+R |-
+|Previous, Next Block |Option+Cmd+Up, Down |Ctrl+Alt+Up, Down |-
+|Show AI Panel |Cmd+K |Ctrl+K |-
+|Find next, previous |- |- |F3, Shift+F3, Cmd or Ctrl+G, with Shift (only while a search is open)
+|===
+
+`EditorOwnedShortcuts` lists the primary-key aliases per system; a test checks that they never overlap the menu table.
+
+D6. Editor. The key branches the menu now owns are deleted from the editor (Find, Replace, Go to Line, Undo, Redo) and from the window handler (Run, AI panel, block jump). Find, Replace and Go to Line reach the editor as an `EditorCommand` (kind and nonce); the editor opens the bar as before. Undo and Redo ask the editor for the focus afterwards, because a click on a menu entry can take it away on Windows and Linux.
+
+D7. Menus and icons. `FileMenuBar` builds File, Edit and View in the one `MenuBar` of the window. The 14 new icons follow ADR-0073 (16 grid, stroke 1.0, half pixels); Toggle Transparent is a square drawn as eight single segments because the painter has no dash support. Entries are all always present; a disabled one is greyed.
+
+D8. Consequences of deleting the editor branches. On macOS the Ctrl variants (Ctrl+Z, Ctrl+F, Ctrl+L) no longer work. Ctrl+H is kept as Replace alias on macOS. Run without an open file is now disabled with "Open a script first" (before, the key did nothing silently or ran without a file). Cmd+K in a knowledge workspace shows the reason instead of being swallowed without effect.
+
+== Consequences
+
+* A new `EditAction` or `ViewAction` does not compile without a state, a shortcut decision and an icon.
+* The window key handler contains no call of a menu action; a source test checks it.
+* The reasons of the toolbar and the menu cannot drift apart (shared constants, regression test).
+
+== Open / not verified
+
+* Cut, Copy, Paste, Select All and the Script menu are not part of this wave (M3).
+* Undo with the editor focused on Windows and Linux: the menu accelerator and the text field's own undo may both see Cmd or Ctrl+Z. On macOS the screen menu bar takes the key before Java sees it. If both fire, the fallback is to take Undo and Redo in the editor handler without acting; not decided, not tried.
+* Cmd+Z in the viewer without editor focus does nothing and says nothing (Undo is not routed then).
+* Ctrl+Alt+Up and Down on Linux desktops may be taken by the window manager (workspace switching).
+* Focus after a click on a menu entry, input method (umlauts), and the Dictation and Emoji entries that macOS adds to an Edit menu were not tried in the real window.
+* The look of the 14 icons in light and dark mode was not seen; only the raster guard test ran.

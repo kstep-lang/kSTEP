@@ -91,11 +91,14 @@ import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.export.ScriptExportPreference
+import dev.kstep.desktop.menu.EditAction
 import dev.kstep.desktop.menu.FileAction
 import dev.kstep.desktop.menu.MenuContext
 import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.menu.MenuReasons
+import dev.kstep.desktop.menu.ShortcutKey
 import dev.kstep.desktop.menu.ShortcutRouting
+import dev.kstep.desktop.menu.ViewAction
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
@@ -261,6 +264,8 @@ fun FrameWindowScope.DesktopApp(
         }
     }
     var editorFocused by remember { mutableStateOf(false) }
+    var editorCommand by remember { mutableStateOf<EditorCommand?>(null) }
+    var editorCommandNonce by remember { mutableStateOf(0) }
     var jump by remember { mutableStateOf<EditorJump?>(null) }
     var jumpNonce by remember { mutableStateOf(0) }
     val layoutStore = remember { LayoutPreferencesStore() }
@@ -761,7 +766,50 @@ fun FrameWindowScope.DesktopApp(
             scriptOpen = state.file != null && editorView.state is EditorState.Editing,
             knowledgeOpen = knowledgeOpen,
             exportEnabled = exportEnabled,
+            editorOpen = editorView.state is EditorState.Editing,
+            editorFocused = editorFocused,
+            canUndo = editorView.canUndo,
+            canRedo = editorView.canRedo,
+            fileOpen = state.file != null,
+            visibilityAvailable = visibilityScene != null,
+            hasSelection = hasTarget,
+            nothingChanged = !somethingChanged,
         )
+    val onEditAction: (EditAction) -> Unit = {
+        editorCommandNonce++
+        val kind =
+            when (it) {
+                EditAction.UNDO -> {
+                    session.undo()
+                    EditorCommandKind.REFOCUS
+                }
+                EditAction.REDO -> {
+                    session.redo()
+                    EditorCommandKind.REFOCUS
+                }
+                EditAction.FIND -> EditorCommandKind.FIND
+                EditAction.REPLACE -> EditorCommandKind.REPLACE
+                EditAction.GO_TO_LINE -> EditorCommandKind.GO_TO
+            }
+        // Undo and Redo hand the focus back to the editor (a click on a menu may have taken it, ADR-0074).
+        editorCommand = EditorCommand(kind, editorCommandNonce)
+    }
+    val onViewAction: (ViewAction) -> Unit = {
+        when (it) {
+            ViewAction.RUN -> controller.forceRun()
+            ViewAction.HOME -> home()
+            ViewAction.PREVIOUS_BLOCK -> jumpBlock(false)
+            ViewAction.NEXT_BLOCK -> jumpBlock(true)
+            ViewAction.TRANSPARENT -> applyVisibility(target, VisibilityMachine::toggleTransparent)
+            ViewAction.HIDE -> applyVisibility(target, VisibilityMachine::toggleHidden)
+            ViewAction.ISOLATE -> applyVisibility(target, VisibilityMachine::isolate)
+            ViewAction.SHOW_ALL -> visibilityState = VisibilityMachine.showAll(visibilityState)
+            ViewAction.AI_PANEL -> {
+                aiVisible = true
+                aiFocus++
+            }
+        }
+    }
     val onFileAction: (FileAction) -> Unit = {
         when (it) {
             FileAction.OPEN -> openFile()
@@ -779,6 +827,8 @@ fun FrameWindowScope.DesktopApp(
         onAction = onFileAction,
         onRecent = openFromRecent,
         onClearRecent = { updateRecent { it.clear() } },
+        onEdit = onEditAction,
+        onView = onViewAction,
     )
 
     MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
@@ -789,11 +839,11 @@ fun FrameWindowScope.DesktopApp(
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     val command = event.isMetaPressed || event.isCtrlPressed
-                    // Open, Open Folder, Save and Export belong to the menu (ADR-0072): never run here.
+                    // The shortcuts of the File, Edit and View entries belong to the menu (ADR-0072, ADR-0074): never run here.
                     val menuRoute =
-                        menuLetter(event.key)?.let { letter ->
+                        menuKey(event.key)?.let { key ->
                             ShortcutRouting.route(
-                                letter,
+                                key,
                                 if (menuOs == MenuOs.MAC) event.isMetaPressed else event.isCtrlPressed,
                                 event.isShiftPressed,
                                 event.isAltPressed,
@@ -805,24 +855,6 @@ fun FrameWindowScope.DesktopApp(
                         menuRoute is ShortcutRouting.Route.PassToMenu -> false
                         menuRoute is ShortcutRouting.Route.ShowReason -> {
                             transientNotice = menuRoute.reason
-                            true
-                        }
-                        knowledgeOpen &&
-                            command &&
-                            event.isAltPressed &&
-                            (event.key == Key.DirectionUp || event.key == Key.DirectionDown) -> {
-                            jumpBlock(event.key == Key.DirectionDown)
-                            true
-                        }
-                        command && event.key == Key.R -> {
-                            controller.forceRun()
-                            true
-                        }
-                        command && event.key == Key.K -> {
-                            if (!knowledgeOpen) {
-                                aiVisible = true
-                                aiFocus++
-                            }
                             true
                         }
                         !command && !editorFocused && event.key == Key.H -> {
@@ -969,6 +1001,7 @@ fun FrameWindowScope.DesktopApp(
                             modifier = Modifier.width(windowWidth * effectiveFraction).fillMaxHeight(),
                             errorLine = selectedError?.line,
                             findRequest = findRequest,
+                            editorCommand = editorCommand,
                             onUserEdit = { selectedError = null },
                             onEscape = { selectedError = null },
                             knowledge = knowledgeOpen && state.file?.let { knowledge.isWorkspaceFile(it) } == true,
@@ -1405,12 +1438,21 @@ private fun DropOverlay(
     }
 }
 
-/** The letter of the keys a menu shortcut can use; any other key is not menu-owned. */
-private fun menuLetter(key: Key): Char? =
+/** The key of the menu shortcuts (letters and arrows); any other key is not menu-owned. */
+private fun menuKey(key: Key): ShortcutKey? =
     when (key) {
-        Key.O -> 'O'
-        Key.S -> 'S'
-        Key.E -> 'E'
+        Key.O -> ShortcutKey.Letter('O')
+        Key.S -> ShortcutKey.Letter('S')
+        Key.E -> ShortcutKey.Letter('E')
+        Key.Z -> ShortcutKey.Letter('Z')
+        Key.Y -> ShortcutKey.Letter('Y')
+        Key.F -> ShortcutKey.Letter('F')
+        Key.H -> ShortcutKey.Letter('H')
+        Key.L -> ShortcutKey.Letter('L')
+        Key.R -> ShortcutKey.Letter('R')
+        Key.K -> ShortcutKey.Letter('K')
+        Key.DirectionUp -> ShortcutKey.Up
+        Key.DirectionDown -> ShortcutKey.Down
         else -> null
     }
 

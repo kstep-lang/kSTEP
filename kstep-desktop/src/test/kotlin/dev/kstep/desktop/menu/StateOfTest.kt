@@ -17,7 +17,7 @@ class StateOfTest :
         "a disabled entry registers no native shortcut, so its key press reaches the key handler" {
             for (ctx in contexts) {
                 for (action in FileAction.entries) {
-                    val registered = registeredShortcut(action, ctx)
+                    val registered = registeredShortcut(action, ctx, MenuOs.MAC)
                     if (stateOf(action, ctx).enabled) {
                         registered shouldBe action.shortcut
                     } else {
@@ -30,7 +30,7 @@ class StateOfTest :
                 for (action in FileAction.entries) {
                     val sc = action.shortcut ?: continue
                     if (!stateOf(action, ctx).enabled) {
-                        ShortcutRouting.route(sc.key, true, sc.shift, false, MenuOs.MAC, ctx) shouldBe
+                        ShortcutRouting.route(sc.key, true, sc.shift, sc.alt, MenuOs.MAC, ctx) shouldBe
                             ShortcutRouting.Route.ShowReason(checkNotNull(stateOf(action, ctx).reason))
                     }
                 }

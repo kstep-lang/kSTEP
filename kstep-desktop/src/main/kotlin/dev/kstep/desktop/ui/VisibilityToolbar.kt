@@ -19,6 +19,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.kstep.desktop.menu.MenuReasons
 import dev.kstep.desktop.pick.VisibilityCounts
 import dev.kstep.desktop.pick.VisibilityState
 
@@ -63,13 +64,13 @@ internal fun VisibilityControls(
     onAlpha: (Float) -> Unit,
 ) {
     val nothingChanged = counts.hidden == 0 && counts.transparent == 0
-    WithTip(if (nothingChanged) "Nothing is hidden or transparent" else null) {
+    WithTip(if (nothingChanged) MenuReasons.NOTHING_CHANGED else null) {
         TextButton(onClick = onShowAll, enabled = !nothingChanged) { Text("Show all", fontSize = 13.sp) }
     }
-    WithTip(if (hasSelection) null else "Select a part first") {
+    WithTip(if (hasSelection) null else MenuReasons.SELECT_PART_FIRST) {
         TextButton(onClick = onIsolate, enabled = hasSelection) { Text("Isolate", fontSize = 13.sp) }
     }
-    WithTip(if (hasSelection) null else "Select a part first") {
+    WithTip(if (hasSelection) null else MenuReasons.SELECT_PART_FIRST) {
         TextButton(onClick = onHide, enabled = hasSelection) { Text("Hide", fontSize = 13.sp) }
     }
     val noTransparent = counts.transparent == 0

@@ -24,31 +24,140 @@ enum class MenuOs {
     }
 }
 
-/** A letter with the primary key (Cmd on macOS, Ctrl elsewhere) and optionally Shift. */
-data class Shortcut(
-    val key: Char,
-    val shift: Boolean = false,
-) {
-    fun display(os: MenuOs): String =
-        if (os == MenuOs.MAC) {
-            (if (shift) "⇧" else "") + "⌘" + key
-        } else {
-            "Ctrl+" + (if (shift) "Shift+" else "") + key
+/** The key of a menu shortcut: a letter or one of the arrow keys. */
+sealed interface ShortcutKey {
+    data class Letter(
+        val c: Char,
+    ) : ShortcutKey {
+        init {
+            require(c in 'A'..'Z') { "a shortcut letter is A-Z" }
         }
+    }
+
+    data object Up : ShortcutKey
+
+    data object Down : ShortcutKey
 }
+
+/** A key with the primary key (Cmd on macOS, Ctrl elsewhere) and optionally Shift and Alt (Option on macOS). */
+data class Shortcut(
+    val key: ShortcutKey,
+    val shift: Boolean = false,
+    val alt: Boolean = false,
+) {
+    fun display(os: MenuOs): String {
+        val name =
+            when (key) {
+                is ShortcutKey.Letter -> key.c.toString()
+                ShortcutKey.Up -> if (os == MenuOs.MAC) "↑" else "Up"
+                ShortcutKey.Down -> if (os == MenuOs.MAC) "↓" else "Down"
+            }
+        return if (os == MenuOs.MAC) {
+            (if (shift) "⇧" else "") + (if (alt) "⌥" else "") + "⌘" + name
+        } else {
+            "Ctrl+" + (if (shift) "Shift+" else "") + (if (alt) "Alt+" else "") + name
+        }
+    }
+}
+
+private fun letter(c: Char) = ShortcutKey.Letter(c)
 
 /** The entries of the File menu. */
 enum class FileAction(
     val label: String,
     val shortcut: Shortcut?,
 ) {
-    OPEN("Open…", Shortcut('O')),
-    OPEN_FOLDER("Open Folder…", Shortcut('O', shift = true)),
+    OPEN("Open…", Shortcut(letter('O'))),
+    OPEN_FOLDER("Open Folder…", Shortcut(letter('O'), shift = true)),
     CLOSE_WORKSPACE("Close Workspace", null),
-    SAVE("Save", Shortcut('S')),
-    EXPORT("Export…", Shortcut('E')),
+    SAVE("Save", Shortcut(letter('S'))),
+    EXPORT("Export…", Shortcut(letter('E'))),
     QUIT("Quit", null),
 }
+
+/** The entries of the Edit menu (ADR-0074). Cut, Copy, Paste and Select All follow in M3. */
+enum class EditAction(
+    val label: String,
+) {
+    UNDO("Undo"),
+    REDO("Redo"),
+    FIND("Find…"),
+    REPLACE("Replace…"),
+    GO_TO_LINE("Go to Line…"),
+}
+
+/** The single key a View entry answers to while the viewer has the focus; shown in the menu text, never registered. */
+data class KeyHint(
+    val letter: Char,
+    val shift: Boolean,
+) {
+    fun hintText(os: MenuOs): String =
+        if (shift) {
+            (if (os == MenuOs.MAC) "⇧" else "Shift+") + letter
+        } else {
+            letter.toString()
+        }
+}
+
+/** The entries of the View menu (ADR-0074). */
+enum class ViewAction(
+    val label: String,
+    val keyHint: KeyHint?,
+) {
+    RUN("Run Script", null),
+    HOME("Home", KeyHint('H', false)),
+    PREVIOUS_BLOCK("Previous Block", null),
+    NEXT_BLOCK("Next Block", null),
+    TRANSPARENT("Toggle Transparent", KeyHint('T', false)),
+    HIDE("Toggle Hidden", KeyHint('V', false)),
+    ISOLATE("Isolate", KeyHint('I', false)),
+    SHOW_ALL("Show All", KeyHint('V', true)),
+    AI_PANEL("Show AI Panel", null),
+    ;
+
+    /** The menu text, with the single-key hint in brackets (two blanks before the bracket). */
+    fun menuText(os: MenuOs): String = MenuText.safe(keyHint?.let { "$label  (${it.hintText(os)})" } ?: label)
+}
+
+private fun sc(
+    c: Char,
+    shift: Boolean = false,
+    alt: Boolean = false,
+) = Shortcut(letter(c), shift, alt)
+
+/** The shortcut the menu registers for an Edit entry on [os], or null. */
+fun shortcutOf(
+    action: EditAction,
+    os: MenuOs,
+): Shortcut? {
+    val m = os == MenuOs.MAC
+    return when (action) {
+        EditAction.UNDO -> sc('Z')
+        EditAction.REDO -> if (m) sc('Z', shift = true) else sc('Y')
+        EditAction.FIND -> sc('F')
+        EditAction.REPLACE -> if (m) sc('F', alt = true) else sc('H')
+        EditAction.GO_TO_LINE -> sc('L')
+    }
+}
+
+/** The shortcut the menu registers for a View entry on [os]; the single-key entries have none. */
+@Suppress("UNUSED_PARAMETER")
+fun shortcutOf(
+    action: ViewAction,
+    os: MenuOs,
+): Shortcut? =
+    when (action) {
+        ViewAction.RUN -> sc('R')
+        ViewAction.AI_PANEL -> sc('K')
+        ViewAction.PREVIOUS_BLOCK -> Shortcut(ShortcutKey.Up, alt = true)
+        ViewAction.NEXT_BLOCK -> Shortcut(ShortcutKey.Down, alt = true)
+        ViewAction.HOME,
+        ViewAction.TRANSPARENT,
+        ViewAction.HIDE,
+        ViewAction.ISOLATE,
+        ViewAction.SHOW_ALL,
+        -> null
+    }
 
 /** Enabled, or disabled with the reason (the reason is shown in the status line when the shortcut is pressed). */
 data class ActionState(
@@ -64,6 +173,18 @@ data class MenuContext(
     val scriptOpen: Boolean,
     val knowledgeOpen: Boolean,
     val exportEnabled: Boolean,
+    /** An editor buffer is open (a script or a note). */
+    val editorOpen: Boolean = false,
+    val editorFocused: Boolean = false,
+    val canUndo: Boolean = false,
+    val canRedo: Boolean = false,
+    /** A file is open, so Run has something to run. */
+    val fileOpen: Boolean = false,
+    /** A model is shown, so the visibility actions can work. */
+    val visibilityAvailable: Boolean = false,
+    val hasSelection: Boolean = false,
+    /** Nothing is hidden or transparent, so Show All has nothing to do. */
+    val nothingChanged: Boolean = false,
 )
 
 object MenuReasons {
@@ -72,6 +193,10 @@ object MenuReasons {
     const val NO_FOLDER_OPEN = "No folder is open"
     const val NO_RECENT = "No Recent Items"
     const val CLEAR_RECENT = "Clear Recent"
+    const val NOTHING_TO_UNDO = "Nothing to undo"
+    const val NOTHING_TO_REDO = "Nothing to redo"
+    const val SELECT_PART_FIRST = "Select a part first"
+    const val NOTHING_CHANGED = "Nothing is hidden or transparent"
 }
 
 private val ENABLED = ActionState(true, null)
@@ -94,15 +219,68 @@ fun stateOf(
             }
     }
 
+fun stateOf(
+    action: EditAction,
+    ctx: MenuContext,
+): ActionState =
+    when {
+        !ctx.editorOpen -> disabled(MenuReasons.OPEN_SCRIPT_FIRST)
+        action == EditAction.UNDO && !ctx.canUndo -> disabled(MenuReasons.NOTHING_TO_UNDO)
+        action == EditAction.REDO && !ctx.canRedo -> disabled(MenuReasons.NOTHING_TO_REDO)
+        else -> ENABLED
+    }
+
+fun stateOf(
+    action: ViewAction,
+    ctx: MenuContext,
+): ActionState =
+    when (action) {
+        ViewAction.RUN -> if (ctx.fileOpen) ENABLED else disabled(MenuReasons.OPEN_SCRIPT_FIRST)
+        ViewAction.HOME -> ENABLED
+        ViewAction.PREVIOUS_BLOCK, ViewAction.NEXT_BLOCK ->
+            if (ctx.knowledgeOpen) ENABLED else disabled(MenuReasons.NO_FOLDER_OPEN)
+        ViewAction.TRANSPARENT, ViewAction.HIDE, ViewAction.ISOLATE ->
+            when {
+                !ctx.visibilityAvailable -> disabled(MenuReasons.OPEN_SCRIPT_FIRST)
+                !ctx.hasSelection -> disabled(MenuReasons.SELECT_PART_FIRST)
+                else -> ENABLED
+            }
+        ViewAction.SHOW_ALL ->
+            when {
+                !ctx.visibilityAvailable -> disabled(MenuReasons.OPEN_SCRIPT_FIRST)
+                ctx.nothingChanged -> disabled(MenuReasons.NOTHING_CHANGED)
+                else -> ENABLED
+            }
+        ViewAction.AI_PANEL -> if (ctx.knowledgeOpen) disabled(MenuReasons.KNOWLEDGE_UNAVAILABLE) else ENABLED
+    }
+
 /**
- * The shortcut the native menu registers for [action]: only while the entry is enabled. A disabled entry registers none,
- * so the native menu cannot swallow the key press; it reaches the window's key handler, which shows the reason
- * ([ShortcutRouting], ADR-0072). Without this a disabled shortcut could fail silently.
+ * The shortcut the native menu registers for an entry: only while the entry is enabled. A disabled entry registers
+ * none, so the native menu cannot swallow the key press; it reaches the window's key handler, which shows the reason
+ * ([ShortcutRouting], ADR-0072). Without this a disabled shortcut could fail silently. Undo and Redo register only
+ * while the editor has the focus, so a focused text field keeps its own undo.
  */
 fun registeredShortcut(
     action: FileAction,
     ctx: MenuContext,
+    @Suppress("UNUSED_PARAMETER") os: MenuOs,
 ): Shortcut? = if (stateOf(action, ctx).enabled) action.shortcut else null
+
+fun registeredShortcut(
+    action: EditAction,
+    ctx: MenuContext,
+    os: MenuOs,
+): Shortcut? {
+    if (!stateOf(action, ctx).enabled) return null
+    if ((action == EditAction.UNDO || action == EditAction.REDO) && !ctx.editorFocused) return null
+    return shortcutOf(action, os)
+}
+
+fun registeredShortcut(
+    action: ViewAction,
+    ctx: MenuContext,
+    os: MenuOs,
+): Shortcut? = if (stateOf(action, ctx).enabled) shortcutOf(action, os) else null
 
 /** Keeps Swing from reading a menu text as HTML (`<html>...`): a leading `<` (after blanks) becomes `‹`. */
 object MenuText {
@@ -156,8 +334,43 @@ sealed interface MenuEntry {
         val submenu: RecentSubmenu,
     ) : MenuEntry
 
+    data class EditItem(
+        val action: EditAction,
+    ) : MenuEntry
+
+    data class ViewItem(
+        val action: ViewAction,
+    ) : MenuEntry
+
     data object Separator : MenuEntry
 }
+
+fun editMenu(): List<MenuEntry> =
+    listOf(
+        MenuEntry.EditItem(EditAction.UNDO),
+        MenuEntry.EditItem(EditAction.REDO),
+        MenuEntry.Separator,
+        MenuEntry.EditItem(EditAction.FIND),
+        MenuEntry.EditItem(EditAction.REPLACE),
+        MenuEntry.Separator,
+        MenuEntry.EditItem(EditAction.GO_TO_LINE),
+    )
+
+fun viewMenu(): List<MenuEntry> =
+    listOf(
+        MenuEntry.ViewItem(ViewAction.RUN),
+        MenuEntry.Separator,
+        MenuEntry.ViewItem(ViewAction.HOME),
+        MenuEntry.ViewItem(ViewAction.PREVIOUS_BLOCK),
+        MenuEntry.ViewItem(ViewAction.NEXT_BLOCK),
+        MenuEntry.Separator,
+        MenuEntry.ViewItem(ViewAction.TRANSPARENT),
+        MenuEntry.ViewItem(ViewAction.HIDE),
+        MenuEntry.ViewItem(ViewAction.ISOLATE),
+        MenuEntry.ViewItem(ViewAction.SHOW_ALL),
+        MenuEntry.Separator,
+        MenuEntry.ViewItem(ViewAction.AI_PANEL),
+    )
 
 fun fileMenu(
     os: MenuOs,

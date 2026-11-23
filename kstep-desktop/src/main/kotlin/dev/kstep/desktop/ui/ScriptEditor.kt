@@ -60,6 +60,7 @@ import dev.kstep.desktop.edit.ScrollTarget
 import dev.kstep.desktop.edit.SearchBarText
 import dev.kstep.desktop.edit.TextReplace
 import dev.kstep.desktop.edit.TextSearch
+import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.okf.NoteAnalyzer
 import dev.kstep.desktop.run.DesktopError
 import dev.kstep.desktop.run.ErrorBarText
@@ -79,6 +80,31 @@ internal data class EditorJump(
     val line: Int,
     val nonce: Int,
 )
+
+/** What an Edit-menu command asks of the editor. */
+internal enum class EditorCommandKind { FIND, REPLACE, GO_TO, REFOCUS }
+
+/** Ctrl+H stays the Replace key on macOS, where the menu uses Option+Cmd+F (ADR-0074). */
+internal fun isMacReplaceAlias(
+    key: Key,
+    ctrl: Boolean,
+    meta: Boolean,
+    alt: Boolean,
+    os: MenuOs,
+): Boolean = os == MenuOs.MAC && ctrl && !meta && !alt && key == Key.H
+
+/** An Edit-menu command for the editor; the nonce makes two equal commands in a row distinct. */
+internal data class EditorCommand(
+    val kind: EditorCommandKind,
+    val nonce: Int,
+)
+
+/** The Redo keys the menu does not own (ADR-0074): Cmd+Y on macOS, Ctrl+Shift+Z elsewhere. */
+internal fun isRedoAlias(
+    key: Key,
+    shift: Boolean,
+    os: MenuOs,
+): Boolean = if (os == MenuOs.MAC) key == Key.Y && !shift else key == Key.Z && shift
 
 /**
  * A request to open the find bar with [query] filled in (ADR-0068, "Show in Script" on an ambiguous name). The caret
@@ -114,7 +140,10 @@ internal fun ScriptEditor(
     onUserEdit: () -> Unit = {},
     onEscape: () -> Unit = {},
     findRequest: FindRequest? = null,
+    /** An Edit-menu command for the editor (ADR-0074): open a bar, or take the focus back. */
+    editorCommand: EditorCommand? = null,
 ) {
+    val os = remember { MenuOs.current() }
     val colors = if (dark) EditorColors.DARK else EditorColors.LIGHT
     val state = view.state
     val editing = state as? EditorState.Editing
@@ -230,6 +259,20 @@ internal fun ScriptEditor(
         bar = EditorBar.Find(withReplace, barNonce)
         pendingNavigate = query.isNotEmpty()
     }
+    val openGoTo: () -> Unit = {
+        barNonce++
+        goToInput = ""
+        bar = EditorBar.GoTo(barNonce)
+    }
+    LaunchedEffect(editorCommand?.nonce) {
+        when (editorCommand?.kind) {
+            EditorCommandKind.FIND -> openFind(false)
+            EditorCommandKind.REPLACE -> openFind(true)
+            EditorCommandKind.GO_TO -> openGoTo()
+            EditorCommandKind.REFOCUS -> runCatching { focus.requestFocus() }
+            null -> Unit
+        }
+    }
     val doReplace: () -> Unit = {
         if (editing != null && query.isNotEmpty()) {
             session.onTextChanged(field.text, field.selection.end)
@@ -292,22 +335,9 @@ internal fun ScriptEditor(
             val command = event.isMetaPressed || event.isCtrlPressed
             val open = bar
             when {
-                command && event.key == Key.F && event.isAltPressed && event.isMetaPressed -> {
+                // Ctrl+H stays the Replace key on macOS, where the menu uses Option+Cmd+F (ADR-0074).
+                isMacReplaceAlias(event.key, event.isCtrlPressed, event.isMetaPressed, event.isAltPressed, os) -> {
                     openFind(true)
-                    true
-                }
-                command && !event.isAltPressed && event.key == Key.F -> {
-                    openFind(false)
-                    true
-                }
-                event.isCtrlPressed && !event.isMetaPressed && !event.isAltPressed && event.key == Key.H -> {
-                    openFind(true)
-                    true
-                }
-                command && !event.isAltPressed && event.key == Key.L -> {
-                    barNonce++
-                    goToInput = ""
-                    bar = EditorBar.GoTo(barNonce)
                     true
                 }
                 open is EditorBar.Find && event.key == Key.F3 -> {
@@ -490,11 +520,8 @@ internal fun ScriptEditor(
                                     }
                                     val command = event.isMetaPressed || event.isCtrlPressed
                                     when {
-                                        command && event.key == Key.Z -> {
-                                            if (event.isShiftPressed) session.redo() else session.undo()
-                                            true
-                                        }
-                                        command && event.key == Key.Y -> {
+                                        // Aliases the menu does not own (ADR-0074): Redo on the other key of the platform.
+                                        command && isRedoAlias(event.key, event.isShiftPressed, os) -> {
                                             session.redo()
                                             true
                                         }

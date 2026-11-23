@@ -23,6 +23,8 @@ class EditorView(
     val revision: Int,
     val caret: Int,
     val pulse: Int,
+    val canUndo: Boolean = false,
+    val canRedo: Boolean = false,
 ) {
     val text: String get() = (state as? EditorState.Editing)?.text ?: ""
     val dirty: Boolean get() = (state as? EditorState.Editing)?.dirty == true
@@ -58,7 +60,7 @@ class EditorSession(
     val view: StateFlow<EditorView> = mutableView.asStateFlow()
 
     private fun publish() {
-        mutableView.value = EditorView(state, revision, caret, pulse)
+        mutableView.value = EditorView(state, revision, caret, pulse, history.canUndo, history.canRedo)
     }
 
     /** Loads [path] into the editor (replaces any current buffer; the caller has already handled unsaved changes). */

@@ -17,6 +17,11 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop Edit and View menus (Welle M2, ADR-0074): Undo, Redo, Find, Replace, Go to Line and Run Script, Home,
+  Previous and Next Block, Toggle Transparent, Toggle Hidden, Isolate, Show All, Show AI Panel are menu entries with
+  state (disabled with a reason in the status line), icons and native shortcuts; the single-key entries show their key
+  in the text. The key branches the menu now owns were removed from the editor and the window; Redo (Cmd+Y,
+  Ctrl+Shift+Z), F3 and Cmd or Ctrl+G stay as editor aliases. Run is disabled without an open file.
 * kSTEP Desktop menu icons (Welle M1b, ADR-0073): the File menu entries (Open, Open Folder, Open Recent, Clear Recent,
   Close Workspace, Save, Export, Quit) show small stroke icons that follow the system appearance on macOS and the menu
   colour elsewhere; disabled entries are dimmed. Recent files themselves have no icon. Not looked at in the real window yet.

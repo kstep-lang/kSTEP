@@ -10,6 +10,20 @@ enum class MenuIconId {
     SAVE,
     EXPORT,
     QUIT,
+    UNDO,
+    REDO,
+    FIND,
+    REPLACE,
+    GO_TO_LINE,
+    RUN,
+    HOME,
+    PREVIOUS_BLOCK,
+    NEXT_BLOCK,
+    TRANSPARENT,
+    HIDE,
+    ISOLATE,
+    SHOW_ALL,
+    AI_PANEL,
 }
 
 /** The icon of a File action. Exhaustive: a new [FileAction] does not compile without an icon. */
@@ -21,6 +35,30 @@ fun iconOf(action: FileAction): MenuIconId =
         FileAction.SAVE -> MenuIconId.SAVE
         FileAction.EXPORT -> MenuIconId.EXPORT
         FileAction.QUIT -> MenuIconId.QUIT
+    }
+
+/** The icon of an Edit action. Exhaustive. */
+fun iconOf(action: EditAction): MenuIconId =
+    when (action) {
+        EditAction.UNDO -> MenuIconId.UNDO
+        EditAction.REDO -> MenuIconId.REDO
+        EditAction.FIND -> MenuIconId.FIND
+        EditAction.REPLACE -> MenuIconId.REPLACE
+        EditAction.GO_TO_LINE -> MenuIconId.GO_TO_LINE
+    }
+
+/** The icon of a View action. Exhaustive. */
+fun iconOf(action: ViewAction): MenuIconId =
+    when (action) {
+        ViewAction.RUN -> MenuIconId.RUN
+        ViewAction.HOME -> MenuIconId.HOME
+        ViewAction.PREVIOUS_BLOCK -> MenuIconId.PREVIOUS_BLOCK
+        ViewAction.NEXT_BLOCK -> MenuIconId.NEXT_BLOCK
+        ViewAction.TRANSPARENT -> MenuIconId.TRANSPARENT
+        ViewAction.HIDE -> MenuIconId.HIDE
+        ViewAction.ISOLATE -> MenuIconId.ISOLATE
+        ViewAction.SHOW_ALL -> MenuIconId.SHOW_ALL
+        ViewAction.AI_PANEL -> MenuIconId.AI_PANEL
     }
 
 /** The icons of the entries that are not a [FileAction]. */
@@ -36,5 +74,7 @@ object MenuIcons {
 /** The texts the Swing workaround for the submenu icon looks a menu up by; one source for the menu and the lookup. */
 object MenuTitles {
     const val FILE = "File"
+    const val EDIT = "Edit"
+    const val VIEW = "View"
     const val OPEN_RECENT = "Open Recent"
 }

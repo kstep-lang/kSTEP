@@ -7,6 +7,7 @@ import androidx.compose.ui.input.key.KeyShortcut
 import androidx.compose.ui.window.FrameWindowScope
 import androidx.compose.ui.window.MenuBar
 import androidx.compose.ui.window.MenuScope
+import dev.kstep.desktop.menu.EditAction
 import dev.kstep.desktop.menu.FileAction
 import dev.kstep.desktop.menu.MenuContext
 import dev.kstep.desktop.menu.MenuEntry
@@ -15,6 +16,8 @@ import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.menu.MenuReasons
 import dev.kstep.desktop.menu.MenuTitles
 import dev.kstep.desktop.menu.Shortcut
+import dev.kstep.desktop.menu.ShortcutKey
+import dev.kstep.desktop.menu.ViewAction
 import dev.kstep.desktop.menu.fileMenu
 import dev.kstep.desktop.menu.iconOf
 import dev.kstep.desktop.menu.registeredShortcut
@@ -23,13 +26,25 @@ import dev.kstep.desktop.recent.RecentEntry
 import dev.kstep.desktop.recent.RecentList
 import kotlinx.coroutines.delay
 
-/** The key a menu shortcut letter stands for. Unknown letters fail loudly: no shortcut is ever silently dropped. */
-internal fun keyFor(letter: Char): Key =
-    when (letter) {
-        'O' -> Key.O
-        'S' -> Key.S
-        'E' -> Key.E
-        else -> error("No Compose key mapped for menu shortcut '$letter'")
+/** The Compose key a menu shortcut key stands for. Unknown keys fail loudly: no shortcut is ever silently dropped. */
+internal fun keyFor(key: ShortcutKey): Key =
+    when (key) {
+        ShortcutKey.Up -> Key.DirectionUp
+        ShortcutKey.Down -> Key.DirectionDown
+        is ShortcutKey.Letter ->
+            when (key.c) {
+                'O' -> Key.O
+                'S' -> Key.S
+                'E' -> Key.E
+                'Z' -> Key.Z
+                'Y' -> Key.Y
+                'F' -> Key.F
+                'H' -> Key.H
+                'L' -> Key.L
+                'R' -> Key.R
+                'K' -> Key.K
+                else -> error("No Compose key mapped for menu shortcut '${key.c}'")
+            }
     }
 
 internal fun keyShortcutOf(
@@ -41,6 +56,7 @@ internal fun keyShortcutOf(
         meta = os == MenuOs.MAC,
         ctrl = os != MenuOs.MAC,
         shift = shortcut.shift,
+        alt = shortcut.alt,
     )
 
 private const val SUBMENU_ICON_ATTEMPTS = 10
@@ -58,6 +74,8 @@ fun FrameWindowScope.FileMenuBar(
     onAction: (FileAction) -> Unit,
     onRecent: (RecentEntry) -> Unit,
     onClearRecent: () -> Unit,
+    onEdit: (EditAction) -> Unit,
+    onView: (ViewAction) -> Unit,
 ) {
     // The Compose Menu has no icon parameter: the icon of the submenu is set on the Swing menu (ADR-0073).
     val recentIcon = menuIconToSwing(MenuIcons.OPEN_RECENT_SUBMENU, enabled = true)
@@ -74,6 +92,7 @@ fun FrameWindowScope.FileMenuBar(
                 when (entry) {
                     is MenuEntry.Separator -> Separator()
                     is MenuEntry.Action -> actionItem(entry.action, os, ctx, onAction)
+                    is MenuEntry.EditItem, is MenuEntry.ViewItem -> Unit
                     is MenuEntry.Recent ->
                         Menu(MenuTitles.OPEN_RECENT) {
                             val sub = entry.submenu
@@ -93,6 +112,8 @@ fun FrameWindowScope.FileMenuBar(
                 }
             }
         }
+        Menu(MenuTitles.EDIT, mnemonic = 'E') { editMenuItems(os, ctx, onEdit) }
+        Menu(MenuTitles.VIEW, mnemonic = 'V') { viewMenuItems(os, ctx, onView) }
     }
 }
 
@@ -108,7 +129,7 @@ private fun MenuScope.actionItem(
         action.label,
         icon = menuIcon(iconOf(action), enabled = state.enabled),
         enabled = state.enabled,
-        shortcut = registeredShortcut(action, ctx)?.let { keyShortcutOf(it, os) },
+        shortcut = registeredShortcut(action, ctx, os)?.let { keyShortcutOf(it, os) },
         onClick = { onAction(action) },
     )
 }

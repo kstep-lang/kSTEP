@@ -171,5 +171,6 @@ internal object KstepMenuIcons {
                         lineTo(11.5f, 11.5f)
                     },
                 )
+            else -> KstepEditViewIcons.shapesOf(id)
         }
 }

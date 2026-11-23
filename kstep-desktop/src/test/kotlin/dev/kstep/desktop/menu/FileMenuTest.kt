@@ -13,6 +13,7 @@ class FileMenuTest :
                     is MenuEntry.Action -> it.action.label
                     is MenuEntry.Recent -> "<recent>"
                     MenuEntry.Separator -> "-"
+                    is MenuEntry.EditItem, is MenuEntry.ViewItem -> "<other>"
                 }
             }
 
@@ -35,10 +36,10 @@ class FileMenuTest :
         }
 
         "shortcut texts per operating system" {
-            Shortcut('O').display(MenuOs.MAC) shouldBe "⌘O"
-            Shortcut('O', shift = true).display(MenuOs.MAC) shouldBe "⇧⌘O"
-            Shortcut('O').display(MenuOs.WINDOWS) shouldBe "Ctrl+O"
-            Shortcut('O', shift = true).display(MenuOs.LINUX) shouldBe "Ctrl+Shift+O"
+            Shortcut(ShortcutKey.Letter('O')).display(MenuOs.MAC) shouldBe "⌘O"
+            Shortcut(ShortcutKey.Letter('O'), shift = true).display(MenuOs.MAC) shouldBe "⇧⌘O"
+            Shortcut(ShortcutKey.Letter('O')).display(MenuOs.WINDOWS) shouldBe "Ctrl+O"
+            Shortcut(ShortcutKey.Letter('O'), shift = true).display(MenuOs.LINUX) shouldBe "Ctrl+Shift+O"
         }
 
         "Close Workspace and Quit have no shortcut" {
