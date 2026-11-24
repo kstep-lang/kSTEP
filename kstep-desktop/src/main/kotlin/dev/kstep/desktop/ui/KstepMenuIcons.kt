@@ -57,6 +57,44 @@ internal object KstepMenuIcons {
 
     private fun shapesOf(id: MenuIconId): List<PathBuilder.() -> Unit> =
         when (id) {
+            // A tree: one root, two children.
+            MenuIconId.TREE ->
+                listOf(
+                    {
+                        moveTo(2.5f, 1.5f)
+                        horizontalLineTo(6.5f)
+                        verticalLineTo(4.5f)
+                        horizontalLineTo(2.5f)
+                        close()
+                    },
+                    {
+                        moveTo(4.5f, 4.5f)
+                        verticalLineTo(12.5f)
+                    },
+                    {
+                        moveTo(4.5f, 8.5f)
+                        horizontalLineTo(8.5f)
+                    },
+                    {
+                        moveTo(8.5f, 7.5f)
+                        horizontalLineTo(13.5f)
+                        verticalLineTo(9.5f)
+                        horizontalLineTo(8.5f)
+                        close()
+                    },
+                    {
+                        moveTo(4.5f, 12.5f)
+                        horizontalLineTo(8.5f)
+                    },
+                    {
+                        moveTo(8.5f, 11.5f)
+                        horizontalLineTo(13.5f)
+                        verticalLineTo(13.5f)
+                        horizontalLineTo(8.5f)
+                        close()
+                    },
+                )
+
             // A page with a folded corner.
             MenuIconId.OPEN ->
                 listOf(

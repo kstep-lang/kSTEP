@@ -1,6 +1,9 @@
 package dev.kstep.desktop.menu
 
-/** The icons of the File menu (ADR-0073). A pure identifier; the drawing lives in the ui package. */
+/**
+ * The icons of the menus (ADR-0073) and of the toolbar (ADR-0079). A pure identifier; the drawing lives in the ui
+ * package. [TREE] is toolbar-only: no menu action maps to it.
+ */
 enum class MenuIconId {
     OPEN,
     OPEN_FOLDER,
@@ -31,6 +34,7 @@ enum class MenuIconId {
     AI_PANEL,
     KEYBOARD,
     INFO,
+    TREE,
 }
 
 /** The icon of a File action. Exhaustive: a new [FileAction] does not compile without an icon. */

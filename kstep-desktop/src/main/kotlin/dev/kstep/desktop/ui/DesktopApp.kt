@@ -63,6 +63,7 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.FrameWindowScope
@@ -99,11 +100,15 @@ import dev.kstep.desktop.menu.FocusTarget
 import dev.kstep.desktop.menu.HelpAction
 import dev.kstep.desktop.menu.MenuContext
 import dev.kstep.desktop.menu.MenuOs
-import dev.kstep.desktop.menu.MenuReasons
 import dev.kstep.desktop.menu.ShortcutKey
 import dev.kstep.desktop.menu.ShortcutRouting
 import dev.kstep.desktop.menu.ViewAction
+import dev.kstep.desktop.menu.aiToolbarState
+import dev.kstep.desktop.menu.exportToolbarState
+import dev.kstep.desktop.menu.homeToolbarState
 import dev.kstep.desktop.menu.isPlainKey
+import dev.kstep.desktop.menu.openToolbarState
+import dev.kstep.desktop.menu.treeToolbarState
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
@@ -991,7 +996,7 @@ fun FrameWindowScope.DesktopApp(
                         editorView,
                         onOpen = openFile,
                         onExport = openExport,
-                        exportEnabled = exportEnabled && convertState is ConvertState.Idle,
+                        menuContext = menuContext,
                         knowledgeOpen = knowledgeOpen,
                         knowledgeLabel =
                             (workspace as? WorkspaceState.Open)?.scan?.root?.let {
@@ -1007,7 +1012,6 @@ fun FrameWindowScope.DesktopApp(
                         onTree = { treeVisible = !treeVisible },
                         visibilityEnabled = visibilityScene != null,
                         counts = counts ?: VisibilityCounts(0, 0),
-                        hasSelection = hasTarget,
                         alphaStep = visibilityState.alphaStep,
                         onShowAll = { visibilityState = VisibilityMachine.showAll(visibilityState) },
                         onIsolate = { applyVisibility(target, VisibilityMachine::isolate) },
@@ -1214,7 +1218,7 @@ private fun Toolbar(
     editor: EditorView,
     onOpen: () -> Unit,
     onExport: () -> Unit,
-    exportEnabled: Boolean,
+    menuContext: MenuContext,
     exportNotice: ExportNotice.Notice?,
     onShowInFolder: () -> Unit,
     onHome: () -> Unit,
@@ -1223,7 +1227,6 @@ private fun Toolbar(
     onTree: () -> Unit,
     visibilityEnabled: Boolean,
     counts: VisibilityCounts,
-    hasSelection: Boolean,
     alphaStep: Int,
     onShowAll: () -> Unit,
     onIsolate: () -> Unit,
@@ -1241,31 +1244,21 @@ private fun Toolbar(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(onClick = onOpen) { Text("Open", fontSize = 13.sp) }
-        WithTip(
-            if (knowledgeOpen) {
-                MenuReasons.KNOWLEDGE_UNAVAILABLE
-            } else if (exportEnabled) {
-                null
-            } else {
-                MenuReasons.OPEN_SCRIPT_FIRST
-            },
+        Row(
+            Modifier.testTag("toolbar-buttons"),
+            horizontalArrangement = Arrangement.spacedBy(TOOLBAR_SPACING),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onExport, enabled = exportEnabled) { Text("Export…", fontSize = 13.sp) }
-        }
-        TextButton(onClick = onHome) { Text("Home", fontSize = 13.sp) }
-        if (treeAvailable) {
-            TextButton(onClick = onTree) {
-                Text("Tree", fontSize = 13.sp, color = if (treeOn) Color.Unspecified else DIM)
+            IconTooltipButton(openToolbarState(menuContext), onOpen)
+            IconTooltipButton(exportToolbarState(menuContext), onExport)
+            ToolbarDivider()
+            IconTooltipButton(homeToolbarState(menuContext), onHome)
+            if (treeAvailable) IconTooltipButton(treeToolbarState(treeOn), onTree)
+            IconTooltipButton(aiToolbarState(menuContext, aiOn), onAi)
+            if (visibilityEnabled) {
+                ToolbarDivider()
+                VisibilityControls(menuContext, counts, alphaStep, onShowAll, onIsolate, onHide, onAlpha)
             }
-        }
-        WithTip(if (knowledgeOpen) MenuReasons.KNOWLEDGE_UNAVAILABLE else null) {
-            TextButton(onClick = onAi, enabled = !knowledgeOpen) {
-                Text("AI", fontSize = 13.sp, color = if (aiOn) Color.Unspecified else DIM)
-            }
-        }
-        if (visibilityEnabled) {
-            VisibilityControls(counts, hasSelection, alphaStep, onShowAll, onIsolate, onHide, onAlpha)
         }
         StatusLine(
             fileName = state.file?.fileName?.toString(),
@@ -1283,6 +1276,17 @@ private fun Toolbar(
                     if (editor.dirty) "  ·  unsaved changes  ·  preview shows saved file" else "",
         )
     }
+}
+
+@Composable
+private fun ToolbarDivider() {
+    Box(
+        Modifier
+            .padding(horizontal = 4.dp)
+            .width(1.dp)
+            .height(20.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant),
+    )
 }
 
 private fun statusText(state: DesktopState): String =

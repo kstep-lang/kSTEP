@@ -224,6 +224,7 @@ object MenuReasons {
     const val CONVERSION_RUNNING = "A conversion is running"
     const val CLOSE_EXPORT_FIRST = "Close the export dialog first"
     const val CLOSE_CONVERT_FIRST = "Close the convert dialog first"
+    const val NO_TRANSPARENT_PARTS = "No transparent parts"
 }
 
 private val ENABLED = ActionState(true, null)

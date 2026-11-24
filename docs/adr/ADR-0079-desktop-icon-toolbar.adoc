@@ -1,0 +1,50 @@
+= ADR-0079: Desktop icon-only toolbar (Welle T1)
+:toc:
+
+== Status
+
+Accepted (Welle T1). Scope: the toolbar of kstep-desktop. File menu, shortcuts and dialogs are unchanged.
+
+== Context
+
+The toolbar used text buttons (Open, Export..., Home, Tree, AI, Show all, Isolate, Hide, "Opacity N %"). kUML Desktop already uses compact icon buttons with tooltips, and the menu icons of ADR-0073 exist for most of these actions. Two defects showed up:
+
+* F1. The Export tooltip copied the reason chain by hand. With the Convert dialog open it said "Open a script first", although a script was open; the menu said "Close the convert dialog first".
+* F2. Tree and AI showed their off state in a grey text colour, which looks the same as disabled.
+
+== Decision
+
+D1. Eight icon buttons, 32 dp target, 18 dp icon, 4 dp spacing, 6 dp rounded corners. The 48 dp minimum interactive size of Material is switched off for them.
+
+D2. Groups separated by a thin divider: file (Open, Export), view (Home, Tree, AI Panel) and, only while a model is shown, visibility (Show All, Isolate, Hide, opacity).
+
+D3. No visible labels. The tooltip names the button; a disabled button names the reason after an em dash ("Export... — Close the convert dialog first"). The tooltip area is the outer element, so it also appears over a disabled button.
+
+D4. One source of rules. The enabled flag and the reason of every button come from `stateOf(...)` of the menu model (`ToolbarModel.kt`, no Compose). Toolbar and menu cannot disagree; this fixes F1. Over the reachable states the old flag `exportEnabled && convertIdle` equals the menu rule (tested over all combinations).
+
+D5. Toggles. Tree and AI Panel show on with a tinted background (primary at 16 %) and off with the normal icon, never with a dimmed one; this fixes F2. Assistive technology gets the name as content description and "On" or "Off" as state description.
+
+D6. Opacity. A decorative transparent icon and the slider, 80 dp wide. The percentage is not a label but part of the tooltip ("Opacity of transparent parts: 25 %", or "Opacity — No transparent parts") and of the slider's state description. The 5 % step lives in `ToolbarModel`.
+
+D7. Icons. One new icon, `MenuIconId.TREE` (a root and two children, ADR-0073 grid rules), used by the toolbar only. The buttons use the tinted painter of the menus.
+
+D8. Disabled alpha. The shared painter dims a disabled icon to 35 %. The design brief said 38 %; the shared path is kept so that menu and toolbar look the same.
+
+== Consequences
+
+* The toolbar is narrower and leaves more room for the status line.
+* Meaning is carried by icons and tooltips; a user must hover once to learn a button.
+* Tint follows the menu rule (system appearance on macOS, Swing menu colour elsewhere); the Material scheme follows the system appearance, so they agree except where the Swing colour differs.
+* Layout and hover are checked by hand; the tests cover the model, the icons and source-level guards.
+
+== Rejected alternatives
+
+* A popover for the opacity slider: one more click for a frequent action.
+* Colour only for the toggle state: invisible to colour-blind users and confusable with disabled (F2).
+* 40 dp targets: crowds the 40 dp toolbar.
+* Shortcuts in the tooltips: a follow-up wave.
+* Material `IconToggleButton`: its checked style does not match the menu icons.
+
+== Related
+
+ADR-0055 (visibility), ADR-0072 (shortcut routing), ADR-0073 (menu icons), ADR-0076 (slimmer toolbar), ADR-0078 (convert dialog).

@@ -9,6 +9,10 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* kSTEP Desktop toolbar uses icon buttons with tooltips instead of text buttons (Welle T1, ADR-0079): Open, Export,
+  Home, Tree, AI Panel, Show All, Isolate and Hide are 32 dp icon buttons that name themselves on hover; the opacity
+  slider has a tooltip with the percentage instead of a text label. Tree and AI Panel show their on state with a
+  tinted background.
 * kSTEP Desktop: Export (menu, Cmd+E and toolbar) is disabled while the Convert dialog is open, so the two dialogs never
   overlap (follow-up to ADR-0078).
 * kSTEP Desktop toolbar (Welle M3b, ADR-0076): Open Folder, Recent and Close Workspace are only in the File menu now;
@@ -18,6 +22,12 @@ minor versions may contain breaking changes.
   status out; the export dialog shows the target as file name (always whole) and folder (shortened) with the full path as
   tooltip instead of cutting the end of the path; the line after an export stays until another file is shown, a newer run
   starts, a workspace opens or the next export dialog opens.
+
+=== Fixed
+
+* kSTEP Desktop: the Export tooltip now names the Convert dialog ("Close the convert dialog first") instead of
+  "Open a script first" while that dialog is open; toolbar and File menu use the same rule.
+* kSTEP Desktop: the off state of Tree and AI Panel no longer looks disabled.
 
 === Added
 

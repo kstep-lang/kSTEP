@@ -225,7 +225,7 @@ link:docs/usage.adoc[Usage].
 | Live preview of a `*.kstep.kts` script (Compose Desktop, `./gradlew :kstep-desktop:run`): re-renders on save in a
   supervised worker process; with a small script editor (syntax colouring, error marks, crash-safe save). Click a part to select it (Escape or a click on
   empty space clears), hover tints it, and a panel shows its name, size, centroid, colour and position. An assembly tree beside the
-  canvas (toggle `Tree` in the toolbar; Up/Down, Left/Right, Home/End, Enter, Escape when it has focus) selects whole
+  canvas (toggle with the Tree icon in the toolbar, whose name shows on hover; Up/Down, Left/Right, Home/End, Enter, Escape when it has focus) selects whole
   sub-assemblies; if the tree cannot be trusted it stays hidden with the warning `KSTEP-D-013` and click selection still works.
   Parts and sub-assemblies can be made transparent or hidden (eye column in the tree, toolbar, keys `T`, `V`, `I`, `Shift+V`).
   The `Export...` dialog (Cmd/Ctrl+E) writes the saved script as STEP AP242, GLB, STL or 3MF: the script runs in a supervised worker, the
@@ -234,7 +234,7 @@ link:docs/usage.adoc[Usage].
   `Open Folder...` (Cmd/Ctrl+Shift+O) opens a folder of Markdown notes as a knowledge workspace: the fenced `kstep` block under the
   cursor is previewed live (ADR-0058; export and AI are not available there yet).
   `Convert...` in the File menu turns a note into scripts or a script into a note, for one file or a folder; existing files are replaced only after you confirm the list (ADR-0078).
-  An optional AI panel (toolbar `AI`, Cmd/Ctrl+K) proposes changes from a description as a diff you accept or discard (ADR-0056).
+  An optional AI panel (AI Panel icon in the toolbar, Cmd/Ctrl+K) proposes changes from a description as a diff you accept or discard (ADR-0056).
   *Privacy:* nothing is sent before you agree in a dialog; only your prompt and, if you tick it, the current script go to the
   provider (Anthropic, `api.anthropic.com`), never keys, file paths or other files. The API key is kept in the system keychain,
   for this session only, or read from `KSTEP_AI_ANTHROPIC_KEY`; it is never written to a file. To check a proposal, the generated

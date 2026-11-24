@@ -31,11 +31,12 @@ class MenuIconsTest :
             ids.toSet().size shouldBe 18
         }
 
-        "no icon is orphaned: actions plus the two extra entries cover all icons" {
+        "no icon is orphaned: actions, the two extra entries and the toolbar cover all icons" {
             val used =
                 FileAction.entries.map { iconOf(it) } + EditAction.entries.map { iconOf(it) } +
                     ViewAction.entries.map { iconOf(it) } + HelpAction.entries.map { iconOf(it) } +
-                    MenuIcons.OPEN_RECENT_SUBMENU + MenuIcons.CLEAR_RECENT_ITEM
+                    MenuIcons.OPEN_RECENT_SUBMENU + MenuIcons.CLEAR_RECENT_ITEM +
+                    ToolbarButtonId.entries.map { it.icon }
             used.toSet() shouldBe MenuIconId.entries.toSet()
         }
 
