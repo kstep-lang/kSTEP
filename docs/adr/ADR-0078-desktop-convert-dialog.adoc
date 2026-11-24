@@ -1,0 +1,51 @@
+= ADR-0078: Desktop convert dialog (Welle M4b)
+:toc:
+
+== Status
+
+Accepted (Welle M4b of the menu bar plan). Scope: the File > Convert... menu entry, its icon and the dialog over the service of ADR-0077. The dialog holds no conversion logic; it draws the `ConvertState` of the controller. The pure texts and decisions are unit tested; the layout is not. See "Open / not verified".
+
+== Context
+
+ADR-0077 gave the desktop a Compose-free convert controller (`begin`, `edit`, `back`, `closeDialog`, `start`, `replace`) with a state machine (Idle, Editing, Running, Done, Conflict, Failed). Nothing could reach it yet. The dialog must be small, must never overwrite without an explicit confirmation, and must not be able to reach the overwrite switch of the facade at all.
+
+== Decision
+
+D1. Menu entry. `FileAction.CONVERT` ("Convert...") follows Export, has no shortcut and is not part of the shortcut overview. It is disabled with "A conversion is running" while a conversion runs, and with "Close the export dialog first" while the export dialog is open; the first reason wins. `MenuContext` gets two defaulted fields (`convertRunning`, `exportDialogVisible`), so existing callers compile unchanged.
+
+D2. Icon. Two opposing horizontal arrows on the 16 x 16 grid of ADR-0073, strokes only, inside 1.5 to 14.5, horizontal lines on half pixels. No circular arrows: arcs blur on the pixel grid (ADR-0073 D7).
+
+D3. Direction. A newly chosen source sets the direction anew: a folder or a note gives "Note to scripts", a `*.kstep.kts` file (case-insensitive) gives "Script to note". Inside one source the user can switch. Choosing a source sets direction, folder rule and recursion in a single `edit` call, so no stale request can follow.
+
+D4. Title and tags. Their text lives in the dialog state. They are sent only when their fields are shown (direction "Script to note" and a single file); otherwise the request carries no title and no tags, even if text was typed before. A file never recurses; for a folder "Include sub-folders" decides and starts on.
+
+D5. Conflict. Nothing has been written. The title says how many files exist, the list shows at most 50 names and "and N more". "Cancel" is the filled default button on the right and holds the focus; "Replace N files" is a text button in the error colour on the left. Enter and Escape cancel (back to editing). The only caller of `replace()` is that text button. The controller still re-checks the conflict set.
+
+D6. Running. One indeterminate bar, the text "Converting...", and a disabled "Converting..." button. No counter, no percentage, no cancel. Escape and the dismiss request do nothing.
+
+D7. Done and Failed. Done lists written names, skipped names with a plain reason, and warnings; empty sections are not drawn; "Close" is the default and "Back" returns to editing. Failed lists the errors and, if some files were already written, names them under "These files were already written". "Back" is the default and "Close" hides the dialog.
+
+D8. Ownership. `ConvertHost` owns the controller, the preferences store and the dialog state, and closes the controller when it leaves the composition. The window gets one `rememberConvertHost` call, one action branch and one `ConvertDialogHost()` call. Opening the dialog while it is visible only brings the window to front.
+
+D9. File choosers. One file (note or script) through the AWT `FileDialog` with a name filter on macOS, a Swing chooser with a filter elsewhere; one folder through the existing folder chooser, now with a title parameter. The filter is a convenience, not a check: the facade validates.
+
+D10. Texts and decisions live in `ConvertText` (convert package, pure): titles, labels, plural forms, skip reasons, direction, tag parsing and the "invisible means not sent" rule. Names from the controller are already escaped; the paths shown in the dialog go through `DisplayName.escaped`.
+
+== Consequences
+
+* `ConvertDialog.kt` does not contain the overwrite switch, the facade request type or `toFacade`; a source test checks this and that `replace` is called from exactly one place in the Conflict branch.
+* The convert package stays free of Compose, AWT and Swing (architecture test).
+* `DIALOG_WIDTH_DP` and `chooseFolderDialog` are now `internal` so the two dialogs share them.
+
+== Design rationale (final review)
+
+The dialog follows the team's binding rules: one primary action per state; the destructive action is never the default and never in the primary position; a running conversion shows no invented progress; hidden fields are never sent behind the user's back; no shortcut and no drag and drop in this wave.
+
+== Open / not verified
+
+* Focus and input method after the macOS `FileDialog`, layout, line wrapping and dark mode: only a manual test can tell; not done in this wave.
+* Windows and Linux are compiled and unit tested only.
+* Export (Cmd+E) stays active while the Convert dialog is open, so two dialogs are possible (the reverse is blocked).
+* No cancel and no "Reveal in Finder"; later wave.
+* When a source changes after title or tag text was typed, the text is cleared (a choice, not specified).
+* No Compose scene test of the four states.

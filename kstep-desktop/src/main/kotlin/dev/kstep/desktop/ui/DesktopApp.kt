@@ -70,6 +70,7 @@ import dev.kstep.cli.kstepVersion
 import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.ai.repair.RepairState
 import dev.kstep.desktop.aiwire.AiController
+import dev.kstep.desktop.convert.ConvertState
 import dev.kstep.desktop.drop.DropAction
 import dev.kstep.desktop.drop.DropEvaluator
 import dev.kstep.desktop.drop.DropHint
@@ -255,6 +256,8 @@ fun FrameWindowScope.DesktopApp(
     val aboutInfo = remember { AboutInfo.of(kstepVersion()) }
     LaunchedEffect(Unit) { aboutInAppMenu = installMacAboutHandler { helpDialog = HelpAction.ABOUT } }
     var exportVisible by remember { mutableStateOf(false) }
+    val convertHost = rememberConvertHost(window)
+    val convertState by convertHost.state.collectAsState()
     var exportNow by remember { mutableStateOf(0L) }
     var exportSaveError by remember { mutableStateOf<String?>(null) }
     var exportNotice by remember { mutableStateOf<ExportNotice.Notice?>(null) }
@@ -795,6 +798,8 @@ fun FrameWindowScope.DesktopApp(
             textSelected = textSelected,
             clipboardHasText = clipboardHasText,
             editorFocusTarget = editorFocusTarget,
+            convertRunning = convertState is ConvertState.Running,
+            exportDialogVisible = exportVisible,
         )
     val onEditAction: (EditAction) -> Unit = {
         editorCommandNonce++
@@ -842,6 +847,7 @@ fun FrameWindowScope.DesktopApp(
             FileAction.CLOSE_WORKSPACE -> closeWorkspace()
             FileAction.SAVE -> session.save()
             FileAction.EXPORT -> openExport()
+            FileAction.CONVERT -> convertHost.open(convertHost.prefill(state.file, openRoot))
             FileAction.QUIT -> onQuit()
         }
     }
@@ -930,6 +936,7 @@ fun FrameWindowScope.DesktopApp(
                 HelpAction.ABOUT -> AboutDialog(aboutInfo) { helpDialog = null }
                 null -> Unit
             }
+            convertHost.ConvertDialogHost()
             if (exportVisible) {
                 ExportDialog(
                     sandboxNotice = sandboxNotice,
@@ -1451,7 +1458,7 @@ private fun menuKey(key: Key): ShortcutKey? =
         else -> null
     }
 
-private fun isMac(): Boolean =
+internal fun isMac(): Boolean =
     System
         .getProperty("os.name")
         .orEmpty()
@@ -1462,12 +1469,15 @@ private fun isMac(): Boolean =
  * A native folder dialog; `null` if cancelled. On macOS the AWT file dialog only chooses folders with a system
  * property, which is reset right after (or Open... would stop choosing scripts); elsewhere a Swing chooser.
  */
-private fun chooseFolderDialog(parent: Frame): Path? {
+internal fun chooseFolderDialog(
+    parent: Frame,
+    title: String = "Open a folder of Markdown notes",
+): Path? {
     if (isMac()) {
         val key = "apple.awt.fileDialogForDirectories"
         System.setProperty(key, "true")
         try {
-            val dialog = FileDialog(parent, "Open a folder of Markdown notes", FileDialog.LOAD)
+            val dialog = FileDialog(parent, title, FileDialog.LOAD)
             dialog.isVisible = true
             val name = dialog.file ?: return null
             return Path.of(dialog.directory ?: "", name)
@@ -1477,7 +1487,7 @@ private fun chooseFolderDialog(parent: Frame): Path? {
     }
     val chooser = javax.swing.JFileChooser()
     chooser.fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
-    chooser.dialogTitle = "Open a folder of Markdown notes"
+    chooser.dialogTitle = title
     return if (chooser.showOpenDialog(parent) ==
         javax.swing.JFileChooser.APPROVE_OPTION
     ) {

@@ -9,6 +9,7 @@ enum class MenuIconId {
     CLOSE_WORKSPACE,
     SAVE,
     EXPORT,
+    CONVERT,
     QUIT,
     UNDO,
     REDO,
@@ -40,6 +41,7 @@ fun iconOf(action: FileAction): MenuIconId =
         FileAction.CLOSE_WORKSPACE -> MenuIconId.CLOSE_WORKSPACE
         FileAction.SAVE -> MenuIconId.SAVE
         FileAction.EXPORT -> MenuIconId.EXPORT
+        FileAction.CONVERT -> MenuIconId.CONVERT
         FileAction.QUIT -> MenuIconId.QUIT
     }
 

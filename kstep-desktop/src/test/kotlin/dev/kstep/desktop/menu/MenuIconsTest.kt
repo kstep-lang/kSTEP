@@ -12,6 +12,11 @@ class MenuIconsTest :
             FileAction.entries.map { iconOf(it) }.size shouldBe FileAction.entries.size
         }
 
+        "Convert has its own icon, different from Export" {
+            iconOf(FileAction.CONVERT) shouldBe MenuIconId.CONVERT
+            (iconOf(FileAction.CONVERT) == iconOf(FileAction.EXPORT)) shouldBe false
+        }
+
         "icons are pairwise different" {
             val ids =
                 FileAction.entries.map { iconOf(it) } + EditAction.entries.map { iconOf(it) } +

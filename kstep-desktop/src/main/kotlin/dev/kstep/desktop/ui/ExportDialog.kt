@@ -45,7 +45,7 @@ import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.run.SandboxNotice
 
-private const val DIALOG_WIDTH_DP = 480
+internal const val DIALOG_WIDTH_DP = 480
 
 /** What the dialog needs to know besides the export state (all of it from the window, none of it from a worker). */
 internal class ExportDialogContext(

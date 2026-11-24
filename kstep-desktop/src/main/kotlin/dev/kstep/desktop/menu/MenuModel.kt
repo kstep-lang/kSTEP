@@ -72,6 +72,7 @@ enum class FileAction(
     CLOSE_WORKSPACE("Close Workspace", null),
     SAVE("Save", Shortcut(letter('S'))),
     EXPORT("Export…", Shortcut(letter('E'))),
+    CONVERT("Convert…", null),
     QUIT("Quit", null),
 }
 
@@ -199,6 +200,10 @@ data class MenuContext(
     val clipboardHasText: Boolean = false,
     /** The editor is the focus target (see [FocusTarget]): it had the focus last, or the window is not focused. */
     val editorFocusTarget: Boolean = false,
+    /** A conversion is running (File > Convert, ADR-0078). */
+    val convertRunning: Boolean = false,
+    /** The export dialog is open, so the convert dialog does not open on top of it. */
+    val exportDialogVisible: Boolean = false,
 )
 
 object MenuReasons {
@@ -214,6 +219,8 @@ object MenuReasons {
     const val SELECT_TEXT_FIRST = "Select text first"
     const val CLIPBOARD_EMPTY = "Clipboard is empty"
     const val CLICK_INTO_EDITOR = "Click into the editor first"
+    const val CONVERSION_RUNNING = "A conversion is running"
+    const val CLOSE_EXPORT_FIRST = "Close the export dialog first"
 }
 
 private val ENABLED = ActionState(true, null)
@@ -232,6 +239,12 @@ fun stateOf(
             when {
                 ctx.knowledgeOpen -> disabled(MenuReasons.KNOWLEDGE_UNAVAILABLE)
                 !ctx.exportEnabled -> disabled(MenuReasons.OPEN_SCRIPT_FIRST)
+                else -> ENABLED
+            }
+        FileAction.CONVERT ->
+            when {
+                ctx.convertRunning -> disabled(MenuReasons.CONVERSION_RUNNING)
+                ctx.exportDialogVisible -> disabled(MenuReasons.CLOSE_EXPORT_FIRST)
                 else -> ENABLED
             }
     }
@@ -417,6 +430,7 @@ fun fileMenu(
         add(MenuEntry.Separator)
         add(MenuEntry.Action(FileAction.SAVE))
         add(MenuEntry.Action(FileAction.EXPORT))
+        add(MenuEntry.Action(FileAction.CONVERT))
         // On macOS Quit lives in the application menu (Cmd+Q, handled by the quit handler).
         if (os != MenuOs.MAC) {
             add(MenuEntry.Separator)

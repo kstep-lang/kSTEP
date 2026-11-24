@@ -19,19 +19,31 @@ class FileMenuTest :
 
         "macOS has no Quit entry" {
             shape(MenuOs.MAC) shouldBe
-                listOf("Open…", "Open Folder…", "<recent>", "-", "Close Workspace", "-", "Save", "Export…")
+                listOf("Open…", "Open Folder…", "<recent>", "-", "Close Workspace", "-", "Save", "Export…", "Convert…")
         }
 
         "Windows and Linux end with a separator and Quit" {
             val expected =
-                listOf("Open…", "Open Folder…", "<recent>", "-", "Close Workspace", "-", "Save", "Export…", "-", "Quit")
+                listOf(
+                    "Open…",
+                    "Open Folder…",
+                    "<recent>",
+                    "-",
+                    "Close Workspace",
+                    "-",
+                    "Save",
+                    "Export…",
+                    "Convert…",
+                    "-",
+                    "Quit",
+                )
             shape(MenuOs.WINDOWS) shouldBe expected
             shape(MenuOs.LINUX) shouldBe expected
         }
 
         "the ellipsis is the real character exactly where the menu opens a dialog" {
             FileAction.entries.filter { '…' in it.label }.map { it.label } shouldBe
-                listOf("Open…", "Open Folder…", "Export…")
+                listOf("Open…", "Open Folder…", "Export…", "Convert…")
             FileAction.entries.none { "..." in it.label } shouldBe true
         }
 

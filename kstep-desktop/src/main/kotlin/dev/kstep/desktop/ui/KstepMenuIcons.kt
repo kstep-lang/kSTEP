@@ -136,6 +136,24 @@ internal object KstepMenuIcons {
                         verticalLineTo(10.5f)
                     },
                 )
+            // Two opposing horizontal arrows.
+            MenuIconId.CONVERT ->
+                listOf(
+                    {
+                        moveTo(2.5f, 5.5f)
+                        horizontalLineTo(13.5f)
+                        moveTo(10.5f, 2.5f)
+                        lineTo(13.5f, 5.5f)
+                        lineTo(10.5f, 8.5f)
+                    },
+                    {
+                        moveTo(13.5f, 10.5f)
+                        horizontalLineTo(2.5f)
+                        moveTo(5.5f, 7.5f)
+                        lineTo(2.5f, 10.5f)
+                        lineTo(5.5f, 13.5f)
+                    },
+                )
             // An arrow leaving a box towards the upper right.
             MenuIconId.EXPORT ->
                 listOf(

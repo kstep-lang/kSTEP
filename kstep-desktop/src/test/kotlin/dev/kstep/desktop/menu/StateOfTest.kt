@@ -85,3 +85,39 @@ class StateOfTest :
             }
         }
     })
+
+/** File > Convert (ADR-0078): enabled unless a conversion runs or the export dialog is open. */
+class ConvertMenuStateTest :
+    StringSpec({
+        val base = MenuContext(scriptOpen = false, knowledgeOpen = false, exportEnabled = false)
+
+        "Convert is enabled by default, with a workspace open and with no script open" {
+            stateOf(FileAction.CONVERT, base) shouldBe ActionState(true, null)
+            stateOf(FileAction.CONVERT, base.copy(knowledgeOpen = true)) shouldBe ActionState(true, null)
+            stateOf(FileAction.CONVERT, base.copy(scriptOpen = true, exportEnabled = true)) shouldBe
+                ActionState(true, null)
+        }
+
+        "a running conversion disables it with its reason" {
+            stateOf(FileAction.CONVERT, base.copy(convertRunning = true)) shouldBe
+                ActionState(false, "A conversion is running")
+        }
+
+        "an open export dialog disables it with its reason" {
+            stateOf(FileAction.CONVERT, base.copy(exportDialogVisible = true)) shouldBe
+                ActionState(false, "Close the export dialog first")
+        }
+
+        "with both set the running conversion wins" {
+            stateOf(FileAction.CONVERT, base.copy(convertRunning = true, exportDialogVisible = true)).reason shouldBe
+                "A conversion is running"
+        }
+
+        "Convert has no shortcut, so nothing is registered and the overview has no row for it" {
+            FileAction.CONVERT.shortcut shouldBe null
+            registeredShortcut(FileAction.CONVERT, base, MenuOs.MAC) shouldBe null
+            for (os in MenuOs.entries) {
+                shortcutOverview(os).flatMap { it.rows }.none { it.label == FileAction.CONVERT.label } shouldBe true
+            }
+        }
+    })

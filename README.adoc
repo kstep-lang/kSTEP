@@ -233,6 +233,7 @@ link:docs/usage.adoc[Usage].
   A script can suggest the file names with an `export { }` block, and the dialog remembers the last format and folder (ADR-0063).
   `Open Folder...` (Cmd/Ctrl+Shift+O) opens a folder of Markdown notes as a knowledge workspace: the fenced `kstep` block under the
   cursor is previewed live (ADR-0058; export and AI are not available there yet).
+  `Convert...` in the File menu turns a note into scripts or a script into a note, for one file or a folder; existing files are replaced only after you confirm the list (ADR-0078).
   An optional AI panel (toolbar `AI`, Cmd/Ctrl+K) proposes changes from a description as a diff you accept or discard (ADR-0056).
   *Privacy:* nothing is sent before you agree in a dialog; only your prompt and, if you tick it, the current script go to the
   provider (Anthropic, `api.anthropic.com`), never keys, file paths or other files. The API key is kept in the system keychain,
