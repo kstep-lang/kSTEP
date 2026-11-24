@@ -9,6 +9,8 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* kSTEP Desktop: Export (menu, Cmd+E and toolbar) is disabled while the Convert dialog is open, so the two dialogs never
+  overlap (follow-up to ADR-0078).
 * kSTEP Desktop toolbar (Welle M3b, ADR-0076): Open Folder, Recent and Close Workspace are only in the File menu now;
   the folder chooser is titled "Open a folder of Markdown notes".
 * kSTEP Desktop UI polish (Welle D9a, ADR-0064): the status line puts separators only between parts that are shown and

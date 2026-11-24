@@ -43,9 +43,9 @@ The dialog follows the team's binding rules: one primary action per state; the d
 
 == Open / not verified
 
-* Focus and input method after the macOS `FileDialog`, layout, line wrapping and dark mode: only a manual test can tell; not done in this wave.
+* Focus and input method after the macOS `FileDialog` and layout (light mode) were checked by hand on macOS on 2026-11-24 (keyboard and menu only, no mouse); dark mode, line wrapping with long paths and the mouse path are not verified.
 * Windows and Linux are compiled and unit tested only.
-* Export (Cmd+E) stays active while the Convert dialog is open, so two dialogs are possible (the reverse is blocked).
+* Export is disabled while the Convert dialog is open (menu entry, Cmd+E and toolbar button, reason "Close the convert dialog first"); the reverse was already blocked, so the two dialogs never overlap.
 * No cancel and no "Reveal in Finder"; later wave.
 * When a source changes after title or tag text was typed, the text is cleared (a choice, not specified).
 * No Compose scene test of the four states.

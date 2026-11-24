@@ -113,6 +113,14 @@ class ConvertMenuStateTest :
                 "A conversion is running"
         }
 
+        "an open convert dialog disables Export with its reason, but only once Export is otherwise possible" {
+            val exportable = base.copy(scriptOpen = true, exportEnabled = true)
+            stateOf(FileAction.EXPORT, exportable) shouldBe ActionState(true, null)
+            stateOf(FileAction.EXPORT, exportable.copy(convertDialogVisible = true)) shouldBe
+                ActionState(false, "Close the convert dialog first")
+            stateOf(FileAction.EXPORT, base.copy(convertDialogVisible = true)).reason shouldBe "Open a script first"
+        }
+
         "Convert has no shortcut, so nothing is registered and the overview has no row for it" {
             FileAction.CONVERT.shortcut shouldBe null
             registeredShortcut(FileAction.CONVERT, base, MenuOs.MAC) shouldBe null

@@ -204,6 +204,8 @@ data class MenuContext(
     val convertRunning: Boolean = false,
     /** The export dialog is open, so the convert dialog does not open on top of it. */
     val exportDialogVisible: Boolean = false,
+    /** The convert dialog is open (in any state), so the export dialog does not open on top of it. */
+    val convertDialogVisible: Boolean = false,
 )
 
 object MenuReasons {
@@ -221,6 +223,7 @@ object MenuReasons {
     const val CLICK_INTO_EDITOR = "Click into the editor first"
     const val CONVERSION_RUNNING = "A conversion is running"
     const val CLOSE_EXPORT_FIRST = "Close the export dialog first"
+    const val CLOSE_CONVERT_FIRST = "Close the convert dialog first"
 }
 
 private val ENABLED = ActionState(true, null)
@@ -239,6 +242,7 @@ fun stateOf(
             when {
                 ctx.knowledgeOpen -> disabled(MenuReasons.KNOWLEDGE_UNAVAILABLE)
                 !ctx.exportEnabled -> disabled(MenuReasons.OPEN_SCRIPT_FIRST)
+                ctx.convertDialogVisible -> disabled(MenuReasons.CLOSE_CONVERT_FIRST)
                 else -> ENABLED
             }
         FileAction.CONVERT ->

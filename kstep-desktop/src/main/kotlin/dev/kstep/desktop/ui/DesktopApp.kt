@@ -646,7 +646,12 @@ fun FrameWindowScope.DesktopApp(
     // One expression for the toolbar and the menu: they must never disagree.
     val exportEnabled = !knowledgeOpen && exportScript != null && editorView.state is EditorState.Editing
     val openExport: () -> Unit = {
-        if (exportScript != null && editorView.state is EditorState.Editing && !exportRunning) {
+        val canOpenExport =
+            exportScript != null &&
+                editorView.state is EditorState.Editing &&
+                !exportRunning &&
+                convertState is ConvertState.Idle
+        if (canOpenExport) {
             exportNotice =
                 ExportNotice.retain(exportNotice, state.file, state, knowledgeOpen, exportDialogOpened = true)
             exportSaveError = null
@@ -800,6 +805,7 @@ fun FrameWindowScope.DesktopApp(
             editorFocusTarget = editorFocusTarget,
             convertRunning = convertState is ConvertState.Running,
             exportDialogVisible = exportVisible,
+            convertDialogVisible = convertState !is ConvertState.Idle,
         )
     val onEditAction: (EditAction) -> Unit = {
         editorCommandNonce++
@@ -985,7 +991,7 @@ fun FrameWindowScope.DesktopApp(
                         editorView,
                         onOpen = openFile,
                         onExport = openExport,
-                        exportEnabled = exportEnabled,
+                        exportEnabled = exportEnabled && convertState is ConvertState.Idle,
                         knowledgeOpen = knowledgeOpen,
                         knowledgeLabel =
                             (workspace as? WorkspaceState.Open)?.scan?.root?.let {
