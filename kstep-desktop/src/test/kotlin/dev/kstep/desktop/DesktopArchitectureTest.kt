@@ -162,6 +162,30 @@ class DesktopArchitectureTest :
                     forbidden.filter { text.contains(it) }.map { "${root.relativize(path)} uses $it" }
                 }.shouldBeEmpty()
         }
+        "the convert package is pure logic: no Compose, UI, AWT, process start, script evaluation or network" {
+            val forbidden =
+                listOf(
+                    "dev.kstep.desktop.ui",
+                    "androidx.compose",
+                    "org.jetbrains.compose",
+                    "java.awt",
+                    "javax.swing",
+                    "ProcessBuilder",
+                    "KStepScriptHost",
+                    "PreviewRenderer",
+                    "java.net.http",
+                )
+            sources()
+                .filter { (path, _) ->
+                    root
+                        .relativize(path)
+                        .toString()
+                        .replace('\\', '/')
+                        .startsWith("dev/kstep/desktop/convert/")
+                }.flatMap { (path, text) ->
+                    forbidden.filter { text.contains(it) }.map { "${root.relativize(path)} uses $it" }
+                }.shouldBeEmpty()
+        }
         "the recent and drop packages are pure logic: no Compose, no UI, no process start, no script evaluation" {
             sources()
                 .filter { (path, _) ->

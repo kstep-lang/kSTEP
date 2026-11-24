@@ -47,4 +47,7 @@ object DesktopErrorCodes {
     // Recent and drag-and-drop (ADR-0066).
     const val RECENT_UNAVAILABLE = "KSTEP-D-032"
     const val DROP_REJECTED = "KSTEP-D-033"
+
+    // File > Convert (ADR-0077): an unexpected failure of the conversion service itself.
+    const val CONVERT_FAILED = "KSTEP-D-036"
 }

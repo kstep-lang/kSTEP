@@ -61,6 +61,8 @@ internal data class ConvertFailure(
     val kind: ConvertErrorKind,
     val message: String,
     val source: String? = null,
+    /** Escaped targets of the pre-write TARGET_EXISTS check (all of them); empty for every other failure. */
+    val conflicts: List<String> = emptyList(),
 )
 
 /** [name] and [source] are already shown safely (`DisplayName.escaped`). */
@@ -148,6 +150,40 @@ private sealed interface One {
     ) : One
 }
 
+internal data class ConvertRun(
+    val dirMode: Boolean,
+    val report: ConvertReport,
+)
+
+/**
+ * The single code path of a conversion (CLI and desktop): plans, checks and writes, and returns the report. Prints
+ * nothing itself; [onWritten] and [onPlanned] are the hooks the CLI prints through.
+ */
+@Suppress("LongParameterList")
+internal fun computeConvert(
+    command: CliCommand.Convert,
+    limits: ConvertDirLimits = ConvertDirLimits(),
+    beforeMove: () -> Unit = {},
+    beforeDescend: (Path) -> Unit = {},
+    onWritten: (WrittenFile) -> Unit = {},
+    onPlanned: (List<Skipped>) -> Unit = {},
+): ConvertRun {
+    val dirMode = isFolderInput(command.inputPath)
+    val warnings = ArrayList<ConvertWarning>()
+    val report =
+        executeConvert(
+            command,
+            dirMode,
+            limits,
+            beforeMove,
+            onWritten = onWritten,
+            onPlanned = onPlanned,
+            warnings = warnings,
+            beforeDescend = beforeDescend,
+        ).withWarnings(warnings)
+    return ConvertRun(dirMode, report)
+}
+
 /**
  * Runs `kstep convert`: pure text conversion, never evaluates a script. Returns the exit code (0 or 1) and does NOT call
  * `exitProcess`, so it can be tested in-process. Nothing is written unless every target has been checked first.
@@ -161,19 +197,16 @@ internal fun runConvert(
     beforeDescend: (Path) -> Unit = {},
 ): Int {
     val json = command.jsonOutput
-    val dirMode = isFolderInput(command.inputPath)
-    val warnings = ArrayList<ConvertWarning>()
-    val report =
-        executeConvert(
+    val hintDirMode = isFolderInput(command.inputPath)
+    val (dirMode, report) =
+        computeConvert(
             command,
-            dirMode,
             limits,
             beforeMove,
+            beforeDescend,
             onWritten = { w -> if (!json) out.println("Wrote ${w.target ?: w.name}") },
-            onPlanned = { skipped -> if (!json) printSkipHints(err, skipped, dirMode) },
-            warnings = warnings,
-            beforeDescend = beforeDescend,
-        ).withWarnings(warnings)
+            onPlanned = { skipped -> if (!json) printSkipHints(err, skipped, hintDirMode) },
+        )
     if (json) {
         out.println(
             convertReportJson(command.target, dirMode, report, limits.maxReportedErrors, command.recursive).toString(),
@@ -773,7 +806,11 @@ private fun finish(
                 "${conflicts.first()} and ${conflicts.size - 1} more already exist; " +
                     "use --force to replace them. Nothing was written."
             }
-        return failed(ConvertErrorKind.TARGET_EXISTS, message)
+        return ConvertReport.Failed(
+            listOf(ConvertFailure(ConvertErrorKind.TARGET_EXISTS, message, conflicts = conflicts.toList())),
+            emptyList(),
+            skipped,
+        )
     }
 
     val written = ArrayList<WrittenFile>()

@@ -1,0 +1,54 @@
+= ADR-0077: Desktop convert service (Welle M4a)
+:toc:
+
+== Status
+
+Accepted (Welle M4a of the menu bar plan). Scope: the service layer of File > Convert...: a public facade over `kstep convert` in `kstep-cli`, and a Compose-free state machine, prefill and preferences in `kstep-desktop`. There is no menu entry, no dialog and no icon yet (Welle M4b). The facade is tested for parity with the command's JSON; the desktop part is unit tested with a fake runner and once with the real facade. See "Open / not verified".
+
+== Context
+
+`kstep convert` (ADR-0060, ADR-0061, ADR-0071) turns Markdown notes into `.kstep.kts` scripts, or a script into an OKF note, as pure text conversion. The desktop needs the same conversion with a conflict list it can show, without starting a process and without parsing JSON. Reading `ConvertCommand.kt` gave these facts:
+
+* Default `--out`: for a single file the real folder of the source file, for a folder the source folder itself (`ConvertFiles.resolveOutDir` requires an existing folder, else `KSTEP-C-007`).
+* With `--recursive` and an output folder inside the source folder, the scanner skips that folder (`Skipped(..., OUTPUT_DIR)`). When `--out` equals the source folder nothing is skipped: targets never carry the source suffix of the same run, and sources are protected in `checkTarget` (`KSTEP-C-009`). Without `--recursive` only one level is scanned.
+* Everything is planned and checked before the first write; then files are written one at a time with `writeAtomic`. Each file is atomic, the run is not transactional. A failure while writing reports the files already written.
+* `finish` collected the escaped conflict names but only passed on the first name and a count.
+* The JSON is capped at 50 errors and 50 warnings and is pinned byte for byte by `ConvertGoldenTest`.
+
+== Decision
+
+D1. One code path. `computeConvert(command, limits, ...)` holds what `runConvert` did up to the report; `runConvert` calls it and keeps all printing. The desktop facade `DesktopConvert.run` also calls `computeConvert`. `executeConvert`, `finish` and the internal types (`ConvertReport`, `WrittenFile`, `Skipped`, `SkipReason`, `ConvertFailure`, `ConvertErrorKind`, `ConvertWarning`, `ConvertDirLimits`) stay `internal`.
+
+D2. Public types: `DesktopConvertRequest`, `ConvertedFile`, `SkippedSource`, `ConvertSkipReason`, `ConvertIssue`, `ConvertOutcome` (`Success`, `Failure`). Every mapping is an exhaustive `when` without `else`, so a new internal value breaks the build instead of vanishing. The facade has no caps: it returns every error and warning, the desktop shows at most 50. It catches no exception. It passes `input.toString()` on unchanged, because the raw string decides file or folder mode.
+
+D3. `outDir == null` means the CLI default (see Context). No absolute path ever appears in an outcome: names and sources are escaped by the CLI.
+
+D4. Conflicts. `ConvertFailure` has a new field `conflicts` (default empty), set only by the pre-write `TARGET_EXISTS` check. `convertReportJson` does not read it, so the JSON and the text are unchanged. `ConvertOutcome.Failure.isTargetConflict` is true only when nothing was written, the list is not empty and the single error is `KSTEP-C-008`. A target that "appeared meanwhile" during writing has no list and is a plain failure.
+
+D5. States and controller (`dev.kstep.desktop.convert`). `ConvertState`: Idle, Editing, Running, Done, Conflict, Failed, each with a generation that changes on every transition; a late result applies only to the Running state of its own generation. One lock, one daemon thread, one run at a time. `begin`, `edit`, `start` and `replace` while Running are ignored, and so is `closeDialog` (no cancelling). `close()` shuts the executor down without waiting for a write (each write is atomic).
+
+D6. Replacing is never silent. A run starts without force. `replace()` works only from Conflict. It first runs again without force: if the conflict set is exactly the one the user saw, it runs with force; if the conflicts vanished, that run has already written and the result is Done; if the set differs, the result is a new Conflict and nothing is overwritten. `ConvertRequest` has no `force` field. The conflict state shows 50 names and a count, but keeps the full list for the comparison.
+
+D7. Prefill (`ConvertPrefill`): an open `*.kstep.kts` (case-insensitive) wins: OKF, that file, not recursive. Otherwise a workspace gives KTS, the folder, recursive. Otherwise no source and the remembered target (default KTS). The remembered output folder is used in all cases.
+
+D8. Preferences: `convert.json` (schema version 1; `export.json` is untouched). Loaded as untrusted: at most 64 KiB, no-follow, folder absolute, at most 4096 characters, no NUL, existing directory, `toRealPath() == normalize()`, target `okf` or `kts`; an unknown version, an exception or a `StackOverflowError` gives the defaults. Saved through a temporary file (0600 where supported) and an atomic move; every failure is swallowed. `onDone` is the hook to remember after a successful run.
+
+D9. Logging (kotlin-logging) only says generation, target kind, outcome kind and counts, never paths, names or content. An unexpected exception becomes a `Failed` state with `KSTEP-D-036` and the class name only.
+
+D10. New code `KSTEP-D-036` (`CONVERT_FAILED`).
+
+== Consequences
+
+* The command line and the desktop cannot drift: `DesktopConvertParityTest` runs `runConvert` with JSON on one copy of a fixture tree and the facade on another and compares status, written, skipped, first error, errors, warnings and the cap behaviour; `ConvertGoldenTest` stays unchanged and green.
+* The convert package is pure logic; a new architecture test forbids UI, Compose, AWT, Swing, process start, script evaluation and the network there.
+* `kstep-cli` gains plain JVM classes without UI, so the release zip contains no desktop or Compose jar.
+
+== Open / not verified
+
+* No UI yet (Welle M4b): there is no menu entry, dialog, icon or shortcut.
+* A run over many files is not transactional: a write failure leaves the earlier files.
+* Time window between the re-check and the forced run: a file that appears there is replaced as well.
+* Hard links, Windows junctions and the time-of-check to time-of-use window are inherited from ADR-0071.
+* The facade turns CLI error codes into an interface; the parity test guards that.
+* Not tested on Windows.
+* With more than 50 conflicts the user sees 50 and a count, and replace overwrites all of them.

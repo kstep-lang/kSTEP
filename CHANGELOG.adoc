@@ -19,6 +19,8 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop convert service (Welle M4a, ADR-0077): public `DesktopConvert` facade in kstep-cli over the same logic
+  as `kstep convert`; desktop state machine with explicit replace confirmation; no menu entry yet.
 * kSTEP Desktop Help menu (Welle M3b, ADR-0076): Keyboard Shortcuts (an overview built from the menu model) and
   About kSTEP Desktop (version, link to kstep.dev); on macOS About is in the application menu when the system handler
   is available.
