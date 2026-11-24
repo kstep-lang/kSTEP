@@ -210,7 +210,8 @@ class ConvertControllerTest :
                 h.controller.replace()
                 h.await { it is ConvertState.Done }
                 h.calls.map { it.force } shouldBe listOf(false, false, true)
-                h.done.size shouldBe 1
+                // onDone runs after the state change on the controller thread: wait for it, as the first test does
+                TestSupport.await(5_000) { h.done.size == 1 } shouldBe true
             }
         }
 
