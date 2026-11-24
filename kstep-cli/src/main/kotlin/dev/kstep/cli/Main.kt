@@ -9,6 +9,7 @@ import dev.kstep.script.KStepScriptOutcomeCodes
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
@@ -739,6 +740,7 @@ internal fun printExportError(
     jsonOutput: Boolean,
     outcome: KStepScriptOutcome,
     command: String,
+    extra: (JsonObjectBuilder.() -> Unit)? = null,
 ): Nothing {
     if (jsonOutput) {
         val base = errorJson(outcome)
@@ -746,6 +748,7 @@ internal fun printExportError(
             buildJsonObject {
                 base.forEach { (key, value) -> put(key, value) }
                 put("command", command)
+                extra?.invoke(this)
             }.toString(),
         )
     } else {

@@ -110,7 +110,8 @@ object KStepScriptCompilationConfiguration : ScriptCompilationConfiguration({
         "dev.kstep.sketch.*",
         // ShapeAssignment -- the type `shape(...)` registers on KStepModel.shapes.
         "dev.kstep.shape.*",
-        // stepFile { } / KStepModel / KStepModelBuilder
+        // stepFile { } / KStepModel / KStepModelBuilder, plus inputFile(...) / readInput(...) (ADR-0080; checked by
+        // grep: no `inputFile`, `readInput` or `ScriptInput*` exists in the generated AP242 types or other imports).
         "dev.kstep.script.*",
     )
 })

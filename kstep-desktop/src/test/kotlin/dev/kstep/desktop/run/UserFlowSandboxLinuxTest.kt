@@ -31,6 +31,13 @@ class UserFlowSandboxLinuxTest :
             UserFlowSandboxProbes.readCase(sb)
         }
 
+        "readInput works in the sandbox and reports the input (skipped when bubblewrap is unusable)".config(
+            enabled = on,
+            timeout = 200.seconds,
+        ) {
+            UserFlowSandboxProbes.inputCase(sb)
+        }
+
         "writes outside the session folder are refused (skipped when bubblewrap is unusable)".config(
             enabled = on,
             timeout = 200.seconds,

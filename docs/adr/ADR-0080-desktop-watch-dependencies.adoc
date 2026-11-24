@@ -1,0 +1,56 @@
+= ADR-0080: The desktop watches the files a script reads (Welle D1c-1)
+:toc:
+
+== Status
+
+Accepted (Welle D1c-1). Scope: `kstep-script` (two helper functions and a recorder), the worker JSON of `kstep-cli`, and the live preview of `kstep-desktop`. The public `kstep render --output json` document is unchanged.
+
+== Context
+
+ADR-0066 (D9) left "watching dependent files" undone: a script can read other files, but nothing reported which ones, and guessing paths from the source would miss files (a stale preview) and invent others (needless runs). It asked for a read hook in `kstep-script`, an additive `dependencies` field in the worker result and polling in the rhythm of the D6 watcher. This ADR does that.
+
+== Decision
+
+D1. Two script helpers, `inputFile(relativePath): Path` and `readInput(relativePath, maxBytes): String`, in the default imports of `*.kstep.kts` scripts. Both resolve the path against the folder of the running script, record it, and return the absolute path (`inputFile`) or the UTF-8 text (`readInput`, no link followed, at most 16 MiB; a larger `maxBytes` is clamped to 16 MiB). Only files named through these helpers are watched.
+
+D2. Pure path rules in `InputPathRules` (`java.nio` only). A path is refused if it is empty, longer than 1024 characters, holds a control character or a backslash, contains `..`, is absolute (also `C:x`), or if any element below the script folder is a symbolic link or the target is not a regular file. The script folder itself may be reached through links (`/var` to `/private/var`). A script names at most 64 different files; the 65th fails visibly. Codes: `KSTEP-S-016` (refused) and `KSTEP-S-017` (missing or too large).
+
+D3. Recording. `KStepScriptHost.evalRecording(file)` keeps a `ThreadLocal` recorder for the duration of one evaluation (removed in `finally`; the host is reused) and returns the sorted, duplicate-free relative paths next to the outcome. A path is recorded before the file is read, so a missing file is reported and watched. The list is also present after a runtime error or validation failure. Inline source (`kstep asciidoc`, MCP) has no recorder; the helpers answer `NO_SCRIPT_FOLDER`. The helpers must run on the script's own thread.
+
+D4. Worker result. The desktop worker (`includeParts = true`) writes `dependencies` (always, also empty) into the success and the script-failure JSON, like `exportTargets` (ADR-0063). The public JSON does not carry it. Other failure paths carry no list, so the desktop keeps its previous set there.
+
+D5. The desktop trusts nothing. `DependencyListParser` treats the list as hostile: it checks the size before iterating, rejects non-strings and duplicates, and resolves every entry again with the same `InputPathRules` against the real script folder. One bad entry drops the whole list (`KSTEP-D-037` warning on a failed run, a transient notice on a success). An invalid list is treated as an empty report, not as "no report": it clears the previously watched set, because a worker that sends a hostile list is not trusted to name inputs (a missing field, in contrast, keeps the previous set, D4/D9). It only ever asks for file attributes without following links; it never opens an input file, so a FIFO or a device cannot hang it.
+
+D6. Polling. One `DependencyWatcher` per opened file, one scheduler thread, up to 64 paths, 150 ms rhythm and 250 ms quiet window like `FileChangeWatcher` (whose state logic moved into the shared `StampTracker`). A poll in which any file changed or vanished gives exactly one callback. After every run that reports a list the set is replaced; paths that stay keep their tracker, so a change during a run is not lost.
+
+D7. Signals of inputs bypass the editor and the run filter. They start a run (`DesktopEvent.Changed`) and do not reach `onDiskSignal` (the editor would take the script for externally changed) or `runFilter` (ADR-0058). A vanished input is not "file not found" for the script; it runs once and the script reports the missing input (`KSTEP-S-017`).
+
+D8. No loop. A vanished input gives one signal, one run; the failed run still reports the path, `replace` keeps the tracker that is already in the "missing" state, and nothing fires again until the file returns (one run). A hostile worker that reports changing paths only creates new trackers whose first poll records and never runs.
+
+D9. A run without a report (timeout, crash, start failure, skipped, routed workspace run) keeps the previous set; an outdated generation never replaces the set (token and generation checks).
+
+== The honest limits
+
+* Raw `java.io` / `java.nio` reads are not observed. Resolution of the helpers is relative to the script folder, unlike `java.io.File("x")`, which resolves against the working directory of the worker.
+* Inline scripts and knowledge-workspace blocks (ADR-0058) are not supported in this wave; there a block runs as a file in the session folder, not next to the note, so `readInput` reports the input as missing (`KSTEP-S-017`).
+* Startup window: a new input that changes between its read in the worker and the first poll after the run is missed (its first poll only records). Known inputs are protected by the retained baseline.
+* A link swapped in for a parent folder after the check is a remaining race. It is accepted: the script can read anything anyway (ADR-0062 D1), and the desktop side only asks for attributes.
+* The refusals of the helper are honesty and portability, not a security boundary; the boundary is the desktop's re-check (D5) and the sandbox (ADR-0062).
+
+== Consequences
+
+* One additional JSON field in the worker document; the desktop treats a missing field as "no report". Old desktop with new worker ignores the field (the other parsers read their own keys only).
+* `KSTEP-S-016`, `KSTEP-S-017`, `KSTEP-D-037` are new. The desktop imports from `dev.kstep.script` only `InputPathRules` and `ScriptInputLimits` (`DesktopArchitectureTest`).
+* Verified on macOS arm64 locally; the Linux sandbox case runs only after CI.
+
+== Rejected alternatives
+
+* A heuristic over the script text: false negatives and false positives.
+* Watching the whole script folder: runs on every unrelated file change.
+* `WatchService`: seconds of latency on macOS (ADR-0051).
+* Instrumenting `java.io` with an agent: heavy, fragile, and invisible to the script author.
+* One watcher thread per input: up to 64 threads.
+
+== Related
+
+ADR-0051 (live preview), ADR-0058 (workspace), ADR-0062 (sandbox), ADR-0063 (export targets, desktop-only JSON fields), ADR-0066 (D9).

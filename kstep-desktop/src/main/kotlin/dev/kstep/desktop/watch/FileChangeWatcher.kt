@@ -2,6 +2,7 @@ package dev.kstep.desktop.watch
 
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.Executors
@@ -64,16 +65,13 @@ private val logger = KotlinLogging.logger {}
 class FileChangeWatcher(
     private val file: Path,
     pollMillis: Long = 150,
-    private val quietMillis: Long = 250,
+    quietMillis: Long = 250,
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
     scheduler: Scheduler = DaemonScheduler(),
     private val stat: (Path) -> FileStamp? = ::statFile,
     private val onEvent: (WatchSignal) -> Unit,
 ) : AutoCloseable {
-    private var lastStamp: FileStamp? = null
-    private var initialised = false
-    private var pendingSince: Long? = null
-    private var reportedMissing = false
+    private val tracker = StampTracker(quietMillis)
 
     @Volatile
     private var closed = false
@@ -83,31 +81,7 @@ class FileChangeWatcher(
     @Synchronized
     private fun poll() {
         if (closed) return
-        val now = clock()
-        val stamp = stat(file)
-        if (!initialised) {
-            initialised = true
-            lastStamp = stamp
-            reportedMissing = stamp == null
-            return
-        }
-        if (stamp != lastStamp) {
-            lastStamp = stamp
-            pendingSince = now
-            return
-        }
-        val since = pendingSince ?: return
-        if (now - since < quietMillis) return
-        pendingSince = null
-        if (stamp == null) {
-            if (!reportedMissing) {
-                reportedMissing = true
-                onEvent(WatchSignal.MISSING)
-            }
-        } else {
-            reportedMissing = false
-            onEvent(WatchSignal.CHANGED)
-        }
+        tracker.observe(stat(file), clock())?.let(onEvent)
     }
 
     override fun close() {
@@ -115,6 +89,68 @@ class FileChangeWatcher(
         handle.close()
     }
 }
+
+/**
+ * The state of one watched file between polls (the logic of [FileChangeWatcher], shared with the dependency watcher,
+ * ADR-0080). Not thread-safe: callers synchronise. The first observation only records the current state.
+ */
+internal class StampTracker(
+    private val quietMillis: Long,
+) {
+    private var lastStamp: FileStamp? = null
+    private var initialised = false
+    private var pendingSince: Long? = null
+    private var reportedMissing = false
+
+    /** Feeds one poll; returns the signal this poll completes, if any. */
+    fun observe(
+        stamp: FileStamp?,
+        now: Long,
+    ): WatchSignal? {
+        if (!initialised) {
+            initialised = true
+            lastStamp = stamp
+            reportedMissing = stamp == null
+            return null
+        }
+        if (stamp != lastStamp) {
+            lastStamp = stamp
+            pendingSince = now
+            return null
+        }
+        val since = pendingSince ?: return null
+        if (now - since < quietMillis) return null
+        pendingSince = null
+        return if (stamp == null) {
+            if (reportedMissing) {
+                null
+            } else {
+                reportedMissing = true
+                WatchSignal.MISSING
+            }
+        } else {
+            reportedMissing = false
+            WatchSignal.CHANGED
+        }
+    }
+}
+
+/**
+ * Like [statFile], but never follows a link: a link, a directory or anything else that is not a regular file counts as
+ * gone (`null`). Used for the input files of a script (ADR-0080): the desktop only asks for attributes, it never opens
+ * them, so a FIFO or a device cannot hang it.
+ */
+fun statNoFollow(path: Path): FileStamp? =
+    try {
+        val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        if (!attrs.isRegularFile) {
+            null
+        } else {
+            FileStamp(attrs.size(), attrs.lastModifiedTime().to(TimeUnit.NANOSECONDS), attrs.fileKey())
+        }
+    } catch (_: Exception) {
+        null
+    }
 
 /** Follows symbolic links on purpose: a symlinked script is legitimate. `null` if the file is gone or unreadable. */
 fun statFile(path: Path): FileStamp? =

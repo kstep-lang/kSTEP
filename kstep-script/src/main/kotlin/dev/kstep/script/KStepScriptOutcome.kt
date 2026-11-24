@@ -60,6 +60,12 @@ object KStepScriptOutcomeCodes {
 
     /** A style targets something that does not exist: a part without a shape or a face index out of range (ADR-0039). */
     const val STYLE_TARGET_UNKNOWN = "KSTEP-S-015"
+
+    /** `inputFile`/`readInput` refused a path (invalid, absolute, `..`, link, not a file, no script folder, more than 64 files; ADR-0080). */
+    const val INPUT_FILE_REFUSED = "KSTEP-S-016"
+
+    /** `readInput` could not deliver the file: it is missing or larger than the limit (ADR-0080). */
+    const val INPUT_FILE_UNREADABLE = "KSTEP-S-017"
 }
 
 /** One compiler diagnostic, stripped down to what a CLI/JSON consumer needs: no internal

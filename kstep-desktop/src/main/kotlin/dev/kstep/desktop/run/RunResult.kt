@@ -26,12 +26,20 @@ data class DesktopModel(
 
 /** The end of one run of the render worker. */
 sealed interface RunResult {
+    /**
+     * The input files the script read, as absolute paths below its folder (ADR-0080). `null` means the run gave no
+     * report (timeout, crash, start failure, skipped); an empty list is a real report of "none".
+     */
+    val dependencies: List<java.nio.file.Path>? get() = null
+
     data class Success(
         val model: DesktopModel,
+        override val dependencies: List<java.nio.file.Path>? = null,
     ) : RunResult
 
     data class Failure(
         val errors: List<DesktopError>,
+        override val dependencies: List<java.nio.file.Path>? = null,
     ) : RunResult
 
     /**
@@ -45,5 +53,6 @@ sealed interface RunResult {
     /** The native OCCT bridge is not available in the worker: no geometry can be shown. */
     data class NativeUnavailable(
         val reason: String,
+        override val dependencies: List<java.nio.file.Path>? = null,
     ) : RunResult
 }

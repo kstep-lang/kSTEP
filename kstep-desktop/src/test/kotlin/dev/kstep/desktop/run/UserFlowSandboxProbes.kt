@@ -30,6 +30,22 @@ object UserFlowSandboxProbes {
         }
     }
 
+    /** `readInput` works inside the sandbox and the run reports the input (ADR-0080): reading stays allowed (ADR-0062). */
+    fun inputCase(sandbox: SandboxFor) {
+        val dir = TestSupport.newDir()
+        try {
+            Files.writeString(dir.resolve("data.txt"), "hello")
+            val script =
+                TestSupport.copyFixture(dir, "hello-assembly.kstep.kts", "inputs.kstep.kts").also {
+                    Files.writeString(it, "check(readInput(\"data.txt\") == \"hello\")\n" + Files.readString(it))
+                }
+            val result = WorkerRunner(dir, sandbox = sandbox(dir)).run(script, 1) { }
+            result.shouldBeInstanceOf<RunResult.Success>().dependencies shouldBe listOf(dir.resolve("data.txt"))
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
     /** Export of a script without geometry work through a sandboxed runner; D-031 must never appear. */
     fun exportCase(box: UserScriptSandbox) {
         val dir = TestSupport.newDir()

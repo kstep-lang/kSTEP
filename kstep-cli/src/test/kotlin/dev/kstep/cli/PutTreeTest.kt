@@ -103,8 +103,8 @@ class PutTreeTest :
             val public = successJson("o.glb", outcome, null)
             public.containsKey("parts") shouldBe false
             public.containsKey("tree") shouldBe false
-            // everything but the two additive keys is byte for byte what it was
-            val stripped = JsonObject(desktop.filterKeys { it != "parts" && it != "tree" })
+            // everything but the additive keys is byte for byte what it was
+            val stripped = JsonObject(desktop.filterKeys { it != "parts" && it != "tree" && it != "dependencies" })
             stripped.toString() shouldBe public.toString()
         }
 

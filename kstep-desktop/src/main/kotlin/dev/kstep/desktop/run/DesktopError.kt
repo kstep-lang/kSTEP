@@ -50,4 +50,7 @@ object DesktopErrorCodes {
 
     // File > Convert (ADR-0077): an unexpected failure of the conversion service itself.
     const val CONVERT_FAILED = "KSTEP-D-036"
+
+    // The input files a script reads (ADR-0080): the worker's dependency list was not trustworthy and was ignored.
+    const val DEPENDENCIES_IGNORED = "KSTEP-D-037"
 }

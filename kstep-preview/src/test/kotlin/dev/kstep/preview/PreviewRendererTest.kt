@@ -210,4 +210,40 @@ class PreviewRendererTest :
             val second = PreviewRenderer.render(request).shouldBeInstanceOf<PreviewOutcome.Rendered>()
             first.bytes.toString(Charsets.UTF_8) shouldBe second.bytes.toString(Charsets.UTF_8)
         }
+
+        "dependencies of a file script: Rendered carries the inputs, ScriptFailed the inputs named before the failure" {
+            val dir =
+                java.nio.file.Files
+                    .createTempDirectory("preview-deps")
+                    .toRealPath()
+                    .toFile()
+            try {
+                File(dir, "in.txt").writeText("x")
+                val ok = File(dir, "ok.kstep.kts")
+                ok.writeText("readInput(\"in.txt\")\n$PRODUCT_STRUCTURE_SCRIPT")
+                val rendered =
+                    PreviewRenderer
+                        .render(PreviewRequest(PreviewSource.ScriptFile(ok)))
+                        .shouldBeInstanceOf<PreviewOutcome.Rendered>()
+                rendered.dependencies shouldBe listOf("in.txt")
+
+                val failing = File(dir, "bad.kstep.kts")
+                failing.writeText("readInput(\"missing.txt\")\n$PRODUCT_STRUCTURE_SCRIPT")
+                val failed =
+                    PreviewRenderer
+                        .render(PreviewRequest(PreviewSource.ScriptFile(failing)))
+                        .shouldBeInstanceOf<PreviewOutcome.ScriptFailed>()
+                failed.dependencies shouldBe listOf("missing.txt")
+            } finally {
+                dir.deleteRecursively()
+            }
+        }
+
+        "dependencies of an inline script are empty" {
+            val rendered =
+                PreviewRenderer
+                    .render(PreviewRequest(PreviewSource.InlineScript(PRODUCT_STRUCTURE_SCRIPT, "pr.kstep.kts")))
+                    .shouldBeInstanceOf<PreviewOutcome.Rendered>()
+            rendered.dependencies shouldBe emptyList()
+        }
     })

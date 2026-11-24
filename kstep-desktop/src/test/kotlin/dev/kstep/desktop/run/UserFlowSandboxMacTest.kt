@@ -35,6 +35,10 @@ class UserFlowSandboxMacTest :
             UserFlowSandboxProbes.readCase(sb)
         }
 
+        "readInput works in the sandbox and reports the input".config(enabled = mac, timeout = 200.seconds) {
+            UserFlowSandboxProbes.inputCase(sb)
+        }
+
         "a harmless script succeeds".config(enabled = mac, timeout = 120.seconds) {
             SandboxProbes.harmlessCase(sb)
         }

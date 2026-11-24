@@ -4,6 +4,7 @@ import dev.kstep.desktop.run.DesktopState
 import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.RunResult
 import dev.kstep.desktop.run.WorkerRunner
+import dev.kstep.desktop.watch.DependencyWatcher
 import dev.kstep.desktop.watch.FileChangeWatcher
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctKernel
@@ -115,6 +116,43 @@ class DesktopLiveRunOcctTest :
                     controller,
                     120_000,
                 ) { it is DesktopState.Ok && it.generation > failed.generation }
+            } finally {
+                controller.close()
+                dir.toFile().deleteRecursively()
+            }
+        }
+
+        "the shape follows a file the script reads: changing size.txt changes the mesh bounds".config(
+            enabled = available,
+            timeout = 400.seconds,
+        ) {
+            val dir = TestSupport.newDir()
+            val session = LiveRunController.createSessionDir(dir)
+            val runner = WorkerRunner(session)
+            val controller =
+                LiveRunController(
+                    runner = { f, g, s -> runner.run(f, g, s) },
+                    watcherFactory = { f, onEvent -> FileChangeWatcher(f, onEvent = onEvent) },
+                    sessionDir = session,
+                    dependencyWatchFactory = { callback -> DependencyWatcher(onChange = callback) },
+                )
+            try {
+                val size = dir.resolve("size.txt").also { Files.writeString(it, "20") }
+                val script = TestSupport.copyFixture(dir, "sized-box.kstep.kts", "sized.kstep.kts")
+                controller.open(script)
+                val first =
+                    TestSupport.awaitState(controller, 120_000) { it is DesktopState.Ok || it is DesktopState.Error }
+                val firstModel = first.shouldBeInstanceOf<DesktopState.Ok>().model
+                bounds(firstModel.mesh!!)[3] shouldBe (20.0 plusOrMinus 1e-3)
+                // a new input is only protected from its first poll on (ADR-0080, startup window)
+                Thread.sleep(1_000)
+
+                replaceAtomically(size, "35")
+                val second =
+                    TestSupport.awaitState(controller, 120_000) {
+                        it is DesktopState.Ok && it.generation > firstModel.generation
+                    }
+                bounds(second.shouldBeInstanceOf<DesktopState.Ok>().model.mesh!!)[3] shouldBe (35.0 plusOrMinus 1e-3)
             } finally {
                 controller.close()
                 dir.toFile().deleteRecursively()

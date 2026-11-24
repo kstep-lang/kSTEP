@@ -26,6 +26,20 @@ class DesktopArchitectureTest :
                 }.shouldBeEmpty()
         }
 
+        "the desktop imports from dev.kstep.script only the input path rules and their limits" {
+            val allowed = setOf("dev.kstep.script.input.InputPathRules", "dev.kstep.script.ScriptInputLimits")
+            sources()
+                .flatMap { (path, text) ->
+                    text
+                        .lineSequence()
+                        .filter { it.startsWith("import dev.kstep.script.") }
+                        .map { it.removePrefix("import ").trim() }
+                        .filter { it !in allowed }
+                        .map { "${root.relativize(path)} imports $it" }
+                        .toList()
+                }.shouldBeEmpty()
+        }
+
         "Compose is only used in the ui package" {
             sources()
                 .filter { (path, _) ->

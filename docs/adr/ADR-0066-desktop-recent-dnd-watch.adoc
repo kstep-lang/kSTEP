@@ -51,7 +51,7 @@ New packages `dev.kstep.desktop.recent` and `dev.kstep.desktop.drop` contain no 
 * A `kstep desktop` launcher without a Compose dependency in the CLI.
 * A warm worker against cold starts.
 * Packaging with jpackage.
-* Watching dependent files: an additive `dependencies: List<String>` in the worker result, a read hook in `kstep-script`, polling in the rhythm of the D6 watcher.
+* Watching dependent files: an additive `dependencies: List<String>` in the worker result, a read hook in `kstep-script`, polling in the rhythm of the D6 watcher. Done in Welle D1c-1, see ADR-0080.
 * A native menu bar with File > Open Recent / Clear Menu and keyboard shortcuts.
 * Recent entries for single notes.
 

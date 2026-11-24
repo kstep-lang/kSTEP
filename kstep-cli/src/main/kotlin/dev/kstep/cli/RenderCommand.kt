@@ -15,7 +15,7 @@ import dev.kstep.preview.RenderedTreeNode
 import dev.kstep.preview.deriveRenderOutputPath
 import dev.kstep.render.export.MeshExportResult
 import dev.kstep.render.gltf.GlbWriteResult
-import dev.kstep.script.KStepScriptOutcome
+import dev.kstep.script.ScriptInputLimits
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -72,7 +72,14 @@ fun runRender(
             println(outcome.message)
             exitProcess(1)
         }
-        is PreviewOutcome.ScriptFailed -> printError(command.jsonOutput, outcome.outcome)
+        is PreviewOutcome.ScriptFailed ->
+            printExportError(
+                command.jsonOutput,
+                outcome.outcome,
+                command = "render",
+                // ADR-0080: the desktop worker also reports the input files a failed script named.
+                extra = if (includeParts) ({ putDependencies(outcome.dependencies) }) else null,
+            )
         is PreviewOutcome.Rendered -> handleRendered(command, outcome, includeParts)
     }
 }
@@ -269,6 +276,8 @@ internal fun successJson(
         put("rootCount", outcome.model?.rootCount ?: 0)
         outcome.glb?.let { glbResult -> putGlb(glbResult) }
         if (includeParts) {
+            // ADR-0080: always present for the desktop worker (also empty), so "no report" is distinguishable.
+            putDependencies(outcome.dependencies)
             outcome.parts?.let { parts ->
                 putParts(parts)
                 if (parts.size <= DesktopPartLimits.MAX_PARTS) outcome.tree?.let { putTree(it) }
@@ -287,6 +296,13 @@ internal fun successJson(
         }
         outcome.meshExport?.let { export -> putMeshExport(export, toleranceMm) }
     }
+
+/** The input files a script read (ADR-0080); at most [ScriptInputLimits.MAX_INPUT_FILES]. Desktop worker only. */
+internal fun JsonObjectBuilder.putDependencies(dependencies: List<String>) {
+    putJsonArray("dependencies") {
+        dependencies.take(ScriptInputLimits.MAX_INPUT_FILES).forEach { add(it) }
+    }
+}
 
 private fun JsonObjectBuilder.putMeshExport(
     export: MeshExportResult,
@@ -416,11 +432,6 @@ private fun JsonObjectBuilder.putOcct(occt: OcctAvailability) {
         }
     }
 }
-
-private fun printError(
-    jsonOutput: Boolean,
-    outcome: KStepScriptOutcome,
-): Unit = printExportError(jsonOutput, outcome, command = "render")
 
 /** Limits shared by the desktop worker (writer) and the desktop app (validator) for the part list (ADR-0053). */
 object DesktopPartLimits {

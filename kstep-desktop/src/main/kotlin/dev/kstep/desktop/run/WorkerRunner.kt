@@ -13,6 +13,7 @@ import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.model.TooManyTrianglesException
 import dev.kstep.desktop.pick.AssemblyTree
 import io.github.oshai.kotlinlogging.KotlinLogging
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -131,7 +132,7 @@ class WorkerRunner(
                     )
                 }
             val durationMs = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI
-            return judge(outcome, out, generation, durationMs)
+            return judge(outcome, out, generation, durationMs, file)
         } finally {
             try {
                 Files.deleteIfExists(out)
@@ -146,6 +147,7 @@ class WorkerRunner(
         out: Path,
         generation: Long,
         durationMs: Long,
+        file: Path,
     ): RunResult =
         when (outcome) {
             is WorkerOutcome.TimedOut ->
@@ -175,7 +177,7 @@ class WorkerRunner(
                     "the render worker ended abnormally (incomplete output)" +
                         detail(diagnosticLine(text(outcome.stderr))),
                 )
-            is WorkerOutcome.Exited -> judgeExited(outcome, out, generation, durationMs)
+            is WorkerOutcome.Exited -> judgeExited(outcome, out, generation, durationMs, file)
         }
 
     private fun judgeExited(
@@ -183,6 +185,7 @@ class WorkerRunner(
         out: Path,
         generation: Long,
         durationMs: Long,
+        file: Path,
     ): RunResult {
         val stdout = text(outcome.stdout, stdout = true)
         val stderr = text(outcome.stderr)
@@ -213,7 +216,74 @@ class WorkerRunner(
                     "the render worker printed no result" + detail(diagnosticLine(stderr)),
                 )
         val notes = notes(stderr, lines.size - 1)
-        return when (val report = ErrorParser.parseRenderJson(last)) {
+        val result = judgeReport(last, notes, out, generation, durationMs, stderr)
+        return attachDependencies(result, last, file)
+    }
+
+    // ADR-0080: the worker's list of input files rides on the same last line. A failure to read it never changes the
+    // verdict of the run itself.
+    private fun attachDependencies(
+        result: RunResult,
+        lastLine: String,
+        file: Path,
+    ): RunResult {
+        val json =
+            try {
+                Json.parseToJsonElement(lastLine) as? JsonObject
+            } catch (_: Exception) {
+                null
+            } ?: return result // an unreadable result gives no report at all
+        // Absent means "no report" (null, the desktop keeps its previous set). Invalid is deliberately an empty list: a
+        // hostile or broken report clears the watched set (ADR-0080 D5).
+        val (paths, invalid) =
+            when (val report = DependencyListParser.parse(json["dependencies"], file)) {
+                DependencyReport.Absent -> null to false
+                is DependencyReport.Valid -> report.paths to false
+                DependencyReport.Invalid -> emptyList<Path>() to true
+            }
+        if (invalid) logger.warn { "the worker's dependency list was ignored" }
+        return when (result) {
+            is RunResult.Success ->
+                result.copy(
+                    model =
+                        if (invalid) {
+                            result.model.copy(notes = result.model.notes + DependencyListParser.IGNORED_NOTICE)
+                        } else {
+                            result.model
+                        },
+                    dependencies = paths,
+                )
+            is RunResult.Failure ->
+                result.copy(
+                    errors =
+                        if (invalid) {
+                            result.errors +
+                                DesktopError(
+                                    DesktopErrorCodes.DEPENDENCIES_IGNORED,
+                                    null,
+                                    null,
+                                    DependencyListParser.IGNORED_NOTICE,
+                                    Severity.WARNING,
+                                )
+                        } else {
+                            result.errors
+                        },
+                    dependencies = paths,
+                )
+            is RunResult.NativeUnavailable -> result.copy(dependencies = paths)
+            is RunResult.Skipped -> result
+        }
+    }
+
+    private fun judgeReport(
+        last: String,
+        notes: List<String>,
+        out: Path,
+        generation: Long,
+        durationMs: Long,
+        stderr: String,
+    ): RunResult =
+        when (val report = ErrorParser.parseRenderJson(last)) {
             is RenderReport.Failed -> RunResult.Failure(report.errors)
             is RenderReport.Unreadable ->
                 failure(
@@ -232,7 +302,6 @@ class WorkerRunner(
                 }
             is RenderReport.Geometry -> readGlb(out, generation, durationMs, notes, report.partsJson)
         }
-    }
 
     internal fun readGlb(
         out: Path,

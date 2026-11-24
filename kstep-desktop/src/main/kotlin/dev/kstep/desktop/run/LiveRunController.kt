@@ -2,6 +2,8 @@ package dev.kstep.desktop.run
 
 import dev.kstep.cli.ImportWorkerSupervisor
 import dev.kstep.cli.WorkerTempDir
+import dev.kstep.desktop.watch.DependencyWatch
+import dev.kstep.desktop.watch.DependencyWatcher
 import dev.kstep.desktop.watch.FileChangeWatcher
 import dev.kstep.desktop.watch.WatchSignal
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -33,6 +35,8 @@ class LiveRunController(
     private val clock: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
     private val wallClock: () -> Instant = Instant::now,
     private val sessionDir: Path? = null,
+    /** Creates the watcher of the script's input files (ADR-0080); `null` switches the observation off. */
+    private val dependencyWatchFactory: ((onChange: () -> Unit) -> DependencyWatch)? = null,
     private val executor: ExecutorService =
         Executors.newSingleThreadExecutor { r -> Thread(r, "kstep-desktop-run").apply { isDaemon = true } },
 ) : AutoCloseable {
@@ -46,6 +50,9 @@ class LiveRunController(
     private var maxGeneration = 0L // never decreases, so generations stay unique across a clear()
     private var current: Pair<Long, Process>? = null
     private var watcher: AutoCloseable? = null
+    private var depWatch: DependencyWatch? = null
+    private var depToken = 0L // the token of the installed dependency watcher; 0 = none
+    private var depTokenCounter = 0L
 
     /**
      * Receives every watcher signal before the run starts (the editor, ADR-0052). Called on the watcher thread, outside
@@ -70,16 +77,77 @@ class LiveRunController(
         val normalized = path.toAbsolutePath().normalize()
         val old = synchronized(lock) { watcher.also { watcher = null } }
         old?.close()
+        closeDependencyWatch()
         dispatch(DesktopEvent.Open(normalized, synchronized(lock) { maxGeneration }))
         val created = watcherFactory(normalized, ::onSignal)
+        val createdDeps = createDependencyWatch()
         synchronized(lock) {
             if (closed.get()) {
                 created.close()
+                createdDeps?.first?.close()
             } else {
                 watcher = created
+                depWatch = createdDeps?.first
+                depToken = createdDeps?.second ?: depToken
             }
         }
     }
+
+    // Each opened file gets its own dependency watcher and a fresh token; a late callback of an older one is ignored.
+    private fun createDependencyWatch(): Pair<DependencyWatch, Long>? {
+        val factory = dependencyWatchFactory ?: return null
+        val token = synchronized(lock) { ++depTokenCounter }
+        return factory { onDependencyChange(token) } to token
+    }
+
+    private fun closeDependencyWatch() {
+        val old =
+            synchronized(lock) {
+                depWatch.also {
+                    depWatch = null
+                    depToken = 0L
+                }
+            }
+        old?.close()
+    }
+
+    /**
+     * A watched input file changed or vanished (ADR-0080). It starts a run and nothing else: the editor must not take
+     * it for an external change of the script, the knowledge-workspace filter does not apply, and a vanished input is
+     * not "file not found" for the script itself (the run reports the missing input).
+     */
+    private fun onDependencyChange(token: Long) {
+        if (closed.get() || synchronized(lock) { token != depToken }) return
+        dispatch(DesktopEvent.Changed)
+    }
+
+    // Installs the input set of the newest run's report. A stale run or a run without a report changes nothing.
+    private fun replaceDependencies(
+        generation: Long,
+        file: Path,
+        reported: List<Path>,
+    ) {
+        val (watch, filtered) =
+            synchronized(lock) {
+                val state = mutableState.value
+                if (generation != latestGeneration || closed.get() || state.file != file) return
+                val base = file.parent
+                val paths =
+                    reported
+                        .filter { it != file && (base == null || it.startsWith(base) || it.startsWith(realBase(file))) }
+                        .take(DependencyWatcher.MAX_PATHS)
+                        .toSet()
+                depWatch to paths
+            }
+        watch?.replace(filtered)
+    }
+
+    private fun realBase(file: Path): Path =
+        try {
+            file.parent.toRealPath()
+        } catch (_: Exception) {
+            file.parent
+        }
 
     fun forceRun() = dispatch(DesktopEvent.ForceRun)
 
@@ -87,6 +155,7 @@ class LiveRunController(
     fun clear() {
         val old = synchronized(lock) { watcher.also { watcher = null } }
         old?.close()
+        closeDependencyWatch()
         dispatch(DesktopEvent.Close)
     }
 
@@ -169,7 +238,11 @@ class LiveRunController(
                 )
             }
         synchronized(lock) { if (current?.first == generation) current = null }
-        logger.info { "run gen=$generation outcome=${result::class.simpleName} durationMs=${clock() - startedMs}" }
+        logger.info {
+            "run gen=$generation outcome=${result::class.simpleName} durationMs=${clock() - startedMs}" +
+                (result.dependencies?.let { " deps=${it.size}" } ?: "")
+        }
+        result.dependencies?.let { replaceDependencies(generation, file, it) }
         dispatch(DesktopEvent.Finished(generation, result))
     }
 
@@ -197,6 +270,7 @@ class LiveRunController(
         if (!closed.compareAndSet(false, true)) return
         val (w, p) = synchronized(lock) { Pair(watcher.also { watcher = null }, current.also { current = null }) }
         w?.close()
+        closeDependencyWatch()
         p?.second?.let { ImportWorkerSupervisor.kill(it) }
         executor.shutdownNow()
         if (!executor.awaitTermination(CLOSE_WAIT_SECONDS, TimeUnit.SECONDS)) {
@@ -245,6 +319,7 @@ class LiveRunController(
                 },
                 watcherFactory = { file, onEvent -> FileChangeWatcher(file, onEvent = onEvent) },
                 sessionDir = dir,
+                dependencyWatchFactory = { callback -> DependencyWatcher(onChange = callback) },
             )
         }
     }

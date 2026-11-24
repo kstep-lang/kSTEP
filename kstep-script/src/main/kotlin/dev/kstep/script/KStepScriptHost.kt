@@ -27,6 +27,29 @@ private val logger = KotlinLogging.logger {}
 // outcome instead of an opaque RuntimeError -- see KStepScriptOutcomeCodes.GET_OR_THROW_ABORT.
 private const val VALIDATION_FAILURE_MARKER = "kSTEP DSL validation failed:"
 
+/** The outcome of one file evaluation plus the input files the script named (see [KStepScriptHost.evalRecording]). */
+data class RecordedEvaluation(
+    val outcome: KStepScriptOutcome,
+    val dependencies: List<String>,
+)
+
+/** Collects the relative input paths of one evaluation; owned by exactly one thread. */
+internal class InputRecorder(
+    val baseReal: java.nio.file.Path,
+) {
+    private val paths = LinkedHashSet<String>()
+
+    /** Records [relative]; `false` when it would be the first file beyond [ScriptInputLimits.MAX_INPUT_FILES]. */
+    fun record(relative: String): Boolean {
+        if (relative in paths) return true
+        if (paths.size >= ScriptInputLimits.MAX_INPUT_FILES) return false
+        paths.add(relative)
+        return true
+    }
+
+    fun sorted(): List<String> = paths.sorted()
+}
+
 /**
  * Evaluates `*.kstep.kts` scripts using [KStepScriptCompilationConfiguration], mapping every
  * outcome -- successful or not -- into a [KStepScriptOutcome]. Never lets a raw
@@ -55,9 +78,52 @@ object KStepScriptHost {
     private val host = BasicJvmScriptingHost()
     private val compilationConfig = createJvmCompilationConfigurationFromTemplate<KStepScript>()
 
+    // Input files a script names through inputFile/readInput (ADR-0080), recorded per evaluating thread. The
+    // scripting host runs the script body on the calling thread; the value is always removed in a finally block,
+    // so nothing leaks into the next evaluation of this reused host.
+    private val context = ThreadLocal<InputRecorder?>()
+
+    /** The recorder of the running file evaluation on this thread, or `null` (inline source, other thread). */
+    internal fun currentRecorder(): InputRecorder? = context.get()
+
     /** Evaluates a `*.kstep.kts` file. */
-    fun eval(file: File): KStepScriptOutcome =
-        evalToOutcome { host.eval(file.toScriptSource(), compilationConfig, null) }
+    fun eval(file: File): KStepScriptOutcome = evalRecording(file).outcome
+
+    /**
+     * Evaluates a `*.kstep.kts` file and reports the input files the script named through `inputFile`/`readInput`
+     * (ADR-0080): relative, `/`-separated, sorted, duplicate-free. A file is recorded before it is read, so a
+     * missing file is reported too. Empty after a compilation error (the script never ran).
+     */
+    fun evalRecording(file: File): RecordedEvaluation {
+        val recorder = createRecorder(file)
+        val previous = context.get()
+        context.set(recorder)
+        try {
+            val outcome = evalToOutcome { host.eval(file.toScriptSource(), compilationConfig, null) }
+            val dependencies =
+                if (outcome is KStepScriptOutcome.CompilationError) emptyList() else recorder?.sorted().orEmpty()
+            return RecordedEvaluation(outcome, dependencies)
+        } finally {
+            if (previous == null) context.remove() else context.set(previous)
+        }
+    }
+
+    // Same base the desktop derives from the script path: the real path of the script's folder. Failing to
+    // resolve it just means no recorder (the helpers then answer NO_SCRIPT_FOLDER).
+    private fun createRecorder(file: File): InputRecorder? =
+        try {
+            file
+                .toPath()
+                .toAbsolutePath()
+                .normalize()
+                .parent
+                ?.toRealPath()
+                ?.let { InputRecorder(it) }
+        } catch (_: java.io.IOException) {
+            null
+        } catch (_: SecurityException) {
+            null
+        }
 
     /** Evaluates inline `*.kstep.kts` source — useful for tests. */
     fun eval(
@@ -185,6 +251,14 @@ object KStepScriptHost {
                             StyleErrorKind.CONFLICT -> KStepScriptOutcomeCodes.STYLE_CONFLICT
                             StyleErrorKind.TARGET -> KStepScriptOutcomeCodes.STYLE_TARGET_UNKNOWN
                         } to (current.message ?: "invalid style")
+                    // ADR-0080: input files read next to the script.
+                    is ScriptInputException ->
+                        when (current.kind) {
+                            ScriptInputErrorKind.MISSING,
+                            ScriptInputErrorKind.TOO_LARGE,
+                            -> KStepScriptOutcomeCodes.INPUT_FILE_UNREADABLE
+                            else -> KStepScriptOutcomeCodes.INPUT_FILE_REFUSED
+                        } to (current.message ?: "input file refused")
                     else -> null to null
                 }
             if (code != null && text != null) {

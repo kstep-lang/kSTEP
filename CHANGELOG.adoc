@@ -9,6 +9,9 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* The desktop worker JSON has an additional `dependencies` array (the input files a script read); the public
+  `kstep render --output json` document is unchanged (Welle D1c-1, ADR-0080).
+
 * kSTEP Desktop toolbar uses icon buttons with tooltips instead of text buttons (Welle T1, ADR-0079): Open, Export,
   Home, Tree, AI Panel, Show All, Isolate and Hide are 32 dp icon buttons that name themselves on hover; the opacity
   slider has a tooltip with the percentage instead of a text label. Tree and AI Panel show their on state with a
@@ -30,6 +33,13 @@ minor versions may contain breaking changes.
 * kSTEP Desktop: the off state of Tree and AI Panel no longer looks disabled.
 
 === Added
+
+* Scripts can read files next to themselves with `inputFile("x")` and `readInput("x")` (Welle D1c-1, ADR-0080); the
+  paths are recorded, refused with `KSTEP-S-016` (absolute, `..`, links, not a file, more than 64 files) or
+  `KSTEP-S-017` (missing, too large). kSTEP Desktop watches exactly these files and re-renders when one changes or
+  vanishes; an unusable list from the worker is ignored with `KSTEP-D-037`. Limits: only files read through these
+  helpers are observed (raw `java.io` is not), paths are relative to the script folder (not the working directory),
+  and inline scripts and knowledge-workspace blocks are not supported.
 
 * kSTEP Desktop convert service (Welle M4a, ADR-0077): public `DesktopConvert` facade in kstep-cli over the same logic
   as `kstep convert`; desktop state machine with explicit replace confirmation; menu entry and dialog follow in M4b.

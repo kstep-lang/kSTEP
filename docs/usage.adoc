@@ -896,6 +896,28 @@ before a late failure. Names are shown with control and bidirectional characters
 
 Warnings (exit code stays 0): `KSTEP-C-016` unknown block attribute ignored, `KSTEP-C-017` unterminated block attribute ignored.
 
+== Reading input files from a script
+
+A script can read files that lie next to it and have the desktop preview follow them (ADR-0080):
+
+----
+val size = readInput("size.txt").trim().toDouble()   // text of <script folder>/size.txt
+val table = inputFile("table.csv")                    // absolute path, for your own reader
+----
+
+Both resolve the name against the _folder of the script_, not against the working directory (`java.io.File("x")` does the
+latter, which in the desktop worker is the folder the desktop was started in). The helpers record every name; the desktop
+watches exactly those files and runs the script again when one changes or disappears. Refused with `KSTEP-S-016`: an empty or
+very long name, `\`, `..`, an absolute name, a symbolic link below the script folder, anything that is not a regular file,
+and more than 64 different files. `KSTEP-S-017`: the file is missing (still watched, so creating it runs the script) or larger
+than the limit of `readInput` (16 MiB by default).
+
+Limits: only files read through `inputFile` and `readInput` are observed; files read through raw `java.io` or `java.nio` are
+not. Inline scripts (`kstep asciidoc`, MCP) have no script folder and answer `KSTEP-S-016`; a block of a knowledge workspace
+runs as a file in the desktop's session folder, where nothing lies next to it, so `readInput` fails there with `KSTEP-S-017`. A new input that changes in the instant between its read and the first poll after the run is missed until the
+next change. `kstep render --output json` stays as it was: the desktop worker additionally reports `dependencies`; the public
+document does not.
+
 == Desktop live preview
 
 `kstep-desktop` shows a `*.kstep.kts` script as a 3D shape and updates it when the file is saved (ADR-0051). It is a
@@ -912,7 +934,8 @@ the run task: `-Pkstep.occt.bridge.library=/abs/path/libkstep_occt_bridge.dylib`
 The script runs in a separate, supervised worker process (60 s timeout, 2 GiB heap, bounded output), never in the window's
 process; a script with an endless loop or an error cannot hang or crash the window. After an error the last good shape stays
 visible with a yellow badge and the time of that result; the error bar below shows the code, `line:column` and message
-("+N more" lists all errors, "Copy" copies them).
+("+N more" lists all errors, "Copy" copies them). Files the script reads through `inputFile`/`readInput` are watched as well
+(see <<Reading input files from a script>>); if the worker's list cannot be trusted, it is ignored (`KSTEP-D-037`).
 
 [cols="1,3",options="header"]
 |===

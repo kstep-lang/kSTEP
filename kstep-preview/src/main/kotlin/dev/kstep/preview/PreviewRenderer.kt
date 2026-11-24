@@ -29,6 +29,7 @@ import dev.kstep.script.KStepModel
 import dev.kstep.script.KStepScriptHost
 import dev.kstep.script.KStepScriptOutcome
 import dev.kstep.script.KStepScriptOutcomeCodes
+import dev.kstep.script.RecordedEvaluation
 import dev.kstep.shape.AssemblyInstanceExpander
 import dev.kstep.shape.PlacedInstance
 import dev.kstep.shape.ShapeAssignment
@@ -211,29 +212,33 @@ object PreviewRenderer {
             return PreviewOutcome.InvalidRequest("Error: --require-watertight is only valid with -f stl or -f 3mf")
         }
 
-        return when (val outcome = evalSource(request.source)) {
-            is KStepScriptOutcome.Success -> renderSuccess(request, outcome.model)
+        val evaluation = evalSource(request.source)
+        val dependencies = evaluation.dependencies
+        return when (val outcome = evaluation.outcome) {
+            is KStepScriptOutcome.Success -> renderSuccess(request, outcome.model, dependencies)
             is KStepScriptOutcome.RuntimeError ->
                 if (outcome.exceptionClass == OCCT_UNAVAILABLE_EXCEPTION_CLASS ||
                     outcome.code == KStepScriptOutcomeCodes.SKETCH_SOLVER_UNAVAILABLE
                 ) {
-                    renderNoModelOcctFallback(request, outcome)
+                    renderNoModelOcctFallback(request, outcome, dependencies)
                 } else {
-                    PreviewOutcome.ScriptFailed(outcome)
+                    PreviewOutcome.ScriptFailed(outcome, dependencies)
                 }
-            else -> PreviewOutcome.ScriptFailed(outcome)
+            else -> PreviewOutcome.ScriptFailed(outcome, dependencies)
         }
     }
 
-    private fun evalSource(source: PreviewSource): KStepScriptOutcome =
+    private fun evalSource(source: PreviewSource): RecordedEvaluation =
         when (source) {
-            is PreviewSource.ScriptFile -> KStepScriptHost.eval(source.file)
-            is PreviewSource.InlineScript -> KStepScriptHost.eval(source.code, source.displayName)
+            is PreviewSource.ScriptFile -> KStepScriptHost.evalRecording(source.file)
+            is PreviewSource.InlineScript ->
+                RecordedEvaluation(KStepScriptHost.eval(source.code, source.displayName), emptyList())
         }
 
     private fun renderSuccess(
         request: PreviewRequest,
         model: KStepModel,
+        dependencies: List<String>,
     ): PreviewOutcome {
         try {
             val occt = OcctKernel.availability()
@@ -245,7 +250,7 @@ object PreviewRenderer {
                     request.height,
                     request.meshToleranceMm,
                 )
-            return finishRender(request, content, model, occt, warnings)
+            return finishRender(request, content, model, occt, warnings, dependencies)
         } finally {
             closeShapes(model)
         }
@@ -262,6 +267,7 @@ object PreviewRenderer {
     private fun renderNoModelOcctFallback(
         request: PreviewRequest,
         outcome: KStepScriptOutcome.RuntimeError,
+        dependencies: List<String>,
     ): PreviewOutcome {
         val occt = OcctKernel.availability()
         val content =
@@ -269,7 +275,14 @@ object PreviewRenderer {
                 PreviewSummary.noticeLines(request.source.displayName, outcome.message, occt, model = null),
                 RenderFallbackReasons.OCCT_UNAVAILABLE,
             )
-        return finishRender(request, content, model = null, occt = occt, warnings = emptyList())
+        return finishRender(
+            request,
+            content,
+            model = null,
+            occt = occt,
+            warnings = emptyList(),
+            dependencies = dependencies,
+        )
     }
 
     private fun finishRender(
@@ -278,6 +291,7 @@ object PreviewRenderer {
         model: KStepModel?,
         occt: OcctAvailability,
         warnings: List<String>,
+        dependencies: List<String>,
     ): PreviewOutcome {
         val scriptName = request.source.displayName
         val format = resolveFormat(request, content)
@@ -325,6 +339,7 @@ object PreviewRenderer {
             parts = parts,
             tree = tree,
             exportTargets = model?.exportTargets.orEmpty().map { RenderedExportTarget(it.format.id, it.fileName) },
+            dependencies = dependencies,
         )
     }
 

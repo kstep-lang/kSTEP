@@ -101,6 +101,8 @@ sealed interface PreviewOutcome {
         val tree: RenderedAssemblyTree? = null,
         /** File names declared by the script's `export { }` block (ADR-0063); empty without a block. */
         val exportTargets: List<RenderedExportTarget> = emptyList(),
+        /** Input files the script read through `inputFile`/`readInput` (ADR-0080): relative, sorted; empty for none. */
+        val dependencies: List<String> = emptyList(),
     ) : PreviewOutcome
 
     /**
@@ -110,6 +112,8 @@ sealed interface PreviewOutcome {
      */
     data class ScriptFailed(
         val outcome: KStepScriptOutcome,
+        /** Input files named before the script failed (ADR-0080); a missing file is listed too. */
+        val dependencies: List<String> = emptyList(),
     ) : PreviewOutcome
 
     /**
