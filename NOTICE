@@ -158,3 +158,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 kSTEP native runtime archive (opt-in): the OCCT bridge dynamically links OpenCascade Technology (LGPL 2.1 with exception).
 OCCT is not redistributed in the archive and must be installed separately.
+
+kSTEP Desktop macOS app (opt-in build, ADR-0082): the app bundles a jlink runtime of OpenJDK 21 (GPLv2 with the Classpath
+Exception); its license texts stay in the bundle under `Contents/runtime/Contents/Home/legal`. Not a release artefact.

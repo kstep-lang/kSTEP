@@ -113,9 +113,10 @@ object ImportWorkerLaunch {
         tmpDir: Path? = null,
         classPath: String = System.getProperty("java.class.path"),
         extraJvmOptions: List<String> = emptyList(),
+        java: String = javaExecutable(),
     ): List<String> =
         buildList {
-            add(javaExecutable())
+            add(java)
             addAll(jvmOptions(timeoutMillis, maxHeap, tmpDir))
             addAll(extraJvmOptions)
             add("-cp")

@@ -144,6 +144,7 @@ import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.DesktopState
 import dev.kstep.desktop.run.ErrorBarText
 import dev.kstep.desktop.run.LiveRunController
+import dev.kstep.desktop.run.PackagedHint
 import dev.kstep.desktop.run.SandboxNotice
 import dev.kstep.desktop.run.UserSandboxState
 import dev.kstep.desktop.run.sandboxNotice
@@ -155,6 +156,7 @@ import dev.kstep.viewer.camera.ViewerCameraState
 import dev.kstep.viewer.ui.CanvasHighlight
 import dev.kstep.viewer.ui.CanvasPicking
 import dev.kstep.viewer.ui.CanvasVisibility
+import dev.kstep.viewer.ui.OcctInstallHint
 import dev.kstep.viewer.ui.ShapeCanvas
 import dev.kstep.viewer.ui.UnavailableNotice
 import kotlinx.coroutines.Dispatchers
@@ -1358,6 +1360,7 @@ private fun Canvas(
                 state.reason,
                 modifier,
                 heading = "kSTEP Desktop cannot show geometry: the native OCCT bridge is unavailable.",
+                installHint = if (PackagedHint.active()) PackagedHint.lines() else OcctInstallHint.forCurrentOs(),
             )
         display == null ->
             Box(modifier, contentAlignment = Alignment.Center) {

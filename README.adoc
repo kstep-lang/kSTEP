@@ -222,7 +222,7 @@ link:docs/usage.adoc[Usage].
 | Interactive OCCT shape viewer (Compose Desktop).
 
 | `kstep-desktop`
-| Live preview of a `*.kstep.kts` script (Compose Desktop, `./gradlew :kstep-desktop:run`): re-renders on save in a
+| Live preview of a `*.kstep.kts` script (Compose Desktop, `./gradlew :kstep-desktop:run`; on macOS arm64 it can be packaged as an unsigned, JVM-only app and dmg with `./gradlew clean :kstep-desktop:packageDmg -Pkstep.native.exclude=true`, ADR-0082; geometry needs a build from source): re-renders on save in a
   supervised worker process; with a small script editor (syntax colouring, error marks, crash-safe save). Click a part to select it (Escape or a click on
   empty space clears), hover tints it, and a panel shows its name, size, centroid, colour and position. An assembly tree beside the
   canvas (toggle with the Tree icon in the toolbar, whose name shows on hover; Up/Down, Left/Right, Home/End, Enter, Escape when it has focus) selects whole

@@ -134,9 +134,10 @@ sealed interface WorkerSandbox {
             pathEnv: String? = System.getenv("PATH"),
             isExecutable: (Path) -> Boolean = Files::isExecutable,
             hideTmp: Boolean = true,
+            java: String = Path.of(System.getProperty("java.home"), "bin", "java").toString(),
         ): WorkerSandbox =
             try {
-                detectUnchecked(sessionDir, tempBase, osName, probe, pathEnv, isExecutable, hideTmp)
+                detectUnchecked(sessionDir, tempBase, osName, probe, pathEnv, isExecutable, hideTmp, java)
             } catch (e: Exception) {
                 Unavailable("worker sandbox check failed (${e.javaClass.simpleName})", UnavailableKind.CHECK_FAILED)
             }
@@ -149,6 +150,7 @@ sealed interface WorkerSandbox {
             pathEnv: String?,
             isExecutable: (Path) -> Boolean,
             hideTmp: Boolean,
+            java: String,
         ): WorkerSandbox {
             val os = osName.lowercase()
             if (os.startsWith("windows")) return Unavailable("Windows: no worker sandbox", UnavailableKind.WINDOWS)
@@ -160,7 +162,6 @@ sealed interface WorkerSandbox {
                         Unavailable("sandbox-exec not found", UnavailableKind.MAC_EXEC_MISSING)
                     } else {
                         val candidate = MacSandboxExec(MAC_PROFILE, session, tmp)
-                        val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
                         if (probe(candidate.wrap(listOf(java, "-version"))) == 0) {
                             candidate
                         } else {

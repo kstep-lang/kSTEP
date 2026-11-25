@@ -927,6 +927,17 @@ Compose Desktop application of the repository, not part of the CLI zip or of the
 ./gradlew :kstep-desktop:run --args="/abs/path/to/part.kstep.kts"
 ----
 
+On macOS arm64 it can be packaged as an app and dmg (ADR-0082; unsigned, JVM-only, not a release artefact):
+
+----
+./gradlew clean :kstep-desktop:packageDmg -Pkstep.native.exclude=true
+----
+
+The app is `kstep-desktop/build/packaging/app/kSTEP.app`, the dmg `kstep-desktop/build/packaging/dmg/kSTEP-<version>.dmg`.
+It has no native geometry bridge: scripts are compiled and checked, but geometry preview, export and import need a build from
+source (the window says so). An app built on your own Mac starts directly; a downloaded unsigned dmg is blocked by Gatekeeper
+("Open Anyway" in System Settings > Privacy & Security, or `xattr -dr com.apple.quarantine /Applications/kSTEP.app` at your own risk).
+
 Without an argument, press Ctrl+O (Cmd+O on macOS) or use the Open button. Geometry needs the native OCCT bridge; on a host
 that builds it (Linux x86-64, macOS arm64) it is found as for the other modules. To use a bridge built elsewhere, pass it to
 the run task: `-Pkstep.occt.bridge.library=/abs/path/libkstep_occt_bridge.dylib` (and `-Pkstep.planegcs.bridge.library=...`).

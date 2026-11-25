@@ -34,7 +34,7 @@ class WarmWorkerClient(
     private val sessionDir: Path,
     private val settings: WarmWorkerSettings,
     private val sandbox: WorkerSandbox?,
-    private val workerClasspath: String = defaultWorkerClasspath(),
+    private val worker: WorkerLocationResult = WorkerLocator.current,
     private val maxHeap: String = ImportWorkerLaunch.WORKER_MAX_HEAP,
     private val extraJvmOptions: List<String> = emptyList(),
     private val launchTimeoutMillis: Long = WorkerRunner.DEFAULT_TIMEOUT_MILLIS,
@@ -420,6 +420,11 @@ class WarmWorkerClient(
         CompletableFuture.supplyAsync({ startWorker() }, starterExecutor)
 
     private fun startWorker(): WarmWorkerProcess {
+        val location =
+            when (worker) {
+                is WorkerLocationResult.Found -> worker.location
+                is WorkerLocationResult.Broken -> throw IOException(worker.reason)
+            }
         val tmp =
             try {
                 WorkerTempDir.create(sessionDir.toAbsolutePath())
@@ -433,7 +438,8 @@ class WarmWorkerClient(
                 mainClass = DesktopWarmRenderWorker.MAIN_CLASS,
                 maxHeap = maxHeap,
                 tmpDir = tmp,
-                classPath = workerClasspath,
+                classPath = location.classpath,
+                java = location.java,
                 extraJvmOptions =
                     listOf("-Djava.awt.headless=true", "-Dapple.awt.UIElement=true") +
                         extraJvmOptions +

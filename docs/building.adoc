@@ -134,7 +134,8 @@ the `HOMEBREW_PREFIX` environment variable) or set the individual `-Pkstep.occt.
 this is for development and self-builds only. Nothing native is bundled in a release artifact, the
 built dylib is unsigned, and Intel Macs and Windows are unsupported (the bridges then report
 `Unavailable`). Do not run release builds on a Mac that has Homebrew OCCT installed (the dylibs would
-be embedded into the jars and rejected by `scripts/release/verify-dist.sh`). Details: ADR-0026.
+be embedded into the jars and rejected by `scripts/release/verify-dist.sh`). Details: ADR-0026. The macOS desktop app and dmg (`./gradlew clean :kstep-desktop:packageDmg -Pkstep.native.exclude=true`,
+unsigned, JVM-only, ADR-0082) is the opposite case: it must be built _without_ the bridges.
 
 == Building — headless preview rendering (`kstep render`)
 

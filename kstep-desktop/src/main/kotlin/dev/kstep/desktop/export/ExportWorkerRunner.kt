@@ -11,9 +11,10 @@ import dev.kstep.desktop.run.ErrorParser
 import dev.kstep.desktop.run.FileArgument
 import dev.kstep.desktop.run.SessionDirGuard
 import dev.kstep.desktop.run.WorkerEnvironment
+import dev.kstep.desktop.run.WorkerLocationResult
+import dev.kstep.desktop.run.WorkerLocator
 import dev.kstep.desktop.run.WorkerRunner
 import dev.kstep.desktop.run.WorkerSandbox
-import dev.kstep.desktop.run.defaultWorkerClasspath
 import dev.kstep.desktop.run.sandboxRefusal
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.io.IOException
@@ -34,7 +35,7 @@ class ExportWorkerRunner(
     private val sessionDir: Path,
     private val timeoutMillis: Long = DesktopExportWorker.EXPORT_TIMEOUT_MILLIS,
     private val maxHeap: String = ImportWorkerLaunch.WORKER_MAX_HEAP,
-    private val workerClasspath: String = defaultWorkerClasspath(),
+    private val worker: WorkerLocationResult = WorkerLocator.current,
     private val extraJvmOptions: List<String> = emptyList(),
     /** `null` runs unsandboxed; a real sandbox is the user-flow sandbox of ADR-0062 (never [WorkerSandbox.Unavailable]). */
     private val sandbox: WorkerSandbox? = null,
@@ -61,6 +62,11 @@ class ExportWorkerRunner(
         generation: Long,
         onStarted: (Process) -> Unit,
     ): ExportWorkerResult {
+        val location =
+            when (worker) {
+                is WorkerLocationResult.Found -> worker.location
+                is WorkerLocationResult.Broken -> return failure(worker.code, worker.reason)
+            }
         if (sandbox is WorkerSandbox.Unavailable) {
             return failure(DesktopErrorCodes.SANDBOX_START_FAILED, SANDBOX_MESSAGE + detail(sandbox.reason))
         }
@@ -88,7 +94,8 @@ class ExportWorkerRunner(
                         mainClass = DesktopExportWorker.MAIN_CLASS,
                         maxHeap = maxHeap,
                         tmpDir = workerTmp,
-                        classPath = workerClasspath,
+                        classPath = location.classpath,
+                        java = location.java,
                         extraJvmOptions =
                             listOf("-Djava.awt.headless=true", "-Dapple.awt.UIElement=true") + extraJvmOptions,
                     )

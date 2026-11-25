@@ -53,4 +53,7 @@ object DesktopErrorCodes {
 
     // The input files a script reads (ADR-0080): the worker's dependency list was not trustworthy and was ignored.
     const val DEPENDENCIES_IGNORED = "KSTEP-D-037"
+
+    // The worker of the packaged app could not be located or is incomplete (ADR-0082).
+    const val WORKER_MISSING = "KSTEP-D-038"
 }

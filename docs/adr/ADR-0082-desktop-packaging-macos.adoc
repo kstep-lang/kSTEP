@@ -1,0 +1,62 @@
+= ADR-0082: Packaging the desktop as a macOS app (Welle D1c-3)
+:toc:
+
+== Status
+
+Accepted (Welle D1c-3). Scope: `kstep-desktop` (build only, plus a small worker-lookup in `run`), `kstep-cli` (one additive parameter). Not part of any release workflow, not part of `check`. macOS arm64 only; unsigned; JVM-only (no native geometry bridge).
+
+== Context
+
+ADR-0051 left packaging for later. The desktop is a Compose application that starts a worker JVM from the same runtime (`java.home/bin/java`) with a class path that contains only `kstep-cli`'s runtime jars (so the script compiler never sees Compose or Skiko). Whatever packages the desktop must keep both properties: a real `bin/java` in the bundled runtime, and a separate, stable list of worker jars.
+
+== Decision
+
+D1. Plain `jlink` and `jpackage`, driven by typed Gradle tasks in `kstep-desktop/build.gradle.kts`. Compose's `nativeDistributions` was rejected for three reasons:
+
+* Its jlink task always runs with `--strip-native-commands` (not configurable through the DSL), so the bundled runtime has no `bin/java` and the worker cannot start.
+* It registers its own `run` task, which collides with the `application` plugin's `run`, to which the worker class path argument is attached.
+* It renames jars by content hash, so a worker manifest with stable jar names is impossible.
+
+D2. Bundle layout (`kSTEP.app`):
+
+* `Contents/app/`: the desktop jar and its runtime jars, flat (jpackage puts every jar below `--input` on the launcher class path, so the worker jars are _not_ in the input).
+* `Contents/kstep-worker/`: the worker jars of `kstep-cli`'s runtime and `worker-classpath.txt`, one jar file name per line in resolution order (`--app-content`).
+* `Contents/runtime/`: a `jlink` image with `bin/java`. The launcher passes `-Dkstep.desktop.workerLibDir=$APPDIR/../kstep-worker`.
+
+D3. Worker lookup (`WorkerLocator`). If `kstep.desktop.workerLibDir` is set the app is packaged and the lookup is strict and closed: the folder, the manifest (regular file, at most 256 KiB, at most 1024 entries) and every listed jar (a file name ending in `.jar`, no path separators or `..`, regular file, no symbolic link) must exist; the java launcher is `java.home/bin/java` and must be executable. Any failure is `KSTEP-D-038` (`WORKER_MISSING`), shown like any run error, and no process, sandbox probe or warm worker is started. There is deliberately no fall back to `java.class.path`: that would put Compose and Skiko into the script compiler. Without the property, `kstep.desktop.workerClasspath` (Gradle run and tests) is used as before, else the desktop's own class path with a warning. Messages name file names, never full paths.
+
+D4. The runtime is a fixed module list (`java.base`, `java.compiler`, `java.datatransfer`, `java.desktop`, `java.instrument`, `java.logging`, `java.management`, `java.naming`, `java.net.http`, `java.prefs`, `java.scripting`, `java.sql`, `java.xml`, `jdk.accessibility`, `jdk.charsets`, `jdk.crypto.ec`, `jdk.management`, `jdk.unsupported`, `jdk.zipfs`). `jdeps --print-module-deps` was tried and aborts on this class path (the modular `kotlinx-coroutines-reactive` jar requires an absent `org.reactivestreams`). Consequence: a script sees only these JDK modules; a script that needs another one fails with a script error. `legal/` of the JDK stays in the image (OpenJDK, GPLv2 with the Classpath Exception; see `NOTICE`).
+
+D5. The sandbox of ADR-0062 is unchanged. `JAVA_HOME` in the profile is the real path of the launcher's runtime, which is now the bundle. It works for App Translocation and for a start from the mounted dmg volume, since the profile only needs to read there; writes stay in the session and temp folders. `WorkerSandbox.detect` and `ImportWorkerLaunch.command` get an additive `java` parameter (default: unchanged behaviour). The warm worker (ADR-0081) is unchanged and starts from the bundled runtime.
+
+D6. JVM-only. The packaging aborts unless `-Pkstep.native.exclude=true` is given, so no OCCT or PlaneGCS bridge (which would be linked against Homebrew and run on one Mac only) is inside the jars; `scripts/desktop/verify-desktop-app.sh` checks the jars and the file tree as well. Scripts are compiled and checked; geometry preview, STEP/glTF export and STEP import report that the native bridge is unavailable. The window says so in plain words (`PackagedHint`) instead of the build-from-source hint with Homebrew.
+
+D7. Unsigned. `jpackage` without `--mac-sign` signs ad hoc (`codesign -dv`: `Signature=adhoc`, no Hardened Runtime, so the JIT works). There is no notarisation, no certificate, no secret. An app built on the same Mac is not quarantined and starts. A downloaded dmg is blocked by Gatekeeper: use "Open Anyway" in System Settings > Privacy & Security, or `xattr -dr com.apple.quarantine /Applications/kSTEP.app` at your own risk. This was not tested with a downloaded dmg.
+
+D8. Version. jpackage on macOS rejects a leading `0`: `0.MINOR.PATCH` becomes `MINOR.PATCH.0` (0.5.0 becomes 5.0.0); other versions are used as they are. Bundle identifier `dev.kstep.desktop`, name `kSTEP`.
+
+D9. Tasks (`kstep-desktop`, none attached to `check`, `assemble` or `build`; on other systems they stop with a message): `desktopWorkerManifest`, `desktopWorkerLib`, `desktopAppInput`, `desktopRuntimeImage`, `createDistributable` (`build/packaging/app/kSTEP.app`), `verifyDesktopApp`, `packageDmg` (`build/packaging/dmg/kSTEP-<version>.dmg`). Command: `./gradlew clean :kstep-desktop:packageDmg -Pkstep.native.exclude=true`. The release workflows are not changed and publish no desktop artefact.
+
+== Measured (macOS arm64, JDK 21.0.12)
+
+`kSTEP.app` 307 MB, dmg 240 MB; runtime 82 MB, app jars 134 MB, worker folder 91 MB. The worker folder duplicates the compiler part of the app jars (accepted for this wave). First run in the bundled runtime about 1.6 s, the next one on the warm worker about 0.18 s (same as ADR-0081). The packaged worker starts as `kSTEP.app/Contents/runtime/Contents/Home/bin/java` below the app process. (`sandbox-exec` applies its profile and then replaces itself with `java`, so it is not a separate parent in `ps`; the sandbox itself is shown by the packaged-app test, where a write outside the session folder is refused.)
+
+== Verification
+
+Only macOS arm64 on one Mac (Darwin 27, Homebrew OCCT 7.9): `packageDmg` and `verify-desktop-app.sh` green (ad-hoc signature verifies with `--deep --strict`; the smoke worker with the bundled java reports success); `PackagedAppWorkerTest` (box on the JVM-only bundle gives the native-unavailable result, script error with code and line, sandbox, warm worker; with an external bridge library a box renders to a GLB); a real `open kSTEP.app` run showed the window with the hint and a worker below the app, and no process stayed after quitting. Linux and Windows were not built. No dmg was downloaded and run as quarantined.
+
+== Known gaps
+
+* AI key environment variables are not present when the app is started from the Finder.
+* No file association for `.kstep.kts`.
+* kotlin-logging (slf4j-simple) output is lost when started from the Finder.
+
+== Follow-ups
+
+* Windows (msi/exe) and Linux (deb/rpm/app-image), each with its own sandbox evidence.
+* Developer ID signing and notarisation.
+* The dmg in the release pipeline.
+* A variant with the native bridge (ADR-0050, native archive).
+* De-duplicating the worker jars (risk: different dependency versions in the two resolutions).
+* A CDS archive (`--generate-cds-archive`) for a faster cold start.
+* The `kstep desktop` launcher (D1c-4).

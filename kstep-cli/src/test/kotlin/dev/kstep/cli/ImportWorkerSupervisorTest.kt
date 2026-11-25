@@ -416,6 +416,11 @@ class ImportWorkerSupervisorTest :
             command.none { it.startsWith("-Djava.io.tmpdir=") } shouldBe true
         }
 
+        "the worker command takes an explicit java launcher when given (ADR-0082)" {
+            val command = ImportWorkerLaunch.command(listOf("a.step"), 1234, java = "/x/bin/java")
+            command.first() shouldBe "/x/bin/java"
+        }
+
         "the worker command carries the private temp directory, and it is never forwarded from the supervisor" {
             val dir = Path.of("/private/kstep-import-x")
             val command = ImportWorkerLaunch.command(listOf("a.step"), 1234, tmpDir = dir)

@@ -754,6 +754,11 @@ scan before either lands.
   based cancellation, last good result with badge, error bar with `KSTEP-D-001` to `-008`. Not in the CLI zip or on Maven Central
   (`verify-dist.sh` checks the zip). Verified on macOS arm64 with a strict build; Linux CI to follow the push. Open (D1b): drag and drop,
   recent files, included files, warm worker, packaging, `kstep desktop` launcher.
+* Welle D1c-3 (ADR-0082): the desktop can be packaged as a macOS app and dmg (`./gradlew clean :kstep-desktop:packageDmg
+  -Pkstep.native.exclude=true`): plain jlink/jpackage, bundled runtime with `bin/java`, a separate worker folder with a manifest
+  (`KSTEP-D-038` if it is incomplete, no class path fallback). Unsigned (ad hoc), JVM-only (no geometry, export or import in the app;
+  it says so), macOS arm64 only, verified on one Mac, no downloaded-dmg (Gatekeeper) test, not in the releases. Open: Windows and
+  Linux, signing and notarisation, a variant with the native bridge, the `kstep desktop` launcher.
 * Welle D2 (ADR-0052): `kstep-desktop` gets a script editor next to the preview. Plain `BasicTextField` with Kotlin highlighting (a
   1 MiB script tokenizes in about 16 ms), gutter with error marks, error click jumps to the position, explicit save by temp file,
   `fsync` and atomic rename with a hash check against the last seen disk version, own undo history, Reload / Keep mine banner for

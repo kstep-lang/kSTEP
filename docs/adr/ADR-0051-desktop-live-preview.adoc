@@ -69,7 +69,9 @@ D9. UI decisions (design team, final review Steve Jobs).
 
 == Follow-up wave D1b
 
-Recently opened files and drag and drop are done (ADR-0066). Watching the files a script reads is done too (ADR-0080). What remains moves to Welle D1c: a `kstep desktop` launcher without a Compose dependency in the CLI, a warm worker against cold starts (done, ADR-0081), packaging with jpackage.
+Packaging: see ADR-0082.
+
+Recently opened files and drag and drop are done (ADR-0066). Watching the files a script reads is done too (ADR-0080). What remains moves to Welle D1c: a `kstep desktop` launcher without a Compose dependency in the CLI, a warm worker against cold starts (done, ADR-0081), packaging with jpackage (macOS, unsigned, JVM-only: done in ADR-0082).
 
 == Measured results
 

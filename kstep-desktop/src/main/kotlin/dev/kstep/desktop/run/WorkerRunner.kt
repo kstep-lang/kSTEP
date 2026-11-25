@@ -42,16 +42,6 @@ object FileArgument {
 const val WORKER_CLASSPATH_PROPERTY: String = "kstep.desktop.workerClasspath"
 
 /**
- * The class path of the worker: the one the build hands over (only kstep-cli's runtime class path, so the script
- * compiler does not see Compose jars), else the desktop's own with a warning (F5).
- */
-fun defaultWorkerClasspath(): String =
-    System.getProperty(WORKER_CLASSPATH_PROPERTY)?.takeIf { it.isNotBlank() }
-        ?: System.getProperty("java.class.path").also {
-            logger.warn { "worker classpath property not set; using the desktop classpath" }
-        }
-
-/**
  * Runs one `kstep render --format glb --output json` in a supervised subprocess ([DesktopRenderWorker]) and turns its end
  * into a [RunResult] (ADR-0051). The script is only ever evaluated in that subprocess, never in the desktop's JVM. The
  * supervisor enforces the wall-clock timeout, the output bounds and kills the whole process tree; the worker has a heap
@@ -63,7 +53,7 @@ class WorkerRunner(
     private val timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
     private val maxHeap: String = ImportWorkerLaunch.WORKER_MAX_HEAP,
     private val maxGlbBytes: Long = DEFAULT_MAX_GLB_BYTES,
-    private val workerClasspath: String = defaultWorkerClasspath(),
+    private val worker: WorkerLocationResult = WorkerLocator.current,
     private val extraJvmOptions: List<String> = emptyList(),
     private val clock: () -> Instant = Instant::now,
     private val sandbox: WorkerSandbox? = null,
@@ -103,6 +93,7 @@ class WorkerRunner(
         generation: Long,
         onStarted: (Process) -> Unit,
     ): RunResult {
+        if (worker is WorkerLocationResult.Broken) return failure(worker.code, worker.reason)
         if (sandbox is WorkerSandbox.Unavailable) {
             return failure(
                 AiErrorCodes.AI_SANDBOX_UNAVAILABLE,
@@ -143,8 +134,9 @@ class WorkerRunner(
         file: Path,
         out: Path,
         onStarted: (Process) -> Unit,
-    ): WorkerOutcome =
-        supervisorFactory(timeoutMillis, sessionDir, onStarted).runWith { workerTmp ->
+    ): WorkerOutcome {
+        val location = (worker as WorkerLocationResult.Found).location
+        return supervisorFactory(timeoutMillis, sessionDir, onStarted).runWith { workerTmp ->
             ImportWorkerLaunch.command(
                 listOf(
                     file.toAbsolutePath().normalize().toString(),
@@ -159,11 +151,13 @@ class WorkerRunner(
                 mainClass = DesktopRenderWorker.MAIN_CLASS,
                 maxHeap = maxHeap,
                 tmpDir = workerTmp,
-                classPath = workerClasspath,
+                classPath = location.classpath,
                 extraJvmOptions =
                     listOf("-Djava.awt.headless=true", "-Dapple.awt.UIElement=true") + extraJvmOptions,
+                java = location.java,
             )
         }
+    }
 
     private fun judge(
         outcome: WorkerOutcome,
