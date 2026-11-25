@@ -1,0 +1,227 @@
+= ADR-0081: A warm render worker for the desktop live preview (Welle D1c-2)
+:toc:
+
+== Status
+
+Accepted (Welle D1c-2). Scope: `kstep-cli` (a render-exit hook, the warm worker class, its line protocol and a state snapshot) and the live preview of `kstep-desktop`. The public `kstep render --output json` document, the worker result JSON and all error codes are unchanged. Knowledge blocks, the AI candidate check and export stay on the cold path.
+
+== Context
+
+ADR-0051 runs every live preview in a fresh worker JVM. Starting the JVM, the Kotlin script compiler and the kstep classes dominates a run: about 1.5 s wall-clock on macOS arm64, for every keystroke that saves the file. The compile of the script itself is a small part of it.
+
+The obvious fix, one long-lived worker, collides with the rest of the design: a script is arbitrary Kotlin (ADR-0062 D1), the worker is the isolation unit, and "one process per run" is what gave the whole threat model its shape. Welle R of kSTEP (hostile STEP input) taught the same lesson: single checks against hostile input never become complete; the structural answer is a process per run. This ADR therefore offers two modes that share one mechanism.
+
+== Decision
+
+D1. Two modes of one mechanism (`maxRuns`):
+
+* *Spare* (`maxRuns = 1`, default). After each run the desktop starts the next worker in the background. It loads the JVM, the compiler and the kstep classes, renders a tiny warm-up script (with one box if OCCT is there, so the native library and its threads are loaded), prints a hello line and waits for exactly one request. After the reply the process ends and is killed. The isolation is the one of the cold path: one process per run. What is saved is the JVM start, the compiler start and the OCCT load.
+* *Reuse* (`maxRuns > 1`, opt-in). One process serves up to N runs of the same script path. Between runs the worker restores the process state it can (D6), and the desktop replaces the process after N runs, after any trace, for another script and after the idle time. Isolation between the runs of one script is best effort (see the limits).
+
+D2. Kill switch. System property `kstep.desktop.warmWorker` or environment variable `KSTEP_DESKTOP_WARM_WORKER` (the property wins): `off`, `false`, `0`, `no`, `none`, `cold` and `disabled` give the cold path; `spare` the default; `reuse` the reuse mode with `kstep.desktop.warmWorker.maxRuns` (default 20, valid 2 to 100) and `kstep.desktop.warmWorker.idleMillis` (default 120000, valid 1000 to 600000; outside the range the default is used). An unknown value never switches reuse on. `./gradlew :kstep-desktop:run -Pkstep.desktop.warmWorker=off` passes it on.
+
+D3. `kstep-cli` no longer ends the process in the render path. All `exitProcess` calls reachable from `runRender` (five in `RenderCommand.kt`, one in `printExportError`) go through `RenderExit.exit`. Without a handler this is exactly `exitProcess`; the warm worker runs each request under `RenderExit.capture`, where the call throws a stack-less signal that ends only the request. The report code that calls it runs no script code, so a script cannot swallow the signal. The CLI behaviour is byte-identical (`CliRenderIntegrationTest` is unchanged).
+
+D4. Protocol (`WarmRenderProtocol`, version 1). One JSON object per line over stdin and stdout of the worker, one request at a time. Worker: `{"v":1,"hello":true}` once, then per request `{"v":1,"id":N,"exit":C,"out64":"...","err64":"...","overflow":false,"recycle":false,"reason":"..."}`. Desktop: `{"v":1,"id":N,"script":"/abs/path","out":"/abs/glb"}`. stdout and stderr of the render travel as Base64 (a fixed 4/3 growth, no framing escapes). Bounds: request line 64 KiB; captured stdout 16 MiB and stderr 4 MiB (the cold supervisor's limits); reply line at most both captures in Base64 plus 64 KiB. The worker's own `System.out` and `System.err` are bounded capture streams during a run, `System.in` is empty, and the real descriptors are only used by the protocol code.
+
+D5. The desktop (`WarmWorkerClient`, `WarmWorkerProcess`) turns every end into the `WorkerOutcome` the cold supervisor would produce, so `WorkerRunner.judge` and all parsers run unchanged:
+
+[cols="2,3"]
+|===
+| Event | Outcome
+
+| Reply with `overflow`
+| `OutputOverflow`, process killed
+
+| Reply
+| `Exited(exit, stdout, stderr)`
+
+| Timeout (per request)
+| `TimedOut`, process tree killed
+
+| Process ends during a request (crash, `halt`, `ExitOnOutOfMemoryError`)
+| `Exited(code, the non-protocol lines of stdout, the tail of stderr)`: OutOfMemory, signal and "exited with code N" read as on the cold path
+
+| A protocol-looking line that is not the reply (wrong id, broken JSON), a line over the bound, the real stderr over 4 MiB
+| `IncompleteOutput` or `OutputOverflow`, process killed
+
+| A late reply of an earlier request
+| the process is replaced and the (innocent) current request is repeated once on a fresh process
+
+| Start failure, no hello within 30 s
+| `StartFailed`: with a sandbox this is `KSTEP-D-031`, there is no fall-back to an unsandboxed process
+|===
+
+D6. State of a process that is reused (`WarmRunState`, only for `maxRuns > 1`). A snapshot after the warm-up holds the system properties, the default locale (every category), the default time zone, the default uncaught-exception handler, the list of security providers, the standard streams and the threads. After each request the worker restores what can be restored and names what it found: `properties`, `locale`, `timezone`, `handler`, `security`, `threads` (a thread that outlives the request by more than 200 ms), `commonpool`, `fds` (Linux only, via `/proc/self/fd`), `overflow`, `uncaught`. Any such trace sets `recycle`: the worker ends after the reply and the desktop starts a new one. The reason names the kind, and for a property or a thread a sanitised name; the desktop logs only the kind. A request runs on a fresh thread, so thread-locals of the script do not survive, and every evaluation has its own script class loader, so top-level values of an earlier run are not visible.
+
+D7. The desktop does not rely on the worker's honesty. The rules of the settings (run count, one script path per process, idle time, replacement after every failure) hold whatever the worker's `recycle` flag says. A `WarmRunHandle` is handed to `LiveRunController` instead of the process: it ends the real process only while its own request is still the open one. Without it, a cancel of an outdated run could arrive after the next run had started on the same process and make that run fail for no reason. `LiveRunController` itself is unchanged except for an `onClose` hook that closes the client before the session folder is removed.
+
+D8. Process hygiene. The worker ends with `Runtime.halt`, never `exit`, so a shutdown hook a script registered does not run. It ends on end of stdin (the desktop died), on a malformed or over-long request, and after the idle time. Each request arms the existing `ImportWatchdog` (timeout plus 10 s) and disarms it afterwards. The worker's temp folder lives inside the session folder and is removed by the desktop after the process is gone. The environment is scrubbed (`WorkerEnvironment`), and the sandbox wrapper, its session folder and its parameters are the ones of the cold path.
+
+[kuml, adr-0081-run-decision, svg]
+----
+activityDiagram(name = "Warm worker run") {
+    val start = initialNode()
+    val have = decision(name = "worker ready and acceptable?")
+    val boot = action(name = "Start worker, wait for hello")
+    val send = action(name = "Send request, wait for reply")
+    val ok = decision(name = "regular reply?")
+    val keep = decision(name = "reuse mode, no trace, runs left?")
+    val retire = action(name = "Kill worker, start the next one")
+    val fail = action(name = "Kill worker, report the error")
+    val stay = action(name = "Keep worker for the next run")
+    val done = finalNode()
+
+    edge(from = start, to = have)
+    edge(from = have, to = send, guard = "yes")
+    edge(from = have, to = boot, guard = "no")
+    edge(from = boot, to = send)
+    edge(from = send, to = ok)
+    edge(from = ok, to = keep, guard = "yes")
+    edge(from = ok, to = fail, guard = "no")
+    edge(from = keep, to = stay, guard = "yes")
+    edge(from = keep, to = retire, guard = "no")
+    edge(from = stay, to = done)
+    edge(from = retire, to = done)
+    edge(from = fail, to = done)
+}
+----
+
+The kSTEP documentation does not render the `[kuml]` macro at build time yet; the block uses the constructs of the diagram in ADR-0056. It was not rendered in this environment (no `kuml` installed).
+
+== Sandbox and state, cold against warm
+
+[cols="3,2,2,2"]
+|===
+| Aspect | Cold | Warm, spare | Warm, reuse
+
+| OS sandbox (no network, writes only to the session folder, no fork on macOS)
+| per process
+| identical: same wrapper, same parameters
+| identical
+
+| Write access
+| the whole session folder
+| unchanged
+| unchanged
+
+| `java.io.tmpdir`
+| per run
+| per process, which is per run
+| per process; not emptied between runs (a leftover file is a plain file in the session folder)
+
+| Environment, working directory
+| scrubbed
+| identical
+| identical; a changed `user.dir` shows in the property check
+
+| Top-level values, script class loader
+| new
+| new
+| new for every evaluation
+
+| Thread-locals
+| gone with the process
+| gone with the process
+| fresh thread per request
+
+| System properties, locale, time zone, handlers, providers, background threads
+| gone with the process
+| gone with the process
+| restored and checked, trace gives replacement
+
+| Shutdown hooks
+| `halt`
+| `halt`
+| `halt`
+
+| Library statics reached by reflection, native OCCT state, a forged reply on the raw descriptor
+| gone with the process
+| gone with the process
+| *not detectable*; limited by the script binding, the run count and the idle time
+
+| Heap limit
+| per run
+| per run
+| per process: a leak of an earlier run can cause an OutOfMemory in a later one, bounded by the run count
+
+| Timeout
+| kill
+| kill per request
+| kill per request
+
+| Orphan (desktop killed with SIGKILL)
+| watchdog
+| end of stdin, per-request watchdog, `--die-with-parent` of bubblewrap
+| same
+|===
+
+The boundary to the system (the OS sandbox of ADR-0062) is unchanged in every mode. The isolation between runs is unchanged in spare mode and best effort in reuse mode for the runs of one script; a run of another script always gets a fresh process.
+
+== Measured results
+
+macOS arm64 (Darwin 27.2), JDK 21.0.12, OCCT available, `WorkerRunner.run` wall-clock including the process start where there is one; one warm-up run and five measured runs per row. Reproduce with `./gradlew :kstep-desktop:test --tests dev.kstep.desktop.run.WarmWorkerTimingTest -Pkstep.desktop.bench=true`; the table is written to `kstep-desktop/build/warm-worker-timing.txt`.
+
+[cols="3,2,2,2"]
+|===
+| Variant | No geometry (assembly only) | Two coloured parts (OCCT) | Range
+
+| Cold (one process per run)
+| 1532 ms
+| 1537 ms
+| 1519..1548 ms
+
+| Spare, the next process is ready
+| 215 ms
+| 237 ms
+| 214..256 ms
+
+| Spare, nothing ready (first run after opening)
+| 1720 ms
+| 1700 ms
+| single run
+
+| Reuse, runs 2 to 6 on one process
+| 142 ms
+| 155 ms
+| 127..173 ms
+
+| Reuse, first run (start, warm-up, run)
+| 1655 ms
+| 1695 ms
+| single run
+|===
+
+Spare mode takes a run from about 1.5 s to about 0.2 s once the spare is ready (about 2 s after the previous run, in the time the user needs to edit). The first run after opening a file is not faster than before. Reuse is faster still but adds the weaker isolation; the difference to spare (about 60 to 80 ms) is the cost of the mesh and script compilation itself.
+
+Not measured, not changed: `-XX:TieredStopAtLevel=1` is already part of the worker's standard options (ADR-0038) and stays; `-Dkotlin.environment.keepalive=true` was not tried, because it would share compiler state between runs for a gain that is small next to the spare worker (it stays off).
+
+== Honest limits
+
+* Reuse mode is best effort. Reflection on library statics, native OCCT state, and a script that writes a forged reply line to the raw descriptor cannot be seen. A forged reply with the right request id only fools its own run (it then produces no result); the real reply arrives later, is recognised as a late reply and replaces the process. Threads cannot be stopped from JDK 20 on, so a leaking thread can only be detected and the process replaced.
+* The file-descriptor check works only where `/proc/self/fd` exists (Linux). On macOS it is off.
+* The warm worker's heap limit holds for the whole process in reuse mode.
+* The first run after the desktop opens a file or after a failure starts a worker itself and is not faster than the cold path (about 1.7 s). A prestart when a file is opened was left out on purpose.
+* Verified on macOS arm64 locally, including the sandbox (`sandbox-exec`) for the second run of one process. The Linux (`bubblewrap`) and OCCT cases run only after the CI run.
+* The reaction to a script that makes the worker print an enormous number of lines to the raw descriptor is the pipe: the desktop reads at most one protocol line at a time into a queue of two and keeps only a bounded tail of other lines.
+
+== Consequences
+
+* New classes in `kstep-cli`: `RenderExit`, `WarmRenderProtocol`, `WarmRunState`, `DesktopWarmRenderWorker`; in `kstep-desktop`: `WarmWorkerSettings`, `WarmWorkerProcess`, `WarmWorkerClient`, `WarmRunHandle`. Additive parameters: `WorkerRunner(warm)`, `UserScriptSandbox.workerRunner(sessionDir, warm)`, `LiveRunController(onClose)`.
+* `DesktopRenderWorker` (cold) is unchanged. `kstep-cli` is touched, contrary to ADR-0062; `scripts/release/` is not.
+* Tests: protocol, exit hook, state snapshot and the worker process in `kstep-cli`; settings, kill switch, hostile cases, reuse rules, controller cancel, sandbox, OCCT parity and an architecture rule (only the live preview wiring may use the warm client) in `kstep-desktop`.
+
+== Rejected alternatives
+
+* One long-lived worker for everything: no isolation between runs, and no way to enforce it from outside.
+* In-process execution in the desktop JVM: ADR-0051 D1.
+* Warming only the JVM (a class data sharing archive): helps less than half of the start and still pays the compiler start.
+* Stopping hostile threads or sandboxing with a `SecurityManager`: gone or deprecated since JDK 17.
+
+== Follow-up
+
+D1c-3 and D1c-4 are untouched (launcher without Compose in the CLI, jpackage). Possible later: prestart when a file is opened, the knowledge workspace on the warm path, a Windows sandbox.
+
+== Related
+
+ADR-0038 (worker model and watchdog), ADR-0051 (live preview), ADR-0056 and ADR-0059 (AI check, stays cold), ADR-0058 (workspace, stays cold), ADR-0062 (sandbox), ADR-0080 (dependencies).

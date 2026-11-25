@@ -71,6 +71,8 @@ class WorkerRunner(
     private val sandboxFailureCode: String = AiErrorCodes.AI_SANDBOX_START_FAILED,
     /** `null` keeps the AI texts unchanged. */
     private val sandboxFailureMessage: String? = null,
+    /** The warm worker of the live preview (ADR-0081); `null` is the cold path, one fresh process per run. */
+    private val warm: WarmWorkerClient? = null,
     private val supervisorFactory: (Long, Path, (Process) -> Unit) -> ImportWorkerSupervisor =
         { timeout, base, started ->
             ImportWorkerSupervisor(
@@ -87,6 +89,14 @@ class WorkerRunner(
         },
 ) {
     private val guard = SessionDirGuard(sessionDir)
+
+    /** `true` if this runner serves runs from a warm worker (ADR-0081); for tests. */
+    internal val usesWarmWorker: Boolean get() = warm != null
+
+    /** Ends the warm worker, if any (the session is closing). */
+    fun closeWarm() {
+        warm?.close()
+    }
 
     fun run(
         file: Path,
@@ -111,26 +121,13 @@ class WorkerRunner(
         val startedNanos = System.nanoTime()
         try {
             val outcome =
-                supervisorFactory(timeoutMillis, sessionDir, onStarted).runWith { workerTmp ->
-                    ImportWorkerLaunch.command(
-                        listOf(
-                            file.toAbsolutePath().normalize().toString(),
-                            "--format",
-                            "glb",
-                            "--out",
-                            out.toString(),
-                            "--output",
-                            "json",
-                        ),
-                        timeoutMillis,
-                        mainClass = DesktopRenderWorker.MAIN_CLASS,
-                        maxHeap = maxHeap,
-                        tmpDir = workerTmp,
-                        classPath = workerClasspath,
-                        extraJvmOptions =
-                            listOf("-Djava.awt.headless=true", "-Dapple.awt.UIElement=true") + extraJvmOptions,
-                    )
-                }
+                warm?.run(file.toAbsolutePath().normalize(), out, timeoutMillis, onStarted)
+                    ?: runCold(file, out, onStarted)
+            if (warm != null && sandbox != null && !guard.intact()) {
+                // The folder of the session was changed while the script ran: the warm process is not trusted any more.
+                warm.reset()
+                return failure(sandboxFailureCode, GUARD_MESSAGE_USER)
+            }
             val durationMs = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI
             return judge(outcome, out, generation, durationMs, file)
         } finally {
@@ -141,6 +138,32 @@ class WorkerRunner(
             }
         }
     }
+
+    private fun runCold(
+        file: Path,
+        out: Path,
+        onStarted: (Process) -> Unit,
+    ): WorkerOutcome =
+        supervisorFactory(timeoutMillis, sessionDir, onStarted).runWith { workerTmp ->
+            ImportWorkerLaunch.command(
+                listOf(
+                    file.toAbsolutePath().normalize().toString(),
+                    "--format",
+                    "glb",
+                    "--out",
+                    out.toString(),
+                    "--output",
+                    "json",
+                ),
+                timeoutMillis,
+                mainClass = DesktopRenderWorker.MAIN_CLASS,
+                maxHeap = maxHeap,
+                tmpDir = workerTmp,
+                classPath = workerClasspath,
+                extraJvmOptions =
+                    listOf("-Djava.awt.headless=true", "-Dapple.awt.UIElement=true") + extraJvmOptions,
+            )
+        }
 
     private fun judge(
         outcome: WorkerOutcome,

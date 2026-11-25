@@ -39,6 +39,8 @@ class LiveRunController(
     private val dependencyWatchFactory: ((onChange: () -> Unit) -> DependencyWatch)? = null,
     private val executor: ExecutorService =
         Executors.newSingleThreadExecutor { r -> Thread(r, "kstep-desktop-run").apply { isDaemon = true } },
+    /** Runs in [close] before the session folder is removed (the warm worker lives in it, ADR-0081). */
+    private val onClose: () -> Unit = {},
 ) : AutoCloseable {
     private val machine = RunStateMachine()
     private val lock = Any()
@@ -276,6 +278,11 @@ class LiveRunController(
         if (!executor.awaitTermination(CLOSE_WAIT_SECONDS, TimeUnit.SECONDS)) {
             logger.warn { "the run executor did not end in time" }
         }
+        try {
+            onClose()
+        } catch (e: Exception) {
+            logger.warn { "closing the run helpers failed (${e::class.simpleName})" }
+        }
         sessionDir?.let { WorkerTempDir.deleteRecursively(it) }
     }
 
@@ -306,12 +313,19 @@ class LiveRunController(
             route: ((Path) -> ((Path, Long, (Process) -> Unit) -> RunResult)?)? = null,
         ): LiveRunController {
             val dir = createSessionDir()
+            // The warm worker (ADR-0081) of the live preview; the kill switch is a property or an environment variable.
+            val warm = WarmWorkerSettings.resolve()
             // A normal close() removes the session directory; this covers SIGTERM/Ctrl-C of the whole application.
+            // A warm worker is ended through its own close() and, on SIGTERM, by its stdin end-of-file.
             Runtime.getRuntime().addShutdownHook(
                 Thread({ WorkerTempDir.deleteRecursively(dir) }, "kstep-desktop-cleanup"),
             )
             // With a sandbox (ADR-0062) the runner resolves it at the first run, in the runner thread.
-            val runner = sandbox?.workerRunner(dir) ?: lazyOf(WorkerRunner(dir))
+            val runner =
+                sandbox?.workerRunner(dir, warm)
+                    ?: lazy {
+                        WorkerRunner(dir, warm = warm.takeIf { it.enabled }?.let { WarmWorkerClient(dir, it, null) })
+                    }
             return LiveRunController(
                 runner = { file, gen, started ->
                     val routed = route?.invoke(file)
@@ -320,6 +334,7 @@ class LiveRunController(
                 watcherFactory = { file, onEvent -> FileChangeWatcher(file, onEvent = onEvent) },
                 sessionDir = dir,
                 dependencyWatchFactory = { callback -> DependencyWatcher(onChange = callback) },
+                onClose = { if (runner.isInitialized()) runner.value.closeWarm() },
             )
         }
     }

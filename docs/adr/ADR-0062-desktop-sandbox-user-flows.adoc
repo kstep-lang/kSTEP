@@ -111,7 +111,7 @@ The kSTEP documentation does not render the `[kuml]` macro at build time yet; th
 
 * Live preview, export and knowledge blocks run in `sandbox-exec` (macOS) or `bubblewrap` (Linux) with no network and write access only to their session folder. Where the probe fails, they run as before and the status line (and the export dialog) show "Script runs without sandbox", reason in a tooltip. Nothing is stored, no setting, no migration.
 * New error code `KSTEP-D-031` (`SANDBOX_START_FAILED`) in `DesktopErrorCodes`; `WorkerRunner` got the additive parameters `sandboxFailureCode` and `sandboxFailureMessage`, `ExportWorkerRunner` the parameter `sandbox`, `WorkerSandbox.Bubblewrap` the field `hideTmp`, `Unavailable` a `kind`. Defaults keep the AI behaviour (`KSTEP-D-030`) byte for byte.
-* `kstep-cli` and `scripts/release/` were not touched.
+* `kstep-cli` and `scripts/release/` were not touched. (Welle D1c-2, ADR-0081: a warm worker keeps this sandbox and the session folder; the isolation between its runs is described there.)
 
 == Follow-up D6d
 

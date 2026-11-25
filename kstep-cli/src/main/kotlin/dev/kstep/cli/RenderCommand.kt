@@ -26,7 +26,6 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.io.File
-import kotlin.system.exitProcess
 
 /**
  * Thin CLI adapter for `kstep render`: builds a [PreviewRequest] from [CliCommand.Render], calls
@@ -70,7 +69,7 @@ fun runRender(
     when (outcome) {
         is PreviewOutcome.InvalidRequest -> {
             println(outcome.message)
-            exitProcess(1)
+            RenderExit.exit(1)
         }
         is PreviewOutcome.ScriptFailed ->
             printExportError(
@@ -167,7 +166,7 @@ private fun reportFailure(
         // --require-geometry-specific verdict on top of it.
         System.err.println("kstep render: --require-geometry set, geometry could not be rendered ($fallbackReason).")
     }
-    exitProcess(1)
+    RenderExit.exit(1)
 }
 
 private fun reportNotWatertight(
@@ -190,7 +189,7 @@ private fun reportNotWatertight(
                 "(${export.openEdgeCount} open edge(s), ${export.nonManifoldEdgeCount} non-manifold edge(s)); no file written.",
         )
     }
-    exitProcess(1)
+    RenderExit.exit(1)
 }
 
 private fun reportMeshInvalid(
@@ -209,7 +208,7 @@ private fun reportMeshInvalid(
     } else {
         println("Error: $message")
     }
-    exitProcess(1)
+    RenderExit.exit(1)
 }
 
 /** Reports a [PreviewIoException] (or a [dev.kstep.preview.PreviewEncodingException]'s message)
@@ -233,7 +232,7 @@ private fun reportIoFailure(
     } else {
         println("Error: $message")
     }
-    exitProcess(1)
+    RenderExit.exit(1)
 }
 
 internal fun successJson(

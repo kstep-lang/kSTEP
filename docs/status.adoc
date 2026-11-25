@@ -780,6 +780,12 @@ scan before either lands.
   re-checks the list as hostile input (`KSTEP-D-037`) and polls the files with one thread in the rhythm of the script watcher. Limits: raw
   `java.io` reads are not observed, inline scripts and workspace blocks are not supported, a brand-new input changing before its first
   poll is missed. Verified on macOS arm64; the Linux sandbox case only after the CI run.
+* Welle D1c-2 (ADR-0081): a warm render worker for the live preview. Spare mode (default): the next worker is started in the background after each run
+  and serves exactly one run, so the isolation is that of the cold path; a run takes about 0.2 s instead of 1.5 s (macOS arm64). Opt-in reuse
+  mode: one process serves up to N runs of the same script (about 0.15 s), with a state snapshot, trace detection and replacement; isolation between
+  those runs is best effort. Kill switch `kstep.desktop.warmWorker` / `KSTEP_DESKTOP_WARM_WORKER` (`off`, `spare`, `reuse`). `kstep render` ends a request
+  through an exit hook instead of `exitProcess`. Knowledge blocks, AI check and export stay cold. Verified on macOS arm64 (including the
+  sandbox); Linux and OCCT cases only after the CI run. Open: D1c-3 (launcher without Compose), D1c-4 (jpackage).
 * Maven Central (ADR-0043): the twelve library modules are published as `dev.kstep:<module>` from v0.4.0 on, signed and
   without native libraries (`kstep-geometry` and `kstep-constraints` carry only the Kotlin API; the bridges are built
   locally). The `maven-central` job of `release.yml` runs after the GitHub release, gated on secrets and idempotent;

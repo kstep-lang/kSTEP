@@ -754,7 +754,7 @@ internal fun printExportError(
     } else {
         println(errorText(outcome))
     }
-    exitProcess(1)
+    RenderExit.exit(1)
 }
 
 private fun errorText(outcome: KStepScriptOutcome): String =

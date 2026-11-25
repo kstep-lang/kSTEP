@@ -86,7 +86,10 @@ class UserScriptSandbox(
         }
 
     /** A runner that resolves the sandbox on first use (in the runner thread), shared by the production wiring. */
-    fun workerRunner(sessionDir: Path): Lazy<WorkerRunner> =
+    fun workerRunner(
+        sessionDir: Path,
+        warm: WarmWorkerSettings? = null,
+    ): Lazy<WorkerRunner> =
         lazy {
             val box = forSession(sessionDir)
             WorkerRunner(
@@ -94,6 +97,8 @@ class UserScriptSandbox(
                 sandbox = box,
                 sandboxFailureCode = DesktopErrorCodes.SANDBOX_START_FAILED,
                 sandboxFailureMessage = SANDBOX_FAILED_MESSAGE,
+                // The warm worker (ADR-0081) runs in the same sandbox as a cold one; null or OFF is the cold path.
+                warm = warm?.takeIf { it.enabled }?.let { WarmWorkerClient(sessionDir, it, box) },
             )
         }
 

@@ -71,9 +71,13 @@ val planeGcsBridgeLibrary: String? = providers.gradleProperty("kstep.planegcs.br
 val sandboxRequire: String = providers.gradleProperty("kstep.sandbox.require").getOrElse("false")
 val occtRequire: String = providers.gradleProperty("kstep.occt.require").getOrElse("false")
 val fixturesDir: String = file("src/test/resources").absolutePath
+val desktopBench: String = providers.gradleProperty("kstep.desktop.bench").getOrElse("false")
+val warmWorkerMode: String? = providers.gradleProperty("kstep.desktop.warmWorker").orNull
 
 tasks.named<JavaExec>("run") {
     jvmArgumentProviders.add(workerClasspathArg)
+    // The warm render worker's kill switch (ADR-0081): -Pkstep.desktop.warmWorker=off|spare|reuse.
+    warmWorkerMode?.let { jvmArgs("-Dkstep.desktop.warmWorker=$it") }
     occtBridgeLibrary?.let { jvmArgs("-Dkstep.occt.bridge.library=$it") }
     planeGcsBridgeLibrary?.let { jvmArgs("-Dkstep.planegcs.bridge.library=$it") }
 }
@@ -85,6 +89,7 @@ tasks.withType<Test>().configureEach {
     systemProperty("kstep.occt.require", occtRequire)
     systemProperty("kstep.sandbox.require", sandboxRequire)
     systemProperty("kstep.desktop.fixtures", fixturesDir)
+    systemProperty("kstep.desktop.bench", desktopBench)
     dependsOn(":kstep-cli:jar")
 }
 

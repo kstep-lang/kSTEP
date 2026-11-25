@@ -26,6 +26,23 @@ class DesktopArchitectureTest :
                 }.shouldBeEmpty()
         }
 
+        "only the live preview wiring uses the warm worker; AI, export and knowledge blocks stay cold (ADR-0081)" {
+            val allowed =
+                setOf(
+                    "dev/kstep/desktop/run/LiveRunController.kt",
+                    "dev/kstep/desktop/run/UserScriptSandbox.kt",
+                    "dev/kstep/desktop/run/WorkerRunner.kt",
+                )
+            sources()
+                .filter { (path, text) ->
+                    val rel = root.relativize(path).toString().replace('\\', '/')
+                    (text.contains("WarmWorkerClient") || text.contains("WarmWorkerSettings")) &&
+                        rel !in allowed &&
+                        !rel.startsWith("dev/kstep/desktop/run/WarmWorker")
+                }.map { root.relativize(it.first).toString() }
+                .shouldBeEmpty()
+        }
+
         "the desktop imports from dev.kstep.script only the input path rules and their limits" {
             val allowed = setOf("dev.kstep.script.input.InputPathRules", "dev.kstep.script.ScriptInputLimits")
             sources()

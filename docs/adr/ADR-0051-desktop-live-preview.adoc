@@ -69,10 +69,10 @@ D9. UI decisions (design team, final review Steve Jobs).
 
 == Follow-up wave D1b
 
-Recently opened files and drag and drop are done (ADR-0066). Watching the files a script reads is done too (ADR-0080). What remains moves to Welle D1c: a `kstep desktop` launcher without a Compose dependency in the CLI, a warm worker against cold starts, packaging with jpackage.
+Recently opened files and drag and drop are done (ADR-0066). Watching the files a script reads is done too (ADR-0080). What remains moves to Welle D1c: a `kstep desktop` launcher without a Compose dependency in the CLI, a warm worker against cold starts (done, ADR-0081), packaging with jpackage.
 
 == Measured results
 
-On macOS arm64 with OCCT 7.9.3, one `kstep render --format glb` of the two-part colour assembly (JVM start, script compilation, OCCT, GLB) takes about 1.6 s wall-clock; the live end-to-end test (watch, worker, GLB, mesh) runs four such cycles in about 7 s.
+On macOS arm64 with OCCT 7.9.3, one `kstep render --format glb` of the two-part colour assembly (JVM start, script compilation, OCCT, GLB) takes about 1.6 s wall-clock (about 0.2 s on a warm worker, ADR-0081); the live end-to-end test (watch, worker, GLB, mesh) runs four such cycles in about 7 s.
 
 Note: since Welle D6c the worker of this flow runs sandboxed where the system has a sandbox (ADR-0062); where it has none it runs as described here, with a visible notice.
