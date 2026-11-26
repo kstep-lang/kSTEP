@@ -1,0 +1,41 @@
+= ADR-0088: Incremental Tokenizer for the Syntax Colouring (Welle D2c-4a)
+:toc:
+
+== Status
+
+Accepted (Welle D2c-4a). Scope: `kstep-desktop` only (`edit/TokenScanner`, `edit/IncrementalTokenizer`, one line in `ui/SyntaxTransformation`). No new dependency, no new error code, no change to `layout.json` or any file format. Not checked by hand in a real window: the tokens are proven equal to the full scan by tests, but the wiring in `SyntaxTransformation` (Compose) is not exercised headless.
+
+== Context
+
+`SyntaxTransformation.filter` tokenized the whole text on every change (ADR-0052). A 1 MiB script takes about 16 ms, which is acceptable but grows with the script and is paid on every keystroke. The tokenizer is a single forward scan with a template stack (ADR-0052), so a change in the middle cannot simply be patched: a typed `"` or `/*` changes the colouring of everything after it.
+
+== Decision
+
+D1. State at a line start. No scan step consumes a line break as part of a multi-character step: an escape skips only a non-newline character; `"""`, `${`, `/*`, `*/`, `//`, `0x`, fractions, exponents and suffixes consist of non-newline characters; character literals, backticks, `//`, `$name`, annotations and identifiers stop before the line break. The scan pointer therefore lands exactly on every line start (the position after a `\n`), and the lookaheads read at most up to the first `\n`. The scanner state there depends only on the text before it. A normal string never survives a line break, so only three modes can be open at a line start: code (possibly inside a template, `depth > 0`), a raw string and a block comment. A token that spans a line start is exactly the one open token of that state; its start is carried in the state as `pendingStart` (the segment start of the string or the start of the comment). Dead fields are normalised so that states compare field by field: `pendingStart` is -1 and the comment nesting 0 in code, `braces` is 0 outside a template, the saved template stack is compared only in `[0, depth)`.
+
+D2. Diff. The change is found with the existing `TextEdit.between(old, new)` (common prefix and suffix, O(n), no split surrogate pair). The surrogate back-off only makes the prefix shorter, which is safe because the scan restarts at a line start anyway.
+
+D3. Resume and converge. The scan restarts at the line start one line before the line of the first changed character (one line of safety margin: it costs a line and protects against a lookahead assumption being wrong; the state there is unchanged because it depends only on the unchanged prefix). The tokens before the resume point (or before the pending token of the stored state there) are reused by reference. From the end of the edited region on, at every line start `q` with `q - 1 >= newEnd` (so the `\n` before `q` lies in the unchanged suffix and `q - delta` is an old line start), the live state is compared with the stored state of the old line. They agree when mode, comment nesting, depth, braces and the template stack are equal and the pending start agrees after mapping the old offset through the edit (before the edit unchanged, after it shifted by `delta`, inside it unmappable and therefore never equal). On agreement the scan stops: the rest of the text is identical and the scanner is in the same state, so the old tokens after that line are the new tokens shifted by `delta`; the one pending token gets the new start. The stored line starts and states of the following lines are shifted the same way (states with a pending start are mapped, equal instances shared). Without agreement the scan runs to the end of the text and emits the open token there, exactly like the full scan.
+
+D4. Fallbacks and the guarantee. `update(text)` always returns the same list as `KotlinTokenizer.tokenize(text)`. A text over `maxChars` (default `EditorText.MAX_BYTES`, 1 MiB) is tokenized in full and no incremental state is kept (so no line arrays for huge texts); the next small text rebuilds from a full scan. If the pending token cannot be found in the stored list at convergence, the update falls back to a full scan and counts it (`Stats.fullFallbacks`); it never throws. The guarantee is backed by (a) `KotlinTokenizer` itself now being the state machine run over the whole text, compared with a frozen verbatim copy of the old tokenizer on more than 7000 random and hand-picked texts (nested `/*/`, `*/*`, templates, CRLF, surrogates), and (b) a seeded property test: 400 start texts, 15 edits each (insert, delete, replace, at the start and the end, full replacement, empty text, into a surrogate pair), after each edit the tokens equal the full scan and the stored line starts and states equal those of a fresh full scan (`verifyAgainstFullScan`), so drift is caught before it shows up in tokens.
+
+D5. What stays linear. The tokenization is local: O(characters of the rescanned lines). Linear per keystroke remain the diff (a prefix/suffix comparison), the shifting of the line and token offsets after the change and, in `ui`, the build of the `AnnotatedString`. No call is quadratic: the convergence check costs O(depth <= 32) per line, the searches are binary. No recursion and no regex, so deep nesting cannot overflow the stack. Worst cases rescan to the end of the text, as the full scan did: an unclosed `/*` or raw string in front of a large rest, a comment or string that changes the state of every later line, and a single huge line.
+
+D6. Users. Only `SyntaxTransformation` uses the incremental tokenizer. `BracketMatcher` receives identical tokens through `tokensFor`. `ErrorAnchorTracker` (tokenizes the base text when a new error list arrives) and `KnowledgeSyntaxTransformation` (small code blocks in notes) keep `KotlinTokenizer.tokenize`: they run rarely or on small input. Each `update` returns a new list; a list handed out earlier is never changed (the bracket cache and `tokensFor` keep it).
+
+D7. Measurements (a 1 MiB script of 40-character lines, one character typed in the middle): 77 characters scanned instead of about 1,040,000, `full = false`. Typing `/*` there: about 520,000 characters scanned (the rest of the text turns into a comment). Closing it again: about 520,000 scanned (every later state changes back); the next edit is local again (77 characters). Timings were printed but not asserted (no time limit in tests; the macOS CI runner is slower).
+
+D8. Memory. The line starts are one `IntArray` and the line states one reference array of at most (lines + 1) entries; consecutive equal states share one instance, so a text of one million line breaks needs a few MB. Over `maxChars` nothing is kept.
+
+== Rejected
+
+* A tree or rope based incremental parser: far more code for a colouring that is a single regular-ish scan.
+* Resuming at an arbitrary offset with a guessed state: the state is only well defined at line starts (D1).
+* Time-based assertions of the speed-up: flaky on CI; the scanned character count is asserted instead.
+* Changing `ErrorAnchorTracker` and the note blocks: no measurable gain.
+
+== Consequences
+
+* Typing in a large script re-tokenizes a line or two; the colours are identical to before.
+* A future wave that makes the DSL names dynamic (D2c-4b) must call `IncrementalTokenizer.reset()` when the names change: the reused rest of the text would otherwise keep the old DSL and keyword tokens.
+* Not covered: relative token offsets or colouring only the visible part would be needed for a fully O(change) pipeline; not checked by hand in a real window.

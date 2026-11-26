@@ -9,6 +9,13 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: incremental syntax colouring (Welle D2c-4a, ADR-0088). The editor no longer tokenizes the whole script on
+  every change: the tokenizer is a resumable state machine and restarts at the line of the change until its state at a line
+  start agrees with the stored one again; a typed character in a 1 MiB script scans about 80 characters instead of about a
+  million. The result is identical to a full scan (property-tested against a frozen copy of the old tokenizer and against
+  full scans after thousands of random edits); above 1 MiB, or if the proof ever fails, it falls back to a full scan. No
+  visible change, no new dependency, no new error code, `layout.json` unchanged. Not checked by hand in the window.
+
 * kSTEP Desktop: automatic preview of unsaved text (Welle D2c-3b, ADR-0087). *View > Preview Unsaved Changes* (check item, off
   by default, remembered in `layout.json` as the optional key `previewUnsaved`; the file stays version 1) previews the editor text
   while you type: 800 ms after the last edit, at most one run per 2 s, the last edit always runs. No automatic run while a run of

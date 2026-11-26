@@ -5,13 +5,14 @@ package dev.kstep.desktop.edit
  * string templates (no recursion, no regex), so it is O(n) and cannot overflow the stack on hostile input. It never
  * throws; the result is sorted by start, non-overlapping and within the text.
  *
- * Unterminated strings end at the line end (raw strings and block comments at the end of the text).
+ * Unterminated strings end at the line end (raw strings and block comments at the end of the text). The scan itself is
+ * a resumable state machine in [TokenScanner] so that [IncrementalTokenizer] can restart it at a line start (ADR-0088).
  */
 object KotlinTokenizer {
     /** Template nesting beyond this depth is not recognised: the rest is plain string text. */
     const val MAX_TEMPLATE_DEPTH = 32
 
-    private val keywords =
+    internal val keywords =
         setOf(
             "package",
             "import",
@@ -71,172 +72,16 @@ object KotlinTokenizer {
         )
 
     fun tokenize(text: CharSequence): List<Token> {
-        val n = text.length
-        val out = ArrayList<Token>(maxOf(16, n / 16))
-        val savedRaw = BooleanArray(MAX_TEMPLATE_DEPTH)
-        val savedBraces = IntArray(MAX_TEMPLATE_DEPTH)
-        var depth = 0
-        var braces = 0
-        var inString = false
-        var raw = false
-        var segStart = 0
-        var i = 0
-
-        fun emit(
-            start: Int,
-            end: Int,
-            kind: TokenKind,
-        ) {
-            if (end > start) out.add(Token(start, end, kind))
-        }
-
-        while (i < n) {
-            val c = text[i]
-            if (inString) {
-                when {
-                    !raw && c == '\\' -> i = if (i + 1 < n && text[i + 1] != '\n') i + 2 else i + 1
-                    c == '"' && !raw -> {
-                        i++
-                        emit(segStart, i, TokenKind.STRING)
-                        inString = false
-                    }
-                    c == '"' && raw -> {
-                        if (i + 2 < n && text[i + 1] == '"' && text[i + 2] == '"') {
-                            i += 3
-                            while (i < n && text[i] == '"') i++
-                            emit(segStart, i, TokenKind.STRING)
-                            inString = false
-                        } else {
-                            i++
-                        }
-                    }
-                    !raw && c == '\n' -> {
-                        emit(segStart, i, TokenKind.STRING)
-                        inString = false
-                    }
-                    c == '$' && depth < MAX_TEMPLATE_DEPTH && i + 1 < n && text[i + 1] == '{' -> {
-                        emit(segStart, i, TokenKind.STRING)
-                        emit(i, i + 2, TokenKind.TEMPLATE)
-                        savedRaw[depth] = raw
-                        savedBraces[depth] = braces
-                        depth++
-                        braces = 0
-                        inString = false
-                        i += 2
-                    }
-                    c == '$' && i + 1 < n && isIdentStart(text[i + 1]) -> {
-                        emit(segStart, i, TokenKind.STRING)
-                        var j = i + 2
-                        while (j < n && isIdentPart(text[j])) j++
-                        emit(i, j, TokenKind.TEMPLATE)
-                        i = j
-                        segStart = j
-                    }
-                    else -> i++
-                }
-                continue
-            }
-            when {
-                c == '/' && i + 1 < n && text[i + 1] == '/' -> {
-                    var j = i + 2
-                    while (j < n && text[j] != '\n') j++
-                    emit(i, j, TokenKind.COMMENT)
-                    i = j
-                }
-                c == '/' && i + 1 < n && text[i + 1] == '*' -> {
-                    var j = i + 2
-                    var nesting = 1
-                    while (j < n && nesting > 0) {
-                        if (text[j] == '/' && j + 1 < n && text[j + 1] == '*') {
-                            nesting++
-                            j += 2
-                        } else if (text[j] == '*' && j + 1 < n && text[j + 1] == '/') {
-                            nesting--
-                            j += 2
-                        } else {
-                            j++
-                        }
-                    }
-                    emit(i, j, TokenKind.COMMENT)
-                    i = j
-                }
-                c == '"' -> {
-                    segStart = i
-                    raw = i + 2 < n && text[i + 1] == '"' && text[i + 2] == '"'
-                    i += if (raw) 3 else 1
-                    inString = true
-                }
-                c == '\'' -> {
-                    var j = i + 1
-                    while (j < n && text[j] != '\n') {
-                        if (text[j] == '\\' && j + 1 < n && text[j + 1] != '\n') {
-                            j += 2
-                        } else if (text[j] == '\'') {
-                            j++
-                            break
-                        } else {
-                            j++
-                        }
-                    }
-                    emit(i, j, TokenKind.STRING)
-                    i = j
-                }
-                c == '`' -> {
-                    var j = i + 1
-                    while (j < n && text[j] != '`' && text[j] != '\n') j++
-                    i = if (j < n && text[j] == '`') j + 1 else j
-                }
-                c == '@' -> {
-                    var j = i + 1
-                    while (j < n && isIdentPart(text[j])) j++
-                    if (j < n && text[j] == ':' && j + 1 < n && isIdentStart(text[j + 1])) {
-                        j++
-                        while (j < n && isIdentPart(text[j])) j++
-                    }
-                    emit(i, j, TokenKind.ANNOTATION)
-                    i = maxOf(j, i + 1)
-                }
-                c in '0'..'9' -> i = scanNumber(text, i, ::emit)
-                isIdentStart(c) -> {
-                    var j = i + 1
-                    while (j < n && isIdentPart(text[j])) j++
-                    val word = text.subSequence(i, j).toString()
-                    when {
-                        word in KStepDslNames.names -> emit(i, j, TokenKind.DSL)
-                        word in keywords -> emit(i, j, TokenKind.KEYWORD)
-                    }
-                    i = j
-                }
-                c == '{' -> {
-                    if (depth > 0) braces++
-                    i++
-                }
-                c == '}' -> {
-                    if (depth > 0 && braces == 0) {
-                        emit(i, i + 1, TokenKind.TEMPLATE)
-                        depth--
-                        raw = savedRaw[depth]
-                        braces = savedBraces[depth]
-                        inString = true
-                        i++
-                        segStart = i
-                    } else {
-                        if (depth > 0) braces--
-                        i++
-                    }
-                }
-                else -> i++
-            }
-        }
-        if (inString) emit(segStart, n, TokenKind.STRING)
+        val out = ArrayList<Token>(maxOf(16, text.length / 16))
+        TokenScanner(text).run(0, ScanState(), out, null)
         return out
     }
 
-    private fun isIdentStart(c: Char): Boolean = c == '_' || Character.isLetter(c)
+    internal fun isIdentStart(c: Char): Boolean = c == '_' || Character.isLetter(c)
 
-    private fun isIdentPart(c: Char): Boolean = c == '_' || Character.isLetterOrDigit(c)
+    internal fun isIdentPart(c: Char): Boolean = c == '_' || Character.isLetterOrDigit(c)
 
-    private fun scanNumber(
+    internal fun scanNumber(
         text: CharSequence,
         start: Int,
         emit: (Int, Int, TokenKind) -> Unit,
