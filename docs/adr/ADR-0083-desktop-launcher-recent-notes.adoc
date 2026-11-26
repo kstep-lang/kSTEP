@@ -1,0 +1,53 @@
+= ADR-0083: `kstep desktop` launcher and Recent entries for single notes (Welle D1c-4)
+:toc:
+
+== Status
+
+Accepted (Welle D1c-4). Scope: `kstep-cli` (one new command and file, no new dependency), `kstep-desktop` (start argument, Recent). Not part of any release workflow. The launcher is verified on macOS only.
+
+== Context
+
+ADR-0082 packages the desktop as `kSTEP.app`, but nothing starts it from a terminal with a file. The desktop already took a first argument (`./gradlew :kstep-desktop:run --args=...`), unchecked: a NUL character crashed it before the window, and a `.md` file went into the script run instead of the notes. ADR-0066 D1 excluded notes from Recent; a note opened on its own (drop, argument) therefore left no trace.
+
+The CLI zip must stay free of Compose (`scripts/release/verify-dist.sh`). `kstep-desktop` depends on `kstep-cli`, never the reverse, so the launcher can only use `java.lang` and `java.nio`.
+
+== Decision
+
+D1. `kstep desktop [<script.kstep.kts|note.md|folder>]` starts the packaged macOS app and returns. Linux and Windows have no package (ADR-0082): the command exits 1 with `KSTEP-D-039` and the Gradle hint. Options after `desktop` are refused (usage, exit 1); a file named `-x.md` is passed as `./-x.md`.
+
+D2. Finding the app. If `KSTEP_DESKTOP_APP` is set and not empty it is the only candidate and there is no fall back (a typo must not silently start another app). Otherwise `/Applications/kSTEP.app`, then `~/Applications/kSTEP.app`. A candidate is valid if its real path is a folder ending in `.app`, `Contents/Info.plist` is a regular file of at most 64 KiB containing `CFBundleIdentifier` `dev.kstep.desktop` (XML plist, as jpackage writes it), and `Contents/MacOS/kSTEP` is an executable regular file. Failure is `KSTEP-D-039`.
+
+D3. Starting. Only an argument list is built, never a shell command: `/usr/bin/open -n -a <app> [--args <absolute path>]`, the tool by absolute path. `open` hands the start to LaunchServices (the app is not a child of the CLI, has a Dock icon, Gatekeeper rules apply). `-n` forces a new instance: without it a running instance would silently ignore `--args`. The file path is absolute and so can never look like an option. The CLI waits at most 30 s for `open`, keeps at most 4 KiB of its stderr, and kills it on a timeout. Failure, non-zero exit or timeout is `KSTEP-D-041`. No environment is forwarded and `open --env` is not used, so no secret reaches `ps`.
+
+D4. CLI path check (`KSTEP-D-040`), a convenience only: not empty, at most 4096 characters, no control characters, valid path, made absolute and normalized, exists, not a link (not followed), a regular file ending in `.kstep.kts` or `.md` (case-insensitive) or a folder. Links further up the path are not detected by the CLI; the desktop does that.
+
+D5. The desktop never trusts its argument. `StartArgument.parse` only parses the first argument (length, control characters, `InvalidPathException`, absolute and normalized; a bad one is `KSTEP-D-033`, no crash). A valid one goes through the same code as a drop: `DropEvaluator` judges type, ending and links, and a script, note or folder opens the same way. No new desktop code is needed. Further arguments are counted and ignored.
+
+D6. Recent gets `RecentKind.NOTE`. An entry carries `root`, the workspace folder the note was opened under, so a note `/ws/a/b/n.md` reopens with `/ws` as workspace, not `/ws/a/b`. This replaces the first sentence of ADR-0066 D1 in part: notes are entries now, but only single ones (D7).
+
+D7. When a note becomes an entry: only when it was opened on its own (drop, start argument, Recent), once it is really shown. A click in the workspace sidebar does not create one; the folder entry exists for that, and ten sidebar clicks would push out every script and folder. Opening a single note also records its workspace folder as a FOLDER entry (the existing rule: the folder really was opened as a workspace), so two entries appear.
+
+D8. File format: `recent.json` stays version 1, the field `root` is additive: `{"kind":"note","path":"/abs/n.md","root":"/abs/ws"}`. On load a note entry needs a `root` that follows the rules of `path` (absolute, normalized, at most 4096 characters, no control characters), a path ending in `.md`, `path` below `root` and not equal to it; otherwise only that entry is dropped. `root` on a script or folder is ignored. The size limit rises from 16 KiB to 128 KiB (ten entries with two long paths each); a larger file is still ignored whole. No migration is needed: a local user file, additive field. An older app version drops `note` entries as unknown and writes its list without them.
+
+D9. At click time a note is checked root first (folder, no link), then the note (regular file, no link, real path equals normalized path, so links above the root are found too). A Recent entry grants no trust: the block trust question (ADR-0058, ADR-0062) is unchanged.
+
+D10. Codes: `KSTEP-D-039` app not found or not macOS, `KSTEP-D-040` path rejected, `KSTEP-D-041` start failed. A test keeps all `KSTEP-D` values of the desktop, the AI module and the launcher distinct.
+
+== Verification
+
+Unit tests: command parsing, plan (argv with unusual names, candidate order, no fall back, bundle id, plist size, non-macOS), a real process with a fake `open` tool (exact arguments, no shell evaluation, exit 3, not runnable, timeout), the CLI boundary (no Compose or desktop import), `StartArgument`, the Recent note store (round trip, hostile entries, limits), the click-time check and the menu label. The end-to-end start of the packaged app was checked by hand on one Mac only (see the wave report).
+
+== Known gaps
+
+* macOS only; no launcher for Linux and Windows.
+* No single instance: every call starts a new instance (several windows, several workers); `recent.json` is "last writer wins" (atomic, no merge).
+* The environment of the shell, including AI key variables, does not reach an app started through LaunchServices.
+* A binary `Info.plist` is not recognised (jpackage writes XML).
+* "Started kSTEP Desktop" means the start was handed over, not that the window opened.
+* Links above the path are only detected by the desktop, not by the CLI.
+* No file association (no `open-document` event); an unsigned app is blocked by Gatekeeper when downloaded (ADR-0082 D7).
+
+== Follow-ups
+
+* Single instance and file association.
+* A launcher for Linux and Windows once those packages exist.

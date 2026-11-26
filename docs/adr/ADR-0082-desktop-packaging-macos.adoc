@@ -59,4 +59,4 @@ Only macOS arm64 on one Mac (Darwin 27, Homebrew OCCT 7.9): `packageDmg` and `ve
 * A variant with the native bridge (ADR-0050, native archive).
 * De-duplicating the worker jars (risk: different dependency versions in the two resolutions).
 * A CDS archive (`--generate-cds-archive`) for a faster cold start.
-* The `kstep desktop` launcher (D1c-4).
+* The `kstep desktop` launcher (D1c-4): done in ADR-0083 (macOS only).

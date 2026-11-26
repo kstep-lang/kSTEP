@@ -9,6 +9,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* `kstep desktop [<script|note|folder>]` (Welle D1c-4, ADR-0083) starts the packaged macOS app and opens the path
+  (`/usr/bin/open -n -a`, no shell, app from `/Applications`, `~/Applications` or `KSTEP_DESKTOP_APP`). Exit 1 if the app is
+  not found or the system is not macOS. New codes `KSTEP-D-039`, `KSTEP-D-040`, `KSTEP-D-041`. macOS only; every call starts a
+  new instance; the shell environment does not reach the app.
+* kSTEP Desktop: Recent entries for single notes (ADR-0083). A note opened on its own (drop, start argument, Recent) is kept
+  with its workspace folder; sidebar clicks inside a workspace are not. `recent.json` stays version 1 (additive `root`), the
+  size limit is 128 KiB.
+
 * kSTEP Desktop can be packaged as a macOS app and dmg (Welle D1c-3, ADR-0082): `./gradlew clean :kstep-desktop:packageDmg
   -Pkstep.native.exclude=true` builds `kstep-desktop/build/packaging/app/kSTEP.app` and `.../dmg/kSTEP-<version>.dmg` with
   plain jlink/jpackage, a bundled runtime and a separate worker folder. Unsigned (ad hoc), JVM-only (no native geometry
@@ -17,6 +25,8 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* kSTEP Desktop: the first command-line argument is judged like a dropped path (ADR-0083): it can be a script, a note or a
+  folder, a link or an unsupported type is refused with `KSTEP-D-033`, and a malformed path no longer crashes the start.
 * `ImportWorkerLaunch.command` takes an optional `java` launcher (default unchanged); `WorkerSandbox.detect` likewise.
 * kSTEP Desktop: warm render worker for the live preview (Welle D1c-2, ADR-0081). After a run the desktop starts the next
   worker in the background (spare mode, default): a run takes about 0.2 s instead of about 1.5 s (macOS arm64, measured),

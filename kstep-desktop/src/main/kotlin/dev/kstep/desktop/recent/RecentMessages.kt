@@ -47,7 +47,13 @@ object RecentMessages {
     fun wrongType(entry: RecentEntry): DesktopError =
         error(
             entry,
-            "is no longer a ${if (entry.kind == RecentKind.FOLDER) "folder" else "script"} and was removed from Recent.",
+            "is no longer a ${
+                when (entry.kind) {
+                    RecentKind.FOLDER -> "folder"
+                    RecentKind.NOTE -> "note"
+                    RecentKind.SCRIPT -> "script"
+                }
+            } and was removed from Recent.",
         )
 
     fun forCheck(

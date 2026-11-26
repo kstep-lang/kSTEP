@@ -21,6 +21,10 @@ class RecentSubmenuTest :
                 .single()
                 .text
 
+        "a note entry shows its file name" {
+            textOf(RecentEntry(Path.of("/w/sub/n.md"), RecentKind.NOTE, Path.of("/w"))) shouldStartWith "n.md"
+        }
+
         "an empty list shows the grey placeholder and Clear Recent is off" {
             val sub = RecentSubmenuModel.of(RecentList.empty(false))
             sub.items shouldBe emptyList()

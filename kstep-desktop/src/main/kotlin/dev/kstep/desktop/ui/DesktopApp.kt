@@ -78,6 +78,7 @@ import dev.kstep.desktop.drop.DropHint
 import dev.kstep.desktop.drop.DropPaths
 import dev.kstep.desktop.drop.PendingNote
 import dev.kstep.desktop.drop.PendingResolution
+import dev.kstep.desktop.drop.StartRequest
 import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorState
@@ -193,7 +194,7 @@ private const val EDITOR_DIVIDER_DP = 7 // the 1 dp line and the 6 dp drag handl
 fun FrameWindowScope.DesktopApp(
     controller: LiveRunController,
     session: EditorSession,
-    initialFile: Path?,
+    initialRequest: StartRequest,
     window: Frame,
     ai: AiController,
     exporter: ExportController,
@@ -241,6 +242,8 @@ fun FrameWindowScope.DesktopApp(
     var dragHint by remember { mutableStateOf<DropHint?>(null) }
     var pendingNote by remember { mutableStateOf<Path?>(null) }
     var pendingRoot by remember { mutableStateOf<Path?>(null) }
+    // a note opened on its own (drop, start argument, Recent) becomes a Recent entry once it is shown (ADR-0083)
+    var recentNoteCandidate by remember { mutableStateOf<RecentEntry?>(null) }
     var pendingSawScan by remember { mutableStateOf(false) }
     var pendingErrorBefore by remember { mutableStateOf<DesktopError?>(null) }
     // AI panel (ADR-0056): hidden by default; nothing is sent before the user asks and agrees.
@@ -490,6 +493,33 @@ fun FrameWindowScope.DesktopApp(
         }
     }
     val chooseFolder: () -> Unit = { chooseFolderDialog(window)?.let { openFolderPath(it) } }
+    // [root]: the workspace folder a Recent note was opened under; without it the note's own folder is used
+    val openDroppedNote: (Path, Path?) -> Boolean = { note, explicitRoot ->
+        val open = workspace as? WorkspaceState.Open
+        if (open != null && note.startsWith(open.scan.root)) {
+            val found = PendingNote.resolve(note, open.scan.root, open, false, false)
+            if (found is PendingResolution.Open) {
+                recentNoteCandidate = RecentEntry(note, RecentKind.NOTE, open.scan.root)
+                openNote(found.entry)
+                true
+            } else {
+                actionError = DropEvaluator.reject(notInFolderText(note))
+                false
+            }
+        } else {
+            val parent = explicitRoot ?: note.parent
+            if (parent != null && openFolderPath(parent)) {
+                recentNoteCandidate = RecentEntry(note, RecentKind.NOTE, parent)
+                pendingErrorBefore = knowledge.error.value
+                pendingSawScan = false
+                pendingRoot = parent
+                pendingNote = note
+                true
+            } else {
+                false
+            }
+        }
+    }
     val openFromRecent: (RecentEntry) -> Unit = { entry ->
         scope.launch {
             val check = withContext(Dispatchers.IO) { RecentOpenCheck.check(entry) }
@@ -500,31 +530,11 @@ fun FrameWindowScope.DesktopApp(
                 updateRecent { it.remove(entry.path) }
             } else {
                 actionError = null
-                if (entry.kind == RecentKind.SCRIPT) openPath(entry.path) else openFolderPath(entry.path)
-            }
-        }
-    }
-    val openDroppedNote: (Path) -> Boolean = { note ->
-        val open = workspace as? WorkspaceState.Open
-        if (open != null && note.startsWith(open.scan.root)) {
-            val found = PendingNote.resolve(note, open.scan.root, open, false, false)
-            if (found is PendingResolution.Open) {
-                openNote(found.entry)
-                true
-            } else {
-                actionError = DropEvaluator.reject(notInFolderText(note))
-                false
-            }
-        } else {
-            val parent = note.parent
-            if (parent != null && openFolderPath(parent)) {
-                pendingErrorBefore = knowledge.error.value
-                pendingSawScan = false
-                pendingRoot = parent
-                pendingNote = note
-                true
-            } else {
-                false
+                when (entry.kind) {
+                    RecentKind.SCRIPT -> openPath(entry.path)
+                    RecentKind.FOLDER -> openFolderPath(entry.path)
+                    RecentKind.NOTE -> openDroppedNote(entry.path, entry.root)
+                }
             }
         }
     }
@@ -539,7 +549,7 @@ fun FrameWindowScope.DesktopApp(
                     }
                     is DropAction.OpenScript -> openPath(action.path).also { if (it) actionError = null }
                     is DropAction.OpenFolder -> openFolderPath(action.path).also { if (it) actionError = null }
-                    is DropAction.OpenNote -> openDroppedNote(action.path).also { if (it) actionError = null }
+                    is DropAction.OpenNote -> openDroppedNote(action.path, null).also { if (it) actionError = null }
                 }
             if (started) {
                 val name =
@@ -604,6 +614,15 @@ fun FrameWindowScope.DesktopApp(
     val shownScript = (editorView.state as? EditorState.Editing)?.path
     LaunchedEffect(shownScript) {
         val path = shownScript ?: return@LaunchedEffect
+        val candidate = recentNoteCandidate
+        if (candidate != null &&
+            path.toAbsolutePath().normalize() == candidate.path.toAbsolutePath().normalize()
+        ) {
+            recentNoteCandidate = null
+            val ok = withContext(Dispatchers.IO) { RecentOpenCheck.checkPath(path, false) is RecentCheck.Ok }
+            if (ok) updateRecent { it.touch(candidate) }
+            return@LaunchedEffect
+        }
         if (path.fileName
                 ?.toString()
                 ?.lowercase()
@@ -632,9 +651,13 @@ fun FrameWindowScope.DesktopApp(
         }
     }
     LaunchedEffect(Unit) {
-        initialFile?.let {
-            session.open(it)
-            controller.open(it)
+        when (val request = initialRequest) {
+            StartRequest.None -> Unit
+            is StartRequest.Open -> {
+                // the same path as a drop: type, ending and links are judged by DropEvaluator
+                handleDrop(listOf(request.path))
+            }
+            is StartRequest.Rejected -> actionError = request.error
         }
     }
 

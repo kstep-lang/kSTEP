@@ -25,7 +25,15 @@ sealed interface RecentCheck {
 
 /** Checks a Recent entry or a dropped path at click time, never when a menu opens. Does file I/O: call off the UI thread. */
 object RecentOpenCheck {
-    fun check(entry: RecentEntry): RecentCheck = checkPath(entry.path, entry.kind == RecentKind.FOLDER)
+    fun check(entry: RecentEntry): RecentCheck {
+        if (entry.kind == RecentKind.NOTE) {
+            // the workspace folder first: the first problem wins; links above the note are found by checkPath as well
+            val root = entry.root ?: return RecentCheck.Missing
+            val rootCheck = checkPath(root, true)
+            if (rootCheck !is RecentCheck.Ok) return rootCheck
+        }
+        return checkPath(entry.path, entry.kind == RecentKind.FOLDER)
+    }
 
     fun checkPath(
         path: Path,

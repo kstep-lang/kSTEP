@@ -5,6 +5,8 @@
 
 Accepted (Welle D1). Implemented and verified on macOS arm64 (OCCT 7.9.3, strict build). Linux CI verification follows the push.
 
+Update (ADR-0083): `kstep desktop <path>` starts the packaged macOS app, and the first command-line argument is now judged like a dropped path (script, note or folder).
+
 == Context
 
 `kstep-viewer` shows one hard-coded demo scene. Authors of `*.kstep.kts` scripts want to see the shape of the script they are editing, and see it update when the file is saved. The preview must survive the situations a script editor produces all the time: a half-typed script, a script with an endless loop, a script that allocates without limit, a script that prints a lot. A script is code; it can do anything, so it must never run inside the process that owns the window.

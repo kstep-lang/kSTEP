@@ -91,6 +91,9 @@ Usage:
       --tag <tag>                          Extra note tag, repeatable (--to okf only; "kstep" is always set)
                                             A folder converts every matching file in it (one level unless --recursive, no links).
                                             Never runs a script. Exit 1 on any error; nothing is written then.
+  kstep desktop [<script.kstep.kts|note.md|folder>]
+                                            Start the packaged kSTEP Desktop app (macOS) and open the path;
+                                            exit 1 if the app is not found
   kstep --version                          Print the kSTEP version
   kstep help                                Show this message
 """
@@ -160,6 +163,11 @@ sealed interface CliCommand {
         val recursive: Boolean = false,
     ) : CliCommand
 
+    /** `kstep desktop [path]` (ADR-0083): starts the packaged macOS app. */
+    data class Desktop(
+        val path: String?,
+    ) : CliCommand
+
     data class ShowUsage(
         val exitCode: Int,
     ) : CliCommand
@@ -209,6 +217,7 @@ fun resolveCommand(args: Array<String>): CliCommand =
         args[0] == "asciidoc" -> resolveAsciidocCommand(args.drop(1))
         args[0] == "import" -> resolveImportCommand(args.drop(1))
         args[0] == "convert" -> resolveConvertCommand(args.drop(1))
+        args[0] == "desktop" -> resolveDesktopCommand(args.drop(1))
         else -> CliCommand.ShowUsage(exitCode = 1)
     }
 
@@ -388,6 +397,14 @@ private fun resolveConvertCommand(rest: List<String>): CliCommand {
         recursive = recursive,
     )
 }
+
+// `desktop [path]`: no options are guessed; a file whose name starts with "-" is passed as "./-x.md".
+private fun resolveDesktopCommand(rest: List<String>): CliCommand =
+    when {
+        rest.isEmpty() -> CliCommand.Desktop(null)
+        rest.size == 1 && !rest[0].startsWith("-") -> CliCommand.Desktop(rest[0])
+        else -> CliCommand.ShowUsage(1)
+    }
 
 private const val DEFAULT_RENDER_WIDTH = 1024
 private const val DEFAULT_RENDER_HEIGHT = 768
@@ -614,6 +631,10 @@ fun main(args: Array<String>) {
         is CliCommand.Import -> runImport(command)
         is CliCommand.Convert -> {
             val code = runConvert(command)
+            if (code != 0) exitProcess(code)
+        }
+        is CliCommand.Desktop -> {
+            val code = runDesktop(command)
             if (code != 0) exitProcess(code)
         }
         CliCommand.ShowVersion -> printVersion()

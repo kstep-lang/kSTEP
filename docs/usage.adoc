@@ -1016,6 +1016,32 @@ between sessions (`export.json` in the kSTEP config folder). A script without a 
 A script without a `shape(...)` shows "Script has no shape(...)"; without the native bridge the window shows the OCCT notice
 with an install hint for the current operating system.
 
+=== Starting the desktop from the CLI
+
+On macOS, with `kSTEP.app` built or installed (ADR-0082), `kstep desktop` starts the app:
+
+[source,shell]
+----
+kstep desktop                       # just the app
+kstep desktop part.kstep.kts        # open a script
+kstep desktop notes/idea.md         # open a note (its folder becomes the workspace)
+kstep desktop ~/vault               # open a folder as a workspace
+----
+
+The app is looked for in `/Applications/kSTEP.app`, then `~/Applications/kSTEP.app`; `KSTEP_DESKTOP_APP` names another app and
+is then the only place that is tried (no fall back). The app must have the bundle identifier `dev.kstep.desktop`. The command
+starts the app through `/usr/bin/open -n` (no shell) and returns at once; "Started" only means the start was handed over. The
+path must exist, must not be a link and must be a `.kstep.kts` script, a `.md` note or a folder; a file name starting with `-` is
+given as `./-x.md`. The app checks its argument again like a dropped path.
+
+Errors (exit 1): `KSTEP-D-039` no usable app, or not macOS (on Linux and Windows start from source:
+`./gradlew :kstep-desktop:run --args="<path>"`); `KSTEP-D-040` path rejected; `KSTEP-D-041` `open` failed or took longer than 30 s.
+
+Limits: every call starts a new instance (no single instance), so two calls give two windows; the environment of your shell,
+including AI key variables, is not passed on to an app started this way; an unsigned downloaded app is blocked by Gatekeeper
+(ADR-0082 D7). Recent (File > Open Recent) also keeps a note that was opened on its own, with its workspace folder, but not the
+notes you click in the sidebar of an open workspace.
+
 == Native runtime archive and `kstep --version`
 
 `kstep --version` prints `kstep <version>`. The opt-in native archive (ADR-0050, built locally with

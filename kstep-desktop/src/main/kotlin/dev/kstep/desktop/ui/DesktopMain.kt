@@ -12,6 +12,7 @@ import androidx.compose.ui.window.rememberWindowState
 import dev.kstep.cli.WorkerTempDir
 import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.aiwire.AiController
+import dev.kstep.desktop.drop.StartArgument
 import dev.kstep.desktop.edit.AtomicSaver
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.export.ExportController
@@ -27,7 +28,6 @@ import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
 import java.awt.Desktop
 import java.awt.Dimension
 import java.awt.Frame
-import java.nio.file.Path
 import javax.swing.SwingUtilities
 
 private const val INITIAL_WIDTH = 1200
@@ -45,7 +45,7 @@ fun runDesktopApp(args: Array<String>) {
     }
     // Same reason as in the CLI: kotlin-logging's start-up banner is noise.
     KotlinLoggingConfiguration.logStartupMessage = false
-    val initial = args.firstOrNull()?.let { Path.of(it) }
+    val initial = StartArgument.parse(args)
     application {
         // Knowledge workspace (ADR-0058): own session directory and worker; it routes a note to its block runner.
         // The sandbox of the user's own flows (ADR-0062), probed once at the first run; the AI check keeps its own.
@@ -131,7 +131,7 @@ fun runDesktopApp(args: Array<String>) {
             DesktopApp(
                 controller = controller,
                 session = session,
-                initialFile = initial,
+                initialRequest = initial,
                 window = window,
                 ai = ai,
                 exporter = exporter,

@@ -11,7 +11,7 @@ ADR-0051 announced a follow-up wave D1b: drag and drop, recently opened files an
 
 == Decisions
 
-D1. Recent model. An entry is a path and a kind, `SCRIPT` or `FOLDER`. Notes are never entries: opening a note is part of a workspace, and the workspace folder is the thing to come back to. The list holds at most ten entries, newest first. Two entries are the same when their `toAbsolutePath().normalize()` strings are equal, compared case-insensitively on macOS and Windows only; a script and a folder with the same path are one entry. The list is immutable (`touch`, `remove`, `clear` return a new list); the comparison mode is a parameter so the tests do not depend on the machine.
+D1. Recent model. An entry is a path and a kind, `SCRIPT` or `FOLDER`. Notes are never entries: opening a note is part of a workspace, and the workspace folder is the thing to come back to. (Superseded in part by ADR-0083: a note opened on its own is an entry too, with a third kind `NOTE` and its workspace folder.) The list holds at most ten entries, newest first. Two entries are the same when their `toAbsolutePath().normalize()` strings are equal, compared case-insensitively on macOS and Windows only; a script and a folder with the same path are one entry. The list is immutable (`touch`, `remove`, `clear` return a new list); the comparison mode is a parameter so the tests do not depend on the machine.
 
 D2. What counts as "opened". A script is recorded once the editor really shows it (state `Editing`) and a check says that it is a regular file whose real path equals its path; a script that failed to load, or that was reached through a link, is not recorded. A folder is recorded when its scan has succeeded (state `Open`), with the real root. Scripts given on the command line are recorded like any other, because they go through the same editor state. Trust is never recorded: every folder from Recent asks the trust question again (ADR-0058, D5), because `openFolder` resets it.
 
@@ -53,6 +53,6 @@ New packages `dev.kstep.desktop.recent` and `dev.kstep.desktop.drop` contain no 
 * Packaging with jpackage.
 * Watching dependent files: an additive `dependencies: List<String>` in the worker result, a read hook in `kstep-script`, polling in the rhythm of the D6 watcher. Done in Welle D1c-1, see ADR-0080.
 * A native menu bar with File > Open Recent / Clear Menu and keyboard shortcuts.
-* Recent entries for single notes.
+* Recent entries for single notes: done in Welle D1c-4, see ADR-0083 (D1 is superseded in part: single notes are entries, with their workspace folder).
 
 References: ADR-0051 (live preview, the original follow-up note), ADR-0052 (editor, unsaved changes), ADR-0058 (knowledge workspace, D13 paths and names), ADR-0062 (sandbox), ADR-0064 (status line).

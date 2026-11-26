@@ -3,12 +3,17 @@ package dev.kstep.desktop.recent
 import java.nio.file.Path
 import java.util.Locale
 
-/** What a Recent entry opens: a script in the editor or a folder as a knowledge workspace (ADR-0066). Notes never. */
-enum class RecentKind { SCRIPT, FOLDER }
+/**
+ * What a Recent entry opens: a script in the editor, a folder as a knowledge workspace (ADR-0066), or a single note
+ * that was opened on its own, together with its workspace folder (ADR-0083).
+ */
+enum class RecentKind { SCRIPT, FOLDER, NOTE }
 
+/** [root] is only set for a [RecentKind.NOTE]: the workspace folder the note was opened under. */
 data class RecentEntry(
     val path: Path,
     val kind: RecentKind,
+    val root: Path? = null,
 )
 
 /**

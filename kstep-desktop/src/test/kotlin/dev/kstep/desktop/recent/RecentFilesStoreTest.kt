@@ -97,7 +97,7 @@ class RecentFilesStoreTest :
             }
         }
 
-        "a file of exactly 16 KiB is read, one byte more is ignored" {
+        "a file of exactly the size limit (128 KiB) is read, one byte more is ignored" {
             withDir { _, config ->
                 val head = doc(json("folder", abs("f"))).removeSuffix("}")
 

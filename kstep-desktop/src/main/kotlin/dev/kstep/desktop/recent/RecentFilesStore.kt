@@ -21,8 +21,8 @@ private val logger = KotlinLogging.logger {}
 
 /**
  * Persists the [RecentList] as `recent.json` in the desktop config folder (ADR-0066). The file is untrusted on load:
- * at most 16 KiB, version 1, at most [RecentList.MAX_ENTRIES] entries, each with a known kind and an absolute,
- * normalized path without control characters; a script path must end in `.kstep.kts`. The file system is NOT touched
+ * at most 128 KiB, version 1, at most [RecentList.MAX_ENTRIES] entries, each with a known kind and an absolute,
+ * normalized path without control characters; a script path must end in `.kstep.kts`; a note (ADR-0083) must end in `.md` and carry an absolute workspace `root` above it. The file system is NOT touched
  * for the entries (a missing file is found when it is clicked). Writes are atomic, mode 0600 where supported, and every
  * failure is swallowed.
  */
@@ -85,8 +85,18 @@ class RecentFilesStore(
                             list.entries.forEach {
                                 add(
                                     buildJsonObject {
-                                        put("kind", if (it.kind == RecentKind.SCRIPT) "script" else "folder")
+                                        put(
+                                            "kind",
+                                            when (it.kind) {
+                                                RecentKind.SCRIPT -> "script"
+                                                RecentKind.FOLDER -> "folder"
+                                                RecentKind.NOTE -> "note"
+                                            },
+                                        )
                                         put("path", it.path.toString())
+                                        if (it.kind == RecentKind.NOTE && it.root != null) {
+                                            put("root", it.root.toString())
+                                        }
                                     },
                                 )
                             }
@@ -112,19 +122,38 @@ class RecentFilesStore(
             when (text(obj, "kind")) {
                 "script" -> RecentKind.SCRIPT
                 "folder" -> RecentKind.FOLDER
+                "note" -> RecentKind.NOTE
                 else -> return null
             }
-        val raw = text(obj, "path") ?: return null
-        if (raw.isEmpty() || raw.length > MAX_PATH_CHARS || raw.any { it.code <= 0x1F || it.code == 0x7F }) return null
+        val path = absolutePath(text(obj, "path")) ?: return null
+        if (kind == RecentKind.SCRIPT && !hasSuffix(path, SCRIPT_SUFFIX)) return null
+        if (kind != RecentKind.NOTE) return RecentEntry(path, kind)
+        // a note needs its workspace folder: an absolute, normalized folder path above the note
+        val root = absolutePath(text(obj, "root")) ?: return null
+        if (!hasSuffix(path, NOTE_SUFFIX) || path == root || !path.startsWith(root)) return null
+        return RecentEntry(path, kind, root)
+    }
+
+    private fun hasSuffix(
+        path: Path,
+        suffix: String,
+    ): Boolean = path.toString().lowercase(Locale.ROOT).endsWith(suffix)
+
+    private fun absolutePath(raw: String?): Path? {
+        if (raw == null ||
+            raw.isEmpty() ||
+            raw.length > MAX_PATH_CHARS ||
+            raw.any { it.code <= 0x1F || it.code == 0x7F }
+        ) {
+            return null
+        }
         val path =
             try {
                 Path.of(raw)
             } catch (_: InvalidPathException) {
                 return null
             }
-        if (!path.isAbsolute || path != path.normalize()) return null
-        if (kind == RecentKind.SCRIPT && !raw.lowercase(Locale.ROOT).endsWith(SCRIPT_SUFFIX)) return null
-        return RecentEntry(path, kind)
+        return if (path.isAbsolute && path == path.normalize()) path else null
     }
 
     private fun text(
@@ -134,8 +163,9 @@ class RecentFilesStore(
 
     companion object {
         const val FILE_NAME = "recent.json"
-        const val MAX_BYTES: Long = 16L * 1024
+        const val MAX_BYTES: Long = 128L * 1024
         private const val MAX_PATH_CHARS = 4096
         private const val SCRIPT_SUFFIX = ".kstep.kts"
+        private const val NOTE_SUFFIX = ".md"
     }
 }
