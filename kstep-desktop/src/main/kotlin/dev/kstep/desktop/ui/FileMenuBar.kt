@@ -48,6 +48,7 @@ internal fun keyFor(key: ShortcutKey): Key =
                 'C' -> Key.C
                 'V' -> Key.V
                 'A' -> Key.A
+                'B' -> Key.B
                 else -> error("No Compose key mapped for menu shortcut '${key.c}'")
             }
     }

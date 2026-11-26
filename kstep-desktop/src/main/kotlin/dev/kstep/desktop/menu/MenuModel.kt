@@ -110,6 +110,9 @@ enum class ViewAction(
     val keyHint: KeyHint?,
 ) {
     RUN("Run Script", null),
+
+    /** Previews the editor text that is not saved yet, once (ADR-0086). */
+    RUN_UNSAVED("Run Unsaved", null),
     HOME("Home", KeyHint('H', false)),
     PREVIOUS_BLOCK("Previous Block", null),
     NEXT_BLOCK("Next Block", null),
@@ -121,6 +124,9 @@ enum class ViewAction(
 
     /** A check item (ADR-0085): long lines wrap at the editor edge. Always available, no key. */
     SOFT_WRAP("Soft Wrap", null),
+
+    /** Moves the keyboard focus to the buttons of the banner above the text (ADR-0086). */
+    FOCUS_BANNER("Banner Actions", null),
     ;
 
     /** The menu text, with the single-key hint in brackets (two blanks before the bracket). */
@@ -152,6 +158,9 @@ fun shortcutOf(
     }
 }
 
+/** The hint on the banner for [ViewAction.FOCUS_BANNER] on [os], derived from the registered shortcut. */
+fun bannerShortcutHint(os: MenuOs): String = checkNotNull(shortcutOf(ViewAction.FOCUS_BANNER, os)).display(os)
+
 /** The shortcut the menu registers for a View entry on [os]; the single-key entries have none. */
 @Suppress("UNUSED_PARAMETER")
 fun shortcutOf(
@@ -160,7 +169,9 @@ fun shortcutOf(
 ): Shortcut? =
     when (action) {
         ViewAction.RUN -> sc('R')
+        ViewAction.RUN_UNSAVED -> sc('R', shift = true)
         ViewAction.AI_PANEL -> sc('K')
+        ViewAction.FOCUS_BANNER -> sc('B', shift = true)
         ViewAction.PREVIOUS_BLOCK -> Shortcut(ShortcutKey.Up, alt = true)
         ViewAction.NEXT_BLOCK -> Shortcut(ShortcutKey.Down, alt = true)
         ViewAction.HOME,
@@ -212,6 +223,14 @@ data class MenuContext(
     val convertDialogVisible: Boolean = false,
     /** Soft wrap is on (ADR-0085): the View menu shows the check mark. */
     val softWrap: Boolean = false,
+    /** A banner with at least one usable button is shown (ADR-0086). */
+    val bannerHasActions: Boolean = false,
+    /** The open editor text is a script (not a knowledge-workspace note, ADR-0086). */
+    val editorIsScript: Boolean = true,
+    /** The editor has changes that are not saved. */
+    val editorDirty: Boolean = false,
+    /** A crash-draft offer waits for Restore or Discard (ADR-0084). */
+    val draftOfferOpen: Boolean = false,
 )
 
 object MenuReasons {
@@ -230,6 +249,10 @@ object MenuReasons {
     const val CONVERSION_RUNNING = "A conversion is running"
     const val CLOSE_EXPORT_FIRST = "Close the export dialog first"
     const val CLOSE_CONVERT_FIRST = "Close the convert dialog first"
+    const val NOTES_SAVED_ONLY = "Notes preview only the saved file"
+    const val RESOLVE_DRAFT_OFFER_FIRST = "Resolve the draft offer first"
+    const val NO_UNSAVED_CHANGES = "No unsaved changes"
+    const val NO_BANNER_ACTIONS = "No banner with actions is shown"
     const val NO_TRANSPARENT_PARTS = "No transparent parts"
 }
 
@@ -288,6 +311,14 @@ fun stateOf(
 ): ActionState =
     when (action) {
         ViewAction.RUN -> if (ctx.fileOpen) ENABLED else disabled(MenuReasons.OPEN_SCRIPT_FIRST)
+        ViewAction.RUN_UNSAVED ->
+            when {
+                !ctx.fileOpen -> disabled(MenuReasons.OPEN_SCRIPT_FIRST)
+                !ctx.editorIsScript -> disabled(MenuReasons.NOTES_SAVED_ONLY)
+                ctx.draftOfferOpen -> disabled(MenuReasons.RESOLVE_DRAFT_OFFER_FIRST)
+                !ctx.editorDirty -> disabled(MenuReasons.NO_UNSAVED_CHANGES)
+                else -> ENABLED
+            }
         ViewAction.HOME -> ENABLED
         ViewAction.PREVIOUS_BLOCK, ViewAction.NEXT_BLOCK ->
             if (ctx.knowledgeOpen) ENABLED else disabled(MenuReasons.NO_FOLDER_OPEN)
@@ -305,6 +336,7 @@ fun stateOf(
             }
         ViewAction.AI_PANEL -> if (ctx.knowledgeOpen) disabled(MenuReasons.KNOWLEDGE_UNAVAILABLE) else ENABLED
         ViewAction.SOFT_WRAP -> ENABLED
+        ViewAction.FOCUS_BANNER -> if (ctx.bannerHasActions) ENABLED else disabled(MenuReasons.NO_BANNER_ACTIONS)
     }
 
 /**
@@ -416,6 +448,7 @@ fun editMenu(): List<MenuEntry> =
 fun viewMenu(): List<MenuEntry> =
     listOf(
         MenuEntry.ViewItem(ViewAction.RUN),
+        MenuEntry.ViewItem(ViewAction.RUN_UNSAVED),
         MenuEntry.Separator,
         MenuEntry.ViewItem(ViewAction.HOME),
         MenuEntry.ViewItem(ViewAction.PREVIOUS_BLOCK),
@@ -429,6 +462,8 @@ fun viewMenu(): List<MenuEntry> =
         MenuEntry.ViewItem(ViewAction.AI_PANEL),
         MenuEntry.Separator,
         MenuEntry.ViewItem(ViewAction.SOFT_WRAP),
+        MenuEntry.Separator,
+        MenuEntry.ViewItem(ViewAction.FOCUS_BANNER),
     )
 
 fun fileMenu(

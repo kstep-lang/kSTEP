@@ -40,3 +40,7 @@ D8. Kept. `CaretMapper.markedLines` and `ErrorBarText.tooltipsByLine` stay (test
 * Files with `\r\n`: the line index knows only `\n`, as before; a column then counts the `\r`.
 * A very large file with soft wrap: the position table costs one pass over all lines per layout.
 * A mark pinned while the buffer is already different (a late result) is placed by replaying the difference; if the edit overlaps the mark it comes out touched or gone, which is correct but not the position the run meant.
+
+== Update (Welle D2c-3a)
+
+D6 base: the marks of a failed *unsaved* run are pinned against the exact text that was sent (the snapshot in the run's origin), not against the saved file; see ADR-0086 D8.

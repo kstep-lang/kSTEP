@@ -55,4 +55,46 @@ class DesktopRenderWorkerTest :
                 dir.toFile().deleteRecursively()
             }
         }
+
+        "a partial set of the unsaved options is a usage error" {
+            DesktopRenderWorker.parseUnsaved(arrayOf("--unsaved-script-dir", "/d", "x.kstep.kts")) shouldBe null
+            DesktopRenderWorker.parseUnsaved(
+                arrayOf(
+                    "--unsaved-script-dir",
+                    "/d",
+                    "--unsaved-script-dir",
+                    "/e",
+                    "--unsaved-display-name",
+                    "n",
+                    "--unsaved-sha256",
+                    "h",
+                ),
+            ) shouldBe null
+            DesktopRenderWorker.parseUnsaved(arrayOf("a.kstep.kts"))!!.options shouldBe null
+        }
+
+        "the unsaved options are cut off before the render arguments" {
+            val parsed =
+                DesktopRenderWorker.parseUnsaved(
+                    arrayOf(
+                        "--unsaved-script-dir",
+                        "/d",
+                        "--unsaved-display-name",
+                        "n.kstep.kts",
+                        "--unsaved-sha256",
+                        "h",
+                        "b.kstep.kts",
+                        "--output",
+                        "json",
+                    ),
+                )!!
+            parsed.rest.toList() shouldBe listOf("b.kstep.kts", "--output", "json")
+            parsed.options!!.scriptDir shouldBe "/d"
+        }
+
+        "kstep render itself does not know the unsaved options" {
+            resolveCommand(
+                arrayOf("render", "x.kstep.kts", "--unsaved-script-dir", "/"),
+            ).shouldBeInstanceOf<CliCommand.ShowUsage>()
+        }
     })

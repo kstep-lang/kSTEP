@@ -71,6 +71,10 @@ class WarmWorkerClient(
         out: Path,
         timeoutMillis: Long,
         onStarted: (Process) -> Unit,
+        /** The run is of an unsaved buffer (ADR-0086): [script] is then the buffer file. */
+        unsaved: WarmRenderProtocol.Unsaved? = null,
+        /** The script a worker is bound to in reuse mode; for a buffer run the real file, not the buffer file. */
+        bindTo: Path = script,
     ): WorkerOutcome =
         synchronized(runLock) {
             lock.withLock {
@@ -78,7 +82,7 @@ class WarmWorkerClient(
                 busy = true
             }
             try {
-                runLocked(script, out, timeoutMillis, onStarted)
+                runLocked(script, out, timeoutMillis, onStarted, unsaved, bindTo)
             } finally {
                 lock.withLock { busy = false }
             }
@@ -157,12 +161,14 @@ class WarmWorkerClient(
         out: Path,
         timeoutMillis: Long,
         onStarted: (Process) -> Unit,
+        unsaved: WarmRenderProtocol.Unsaved?,
+        bindTo: Path,
     ): WorkerOutcome {
         var attempt = 0
         while (true) {
             attempt++
             val worker =
-                when (val got = acquire(script)) {
+                when (val got = acquire(bindTo)) {
                     is Acquired.Failed -> return WorkerOutcome.StartFailed(got.reason)
                     is Acquired.Ok -> got.worker
                 }
@@ -180,7 +186,7 @@ class WarmWorkerClient(
                 retire(worker)
                 throw t
             }
-            val request = WarmRenderProtocol.Request(id, script.toString(), out.toString())
+            val request = WarmRenderProtocol.Request(id, script.toString(), out.toString(), unsaved)
             val awaited =
                 if (worker.send(WarmRenderProtocol.encodeRequest(request))) {
                     await(worker, id, timeoutMillis)
@@ -198,7 +204,7 @@ class WarmWorkerClient(
                 logger.info { "warm worker retired mode=${settings.mode} after=stale" }
                 continue
             }
-            return finish(worker, script, awaited)
+            return finish(worker, bindTo, awaited)
         }
     }
 

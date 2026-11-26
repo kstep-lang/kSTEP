@@ -165,6 +165,10 @@ internal fun ScriptEditor(
     onOpenDraft: (java.nio.file.Path) -> Unit = {},
     /** Long lines wrap at the editor edge instead of scrolling sideways (ADR-0085). */
     softWrap: Boolean = false,
+    /** Counts "Banner Actions" presses (ADR-0086): the banner takes the keyboard focus. */
+    bannerFocusSignal: Int = 0,
+    /** The text the [errors] were found in when that was an unsaved buffer (ADR-0086); `null`: the saved text. */
+    errorBase: String? = null,
 ) {
     val os = remember { MenuOs.current() }
     val colors = if (dark) EditorColors.DARK else EditorColors.LIGHT
@@ -207,7 +211,8 @@ internal fun ScriptEditor(
     val lineCount = lineIndex.lineCount
     // Error marks move with the text (ADR-0085): the tracker replays every change of the buffer onto the anchors.
     val tracker = remember(editing?.path) { ErrorAnchorTracker() }
-    val anchors = tracker.update(if (editing == null) emptyList() else errors, editing?.base ?: "", field.text)
+    val shownErrors = if (editing == null) emptyList() else errors
+    val anchors = tracker.update(shownErrors, errorBase ?: editing?.base ?: "", field.text)
     val lineMarks = remember(anchors, field.text) { anchors.lineMarks(field.text) }
     val marks = lineMarks.severities
     val tooltips = lineMarks.tooltips
@@ -503,6 +508,8 @@ internal fun ScriptEditor(
             onDiscard = session::discardDraft,
             onOpenDraft = onOpenDraft,
             onDismissNotice = session::dismissNotice,
+            focusSignal = bannerFocusSignal,
+            onLeave = { runCatching { focus.requestFocus() } },
         )
         if (state is EditorState.NoFile) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

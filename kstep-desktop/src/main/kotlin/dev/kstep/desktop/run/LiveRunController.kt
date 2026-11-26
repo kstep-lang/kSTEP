@@ -41,6 +41,18 @@ class LiveRunController(
         Executors.newSingleThreadExecutor { r -> Thread(r, "kstep-desktop-run").apply { isDaemon = true } },
     /** Runs in [close] before the session folder is removed (the warm worker lives in it, ADR-0081). */
     private val onClose: () -> Unit = {},
+    /** Runs the unsaved buffer of a file (ADR-0086); `null` switches "Run Unsaved" off (it ends in KSTEP-D-008). */
+    private val bufferRunner: (
+        (
+            file: Path,
+            text: String,
+            generation: Long,
+            onStarted: (Process) -> Unit,
+        ) -> RunResult
+    )? =
+        null,
+    /** `true` when [file] is shown by another runner (a note, ADR-0058): there is only the saved file to preview. */
+    private val isRouted: (Path) -> Boolean = { false },
 ) : AutoCloseable {
     private val machine = RunStateMachine()
     private val lock = Any()
@@ -153,6 +165,12 @@ class LiveRunController(
 
     fun forceRun() = dispatch(DesktopEvent.ForceRun)
 
+    /** Previews [text], the unsaved buffer of [file] (ADR-0086). The saved file and the input watch stay untouched. */
+    fun runBuffer(
+        file: Path,
+        text: String,
+    ) = dispatch(DesktopEvent.RunBuffer(file.toAbsolutePath().normalize(), text))
+
     /** Stops watching and running and returns to [DesktopState.Idle] (the workspace was closed, ADR-0058). */
     fun clear() {
         val old = synchronized(lock) { watcher.also { watcher = null } }
@@ -209,7 +227,7 @@ class LiveRunController(
     private fun submit(start: Effect.StartRun) {
         val generation = start.generation
         try {
-            executor.submit { runOne(generation, start.file) }
+            executor.submit { runOne(generation, start.file, start.buffer) }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             // closed
         }
@@ -218,12 +236,17 @@ class LiveRunController(
     private fun runOne(
         generation: Long,
         file: Path,
+        buffer: String? = null,
     ) {
         if (synchronized(lock) { generation != latestGeneration || closed.get() }) return
         val startedMs = clock()
         val result =
             try {
-                runner(file, generation) { process -> onStarted(generation, process) }
+                if (buffer == null) {
+                    runner(file, generation) { process -> onStarted(generation, process) }
+                } else {
+                    runBufferOne(file, buffer, generation)
+                }
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 return
@@ -241,11 +264,29 @@ class LiveRunController(
             }
         synchronized(lock) { if (current?.first == generation) current = null }
         logger.info {
-            "run gen=$generation outcome=${result::class.simpleName} durationMs=${clock() - startedMs}" +
+            "run gen=$generation kind=${if (buffer == null) "file" else "buffer"} " +
+                "outcome=${result::class.simpleName} durationMs=${clock() - startedMs}" +
                 (result.dependencies?.let { " deps=${it.size}" } ?: "")
         }
-        result.dependencies?.let { replaceDependencies(generation, file, it) }
+        // the input watch follows the saved file; a buffer run does not change what is watched (ADR-0086)
+        if (buffer == null) result.dependencies?.let { replaceDependencies(generation, file, it) }
         dispatch(DesktopEvent.Finished(generation, result))
+    }
+
+    private fun runBufferOne(
+        file: Path,
+        text: String,
+        generation: Long,
+    ): RunResult {
+        val run = bufferRunner
+        return when {
+            isRouted(file) -> RunResult.Skipped("Notes preview only the saved file")
+            run == null ->
+                RunResult.Failure(
+                    listOf(DesktopError(DesktopErrorCodes.PREVIEW_FAILED, null, null, "Run Unsaved is not available")),
+                )
+            else -> run(file, text, generation) { process -> onStarted(generation, process) }
+        }
     }
 
     private fun onStarted(
@@ -321,10 +362,17 @@ class LiveRunController(
                 Thread({ WorkerTempDir.deleteRecursively(dir) }, "kstep-desktop-cleanup"),
             )
             // With a sandbox (ADR-0062) the runner resolves it at the first run, in the runner thread.
+            // The text of "Run Unsaved" goes to a folder of its own, never to the session folder (ADR-0086).
+            val buffers = UnsavedBufferStore()
+            Runtime.getRuntime().addShutdownHook(Thread({ buffers.close() }, "kstep-desktop-unsaved-cleanup"))
             val runner =
-                sandbox?.workerRunner(dir, warm)
+                sandbox?.workerRunner(dir, warm, buffers)
                     ?: lazy {
-                        WorkerRunner(dir, warm = warm.takeIf { it.enabled }?.let { WarmWorkerClient(dir, it, null) })
+                        WorkerRunner(
+                            dir,
+                            warm = warm.takeIf { it.enabled }?.let { WarmWorkerClient(dir, it, null) },
+                            bufferStore = buffers,
+                        )
                     }
             return LiveRunController(
                 runner = { file, gen, started ->
@@ -334,7 +382,12 @@ class LiveRunController(
                 watcherFactory = { file, onEvent -> FileChangeWatcher(file, onEvent = onEvent) },
                 sessionDir = dir,
                 dependencyWatchFactory = { callback -> DependencyWatcher(onChange = callback) },
-                onClose = { if (runner.isInitialized()) runner.value.closeWarm() },
+                onClose = {
+                    if (runner.isInitialized()) runner.value.closeWarm()
+                    buffers.close()
+                },
+                bufferRunner = { file, text, gen, started -> runner.value.runBuffer(file, text, gen, started) },
+                isRouted = { file -> route?.invoke(file) != null },
             )
         }
     }

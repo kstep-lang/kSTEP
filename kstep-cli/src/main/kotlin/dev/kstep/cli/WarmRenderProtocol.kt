@@ -37,13 +37,30 @@ object WarmRenderProtocol {
 
     private const val MAX_REASON_CHARS = 64
 
+    /** Longest value of an unsaved-run field; three of them fit the request line with room to spare. */
+    private const val MAX_UNSAVED_FIELD_CHARS = 4096
+
     private val json = Json
+
+    /**
+     * The render is of an unsaved buffer (ADR-0086): [Request.script] is the buffer file, [scriptDir] the folder of the
+     * real script (the base of its input files), [displayName] the name diagnostics use, [sha256] the lower-case hex
+     * hash of the buffer bytes, which the worker checks after reading.
+     */
+    data class Unsaved(
+        val scriptDir: String,
+        val displayName: String,
+        val sha256: String,
+    )
 
     data class Request(
         val id: Long,
         val script: String,
         val out: String,
+        val unsaved: Unsaved? = null,
     )
+
+    private val REQUEST_KEYS = setOf("v", "id", "script", "out", "scriptDir", "displayName", "sha256")
 
     class Reply(
         val id: Long,
@@ -74,16 +91,30 @@ object WarmRenderProtocol {
             put("id", request.id)
             put("script", request.script)
             put("out", request.out)
+            request.unsaved?.let {
+                put("scriptDir", it.scriptDir)
+                put("displayName", it.displayName)
+                put("sha256", it.sha256)
+            }
         }.toString()
 
     /** `null` for anything that is not a well-formed request of this version (a protocol error). */
     fun decodeRequest(line: String): Request? {
         val obj = parseObject(line) ?: return null
         if ((obj["v"] as? JsonPrimitive)?.intOrNull != VERSION) return null
+        // strict: a key this version does not know is a protocol error, not something to ignore (ADR-0086)
+        if (!REQUEST_KEYS.containsAll(obj.keys)) return null
         val id = (obj["id"] as? JsonPrimitive)?.longOrNull ?: return null
         val script = stringOf(obj["script"]) ?: return null
         val out = stringOf(obj["out"]) ?: return null
-        return Request(id, script, out)
+        val extra = listOf("scriptDir", "displayName", "sha256").filter { it in obj }
+        if (extra.isEmpty()) return Request(id, script, out)
+        if (extra.size != 3) return null
+        val scriptDir = stringOf(obj["scriptDir"]) ?: return null
+        val displayName = stringOf(obj["displayName"]) ?: return null
+        val sha256 = stringOf(obj["sha256"]) ?: return null
+        if (listOf(scriptDir, displayName, sha256).any { it.length > MAX_UNSAVED_FIELD_CHARS }) return null
+        return Request(id, script, out, Unsaved(scriptDir, displayName, sha256))
     }
 
     fun encodeReply(reply: Reply): String =

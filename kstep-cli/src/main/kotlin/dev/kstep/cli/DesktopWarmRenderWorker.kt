@@ -2,6 +2,7 @@ package dev.kstep.cli
 
 import dev.kstep.geometry.OcctAvailability
 import dev.kstep.geometry.OcctKernel
+import dev.kstep.preview.PreviewSource
 import dev.kstep.script.KStepScriptHost
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
 import java.io.BufferedInputStream
@@ -173,6 +174,19 @@ object DesktopWarmRenderWorker {
         if (command !is CliCommand.Render || !command.jsonOutput) {
             return reply(request, USAGE_EXIT, outCapture, errCapture, listOf("usage"))
         }
+        // An unsaved buffer (ADR-0086) is validated first. A refusal names only the reason, never a path or content,
+        // and recycles the process: the cause can be a planted file.
+        var source: PreviewSource? = null
+        val unsaved = request.unsaved
+        if (unsaved != null) {
+            val loaded = UnsavedBufferInput.load(request.script, unsaved.scriptDir, unsaved.displayName, unsaved.sha256)
+            if (loaded is UnsavedBufferInput.Result.Refused) {
+                val marker = "${UnsavedBufferInput.REFUSED_MARKER}${loaded.reason.name}\n"
+                errCapture.write(marker.toByteArray(StandardCharsets.UTF_8))
+                return reply(request, USAGE_EXIT, outCapture, errCapture, listOf("unsaved-refused"))
+            }
+            source = (loaded as UnsavedBufferInput.Result.Ok).source
+        }
         val watchdog =
             ImportWatchdog(ImportWatchdog.resolveTimeoutMillis() + ImportWorkerLaunch.ORPHAN_GRACE_MILLIS) {
                 Runtime.getRuntime().halt(ImportWorkerLaunch.ORPHAN_EXIT_CODE)
@@ -184,7 +198,7 @@ object DesktopWarmRenderWorker {
         val thread =
             Thread({
                 try {
-                    code = RenderExit.capture { runRender(command, includeParts = true) }
+                    code = RenderExit.capture { runRender(command, includeParts = true, source = source) }
                 } catch (t: Throwable) {
                     t.printStackTrace()
                     code = 1

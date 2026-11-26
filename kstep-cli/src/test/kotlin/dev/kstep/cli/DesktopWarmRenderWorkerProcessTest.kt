@@ -46,9 +46,12 @@ class DesktopWarmRenderWorkerProcessTest :
                 id: Long,
                 script: Path,
                 out: Path,
+                unsaved: WarmRenderProtocol.Unsaved? = null,
             ): WarmRenderProtocol.Reply {
                 send(
-                    WarmRenderProtocol.encodeRequest(WarmRenderProtocol.Request(id, script.toString(), out.toString())),
+                    WarmRenderProtocol.encodeRequest(
+                        WarmRenderProtocol.Request(id, script.toString(), out.toString(), unsaved),
+                    ),
                 )
                 return WarmRenderProtocol.decodeReply(line(), id)!!
             }
@@ -70,11 +73,13 @@ class DesktopWarmRenderWorkerProcessTest :
         fun cold(
             script: Path,
             out: Path,
+            extra: List<String> = emptyList(),
         ): Pair<Int, String> {
             val p =
                 ProcessBuilder(
                     ImportWorkerLaunch.command(
-                        listOf(script.toString(), "--format", "glb", "--out", out.toString(), "--output", "json"),
+                        extra +
+                            listOf(script.toString(), "--format", "glb", "--out", out.toString(), "--output", "json"),
                         60_000,
                         mainClass = DesktopRenderWorker.MAIN_CLASS,
                         maxHeap = "256m",
@@ -178,6 +183,101 @@ class DesktopWarmRenderWorkerProcessTest :
                 w.ended() shouldBe true
             } finally {
                 w.close()
+            }
+        }
+
+        // A buffer outside the script folder reads the input files of the script folder (ADR-0086).
+        val bufferScript =
+            """
+            check(readInput("data.txt") == "hello")
+            val appCtx = applicationContext { application = "configuration control" }.getOrThrow()
+            val prodCtx = productContext { name = "e"; frameOfReference = appCtx; disciplineType = "m" }.getOrThrow()
+            val bracket = product("B-1") { name = "B"; frameOfReference = setOf(prodCtx) }.getOrThrow()
+            stepFile(fileName = "t.step") { root(bracket) }
+            """.trimIndent() + "\n"
+
+        fun unsavedFor(
+            buffer: Path,
+            scriptDir: Path,
+        ): WarmRenderProtocol.Unsaved {
+            val hash =
+                java.security.MessageDigest
+                    .getInstance("SHA-256")
+                    .digest(Files.readAllBytes(buffer))
+                    .joinToString("") { "%02x".format(it) }
+            return WarmRenderProtocol.Unsaved(scriptDir.toString(), "part.kstep.kts", hash)
+        }
+
+        "an unsaved buffer reads its input files from the script folder, not from the buffer folder, warm and cold"
+            .config(timeout = 300.seconds) {
+                val bufDir = Files.createTempDirectory("warm-buf").toRealPath()
+                val scriptDir = Files.createTempDirectory("warm-script").toRealPath()
+                val w = Worker(maxRuns = 5)
+                try {
+                    WarmRenderProtocol.isHello(w.line()) shouldBe true
+                    Files.writeString(scriptDir.resolve("data.txt"), "hello")
+                    val buffer =
+                        bufDir.resolve(
+                            java.util.UUID
+                                .randomUUID()
+                                .toString() + ".kstep.kts",
+                        )
+                    Files.writeString(buffer, bufferScript)
+                    val unsaved = unsavedFor(buffer, scriptDir)
+                    val warm = w.request(1, buffer, bufDir.resolve("o.glb"), unsaved)
+                    warm.exit shouldBe 0
+                    warm.stdout.decodeToString().contains("data.txt") shouldBe true
+                    val cold =
+                        cold(
+                            buffer,
+                            bufDir.resolve("c.glb"),
+                            listOf(
+                                "--unsaved-script-dir",
+                                scriptDir.toString(),
+                                "--unsaved-display-name",
+                                "part.kstep.kts",
+                                "--unsaved-sha256",
+                                unsaved.sha256,
+                            ),
+                        )
+                    cold.first shouldBe 0
+                    // Counter-test: the file exists only next to the buffer, not in the script folder.
+                    Files.delete(scriptDir.resolve("data.txt"))
+                    Files.writeString(bufDir.resolve("data.txt"), "hello")
+                    val missing = w.request(2, buffer, bufDir.resolve("o2.glb"), unsaved)
+                    missing.exit shouldBe 1
+                    missing.stdout.decodeToString().contains("KSTEP-S-017") shouldBe true
+                } finally {
+                    w.close()
+                    bufDir.toFile().deleteRecursively()
+                    scriptDir.toFile().deleteRecursively()
+                }
+            }
+
+        "a tampered buffer is refused with the marker and the process is recycled".config(timeout = 300.seconds) {
+            val bufDir = Files.createTempDirectory("warm-buf").toRealPath()
+            val scriptDir = Files.createTempDirectory("warm-script").toRealPath()
+            val w = Worker(maxRuns = 5)
+            try {
+                WarmRenderProtocol.isHello(w.line()) shouldBe true
+                val buffer =
+                    bufDir.resolve(
+                        java.util.UUID
+                            .randomUUID()
+                            .toString() + ".kstep.kts",
+                    )
+                Files.writeString(buffer, "val x = 1\n")
+                val unsaved = unsavedFor(buffer, scriptDir)
+                Files.writeString(buffer, "val x = 2\n")
+                val reply = w.request(1, buffer, bufDir.resolve("o.glb"), unsaved)
+                reply.exit shouldBe 2
+                reply.stderr.decodeToString().trim() shouldBe "kstep-unsaved-refused:BUFFER_HASH"
+                reply.recycle shouldBe true
+                w.ended() shouldBe true
+            } finally {
+                w.close()
+                bufDir.toFile().deleteRecursively()
+                scriptDir.toFile().deleteRecursively()
             }
         }
 

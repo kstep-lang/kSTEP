@@ -27,8 +27,8 @@ class MenuIconsTest :
 
         "every Edit and View action has its own icon" {
             val ids = EditAction.entries.map { iconOf(it) } + ViewAction.entries.map { iconOf(it) }
-            ids.size shouldBe 19
-            ids.toSet().size shouldBe 19
+            ids.size shouldBe 21
+            ids.toSet().size shouldBe 21
         }
 
         "no icon is orphaned: actions, the two extra entries and the toolbar cover all icons" {

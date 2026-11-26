@@ -49,3 +49,7 @@ D10. Notice. If drafts cannot be written (`KSTEP-D-042`, folder unusable `-044`,
 * `kill -9` and power loss: only the periodic copy exists, so up to 20 seconds are lost.
 * The shared atomic-write helper is copied into the draft package (a package cycle otherwise); one shared helper stays open.
 * Live preview of the unsaved buffer is not part of this wave.
+
+== Update (Welle D2c-3a)
+
+Unsaved preview: see ADR-0086; no buffer run while a draft offer is open (the "Run Unsaved" entry is disabled with the reason "Resolve the draft offer first").

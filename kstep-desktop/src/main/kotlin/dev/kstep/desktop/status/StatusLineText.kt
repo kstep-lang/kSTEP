@@ -1,6 +1,31 @@
 package dev.kstep.desktop.status
 
 import dev.kstep.cli.okf.DisplayName
+import dev.kstep.desktop.run.PreviewOrigin
+
+/** What the shown picture came from (ADR-0086). */
+enum class PreviewOriginLabel(
+    val text: String,
+) {
+    SAVED("Preview: saved file"),
+    UNSAVED("Preview: unsaved buffer"),
+    UNSAVED_OLDER("Preview: unsaved buffer (older)"),
+}
+
+/**
+ * The label for the picture that is shown, or `null` when there is none. A buffer picture is "older" as soon as the
+ * editor text differs from the text it was made from.
+ */
+fun previewOriginLabel(
+    shown: PreviewOrigin?,
+    editorText: String?,
+): PreviewOriginLabel? =
+    when (shown) {
+        null -> null
+        PreviewOrigin.SavedFile -> PreviewOriginLabel.SAVED
+        is PreviewOrigin.Buffer ->
+            if (shown.text == editorText) PreviewOriginLabel.UNSAVED else PreviewOriginLabel.UNSAVED_OLDER
+    }
 
 /** The pure texts of the status line (ADR-0064). No Compose here: the layout lives in the ui package. */
 object StatusLineText {

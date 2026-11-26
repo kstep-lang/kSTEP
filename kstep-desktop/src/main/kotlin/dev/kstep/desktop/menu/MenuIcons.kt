@@ -24,6 +24,7 @@ enum class MenuIconId {
     REPLACE,
     GO_TO_LINE,
     RUN,
+    RUN_UNSAVED,
     HOME,
     PREVIOUS_BLOCK,
     NEXT_BLOCK,
@@ -33,6 +34,7 @@ enum class MenuIconId {
     SHOW_ALL,
     AI_PANEL,
     SOFT_WRAP,
+    BANNER,
     KEYBOARD,
     INFO,
     TREE,
@@ -68,6 +70,7 @@ fun iconOf(action: EditAction): MenuIconId =
 fun iconOf(action: ViewAction): MenuIconId =
     when (action) {
         ViewAction.RUN -> MenuIconId.RUN
+        ViewAction.RUN_UNSAVED -> MenuIconId.RUN_UNSAVED
         ViewAction.HOME -> MenuIconId.HOME
         ViewAction.PREVIOUS_BLOCK -> MenuIconId.PREVIOUS_BLOCK
         ViewAction.NEXT_BLOCK -> MenuIconId.NEXT_BLOCK
@@ -77,6 +80,7 @@ fun iconOf(action: ViewAction): MenuIconId =
         ViewAction.SHOW_ALL -> MenuIconId.SHOW_ALL
         ViewAction.AI_PANEL -> MenuIconId.AI_PANEL
         ViewAction.SOFT_WRAP -> MenuIconId.SOFT_WRAP
+        ViewAction.FOCUS_BANNER -> MenuIconId.BANNER
     }
 
 /** The icon of a Help action. Exhaustive. */

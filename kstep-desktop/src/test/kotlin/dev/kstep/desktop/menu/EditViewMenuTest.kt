@@ -32,6 +32,7 @@ class EditViewMenuTest :
             viewMenu() shouldBe
                 listOf(
                     MenuEntry.ViewItem(ViewAction.RUN),
+                    MenuEntry.ViewItem(ViewAction.RUN_UNSAVED),
                     MenuEntry.Separator,
                     MenuEntry.ViewItem(ViewAction.HOME),
                     MenuEntry.ViewItem(ViewAction.PREVIOUS_BLOCK),
@@ -45,6 +46,8 @@ class EditViewMenuTest :
                     MenuEntry.ViewItem(ViewAction.AI_PANEL),
                     MenuEntry.Separator,
                     MenuEntry.ViewItem(ViewAction.SOFT_WRAP),
+                    MenuEntry.Separator,
+                    MenuEntry.ViewItem(ViewAction.FOCUS_BANNER),
                 )
         }
 
@@ -107,9 +110,45 @@ class EditViewMenuTest :
 
         "Soft Wrap comes after Next Block and its own separator" {
             val entries = viewMenu()
-            entries.last() shouldBe MenuEntry.ViewItem(ViewAction.SOFT_WRAP)
-            entries[entries.size - 2] shouldBe MenuEntry.Separator
-            (entries.indexOf(MenuEntry.ViewItem(ViewAction.NEXT_BLOCK)) < entries.size - 2) shouldBe true
+            val wrap = entries.indexOf(MenuEntry.ViewItem(ViewAction.SOFT_WRAP))
+            entries[wrap - 1] shouldBe MenuEntry.Separator
+            (entries.indexOf(MenuEntry.ViewItem(ViewAction.NEXT_BLOCK)) < wrap - 1) shouldBe true
+        }
+
+        "Run Unsaved gives its reasons in order: no file, a note, a draft offer, nothing to run" {
+            stateOf(ViewAction.RUN_UNSAVED, base) shouldBe ActionState(false, MenuReasons.OPEN_SCRIPT_FIRST)
+            val file = open.copy(editorDirty = true)
+            stateOf(ViewAction.RUN_UNSAVED, file) shouldBe ActionState(true, null)
+            stateOf(ViewAction.RUN_UNSAVED, file.copy(editorIsScript = false)) shouldBe
+                ActionState(false, "Notes preview only the saved file")
+            stateOf(ViewAction.RUN_UNSAVED, file.copy(draftOfferOpen = true)) shouldBe
+                ActionState(false, "Resolve the draft offer first")
+            stateOf(ViewAction.RUN_UNSAVED, open) shouldBe ActionState(false, "No unsaved changes")
+            // the reasons are checked in this order
+            stateOf(ViewAction.RUN_UNSAVED, open.copy(editorIsScript = false, draftOfferOpen = true)) shouldBe
+                ActionState(false, "Notes preview only the saved file")
+            shortcutOf(ViewAction.RUN_UNSAVED, MenuOs.MAC) shouldBe Shortcut(ShortcutKey.Letter('R'), shift = true)
+        }
+
+        "Banner Actions needs a banner with a usable button and says why otherwise" {
+            stateOf(ViewAction.FOCUS_BANNER, open) shouldBe
+                ActionState(false, "No banner with actions is shown")
+            stateOf(ViewAction.FOCUS_BANNER, open.copy(bannerHasActions = true)) shouldBe ActionState(true, null)
+            shortcutOf(ViewAction.FOCUS_BANNER, MenuOs.MAC) shouldBe Shortcut(ShortcutKey.Letter('B'), shift = true)
+            bannerShortcutHint(MenuOs.MAC) shouldBe "⇧⌘B"
+            bannerShortcutHint(MenuOs.LINUX) shouldBe "Ctrl+Shift+B"
+            registeredShortcut(ViewAction.FOCUS_BANNER, open, MenuOs.LINUX) shouldBe null
+        }
+
+        "no two shortcuts of the File, Edit and View menus and the editor keys collide on any system" {
+            for (os in MenuOs.entries) {
+                val all =
+                    FileAction.entries.mapNotNull { it.shortcut } +
+                        EditAction.entries.mapNotNull { shortcutOf(it, os) } +
+                        ViewAction.entries.mapNotNull { shortcutOf(it, os) } +
+                        EditorOwnedShortcuts.of(os).toList()
+                all.size shouldBe all.toSet().size
+            }
         }
 
         "the AI panel is off in a workspace" {

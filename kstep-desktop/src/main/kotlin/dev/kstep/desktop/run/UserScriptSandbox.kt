@@ -89,6 +89,7 @@ class UserScriptSandbox(
     fun workerRunner(
         sessionDir: Path,
         warm: WarmWorkerSettings? = null,
+        bufferStore: UnsavedBufferStore = UnsavedBufferStore(),
     ): Lazy<WorkerRunner> =
         lazy {
             val box = forSession(sessionDir)
@@ -99,6 +100,7 @@ class UserScriptSandbox(
                 sandboxFailureMessage = SANDBOX_FAILED_MESSAGE,
                 // The warm worker (ADR-0081) runs in the same sandbox as a cold one; null or OFF is the cold path.
                 warm = warm?.takeIf { it.enabled }?.let { WarmWorkerClient(sessionDir, it, box) },
+                bufferStore = bufferStore,
             )
         }
 

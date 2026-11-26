@@ -62,4 +62,11 @@ object DesktopErrorCodes {
     const val DRAFT_REJECTED = "KSTEP-D-043"
     const val DRAFT_STORE_UNAVAILABLE = "KSTEP-D-044"
     const val DRAFT_TOO_LARGE = "KSTEP-D-045"
+
+    // Run Unsaved (ADR-0086): the text of the buffer is too large, the private folder is not safe, writing it failed,
+    // the buffer does not belong to the previewed file or its folder is unusable.
+    const val UNSAVED_RUN_TOO_LARGE = "KSTEP-D-046"
+    const val SESSION_DIR_UNSAFE = "KSTEP-D-047"
+    const val UNSAVED_RUN_WRITE_FAILED = "KSTEP-D-048"
+    const val SCRIPT_DIR_MISMATCH = "KSTEP-D-049"
 }

@@ -3,6 +3,16 @@ package dev.kstep.desktop.run
 import java.nio.file.Path
 import java.time.Instant
 
+/** Which text the shown picture came from (ADR-0086): the saved file, or the editor buffer at that moment. */
+sealed interface PreviewOrigin {
+    data object SavedFile : PreviewOrigin
+
+    /** [text] is the exact text that was sent, kept so that error marks are placed against it (ADR-0085 D6). */
+    data class Buffer(
+        val text: String,
+    ) : PreviewOrigin
+}
+
 /** The state of the live preview. [lastGood] is the last successful model of the current file (ADR-0051). */
 sealed interface DesktopState {
     val generation: Long
@@ -20,6 +30,7 @@ sealed interface DesktopState {
         override val generation: Long,
         override val lastGood: DesktopModel?,
         val startedAtMs: Long,
+        val origin: PreviewOrigin = PreviewOrigin.SavedFile,
     ) : DesktopState
 
     data class Ok(
@@ -36,6 +47,8 @@ sealed interface DesktopState {
         val errors: List<DesktopError>,
         override val lastGood: DesktopModel?,
         val at: Instant,
+        /** What the failed run was run on; the error marks refer to this text. */
+        val origin: PreviewOrigin = PreviewOrigin.SavedFile,
     ) : DesktopState
 
     data class NativeUnavailable(
@@ -70,6 +83,12 @@ sealed interface DesktopEvent {
 
     data object ForceRun : DesktopEvent
 
+    /** Run [text], the unsaved buffer of [file] (ADR-0086). Never started by a file change. */
+    data class RunBuffer(
+        val file: Path,
+        val text: String,
+    ) : DesktopEvent
+
     data class Finished(
         val generation: Long,
         val result: RunResult,
@@ -80,6 +99,8 @@ sealed interface Effect {
     data class StartRun(
         val generation: Long,
         val file: Path,
+        /** The unsaved text to run instead of the file (ADR-0086), or `null`. */
+        val buffer: String? = null,
     ) : Effect
 
     data object CancelRun : Effect
@@ -120,6 +141,7 @@ class RunStateMachine {
                     )
                 }
             }
+            is DesktopEvent.RunBuffer -> runBuffer(state, event, nowMs, now)
             DesktopEvent.Close -> Transition(DesktopState.Idle, listOf(Effect.CancelRun))
             DesktopEvent.Missing -> {
                 val file = state.file
@@ -142,6 +164,36 @@ class RunStateMachine {
             is DesktopEvent.Finished -> finished(state, event, now)
         }
 
+    private fun runBuffer(
+        state: DesktopState,
+        event: DesktopEvent.RunBuffer,
+        nowMs: Long,
+        now: Instant,
+    ): Transition {
+        val file = state.file
+        if (file == null || event.file != file) {
+            // A buffer of another file than the previewed one starts nothing. A run in progress goes on and its picture
+            // stays; the refusal is only shown when no run is going (nothing is cancelled either way).
+            if (file == null || state is DesktopState.Running) return Transition(state, emptyList())
+            val error =
+                DesktopError(
+                    DesktopErrorCodes.SCRIPT_DIR_MISMATCH,
+                    null,
+                    null,
+                    "the buffer does not belong to the previewed file",
+                )
+            return Transition(
+                DesktopState.Error(file, state.generation + 1, listOf(error), state.lastGood, now),
+                emptyList(),
+            )
+        }
+        val gen = state.generation + 1
+        return Transition(
+            DesktopState.Running(file, gen, state.lastGood, nowMs, PreviewOrigin.Buffer(event.text)),
+            listOf(Effect.CancelRun, Effect.StartRun(gen, file, event.text)),
+        )
+    }
+
     private fun finished(
         state: DesktopState,
         event: DesktopEvent.Finished,
@@ -149,10 +201,12 @@ class RunStateMachine {
     ): Transition {
         val file = state.file
         if (file == null || event.generation != state.generation) return Transition(state, emptyList())
+        val origin = (state as? DesktopState.Running)?.origin ?: PreviewOrigin.SavedFile
         val next =
             when (val result = event.result) {
-                is RunResult.Success -> DesktopState.Ok(file, event.generation, result.model)
-                is RunResult.Failure -> DesktopState.Error(file, event.generation, result.errors, state.lastGood, now)
+                is RunResult.Success -> DesktopState.Ok(file, event.generation, result.model.copy(origin = origin))
+                is RunResult.Failure ->
+                    DesktopState.Error(file, event.generation, result.errors, state.lastGood, now, origin)
                 is RunResult.NativeUnavailable ->
                     DesktopState.NativeUnavailable(file, event.generation, result.reason, state.lastGood)
                 is RunResult.Skipped -> DesktopState.Waiting(file, event.generation, result.hint, state.lastGood)

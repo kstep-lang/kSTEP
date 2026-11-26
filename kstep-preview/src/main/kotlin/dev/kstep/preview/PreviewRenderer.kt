@@ -233,6 +233,8 @@ object PreviewRenderer {
             is PreviewSource.ScriptFile -> KStepScriptHost.evalRecording(source.file)
             is PreviewSource.InlineScript ->
                 RecordedEvaluation(KStepScriptHost.eval(source.code, source.displayName), emptyList())
+            is PreviewSource.BufferScript ->
+                KStepScriptHost.evalRecording(source.code, source.displayName, source.scriptDir)
         }
 
     private fun renderSuccess(

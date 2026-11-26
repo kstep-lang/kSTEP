@@ -225,3 +225,7 @@ D1c-3 and D1c-4 are untouched (launcher without Compose in the CLI, jpackage). P
 == Related
 
 ADR-0038 (worker model and watchdog), ADR-0051 (live preview), ADR-0056 and ADR-0059 (AI check, stays cold), ADR-0058 (workspace, stays cold), ADR-0062 (sandbox), ADR-0080 (dependencies).
+
+== Update (Welle D2c-3a)
+
+Protocol fields: the request gains the optional fields `scriptDir`, `displayName` and `sha256` (all three or none) and the decoder now refuses unknown keys; version stays 1. See ADR-0086 D4. A worker is bound, in reuse mode, to the real script of a buffer run, not to the buffer file.

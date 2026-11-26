@@ -9,6 +9,13 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: preview of unsaved text and keys for the banner (Welle D2c-3a, ADR-0086). *View > Run Unsaved*
+  (`Shift+Ctrl/Cmd+R`) previews the editor text once, without saving: the text goes to a private folder (not the session folder)
+  and the worker reads input files next to the real script. The status line names the picture (`Preview: saved file`,
+  `unsaved buffer`, `unsaved buffer (older)`), the export still uses the saved file, a note previews only the saved file.
+  *View > Banner Actions* (`Shift+Ctrl/Cmd+B`) puts the keyboard focus on the banner buttons (Tab/arrows, Enter/Space, Escape).
+  New codes `KSTEP-D-046` to `KSTEP-D-049`. The warm worker request gets optional fields and now refuses unknown keys. Automatic
+  preview while typing is not part of this wave (D2c-3b). Not checked by hand in the window.
 * kSTEP Desktop: editor comfort (Welle D2c-2, ADR-0085). *View > Soft Wrap* (check item, off by default, remembered in
   `layout.json` as the optional key `softWrap`; the file stays version 1) wraps long lines; gutter, error bars, tooltips and
   "go to line" follow the wrapped positions. The bracket next to the caret and its partner are tinted (a lone bracket in the

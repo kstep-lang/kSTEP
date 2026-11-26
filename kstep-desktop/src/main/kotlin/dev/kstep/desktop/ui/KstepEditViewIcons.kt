@@ -154,6 +154,20 @@ internal object KstepEditViewIcons {
                         close()
                     },
                 )
+            // The run triangle, smaller, with a bar beside it: the text as it is now, not the saved one.
+            MenuIconId.RUN_UNSAVED ->
+                listOf(
+                    {
+                        moveTo(3.5f, 3.5f)
+                        lineTo(10.5f, 8.5f)
+                        lineTo(3.5f, 13.5f)
+                        close()
+                    },
+                    {
+                        moveTo(13.5f, 4.5f)
+                        verticalLineTo(12.5f)
+                    },
+                )
             MenuIconId.HOME ->
                 listOf(
                     {
@@ -299,6 +313,25 @@ internal object KstepEditViewIcons {
                         moveTo(9.5f, 9.5f)
                         lineTo(7.5f, 11.5f)
                         lineTo(9.5f, 13.5f)
+                    },
+                )
+            // A banner bar above the text lines, with a button in it.
+            MenuIconId.BANNER ->
+                listOf(
+                    {
+                        moveTo(2.5f, 2.5f)
+                        horizontalLineTo(13.5f)
+                        verticalLineTo(6.5f)
+                        horizontalLineTo(2.5f)
+                        close()
+                    },
+                    {
+                        moveTo(9.5f, 4.5f)
+                        horizontalLineTo(11.5f)
+                        moveTo(2.5f, 9.5f)
+                        horizontalLineTo(13.5f)
+                        moveTo(2.5f, 12.5f)
+                        horizontalLineTo(10.5f)
                     },
                 )
             MenuIconId.KEYBOARD ->

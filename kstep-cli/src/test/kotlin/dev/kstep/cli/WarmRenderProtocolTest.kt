@@ -84,4 +84,34 @@ class WarmRenderProtocolTest :
                 )
             (WarmRenderProtocol.encodeReply(full).length <= WarmRenderProtocol.MAX_REPLY_LINE_BYTES) shouldBe true
         }
+
+        "an unsaved request survives a round trip, one without the fields stays without" {
+            val u = WarmRenderProtocol.Unsaved("/tmp/dir", "a.kstep.kts", "0".repeat(64))
+            val with = WarmRenderProtocol.Request(4, "/tmp/b/x.kstep.kts", "/tmp/o.glb", u)
+            WarmRenderProtocol.decodeRequest(WarmRenderProtocol.encodeRequest(with)) shouldBe with
+            val without = WarmRenderProtocol.Request(5, "/tmp/a.kstep.kts", "/tmp/o.glb")
+            WarmRenderProtocol.encodeRequest(without).contains("scriptDir") shouldBe false
+            WarmRenderProtocol.decodeRequest(WarmRenderProtocol.encodeRequest(without)) shouldBe without
+        }
+
+        "a request with only some of the unsaved fields is a protocol error" {
+            WarmRenderProtocol.decodeRequest(
+                """{"v":1,"id":1,"script":"a","out":"b","scriptDir":"/d","displayName":"n.kstep.kts"}""",
+            ) shouldBe null
+            WarmRenderProtocol.decodeRequest("""{"v":1,"id":1,"script":"a","out":"b","sha256":"00"}""") shouldBe null
+        }
+
+        "an unknown request key is a protocol error, not ignored" {
+            WarmRenderProtocol.decodeRequest("""{"v":1,"id":1,"script":"a","out":"b","extra":true}""") shouldBe null
+        }
+
+        "an unsaved field of the wrong type or of absurd length is a protocol error" {
+            WarmRenderProtocol.decodeRequest(
+                """{"v":1,"id":1,"script":"a","out":"b","scriptDir":5,"displayName":"n","sha256":"0"}""",
+            ) shouldBe null
+            val long = "d".repeat(5000)
+            WarmRenderProtocol.decodeRequest(
+                """{"v":1,"id":1,"script":"a","out":"b","scriptDir":"$long","displayName":"n","sha256":"0"}""",
+            ) shouldBe null
+        }
     })

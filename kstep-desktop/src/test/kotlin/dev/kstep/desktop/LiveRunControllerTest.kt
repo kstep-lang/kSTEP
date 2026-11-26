@@ -139,4 +139,105 @@ class LiveRunControllerTest :
                 h.controller.close()
             }
         }
+
+        "a second buffer run kills the first process and its result is dropped".config(timeout = 60.seconds) {
+            val firstStarted = CountDownLatch(1)
+            val ran = CopyOnWriteArrayList<String>()
+            val controller =
+                LiveRunController(
+                    runner = { _, gen, _ -> RunResult.Success(model(gen)) },
+                    watcherFactory = { _, _ -> AutoCloseable { } },
+                    bufferRunner = { _, text, gen, onStarted ->
+                        ran += text
+                        if (text == "first") {
+                            // a started process that is outdated is killed by the controller
+                            onStarted(ProcessBuilder("sleep", "30").start())
+                            firstStarted.countDown()
+                            Thread.sleep(500)
+                        }
+                        RunResult.Success(model(gen))
+                    },
+                )
+            try {
+                controller.open(file)
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok }
+                controller.runBuffer(file, "first")
+                firstStarted.await(10, TimeUnit.SECONDS) shouldBe true
+                controller.runBuffer(file, "second")
+                val ok = TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok && it.generation == 3L }
+                ok.shouldBeInstanceOf<DesktopState.Ok>().model.origin shouldBe
+                    dev.kstep.desktop.run.PreviewOrigin
+                        .Buffer("second")
+                ran.toList() shouldBe listOf("first", "second")
+            } finally {
+                controller.close()
+            }
+        }
+
+        "a buffer run does not replace the watched input files" {
+            var replaced = 0
+            val controller =
+                LiveRunController(
+                    runner = { _, gen, _ -> RunResult.Success(model(gen), dependencies = emptyList()) },
+                    watcherFactory = { _, _ -> AutoCloseable { } },
+                    dependencyWatchFactory = { _ ->
+                        object : dev.kstep.desktop.watch.DependencyWatch {
+                            override fun replace(paths: Set<Path>) {
+                                replaced++
+                            }
+
+                            override fun close() = Unit
+                        }
+                    },
+                    bufferRunner = { _, _, gen, _ -> RunResult.Success(model(gen), dependencies = emptyList()) },
+                )
+            try {
+                controller.open(file)
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok }
+                // the watcher is installed right after the first run is dispatched; a second saved run surely reports
+                controller.forceRun()
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok && it.generation == 2L }
+                val afterFileRun = replaced
+                (afterFileRun >= 1) shouldBe true
+                controller.runBuffer(file, "x")
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok && it.generation == 3L }
+                replaced shouldBe afterFileRun
+            } finally {
+                controller.close()
+            }
+        }
+
+        "a note is never run from a buffer" {
+            val controller =
+                LiveRunController(
+                    runner = { _, gen, _ -> RunResult.Success(model(gen)) },
+                    watcherFactory = { _, _ -> AutoCloseable { } },
+                    bufferRunner = { _, _, _, _ -> error("must not run") },
+                    isRouted = { true },
+                )
+            try {
+                controller.open(file)
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok }
+                controller.runBuffer(file, "x")
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Waiting }
+            } finally {
+                controller.close()
+            }
+        }
+
+        "without a buffer runner the run ends in a clear error" {
+            val controller =
+                LiveRunController(
+                    runner = { _, gen, _ -> RunResult.Success(model(gen)) },
+                    watcherFactory = { _, _ -> AutoCloseable { } },
+                )
+            try {
+                controller.open(file)
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok }
+                controller.runBuffer(file, "x")
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Error }
+            } finally {
+                controller.close()
+            }
+        }
     })

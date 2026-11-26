@@ -46,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -79,6 +80,7 @@ import dev.kstep.desktop.drop.DropPaths
 import dev.kstep.desktop.drop.PendingNote
 import dev.kstep.desktop.drop.PendingResolution
 import dev.kstep.desktop.drop.StartRequest
+import dev.kstep.desktop.edit.BannerActions
 import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorState
@@ -109,6 +111,7 @@ import dev.kstep.desktop.menu.exportToolbarState
 import dev.kstep.desktop.menu.homeToolbarState
 import dev.kstep.desktop.menu.isPlainKey
 import dev.kstep.desktop.menu.openToolbarState
+import dev.kstep.desktop.menu.stateOf
 import dev.kstep.desktop.menu.treeToolbarState
 import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.model.PartTable
@@ -146,12 +149,15 @@ import dev.kstep.desktop.run.DesktopState
 import dev.kstep.desktop.run.ErrorBarText
 import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.PackagedHint
+import dev.kstep.desktop.run.PreviewOrigin
 import dev.kstep.desktop.run.SandboxNotice
 import dev.kstep.desktop.run.UserSandboxState
 import dev.kstep.desktop.run.sandboxNotice
 import dev.kstep.desktop.settings.LayoutPreferences
 import dev.kstep.desktop.settings.LayoutPreferencesStore
+import dev.kstep.desktop.status.PreviewOriginLabel
 import dev.kstep.desktop.status.StatusLineText
+import dev.kstep.desktop.status.previewOriginLabel
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.viewer.camera.ViewerCameraState
 import dev.kstep.viewer.ui.CanvasHighlight
@@ -183,6 +189,7 @@ private const val ERROR_BAR_MAX_FRACTION = 0.4f
 private const val SCRIPT_FILTER_SUFFIX = ".kstep.kts"
 private const val MIN_PANE_DP = 240
 private const val TREE_DIVIDER_DP = 1
+private const val DIMMED_PICTURE_ALPHA = 0.6f
 private const val EDITOR_DIVIDER_DP = 7 // the 1 dp line and the 6 dp drag handle between editor and viewer
 
 /**
@@ -303,6 +310,7 @@ fun FrameWindowScope.DesktopApp(
     val initialLayout = remember { layoutStore.load() }
     var editorFraction by remember { mutableStateOf(initialLayout.editorFraction.toFloat()) }
     var softWrap by remember { mutableStateOf(initialLayout.softWrap) }
+    var bannerFocusSignal by remember { mutableStateOf(0) }
     // Both settings share one file: every save carries the current value of the other one (ADR-0085).
     val saveLayout: () -> Unit = {
         val preferences = LayoutPreferences(editorFraction.toDouble(), softWrap)
@@ -844,6 +852,10 @@ fun FrameWindowScope.DesktopApp(
             exportDialogVisible = exportVisible,
             convertDialogVisible = convertState !is ConvertState.Idle,
             softWrap = softWrap,
+            bannerHasActions = BannerActions.hasActions(editorView),
+            editorIsScript = !(knowledgeOpen && state.file?.let { knowledge.isWorkspaceFile(it) } == true),
+            editorDirty = editorView.dirty,
+            draftOfferOpen = editorView.draftOffer != null,
         )
     val onEditAction: (EditAction) -> Unit = {
         editorCommandNonce++
@@ -871,6 +883,13 @@ fun FrameWindowScope.DesktopApp(
     val onViewAction: (ViewAction) -> Unit = {
         when (it) {
             ViewAction.RUN -> controller.forceRun()
+            ViewAction.RUN_UNSAVED -> {
+                // judged again here: the menu state may be a moment old when the key arrives
+                val editing = editorView.state as? EditorState.Editing
+                if (editing != null && stateOf(ViewAction.RUN_UNSAVED, menuContext).enabled) {
+                    controller.runBuffer(editing.path, editing.text)
+                }
+            }
             ViewAction.HOME -> home()
             ViewAction.PREVIOUS_BLOCK -> jumpBlock(false)
             ViewAction.NEXT_BLOCK -> jumpBlock(true)
@@ -886,6 +905,7 @@ fun FrameWindowScope.DesktopApp(
                 softWrap = !softWrap
                 saveLayout()
             }
+            ViewAction.FOCUS_BANNER -> bannerFocusSignal++
         }
     }
     val onFileAction: (FileAction) -> Unit = {
@@ -993,6 +1013,7 @@ fun FrameWindowScope.DesktopApp(
                         ExportDialogContext(
                             scriptName = exportScript?.fileName?.toString().orEmpty(),
                             dirty = editorView.dirty,
+                            previewIsBuffer = state.lastGood?.origin is PreviewOrigin.Buffer,
                             nativeUnavailable = state is DesktopState.NativeUnavailable,
                             saveError = exportSaveError,
                             tick = exportNow,
@@ -1101,6 +1122,8 @@ fun FrameWindowScope.DesktopApp(
                             modifier = Modifier.width(windowWidth * effectiveFraction).fillMaxHeight(),
                             errorLine = selectedError?.line,
                             softWrap = softWrap,
+                            bannerFocusSignal = bannerFocusSignal,
+                            errorBase = ((state as? DesktopState.Error)?.origin as? PreviewOrigin.Buffer)?.text,
                             findRequest = findRequest,
                             editorCommand = editorCommand,
                             onUserEdit = { selectedError = null },
@@ -1179,18 +1202,25 @@ fun FrameWindowScope.DesktopApp(
                                 )
                             }
                             Box(Modifier.weight(1f).fillMaxWidth()) {
-                                Canvas(
-                                    state,
-                                    display,
-                                    camera,
-                                    fitReference,
-                                    openFile,
-                                    highlight,
-                                    picking,
-                                    canvasVisibility,
-                                    if (workspace is WorkspaceState.None) recent.entries else emptyList(),
-                                    openFromRecent,
-                                )
+                                // while an unsaved buffer is being run the old picture is dimmed (ADR-0086)
+                                val dimmed =
+                                    (state as? DesktopState.Running)?.let {
+                                        it.origin is PreviewOrigin.Buffer && it.lastGood != null
+                                    } == true
+                                Box(Modifier.fillMaxSize().alpha(if (dimmed) DIMMED_PICTURE_ALPHA else 1f)) {
+                                    Canvas(
+                                        state,
+                                        display,
+                                        camera,
+                                        fitReference,
+                                        openFile,
+                                        highlight,
+                                        picking,
+                                        canvasVisibility,
+                                        if (workspace is WorkspaceState.None) recent.entries else emptyList(),
+                                        openFromRecent,
+                                    )
+                                }
                                 Badge(state)
                                 selectedPart?.let {
                                     InspectionPanel(
@@ -1320,7 +1350,11 @@ private fun Toolbar(
                     aiStatus,
                     visibilityStatusText(counts),
                 ).filter { it.isNotEmpty() }.joinToString(StatusLineText.SEPARATOR) +
-                    if (editor.dirty) "  ·  unsaved changes  ·  preview shows saved file" else "",
+                    if (editor.dirty) "  ·  unsaved changes" else "",
+            previewLabel =
+                previewOriginLabel(state.lastGood?.origin, editor.text.takeIf { editor.state is EditorState.Editing })
+                    ?.takeIf { editor.dirty || it != PreviewOriginLabel.SAVED },
+            accent = if (isSystemInDarkTheme()) ACCENT_DARK else ACCENT_LIGHT,
         )
     }
 }

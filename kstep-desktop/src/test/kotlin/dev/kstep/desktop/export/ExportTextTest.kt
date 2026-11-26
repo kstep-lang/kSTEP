@@ -59,4 +59,11 @@ class ExportTextTest :
             ExportText.progressFraction(50, 10) shouldBe 1f
             ExportText.progressFraction(-1, 10) shouldBe 0f
         }
+
+        "the dialog says the export uses the saved file; a buffer preview is named too (ADR-0086)" {
+            ExportText.unsavedNotes(dirty = false, previewIsBuffer = false) shouldBe emptyList()
+            ExportText.unsavedNotes(dirty = true, previewIsBuffer = false) shouldBe listOf("Exports the saved file.")
+            ExportText.unsavedNotes(dirty = true, previewIsBuffer = true) shouldBe
+                listOf("Exports the saved file.", "The preview shows the unsaved buffer.")
+        }
     })

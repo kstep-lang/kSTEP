@@ -6,6 +6,7 @@ import dev.kstep.desktop.run.DesktopEvent
 import dev.kstep.desktop.run.DesktopModel
 import dev.kstep.desktop.run.DesktopState
 import dev.kstep.desktop.run.Effect
+import dev.kstep.desktop.run.PreviewOrigin
 import dev.kstep.desktop.run.RunResult
 import dev.kstep.desktop.run.RunStateMachine
 import io.kotest.core.spec.style.StringSpec
@@ -130,5 +131,69 @@ class RunStateMachineTest :
             closed.effects.shouldContain(Effect.CancelRun)
             val reopened = step(closed.state, DesktopEvent.Open(file, floor = 2))
             reopened.state.generation shouldBe 3
+        }
+
+        "RunBuffer starts a new generation with the buffer as origin and the exact text in the effect" {
+            val open = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val ok = step(open, DesktopEvent.Finished(1, RunResult.Success(model(1)))).state
+            val t = step(ok, DesktopEvent.RunBuffer(file, "val x = 1"))
+            val running = t.state.shouldBeInstanceOf<DesktopState.Running>()
+            running.generation shouldBe 2
+            running.origin shouldBe PreviewOrigin.Buffer("val x = 1")
+            running.lastGood?.generation shouldBe 1
+            t.effects shouldBe listOf(Effect.CancelRun, Effect.StartRun(2, file, "val x = 1"))
+        }
+
+        "a Changed event after RunBuffer drops the buffer result: the generation is outdated" {
+            val open = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val buffer = step(open, DesktopEvent.RunBuffer(file, "a")).state
+            val changed = step(buffer, DesktopEvent.Changed)
+            changed.state
+                .shouldBeInstanceOf<DesktopState.Running>()
+                .origin shouldBe PreviewOrigin.SavedFile
+            val late = step(changed.state, DesktopEvent.Finished(2, RunResult.Success(model(2))))
+            late.state shouldBe changed.state
+            late.effects.shouldBeEmpty()
+        }
+
+        "RunBuffer of another file is an error without a run" {
+            val open = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val ok = step(open, DesktopEvent.Finished(1, RunResult.Success(model(1)))).state
+            val t = step(ok, DesktopEvent.RunBuffer(Path.of("/tmp/other.kstep.kts"), "a"))
+            val error = t.state.shouldBeInstanceOf<DesktopState.Error>()
+            error.errors.single().code shouldBe DesktopErrorCodes.SCRIPT_DIR_MISMATCH
+            t.effects.shouldBeEmpty()
+        }
+
+        "RunBuffer of another file while a run is going keeps the state and cancels nothing" {
+            val running = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            running.shouldBeInstanceOf<DesktopState.Running>()
+            val t = step(running, DesktopEvent.RunBuffer(Path.of("/tmp/other.kstep.kts"), "a"))
+            t.state shouldBe running
+            t.effects.shouldBeEmpty()
+        }
+
+        "RunBuffer without a file does nothing" {
+            val t = step(DesktopState.Idle, DesktopEvent.RunBuffer(file, "a"))
+            t.state shouldBe DesktopState.Idle
+            t.effects.shouldBeEmpty()
+        }
+
+        "the origin of a run reaches the model and the error state, a file run gets SavedFile" {
+            val open = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val buffer = step(open, DesktopEvent.RunBuffer(file, "buf")).state
+            val ok = step(buffer, DesktopEvent.Finished(2, RunResult.Success(model(2)))).state
+            ok.shouldBeInstanceOf<DesktopState.Ok>().model.origin shouldBe PreviewOrigin.Buffer("buf")
+            val again = step(ok, DesktopEvent.RunBuffer(file, "buf2")).state
+            val failed =
+                step(
+                    again,
+                    DesktopEvent.Finished(3, RunResult.Failure(listOf(DesktopError("KSTEP-S-001", 1, 1, "x")))),
+                ).state
+            failed.shouldBeInstanceOf<DesktopState.Error>().origin shouldBe PreviewOrigin.Buffer("buf2")
+            failed.lastGood?.origin shouldBe PreviewOrigin.Buffer("buf")
+            val saved = step(failed, DesktopEvent.ForceRun).state
+            val savedOk = step(saved, DesktopEvent.Finished(4, RunResult.Success(model(4)))).state
+            savedOk.shouldBeInstanceOf<DesktopState.Ok>().model.origin shouldBe PreviewOrigin.SavedFile
         }
     })

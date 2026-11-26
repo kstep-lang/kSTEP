@@ -56,4 +56,32 @@ class ErrorAnchorTrackerTest :
                 .start shouldBe 6
             t.update(emptyList(), saved, saved).anchors shouldBe emptyList()
         }
+
+        "an unsaved run pins the marks against the exact text it was sent, not against the saved file (ADR-0086)" {
+            val t = ErrorAnchorTracker()
+            val onLine3 = listOf(DesktopError("KSTEP-S-001", 3, 1, "m"))
+            val sent = "X\n" + saved // the snapshot the worker saw: "X\na\nbcd\ne"; line 3 is "bcd"
+            val first =
+                t
+                    .update(onLine3, sent, sent)
+                    .anchors
+                    .single()
+                    .start
+            first shouldBe 4 // against the saved text, line 3 would be "e" at 6
+            // typing afterwards moves the mark with the text
+            t
+                .update(onLine3, sent, "YY" + sent)
+                .anchors
+                .single()
+                .start shouldBe 6
+        }
+
+        "a run of the saved file still uses the saved text as base" {
+            val t = ErrorAnchorTracker()
+            t
+                .update(errors, saved, saved)
+                .anchors
+                .single()
+                .start shouldBe 2
+        }
     })

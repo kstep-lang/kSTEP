@@ -22,6 +22,8 @@ data class DesktopModel(
     val tree: AssemblyTree? = null,
     /** File names the script declared in its `export { }` block (ADR-0063), validated; empty without a block. */
     val scriptExportTargets: List<ScriptExportTarget> = emptyList(),
+    /** The text the picture came from (ADR-0086): set by the reducer, never by the worker. */
+    val origin: PreviewOrigin = PreviewOrigin.SavedFile,
 )
 
 /** The end of one run of the render worker. */

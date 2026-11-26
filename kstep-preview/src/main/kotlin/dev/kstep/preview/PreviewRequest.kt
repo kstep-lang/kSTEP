@@ -32,6 +32,16 @@ sealed interface PreviewSource {
         val code: String,
         override val displayName: String,
     ) : PreviewSource
+
+    /**
+     * Text that is not (yet) the file it belongs to, such as an unsaved editor buffer (ADR-0086): evaluated as
+     * [displayName] in [scriptDir], so input files resolve next to the real script, exactly like [ScriptFile].
+     */
+    data class BufferScript(
+        val code: String,
+        override val displayName: String,
+        val scriptDir: File,
+    ) : PreviewSource
 }
 
 data class PreviewRequest(

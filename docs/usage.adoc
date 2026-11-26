@@ -955,7 +955,9 @@ visible with a yellow badge and the time of that result; the error bar below sho
 | Ctrl/Cmd+S | Save the script (the preview shows the saved file)
 | Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, Ctrl+Y | Undo, redo (the editor's own history)
 | Enter, Tab | New line with the indentation of the line (one level deeper after `{`); four spaces
-| Ctrl/Cmd+R | Run again now
+| Ctrl/Cmd+R | Run again now (the saved file)
+| Shift+Ctrl/Cmd+R | Run Unsaved: preview the editor text as it is now, once (ADR-0086)
+| Shift+Ctrl/Cmd+B | Banner Actions: move the keyboard focus to the buttons of the banner (Tab or arrows, Enter or Space, Escape)
 | H | Reset camera and fit scale to the current shape (`H` does not hide a part; hiding is `V`)
 | T | Toggle the selected part or sub-assembly transparent (not while the editor has the focus)
 | V | Toggle it hidden
@@ -981,14 +983,29 @@ visible with a yellow badge and the time of that result; the error bar below sho
 | `KSTEP-D-010` | The file is not editable text (NUL byte, invalid UTF-8, a line over 20 000 characters): preview only
 | `KSTEP-D-011` | Saving failed (read-only file or folder, disk full, atomic replace unsupported, other I/O); the buffer is kept
 | `KSTEP-D-012` | Warning: the list of drawn parts could not be trusted (bad ranges, names, colours or too many parts); the model is shown, selection is off
+| `KSTEP-D-046` | Run Unsaved: the unsaved text is larger than 1 MiB; save it to preview
+| `KSTEP-D-047` | Run Unsaved: the private folder for the text is not safe (link, owner or permissions changed); the run is stopped
+| `KSTEP-D-048` | Run Unsaved: the text could not be written for the run
+| `KSTEP-D-049` | Run Unsaved: the folder or the name of the script is not usable, or the text belongs to another file
 |===
 
-The editor (ADR-0052) sits left of the preview. Editing does not change the preview: the preview always shows the saved file, and
-the status line says so while there are unsaved changes (the window title carries a dot). A click on an error in the error bar moves
+The editor (ADR-0052) sits left of the preview. Editing does not change the preview: the preview shows the saved file, except after *View > Run Unsaved* (see below), and
+the status line says which one it is while there are unsaved changes (the window title carries a dot). A click on an error in the error bar moves
 the caret to it. If the file changes on disk while you have unsaved changes, a banner offers Reload (the disk version becomes the
 buffer, undoable) or Keep mine (the next save overwrites the disk version); Save writes nothing until you chose. A script that is
 too large or not UTF-8 text stays preview-only, with the reason in the banner. Closing the window or opening another file with
 unsaved changes asks Save / Don't Save / Cancel; a failed save keeps the window open.
+
+Run Unsaved (ADR-0086): *View > Run Unsaved* (Shift+Ctrl/Cmd+R, enabled when the editor has unsaved changes) runs the editor text once,
+without saving it. The script runs as if it were the real file: input files are read from its own folder. The status line shows
+*Preview: unsaved buffer* (or *(older)* when you have typed since), the old picture is dimmed while the run is in progress, and the
+error marks refer to the text that was run. A save, a change on disk or *Run* starts a normal run again. Export and Save always use
+the saved file; the export dialog says so. A note previews only the saved file, and while a draft offer is open the entry is
+disabled. Texts over 1 MiB are not run (`KSTEP-D-046`). Banner keys: *View > Banner Actions* (Shift+Ctrl/Cmd+B) puts the focus on
+the first usable button of the banner (Restore, Discard, Reload, Keep mine, Open or OK); Tab or the arrow keys move, Enter or
+Space press, Escape gives the focus back to the editor. Known limits: no automatic preview while typing yet (planned as D2c-3b);
+on Windows the private folder is only checked for links, type and owner, and there is no worker sandbox; after `kill -9` the
+folder `kstep-desktop-unsaved-*` stays in the temp folder until the system cleans it.
 
 Editor comfort (ADR-0085): with the caret next to a bracket (`()`, `[]`, `{}`) and nothing selected, the bracket and its partner
 are tinted; a bracket without a partner is tinted like an error line. Brackets inside strings, comments and the `${` and `}` of a

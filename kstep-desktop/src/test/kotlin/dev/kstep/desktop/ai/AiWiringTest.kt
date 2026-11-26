@@ -24,7 +24,7 @@ import java.time.Instant
 
 class AiWiringTest :
     StringSpec({
-        "error codes D-001 to D-038 and D-042 to D-045 are gap-free and unique" {
+        "error codes D-001 to D-038 and D-042 to D-049 are gap-free and unique" {
             val desktop =
                 DesktopErrorCodes::class.java.declaredFields
                     .filter {
@@ -34,7 +34,7 @@ class AiWiringTest :
                     }.map { it.apply { isAccessible = true }.get(null) as String }
             val all = desktop + AiErrorCodes.all
             all.toSet().size shouldBe all.size
-            all.sorted() shouldBe ((1..38) + (42..45)).map { "KSTEP-D-%03d".format(it) }
+            all.sorted() shouldBe ((1..38) + (42..49)).map { "KSTEP-D-%03d".format(it) }
         }
 
         "the AI script limit equals the editor limit" {

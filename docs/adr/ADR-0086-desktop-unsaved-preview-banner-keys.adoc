@@ -1,0 +1,49 @@
+= ADR-0086: Preview of unsaved text and keys for the banner (Welle D2c-3a)
+:toc:
+
+== Status
+
+Accepted (Welle D2c-3a). Scope: `kstep-desktop` (menu, banner, editor, run path), `kstep-cli` (both render workers, the warm protocol, one new class), `kstep-preview` (one new source type) and `kstep-script` (one new overload). No new dependency. New error codes `KSTEP-D-046` to `KSTEP-D-049`. Closes the first half of the point ADR-0052 moved to D2b ("live preview of the unsaved buffer"): the preview of unsaved text on request. The automatic preview while typing is *not* part of this wave (D2c-3b, see below). Not checked by hand in the window: the logic and the worker processes are tested, the Compose wiring compiles and a headless scene test presses the banner keys, but the menu, the dimming and the status line were not looked at in a real window.
+
+== Context
+
+Two things were missing. The banner buttons (Restore, Discard, Reload, Keep mine, Open, OK) could only be pressed with the mouse. And the preview always showed the saved file (ADR-0052), so trying a change meant saving it first, which also overwrites the disk version.
+
+== Decision
+
+D1. Keys. *View > Banner Actions* (`Shift+Ctrl/Cmd+B`) moves the keyboard focus to the first usable button of the banner; the entry is disabled with the reason "No banner with actions is shown" when there is none. *View > Run Unsaved* (`Shift+Ctrl/Cmd+R`) previews the editor text once. Both are menu-owned shortcuts (ADR-0072), so the reasons of a disabled entry show up in the status line. A test asserts that no two shortcuts of the File, Edit and View menus and the editor-only keys collide on any of the three systems.
+
+D2. Banner focus. The buttons of the banner are drawn from `BannerActions.slots` (pure, no Compose); `bannerKind` moved from `ui` to `edit` so that the logic and the drawing share one source. The order is the order drawn: Restore, Discard / Reload, Keep mine / Open / OK. A disabled button (Restore of a draft that cannot be edited, Reload of a conflict that cannot be reloaded) is skipped. `Tab` and the arrows cycle, `Enter` and `Space` press the button and hand the focus back to the editor, `Escape` hands it back without pressing. `Tab` in the editor still inserts the indentation and `Escape` in the editor is unchanged. Handled key presses and their releases are consumed, so a button is never pressed twice by its own built-in key handling. The focused button has a two-pixel outline in the accent colour; the banner shows the key as a hint.
+
+D3. Where the text goes. "Run Unsaved" writes the editor text to a file of its own and starts the worker on that file. The file is *not* in the session folder: the sandbox of the user flows (ADR-0062) lets a script write to the session folder, so a script of an earlier run of the warm worker could swap a file there. The text goes to `kstep-desktop-unsaved-<random>` in the system temp folder (mode `rwx------`), a sibling that the sandbox can read but not write (macOS profile: writes only to the session and worker temp folders; Linux: `--ro-bind / /`, with `/tmp` left readable for the user flows). `UnsavedBufferStore` re-checks the folder before every write (a plain directory, not a link, the same real path and owner as the first time, mode exactly `rwx------`) and does *not* repair it: a deviation is a sign of tampering and ends the run with `KSTEP-D-047`. A file gets a random UUID name, is created with `CREATE_NEW` without following links (mode `rw-------`), synced, and removed in `finally` after the run, whatever its end. The store is closed with the controller and in a shutdown hook.
+
+D4. Protocol. The warm request (still version 1) carries three optional fields: `scriptDir` (the folder of the real script), `displayName` (its file name) and `sha256` (lower-case hex of the bytes written). Either all three or none; anything else is a protocol error. Decoding is now strict about keys: a key outside `v, id, script, out, scriptDir, displayName, sha256` is a protocol error (before, unknown fields were ignored). The three values are at most 4096 characters each, so the 64 KiB line limit still holds. The cold worker takes the same three values as worker-private options before the positional argument; `kstep render` itself does not know them (tested).
+
+D5. Worker-side validation (`UnsavedBufferInput`, used by both workers). The buffer path must be absolute, normalised and named like `<uuid>.kstep.kts`; the file is a regular file, no link, at most 1 MiB (checked before reading, and again with a hard read limit of 1 MiB + 1 byte), strict UTF-8, and its SHA-256 equals the given one (a new digest per call, constant-time compare). The script folder must be absolute, normalised and a directory. The display name is a plain file name ending in `.kstep.kts`: at most 255 characters, no `/`, `\`, `..`, control, DEL or bidirectional-override character, because it appears in messages. A refusal prints only `kstep-unsaved-refused:<REASON>` on stderr (no path, no content) and ends the warm process (`recycle`). The desktop maps the reasons to `KSTEP-D-049` (folder or name) or `KSTEP-D-047` (everything about the buffer file).
+
+D6. Path rule. The script is evaluated as if it were the file `displayName` in `scriptDir` (`KStepScriptHost.evalRecording(code, displayName, scriptDir)`): the recorder's base is the real path of `scriptDir`, the same rule as for a file, so `readInput("data.txt")` finds the file next to the *real* script and `../x` is refused as before. The input path rules did not change. The real file need not exist (banner "deleted on disk"); its folder must.
+
+D7. Origin lives in the model. `DesktopModel.origin` is `SavedFile` or `Buffer(text)`; `Running` and `Error` carry the origin of their run. The reducer, not the worker, sets it. A saved-file event (`Changed`, `ForceRun`, `Open`) starts a new generation and so supersedes a running buffer run; `RunBuffer` for another file than the previewed one is an error (`KSTEP-D-049`) and starts nothing. A buffer run does not replace the watched input files (ADR-0080): the observation stays on the saved file. The status line says *Preview: saved file*, *Preview: unsaved buffer* or *Preview: unsaved buffer (older)* (the editor text differs from the text that was run); a buffer picture is drawn in the accent colour. While a buffer run is in progress the old picture is dimmed to 60 %.
+
+D8. Error marks. The marks of a failed buffer run are pinned against the exact text that was sent (the snapshot kept in the origin), not against the saved file and not against the editor text of a moment later; the tracker then replays the difference to the current text, as in ADR-0085 D6.
+
+D9. Export, save and notes. The export, Save and the input watch never see the buffer: the export dialog says "Exports the saved file." when the editor is dirty, and additionally "The preview shows the unsaved buffer." when the picture is from the buffer. A note (knowledge workspace) previews only the saved file: the menu entry is disabled with the reason, and the controller refuses a buffer run for a routed file as well. While a draft offer is open (ADR-0084) the entry is disabled too. Codes: `KSTEP-D-046` text larger than 1 MiB, `-047` private folder unsafe, `-048` text could not be written, `-049` folder or name of the script unusable.
+
+== Rejected
+
+* `Escape` or `F6` as the focus key: `Escape` already closes the bars and returns to the editor, `F6` is taken by some window managers; a menu-owned shortcut shows its reasons.
+* Sending the text through stdin or a protocol version 2: the worker's stdin carries requests only, and a bigger line limit would weaken the bound against a flooding script.
+* The buffer in the session folder: see D3.
+* Running the buffer in place of the saved file on every change: that is D2c-3b.
+
+== Consequences
+
+* The status line and the export dialog now tell where the picture comes from; the old fixed text "preview shows saved file" is gone.
+* The worker request has three more fields and a strict key set. Desktop and worker always come from the same build, so no compatibility path exists.
+
+== Not covered
+
+* D2c-3b: the check item *Preview Unsaved Changes* (off by default) with `previewUnsaved` in `layout.json` (strict boolean, version 1), a debounce of 800 ms and at most one run per 2 s, no automatic run while a draft offer is open, for a note, for text over 1 MiB (one `KSTEP-D-046`) or in an unfocused window, an error run that does not replace the good picture, and the tests for debounce, rate limit and replacement while typing.
+* Windows: the folder is checked for link, directory and owner only; there is no ACL hardening (the draft store has none either), and Windows has no worker sandbox.
+* After `kill -9` the folder `kstep-desktop-unsaved-*` stays until the system cleans its temp folder, as the session folder does today. Old folders of other processes are not cleaned up on start: deleting folders by name pattern in a shared folder would be riskier than leaving them.
+* Not checked by hand in a real window on any system; the OCCT-dependent desktop tests are unchanged.

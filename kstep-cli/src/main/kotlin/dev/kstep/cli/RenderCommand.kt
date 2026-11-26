@@ -38,10 +38,16 @@ import java.io.File
 fun runRender(
     command: CliCommand.Render,
     includeParts: Boolean = false,
+    // an unsaved buffer (ADR-0086) replaces the file; the output path is then never derived from the buffer's path
+    source: PreviewSource? = null,
 ) {
+    if (source != null && command.outPath == null) {
+        System.err.println("kstep render: an unsaved buffer needs an explicit --out")
+        RenderExit.exit(2)
+    }
     val request =
         PreviewRequest(
-            source = PreviewSource.ScriptFile(File(command.scriptPath)),
+            source = source ?: PreviewSource.ScriptFile(File(command.scriptPath)),
             format = command.format,
             width = command.width,
             height = command.height,

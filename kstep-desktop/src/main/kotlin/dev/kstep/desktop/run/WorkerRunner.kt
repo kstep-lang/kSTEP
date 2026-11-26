@@ -3,6 +3,8 @@ package dev.kstep.desktop.run
 import dev.kstep.cli.DesktopRenderWorker
 import dev.kstep.cli.ImportWorkerLaunch
 import dev.kstep.cli.ImportWorkerSupervisor
+import dev.kstep.cli.UnsavedBufferInput
+import dev.kstep.cli.WarmRenderProtocol
 import dev.kstep.cli.WorkerOutcome
 import dev.kstep.cli.diagnosticLine
 import dev.kstep.desktop.ai.AiErrorCodes
@@ -63,6 +65,8 @@ class WorkerRunner(
     private val sandboxFailureMessage: String? = null,
     /** The warm worker of the live preview (ADR-0081); `null` is the cold path, one fresh process per run. */
     private val warm: WarmWorkerClient? = null,
+    /** Where the text of "Run Unsaved" is put for the worker (ADR-0086); a folder of its own, created at first use. */
+    private val bufferStore: UnsavedBufferStore = UnsavedBufferStore(),
     private val supervisorFactory: (Long, Path, (Process) -> Unit) -> ImportWorkerSupervisor =
         { timeout, base, started ->
             ImportWorkerSupervisor(
@@ -86,12 +90,32 @@ class WorkerRunner(
     /** Ends the warm worker, if any (the session is closing). */
     fun closeWarm() {
         warm?.close()
+        bufferStore.close()
     }
 
     fun run(
         file: Path,
         generation: Long,
         onStarted: (Process) -> Unit,
+    ): RunResult = execute(file, generation, onStarted, buffer = null)
+
+    /**
+     * Runs [text], the unsaved editor buffer of [file] (ADR-0086), as if it were that file: the worker reads the input
+     * files next to [file] ([file] itself need not exist, its folder must). The text goes to a private folder outside the
+     * session folder and is removed after the run, whatever its end.
+     */
+    fun runBuffer(
+        file: Path,
+        text: String,
+        generation: Long,
+        onStarted: (Process) -> Unit,
+    ): RunResult = execute(file, generation, onStarted, buffer = text)
+
+    private fun execute(
+        file: Path,
+        generation: Long,
+        onStarted: (Process) -> Unit,
+        buffer: String?,
     ): RunResult {
         if (worker is WorkerLocationResult.Broken) return failure(worker.code, worker.reason)
         if (sandbox is WorkerSandbox.Unavailable) {
@@ -106,20 +130,37 @@ class WorkerRunner(
                 if (sandboxFailureMessage == null) SessionDirGuard.MESSAGE else GUARD_MESSAGE_USER,
             )
         }
-        FileArgument.validate(file)?.let { return failure(DesktopErrorCodes.FILE_MISSING, it) }
+        var prepared: PreparedBuffer? = null
+        if (buffer == null) {
+            FileArgument.validate(file)?.let { return failure(DesktopErrorCodes.FILE_MISSING, it) }
+        } else {
+            when (val p = prepareBuffer(file, buffer)) {
+                is BufferPreparation.Refused -> return p.result
+                is BufferPreparation.Ready -> prepared = p.buffer
+            }
+        }
         val out = sessionDir.resolve("run-$generation.glb")
         Files.deleteIfExists(out)
         val startedNanos = System.nanoTime()
         try {
+            val target = prepared?.path ?: file.toAbsolutePath().normalize()
             val outcome =
-                warm?.run(file.toAbsolutePath().normalize(), out, timeoutMillis, onStarted)
-                    ?: runCold(file, out, onStarted)
+                warm?.run(
+                    target,
+                    out,
+                    timeoutMillis,
+                    onStarted,
+                    prepared?.unsaved,
+                    bindTo = file.toAbsolutePath().normalize(),
+                )
+                    ?: runCold(target, out, onStarted, prepared?.unsaved)
             if (warm != null && sandbox != null && !guard.intact()) {
                 // The folder of the session was changed while the script ran: the warm process is not trusted any more.
                 warm.reset()
                 return failure(sandboxFailureCode, GUARD_MESSAGE_USER)
             }
             val durationMs = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI
+            if (prepared != null) refusalOf(outcome)?.let { return it }
             return judge(outcome, out, generation, durationMs, file)
         } finally {
             try {
@@ -127,6 +168,72 @@ class WorkerRunner(
             } catch (_: Exception) {
                 logger.warn { "could not remove a temporary preview file" }
             }
+            prepared?.let { bufferStore.delete(it.path) }
+        }
+    }
+
+    private class PreparedBuffer(
+        val path: Path,
+        val unsaved: WarmRenderProtocol.Unsaved,
+    )
+
+    private sealed interface BufferPreparation {
+        class Ready(
+            val buffer: PreparedBuffer,
+        ) : BufferPreparation
+
+        class Refused(
+            val result: RunResult,
+        ) : BufferPreparation
+    }
+
+    private fun prepareBuffer(
+        file: Path,
+        text: String,
+    ): BufferPreparation {
+        val real = file.toAbsolutePath().normalize()
+        val dir = real.parent
+        val name = real.fileName?.toString().orEmpty()
+        if (dir == null || !Files.isDirectory(dir) || !UnsavedBufferInput.validDisplayName(name)) {
+            return BufferPreparation.Refused(
+                failure(DesktopErrorCodes.SCRIPT_DIR_MISMATCH, "the folder or the name of the script is not usable"),
+            )
+        }
+        return when (val written = bufferStore.write(text)) {
+            UnsavedBufferStore.Written.TooLarge ->
+                BufferPreparation.Refused(
+                    failure(
+                        DesktopErrorCodes.UNSAVED_RUN_TOO_LARGE,
+                        "the unsaved text is larger than 1 MiB; save it to preview",
+                    ),
+                )
+            is UnsavedBufferStore.Written.Unsafe ->
+                BufferPreparation.Refused(failure(DesktopErrorCodes.SESSION_DIR_UNSAFE, UNSAFE_MESSAGE))
+            is UnsavedBufferStore.Written.Failed ->
+                BufferPreparation.Refused(
+                    failure(
+                        DesktopErrorCodes.UNSAVED_RUN_WRITE_FAILED,
+                        "the unsaved text could not be written for the run",
+                    ),
+                )
+            is UnsavedBufferStore.Written.Ok ->
+                BufferPreparation.Ready(
+                    PreparedBuffer(written.path, WarmRenderProtocol.Unsaved(dir.toString(), name, written.sha256Hex)),
+                )
+        }
+    }
+
+    // The worker refused the buffer (ADR-0086): only the reason code travels, mapped to the desktop codes. The warm
+    // process has already asked to be recycled.
+    private fun refusalOf(outcome: WorkerOutcome): RunResult? {
+        // Only the worker's own refusal counts: exit code 2 and a stderr that is exactly one marker line. Anything the
+        // script printed itself (also a copy of the marker) must never turn a real result into a security alarm.
+        if (outcome !is WorkerOutcome.Exited || outcome.exitCode != REFUSED_EXIT_CODE) return null
+        val match = REFUSAL_LINE.matchEntire(text(outcome.stderr)) ?: return null
+        return when (match.groupValues[1]) {
+            UnsavedBufferInput.Refusal.SCRIPT_DIR.name, UnsavedBufferInput.Refusal.DISPLAY_NAME.name ->
+                failure(DesktopErrorCodes.SCRIPT_DIR_MISMATCH, "the folder or the name of the script is not usable")
+            else -> failure(DesktopErrorCodes.SESSION_DIR_UNSAFE, UNSAFE_MESSAGE)
         }
     }
 
@@ -134,19 +241,32 @@ class WorkerRunner(
         file: Path,
         out: Path,
         onStarted: (Process) -> Unit,
+        unsaved: WarmRenderProtocol.Unsaved? = null,
     ): WorkerOutcome {
         val location = (worker as WorkerLocationResult.Found).location
         return supervisorFactory(timeoutMillis, sessionDir, onStarted).runWith { workerTmp ->
             ImportWorkerLaunch.command(
-                listOf(
-                    file.toAbsolutePath().normalize().toString(),
-                    "--format",
-                    "glb",
-                    "--out",
-                    out.toString(),
-                    "--output",
-                    "json",
-                ),
+                (
+                    unsaved?.let {
+                        listOf(
+                            "--unsaved-script-dir",
+                            it.scriptDir,
+                            "--unsaved-display-name",
+                            it.displayName,
+                            "--unsaved-sha256",
+                            it.sha256,
+                        )
+                    } ?: emptyList()
+                ) +
+                    listOf(
+                        file.toAbsolutePath().normalize().toString(),
+                        "--format",
+                        "glb",
+                        "--out",
+                        out.toString(),
+                        "--output",
+                        "json",
+                    ),
                 timeoutMillis,
                 mainClass = DesktopRenderWorker.MAIN_CLASS,
                 maxHeap = maxHeap,
@@ -466,7 +586,12 @@ class WorkerRunner(
         const val GUARD_MESSAGE_USER: String =
             "the session folder was changed while the script ran; the script was not run"
         const val DEFAULT_TIMEOUT_MILLIS: Long = 60_000
+        private const val REFUSED_EXIT_CODE = 2
+        private val REFUSAL_LINE =
+            Regex("^" + Regex.escape(UnsavedBufferInput.REFUSED_MARKER) + "([A-Z_]+)\\r?\\n?$")
         const val DEFAULT_MAX_GLB_BYTES: Long = 64L shl 20
+        private const val UNSAFE_MESSAGE =
+            "the private folder for unsaved runs is not safe (link, owner or permissions changed); the run is stopped"
         private const val OOM_EXIT_CODE = 3
         private const val OOM_MARKER = "Terminating due to java.lang.OutOfMemoryError"
         private const val SIGNAL_BASE = 128

@@ -14,6 +14,7 @@ import kotlin.script.experimental.api.EvaluationResult
 import kotlin.script.experimental.api.ResultValue
 import kotlin.script.experimental.api.ResultWithDiagnostics
 import kotlin.script.experimental.api.ScriptDiagnostic
+import kotlin.script.experimental.api.SourceCode
 import kotlin.script.experimental.host.toScriptSource
 import kotlin.script.experimental.jvmhost.BasicJvmScriptingHost
 import kotlin.script.experimental.jvmhost.createJvmCompilationConfigurationFromTemplate
@@ -94,12 +95,27 @@ object KStepScriptHost {
      * (ADR-0080): relative, `/`-separated, sorted, duplicate-free. A file is recorded before it is read, so a
      * missing file is reported too. Empty after a compilation error (the script never ran).
      */
-    fun evalRecording(file: File): RecordedEvaluation {
-        val recorder = createRecorder(file)
+    fun evalRecording(file: File): RecordedEvaluation = evalWith(createRecorder(file)) { file.toScriptSource() }
+
+    /**
+     * Evaluates [code] as if it were the file [displayName] in [scriptDir] (ADR-0086): input files resolve against
+     * the real path of [scriptDir], the same rule as for a file, so an unsaved buffer reads the files next to the
+     * script it belongs to. [displayName] is what compiler diagnostics call the source.
+     */
+    fun evalRecording(
+        code: String,
+        displayName: String,
+        scriptDir: File,
+    ): RecordedEvaluation = evalWith(createRecorderForDir(scriptDir)) { code.toScriptSource(displayName) }
+
+    private fun evalWith(
+        recorder: InputRecorder?,
+        source: () -> SourceCode,
+    ): RecordedEvaluation {
         val previous = context.get()
         context.set(recorder)
         try {
-            val outcome = evalToOutcome { host.eval(file.toScriptSource(), compilationConfig, null) }
+            val outcome = evalToOutcome { host.eval(source(), compilationConfig, null) }
             val dependencies =
                 if (outcome is KStepScriptOutcome.CompilationError) emptyList() else recorder?.sorted().orEmpty()
             return RecordedEvaluation(outcome, dependencies)
@@ -111,14 +127,19 @@ object KStepScriptHost {
     // Same base the desktop derives from the script path: the real path of the script's folder. Failing to
     // resolve it just means no recorder (the helpers then answer NO_SCRIPT_FOLDER).
     private fun createRecorder(file: File): InputRecorder? =
+        file
+            .toPath()
+            .toAbsolutePath()
+            .normalize()
+            .parent
+            ?.let { createRecorderFor(it) }
+
+    private fun createRecorderForDir(dir: File): InputRecorder? =
+        createRecorderFor(dir.toPath().toAbsolutePath().normalize())
+
+    private fun createRecorderFor(dir: java.nio.file.Path): InputRecorder? =
         try {
-            file
-                .toPath()
-                .toAbsolutePath()
-                .normalize()
-                .parent
-                ?.toRealPath()
-                ?.let { InputRecorder(it) }
+            InputRecorder(dir.toRealPath())
         } catch (_: java.io.IOException) {
             null
         } catch (_: SecurityException) {

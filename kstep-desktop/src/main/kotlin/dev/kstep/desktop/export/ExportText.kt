@@ -5,6 +5,16 @@ import dev.kstep.desktop.run.ErrorParser
 
 /** The readable strings of the export dialog (ADR-0057). Pure. Names only, never full paths. */
 object ExportText {
+    const val SAVED_ONLY = "Exports the saved file."
+    const val PREVIEW_IS_BUFFER = "The preview shows the unsaved buffer."
+
+    /** The notes of the export dialog about unsaved text (ADR-0086): an export never uses the editor buffer. */
+    fun unsavedNotes(
+        dirty: Boolean,
+        previewIsBuffer: Boolean,
+    ): List<String> =
+        if (dirty) listOfNotNull(SAVED_ONLY, PREVIEW_IS_BUFFER.takeIf { previewIsBuffer }) else emptyList()
+
     private const val KB = 1_000L
     private const val MB = 1_000_000L
 

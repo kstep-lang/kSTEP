@@ -1,5 +1,6 @@
 package dev.kstep.desktop.status
 
+import dev.kstep.desktop.run.PreviewOrigin
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.comparables.shouldBeLessThanOrEqualTo
 import io.kotest.matchers.shouldBe
@@ -84,5 +85,16 @@ class StatusLineTextTest :
             StatusLineText.shorten(".".repeat(100), 16).length shouldBeLessThanOrEqualTo 16
             StatusLineText.shorten(" ".repeat(100), 16).length shouldBeLessThanOrEqualTo 16
             StatusLineText.fileLabel("") shouldBe ""
+        }
+
+        "the preview origin label tells saved, unsaved and older unsaved apart" {
+            previewOriginLabel(null, "x") shouldBe null
+            previewOriginLabel(PreviewOrigin.SavedFile, "x") shouldBe PreviewOriginLabel.SAVED
+            previewOriginLabel(PreviewOrigin.Buffer("x"), "x") shouldBe PreviewOriginLabel.UNSAVED
+            previewOriginLabel(PreviewOrigin.Buffer("x"), "xy") shouldBe PreviewOriginLabel.UNSAVED_OLDER
+            previewOriginLabel(PreviewOrigin.Buffer("x"), null) shouldBe PreviewOriginLabel.UNSAVED_OLDER
+            PreviewOriginLabel.SAVED.text shouldBe "Preview: saved file"
+            PreviewOriginLabel.UNSAVED.text shouldBe "Preview: unsaved buffer"
+            PreviewOriginLabel.UNSAVED_OLDER.text shouldBe "Preview: unsaved buffer (older)"
         }
     })

@@ -213,4 +213,37 @@ class ScriptInputsTest :
                 evaluation.dependencies shouldBe listOf("d.txt")
             }
         }
+
+        "an unsaved buffer reads the input files of its script folder (ADR-0086)" {
+            val dir = tempDir()
+            Files.writeString(dir.resolve("in.txt"), "hello")
+            val code = "check(readInput(\"in.txt\") == \"hello\")\n" + MODEL_TAIL
+            val evaluation = KStepScriptHost.evalRecording(code, "t.kstep.kts", dir.toFile())
+            evaluation.outcome.shouldBeInstanceOf<KStepScriptOutcome.Success>()
+            evaluation.dependencies shouldBe listOf("in.txt")
+        }
+
+        "an unsaved buffer keeps the path rules: a parent segment is refused" {
+            val dir = tempDir()
+            val code = "inputFile(\"../x\")\n" + MODEL_TAIL
+            val error = runtimeError(KStepScriptHost.evalRecording(code, "t.kstep.kts", dir.toFile()).outcome)
+            error.code shouldBe KStepScriptOutcomeCodes.INPUT_FILE_REFUSED
+        }
+
+        "an unsaved buffer finds a file only in its own folder, not in another" {
+            val dir = tempDir()
+            val other = tempDir()
+            Files.writeString(other.resolve("only-here.txt"), "x")
+            val code = "readInput(\"only-here.txt\")\n" + MODEL_TAIL
+            val outcome = KStepScriptHost.evalRecording(code, "t.kstep.kts", dir.toFile()).outcome
+            runtimeError(outcome).code shouldBe KStepScriptOutcomeCodes.INPUT_FILE_UNREADABLE
+        }
+
+        "a compile error of an unsaved buffer reports its position and no dependencies" {
+            val dir = tempDir()
+            val evaluation = KStepScriptHost.evalRecording("val x: Int = \"a\"\n", "named.kstep.kts", dir.toFile())
+            val outcome = evaluation.outcome.shouldBeInstanceOf<KStepScriptOutcome.CompilationError>()
+            evaluation.dependencies shouldBe emptyList()
+            outcome.diagnostics.any { it.line == 1 } shouldBe true
+        }
     })

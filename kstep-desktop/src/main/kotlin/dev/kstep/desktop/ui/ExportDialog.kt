@@ -50,8 +50,10 @@ internal const val DIALOG_WIDTH_DP = 480
 /** What the dialog needs to know besides the export state (all of it from the window, none of it from a worker). */
 internal class ExportDialogContext(
     val scriptName: String,
-    /** The editor has unsaved changes: the export runs on the saved file (the preview does too). */
+    /** The editor has unsaved changes: the export runs on the saved file (ADR-0057, ADR-0086). */
     val dirty: Boolean,
+    /** The preview shows an unsaved buffer (Run Unsaved, ADR-0086); the export still uses the saved file. */
+    val previewIsBuffer: Boolean = false,
     /** The preview reported "native bridge unavailable": every format needs it, so the rows are disabled. */
     val nativeUnavailable: Boolean,
     /** The save before an export failed (the export was not started). */
@@ -208,8 +210,8 @@ private fun ConfiguringBody(
                 color = WARN,
             )
         }
-        if (context.dirty) {
-            Text("Preview and export use the saved file.", fontSize = 12.sp, color = DIM)
+        for (note in ExportText.unsavedNotes(context.dirty, context.previewIsBuffer)) {
+            Text(note, fontSize = 12.sp, color = DIM)
         }
         state.notice?.let { Text(it, fontSize = 12.sp, color = DIM) }
         (state.error?.let { ExportText.errorLine(it) } ?: context.saveError)?.let {

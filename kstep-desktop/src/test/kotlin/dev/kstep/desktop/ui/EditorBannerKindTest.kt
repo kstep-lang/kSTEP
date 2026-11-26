@@ -3,11 +3,13 @@ package dev.kstep.desktop.ui
 import dev.kstep.desktop.draft.Draft
 import dev.kstep.desktop.draft.OfferKind
 import dev.kstep.desktop.draft.RecoveryOffer
+import dev.kstep.desktop.edit.BannerKind
 import dev.kstep.desktop.edit.Conflict
 import dev.kstep.desktop.edit.ConflictKind
 import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.edit.LineEnding
+import dev.kstep.desktop.edit.bannerKind
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import java.nio.file.Path

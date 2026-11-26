@@ -43,3 +43,7 @@ D7. Moved to D2c: live preview of the unsaved buffer; error marks that move with
 
 * The window behaviour listed in the status.
 * Windows and Linux shortcuts (Ctrl instead of Cmd, as for the existing editor keys).
+
+== Update (Welle D2c-3a)
+
+Unsaved preview: see ADR-0086; no buffer run while a draft offer is open (ADR-0084).
