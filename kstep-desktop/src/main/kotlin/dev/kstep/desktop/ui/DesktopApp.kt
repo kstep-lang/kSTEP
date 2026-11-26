@@ -652,7 +652,7 @@ fun FrameWindowScope.DesktopApp(
     }
     LaunchedEffect(Unit) {
         when (val request = initialRequest) {
-            StartRequest.None -> Unit
+            StartRequest.None -> session.lookForDraftsElsewhere()
             is StartRequest.Open -> {
                 // the same path as a drop: type, ending and links are judged by DropEvaluator
                 handleDrop(listOf(request.path))
@@ -1074,6 +1074,17 @@ fun FrameWindowScope.DesktopApp(
                             onSelectionChanged = { textSelected = it },
                             onClipboardChanged = { clipboardHasText = it },
                             onNotice = { transientNotice = it },
+                            onOpenDraft = { path ->
+                                // the path comes from a file that could have been planted: judge it like any other
+                                val name =
+                                    path.fileName
+                                        ?.toString()
+                                        ?.lowercase()
+                                        .orEmpty()
+                                if (path.isAbsolute && path == path.normalize() && name.endsWith(".kstep.kts")) {
+                                    openPath(path)
+                                }
+                            },
                             modifier = Modifier.width(windowWidth * effectiveFraction).fillMaxHeight(),
                             errorLine = selectedError?.line,
                             findRequest = findRequest,

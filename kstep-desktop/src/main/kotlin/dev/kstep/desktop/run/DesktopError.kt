@@ -56,4 +56,10 @@ object DesktopErrorCodes {
 
     // The worker of the packaged app could not be located or is incomplete (ADR-0082).
     const val WORKER_MISSING = "KSTEP-D-038"
+
+    // The crash draft (ADR-0084): it could not be written, a draft was refused, the folder is unusable, the text is too large.
+    const val DRAFT_WRITE_FAILED = "KSTEP-D-042"
+    const val DRAFT_REJECTED = "KSTEP-D-043"
+    const val DRAFT_STORE_UNAVAILABLE = "KSTEP-D-044"
+    const val DRAFT_TOO_LARGE = "KSTEP-D-045"
 }

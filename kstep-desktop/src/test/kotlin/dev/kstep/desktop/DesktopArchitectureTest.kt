@@ -98,6 +98,32 @@ class DesktopArchitectureTest :
                 .shouldBeEmpty()
         }
 
+        "the draft package is pure logic: no UI, editor, Compose, AWT, Swing, process or script host" {
+            val forbidden =
+                listOf(
+                    "dev.kstep.desktop.ui",
+                    "dev.kstep.desktop.edit",
+                    "androidx.compose",
+                    "org.jetbrains.compose",
+                    "java.awt",
+                    "javax.swing",
+                    "ProcessBuilder",
+                    "KStepScriptHost",
+                    "PreviewRenderer",
+                    "java.net.http",
+                )
+            sources()
+                .filter { (path, _) ->
+                    root
+                        .relativize(path)
+                        .toString()
+                        .replace('\\', '/')
+                        .startsWith("dev/kstep/desktop/draft/")
+                }.flatMap { (path, text) ->
+                    forbidden.filter { text.contains(it) }.map { "${root.relativize(path)} uses $it" }
+                }.shouldBeEmpty()
+        }
+
         "the menu package is pure logic: no Compose, no AWT, no Swing and no UI package" {
             sources()
                 .filter { (path, _) ->

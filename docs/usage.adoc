@@ -1016,6 +1016,27 @@ between sessions (`export.json` in the kSTEP config folder). A script without a 
 A script without a `shape(...)` shows "Script has no shape(...)"; without the native bridge the window shows the OCCT notice
 with an install hint for the current operating system.
 
+=== Unsaved changes after a crash
+
+While you edit, the desktop keeps a copy of the unsaved text, two seconds after your last change (at the latest 20 seconds after
+the first change since the last save). The copy lives in the config folder, next to `recent.json`:
+
+* macOS: `~/Library/Application Support/kSTEP/drafts/`
+* Linux: `$XDG_CONFIG_HOME/kstep/drafts/` or `~/.config/kstep/drafts/`
+* Windows: `%APPDATA%\kSTEP\drafts\`
+
+If the app ends unexpectedly, opening the same file again shows a banner: "Unsaved changes from 14 Nov, 22:13 were found."
+*Restore* puts the draft into the editor as one undo step (Undo brings back the file), *Discard* deletes it. Until you choose,
+Save does nothing but make the banner flash, and nothing is written to the draft. If the file changed on disk or was deleted
+since, the banner says so; saving restored text then replaces or recreates the file. A draft that equals the file is deleted
+without a question. When the app starts without a file, a draft of a script that is not open is offered with *Open*.
+
+A draft is deleted after a successful save, on Don't Save, on Discard and when you close a file without changes. It is never
+written for text over 1 MiB (the old draft stays and a notice says so), at most 32 drafts are kept, and drafts older than 30 days
+are removed. The files contain your text: they are readable only by you (mode 0600, folder 0700; not checked on Windows).
+Limits: two instances editing the same file overwrite each other's draft (the last writer wins); after `kill -9` or a power
+failure the last two to twenty seconds are lost; you can delete the `drafts` folder at any time.
+
 === Starting the desktop from the CLI
 
 On macOS, with `kSTEP.app` built or installed (ADR-0082), `kstep desktop` starts the app:

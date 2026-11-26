@@ -1,0 +1,51 @@
+= ADR-0084: Crash draft of the desktop editor (Welle D2c-1)
+:toc:
+
+== Status
+
+Accepted (Welle D2c-1). Scope: `kstep-desktop` only (new package `dev.kstep.desktop.draft`, changes in the editor session and the banner), no new dependency. Settles ADR-0067 D6 and replaces its sketch where this ADR differs (see D2, D3, D5, D6, D8, D9). Not checked by hand in the window; the logic and the session are tested headless.
+
+== Context
+
+An unsaved buffer is lost when the app or the machine dies. Writing the buffer to disk is a new safety surface: user text lies in a folder anybody may have planted files in, a draft carries a path that is read later, and a careless restore could overwrite a file silently.
+
+== Decision
+
+D1. Where. `<config>/drafts/` (the config folder of `recent.json`), mode 0700. One file per script or note, named `<sha256 of the normalized path>.draft` (64 lowercase hex digits). The name never contains a part of the path.
+
+D2. Key. The path is made absolute and normalized, and its parent folder is resolved through links (`toRealPath`). The file itself is not resolved: a link is its own key. Resolving only the parent keeps the key of a deleted file stable (on macOS `/tmp` and `/private/tmp` would otherwise differ once the file is gone, and "deleted" could never be offered).
+
+D3. Format. A line header, not JSON: `KSTEP-DRAFT 1`, then exactly eight `key=value` lines in a fixed order (`path`, `file-mtime`, `file-size`, `file-sha256`, `created`, `written`, `body-sha256`, `body-length`), an empty line, the body (UTF-8, LF). The header carries the hash of the file version the draft is based on (`-` if the file did not exist) so that "file unchanged" is a hash comparison, not a guess from the mtime. The file is at most 1 MiB plus 8 KiB; the header at most 8 KiB.
+
+D4. When. Two seconds after the last change, at the latest 20 seconds after the first change since the last write, and once on JVM shutdown (SIGTERM, log-out; own daemon thread, budget 2 s). Nothing is written for a clean buffer. If the text is undone back to the saved text, the existing draft stays until close or save and nothing new is written. The write runs on the editor's IO thread, in sequence with Save: a late write finds a clean buffer and does nothing.
+
+D5. Offer. When a file with a draft is opened, a banner above the text offers *Restore* and *Discard*; it is never automatic and no dialog. Kinds: the file is unchanged (hash equal), changed on disk, deleted, or can no longer be edited (over 1 MiB, not UTF-8; Restore is disabled, Discard works). A draft whose text equals the file is deleted without a question. There is no diff view and no "are you sure" on Discard: the draft is a safety copy, not the user's work product. While an offer is open, Save is blocked (the banner flashes, "Choose Restore or Discard first.") and no draft is written, so the old draft stays byte for byte, also when the window is closed or the app quits.
+
+D6. Restore replaces the buffer in one undo step (Undo brings back the file text). The buffer is then dirty and the draft goes on being written. For a deleted file the buffer is an editing buffer marked "deleted on disk": Save recreates the file. The draft is never written to the script file by itself.
+
+D7. Delete. After a successful save (on the IO thread, so it cannot race a draft write), on Discard, on Don't Save (leaving the file by open, close or quit), on closing a clean buffer. A failed save and a conflict keep the draft. An unanswered offer keeps it.
+
+D8. Elsewhere. At start without a file, the newest valid draft of a `.kstep.kts` script is offered with *Open*. Notes are not offered: the header has no workspace root, and opening a note without one would bypass the trust question of ADR-0058. The header path is checked again (absolute, normalized, `.kstep.kts`) and opened like any other open, with the unsaved-changes question. A deleted file can be opened this way, so "deleted" is reachable.
+
+D9. Limits. At most 32 drafts (the oldest by `written` go), 30 days, stale temp files after one hour. Housekeeping runs at start and after a write that exceeds the count.
+
+D10. Notice. If drafts cannot be written (`KSTEP-D-042`, folder unusable `-044`, text too large `-045`), the banner says once per session that unsaved changes are not protected. A refused draft is `KSTEP-D-043` (logged with the reason only).
+
+== Security
+
+* The folder is untrusted. It is created 0700; if it exists it must be a real directory (not a link) of the current user, and is set to 0700. Otherwise the store is unavailable (`KSTEP-D-044`) and nothing is read or written. The owner is found with a probe file, not with a JDK-internal user API (the jlink runtime of ADR-0082 may lack that module).
+* A draft file is read only if it is a regular file (checked with `NOFOLLOW_LINKS`), owned by the current user, without any group or other permission bit (0644 is refused, strict), and at most 1 MiB plus 8 KiB; it is read with a limit of size plus one. A link is deleted as a link, never its target; a directory with a draft name is ignored and not deleted; names that do not match the draft or temp pattern are never touched.
+* The draft is bound to its name twice: the name must be the hash of the header path, and the header path must be the path that was asked for. A draft of script A under the name of B is refused and deleted.
+* The header path is never a write target. It is only offered to open.
+* The text is checked like an editor buffer: strict UTF-8, no NUL, no CR, no BOM, no line over 20,000 characters, length and SHA-256 as in the header.
+* A restored draft is only text in the buffer: nothing runs, nothing is evaluated.
+* Logs carry codes and reasons, never a path, a name, a hash or content.
+* Drafts contain user text: 0600, deleted on save, discard and Don't Save, removed after 30 days.
+
+== Not covered
+
+* Windows: no owner or permission check (no POSIX view); the folder is in the user's profile.
+* Several instances (`open -n`, ADR-0083): no lock; the last writer wins.
+* `kill -9` and power loss: only the periodic copy exists, so up to 20 seconds are lost.
+* The shared atomic-write helper is copied into the draft package (a package cycle otherwise); one shared helper stays open.
+* Live preview of the unsaved buffer is not part of this wave.

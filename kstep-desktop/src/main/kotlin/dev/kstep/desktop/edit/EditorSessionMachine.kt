@@ -1,5 +1,6 @@
 package dev.kstep.desktop.edit
 
+import dev.kstep.desktop.run.DesktopErrorCodes
 import java.nio.file.Path
 
 enum class ConflictKind { CHANGED, DELETED }
@@ -124,6 +125,11 @@ sealed interface EditorEvent {
     data object KeepMineChosen : EditorEvent
 
     data object CloseRequested : EditorEvent
+
+    /** Restore of a draft whose file is gone (ADR-0084): the buffer is the draft, the file is to be recreated. */
+    class DraftRestoredMissing(
+        val text: String,
+    ) : EditorEvent
 }
 
 sealed interface SaveOutcome {
@@ -187,6 +193,7 @@ class EditorSessionMachine {
                 } else {
                     EditorTransition(state)
                 }
+            is EditorEvent.DraftRestoredMissing -> draftRestoredMissing(state, event.text)
             EditorEvent.SaveRequested -> save(state)
             is EditorEvent.SaveFinished -> saveFinished(state, event.result)
             is EditorEvent.DiskChanged -> diskChanged(state, event.loaded)
@@ -207,6 +214,18 @@ class EditorSessionMachine {
                     ),
                 )
         }
+
+    private fun draftRestoredMissing(
+        state: EditorState,
+        text: String,
+    ): EditorTransition {
+        if (state !is EditorState.Unavailable || state.code != DesktopErrorCodes.FILE_MISSING) {
+            return EditorTransition(state)
+        }
+        return EditorTransition(
+            EditorState.Editing(state.path, "", null, text, LineEnding.LF, false, false, deletedOnDisk = true),
+        )
+    }
 
     private fun fromLoaded(
         path: Path,

@@ -156,6 +156,8 @@ internal fun ScriptEditor(
     onClipboardChanged: (Boolean) -> Unit = {},
     /** A message for the status line (a failed or refused clipboard command). */
     onNotice: (String) -> Unit = {},
+    /** The user chose "Open" on the banner of a draft of a file that is not open (ADR-0084). */
+    onOpenDraft: (java.nio.file.Path) -> Unit = {},
 ) {
     val os = remember { MenuOs.current() }
     val colors = if (dark) EditorColors.DARK else EditorColors.LIGHT
@@ -450,7 +452,16 @@ internal fun ScriptEditor(
             }
         },
     ) {
-        EditorBanner(view, dark, onReload = session::reload, onKeepMine = session::keepMine)
+        EditorBanner(
+            view,
+            dark,
+            onReload = session::reload,
+            onKeepMine = session::keepMine,
+            onRestore = session::restoreDraft,
+            onDiscard = session::discardDraft,
+            onOpenDraft = onOpenDraft,
+            onDismissNotice = session::dismissNotice,
+        )
         if (state is EditorState.NoFile) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("No script open", fontSize = 12.sp, color = colors.gutter)

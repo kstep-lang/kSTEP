@@ -19,18 +19,37 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.kstep.desktop.draft.DraftText
+import dev.kstep.desktop.draft.OfferKind
 import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.edit.LineEnding
 import dev.kstep.desktop.run.DesktopErrorCodes
 import kotlinx.coroutines.delay
+import java.nio.file.Path
 
 private const val EMPHASIS_MS = 400L
 
 /** What the banner says; at most one message at a time, the most urgent first (ADR-0052). */
-internal enum class BannerKind { CONFLICT, SAVE_ERROR, PREVIEW_ONLY, DELETED, LINE_ENDINGS }
+internal enum class BannerKind {
+    DRAFT_OFFER,
+    DRAFT_ELSEWHERE,
+    CONFLICT,
+    SAVE_ERROR,
+    PREVIEW_ONLY,
+    DELETED,
+    LINE_ENDINGS,
+    DRAFT_NOTICE,
+}
 
-internal fun bannerKind(state: EditorState): BannerKind? =
+internal fun bannerKind(view: EditorView): BannerKind? =
+    when {
+        view.draftOffer != null -> BannerKind.DRAFT_OFFER
+        view.draftElsewhere != null && view.state is EditorState.NoFile -> BannerKind.DRAFT_ELSEWHERE
+        else -> stateBannerKind(view.state) ?: if (view.draftNotice != null) BannerKind.DRAFT_NOTICE else null
+    }
+
+private fun stateBannerKind(state: EditorState): BannerKind? =
     when {
         state is EditorState.Unavailable -> BannerKind.PREVIEW_ONLY
         state !is EditorState.Editing -> null
@@ -52,9 +71,13 @@ internal fun EditorBanner(
     onReload: () -> Unit,
     onKeepMine: () -> Unit,
     modifier: Modifier = Modifier,
+    onRestore: () -> Unit = {},
+    onDiscard: () -> Unit = {},
+    onOpenDraft: (Path) -> Unit = {},
+    onDismissNotice: () -> Unit = {},
 ) {
     val state = view.state
-    val kind = bannerKind(state) ?: return
+    val kind = bannerKind(view) ?: return
     var emphasised by remember { mutableStateOf(false) }
     LaunchedEffect(view.pulse) {
         if (view.pulse > 0) {
@@ -72,6 +95,16 @@ internal fun EditorBanner(
     val textColor = if (dark) Color(0xFFE8E8E8) else Color(0xFF1F1F1F)
     val message: String
     when (kind) {
+        BannerKind.DRAFT_OFFER -> message = DraftText.offerMessage(view.draftOffer!!, emphasised)
+        BannerKind.DRAFT_ELSEWHERE ->
+            message =
+                DraftText.elsewhereMessage(
+                    view.draftElsewhere!!
+                        .path.fileName
+                        ?.toString()
+                        .orEmpty(),
+                )
+        BannerKind.DRAFT_NOTICE -> message = DraftText.noticeMessage(view.draftNotice!!)
         BannerKind.CONFLICT -> {
             val conflict = (state as EditorState.Editing).conflict!!
             message =
@@ -109,6 +142,18 @@ internal fun EditorBanner(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
+        when (kind) {
+            BannerKind.DRAFT_OFFER -> {
+                TextButton(onClick = onRestore, enabled = view.draftOffer!!.kind != OfferKind.NOT_EDITABLE) {
+                    Text("Restore", fontSize = 12.sp)
+                }
+                TextButton(onClick = onDiscard) { Text("Discard", fontSize = 12.sp) }
+            }
+            BannerKind.DRAFT_ELSEWHERE ->
+                TextButton(onClick = { onOpenDraft(view.draftElsewhere!!.path) }) { Text("Open", fontSize = 12.sp) }
+            BannerKind.DRAFT_NOTICE -> TextButton(onClick = onDismissNotice) { Text("OK", fontSize = 12.sp) }
+            else -> Unit
+        }
         if (kind == BannerKind.CONFLICT) {
             val conflict = (state as EditorState.Editing).conflict!!
             TextButton(onClick = onReload, enabled = conflict.reloadable) { Text("Reload", fontSize = 12.sp) }

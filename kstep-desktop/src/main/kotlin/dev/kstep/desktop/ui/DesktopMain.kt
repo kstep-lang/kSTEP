@@ -12,6 +12,7 @@ import androidx.compose.ui.window.rememberWindowState
 import dev.kstep.cli.WorkerTempDir
 import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.aiwire.AiController
+import dev.kstep.desktop.draft.DraftStore
 import dev.kstep.desktop.drop.StartArgument
 import dev.kstep.desktop.edit.AtomicSaver
 import dev.kstep.desktop.edit.EditorSession
@@ -68,11 +69,16 @@ fun runDesktopApp(args: Array<String>) {
                 // refuses a workspace note that became a link or left the workspace (ADR-0058, D13).
                 val atomic = AtomicSaver()
                 EditorSession(
+                    drafts = DraftStore(),
                     saver = { path, bytes, hash, force ->
                         knowledge.guardSave(path)?.let { AtomicSaver.Result.Failed(it) }
                             ?: atomic.save(path, bytes, hash, force)
                     },
-                ).also { controller.onDiskSignal = it::onDiskSignal }
+                ).also {
+                    controller.onDiskSignal = it::onDiskSignal
+                    // SIGTERM, log-out, shutdown: one last draft write of an unsaved buffer (ADR-0084)
+                    Runtime.getRuntime().addShutdownHook(Thread({ it.flushForShutdown() }, "kstep-draft-flush-hook"))
+                }
             }
         val ai =
             remember {
@@ -101,6 +107,8 @@ fun runDesktopApp(args: Array<String>) {
         // and the macOS Cmd+Q quit handler alike.
         val requestQuit: () -> Boolean = {
             if (confirmUnsaved(frame[0], session)) {
+                // the draft of what the user just saved or discarded must not be written again by the shutdown hook
+                session.finishForQuit()
                 controller.close()
                 session.close()
                 ai.close()
