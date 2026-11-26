@@ -162,7 +162,7 @@ class LayoutPreferencesStoreTest :
                 val store = LayoutPreferencesStore(c)
                 store.save(LayoutPreferences(0.6, softWrap = true))
                 Files.readString(c.resolve(LayoutPreferencesStore.FILE_NAME)) shouldBe
-                    """{"version":1,"editorFraction":0.6,"softWrap":true}"""
+                    """{"version":1,"editorFraction":0.6,"softWrap":true,"previewUnsaved":false}"""
             }
         }
 
@@ -199,6 +199,42 @@ class LayoutPreferencesStoreTest :
                 } finally {
                     c.toFile().setWritable(true)
                 }
+            }
+        }
+
+        "preview unsaved round trip, off by default, a file without the key means off" {
+            withDir { c ->
+                val store = LayoutPreferencesStore(c)
+                store.load().previewUnsaved shouldBe false
+                store.save(LayoutPreferences(0.5, previewUnsaved = true))
+                store.load() shouldBe LayoutPreferences(0.5, previewUnsaved = true)
+                Files.writeString(c.resolve(LayoutPreferencesStore.FILE_NAME), """{"version":1,"editorFraction":0.6}""")
+                store.load() shouldBe LayoutPreferences(0.6)
+            }
+        }
+
+        "a preview unsaved value that is not a boolean makes the whole file untrusted" {
+            withDir { c ->
+                for (bad in listOf("\"true\"", "1", "null", "[]", "{}", "\"\"")) {
+                    val body = """{"version":1,"editorFraction":0.6,"softWrap":true,"previewUnsaved":$bad}"""
+                    Files.writeString(c.resolve(LayoutPreferencesStore.FILE_NAME), body)
+                    LayoutPreferencesStore(c).load() shouldBe LayoutPreferences()
+                }
+            }
+        }
+
+        "saving one setting keeps the other two, the file stays under 1 KiB" {
+            withDir { c ->
+                val store = LayoutPreferencesStore(c)
+                val all = LayoutPreferences(0.33, softWrap = true, previewUnsaved = true)
+                store.save(all)
+                store.save(all.copy(previewUnsaved = false))
+                store.load() shouldBe LayoutPreferences(0.33, softWrap = true, previewUnsaved = false)
+                store.save(all.copy(softWrap = false))
+                store.load() shouldBe LayoutPreferences(0.33, softWrap = false, previewUnsaved = true)
+                store.save(all.copy(editorFraction = 0.7))
+                store.load() shouldBe LayoutPreferences(0.7, softWrap = true, previewUnsaved = true)
+                (Files.size(c.resolve(LayoutPreferencesStore.FILE_NAME)) < 1024L) shouldBe true
             }
         }
     })

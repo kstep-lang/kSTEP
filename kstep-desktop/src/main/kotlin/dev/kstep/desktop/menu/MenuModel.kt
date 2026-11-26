@@ -125,6 +125,9 @@ enum class ViewAction(
     /** A check item (ADR-0085): long lines wrap at the editor edge. Always available, no key. */
     SOFT_WRAP("Soft Wrap", null),
 
+    /** A check item (ADR-0087): previews the unsaved editor text automatically while typing. No key, off by default. */
+    PREVIEW_UNSAVED("Preview Unsaved Changes", null),
+
     /** Moves the keyboard focus to the buttons of the banner above the text (ADR-0086). */
     FOCUS_BANNER("Banner Actions", null),
     ;
@@ -180,6 +183,7 @@ fun shortcutOf(
         ViewAction.ISOLATE,
         ViewAction.SHOW_ALL,
         ViewAction.SOFT_WRAP,
+        ViewAction.PREVIEW_UNSAVED,
         -> null
     }
 
@@ -223,6 +227,8 @@ data class MenuContext(
     val convertDialogVisible: Boolean = false,
     /** Soft wrap is on (ADR-0085): the View menu shows the check mark. */
     val softWrap: Boolean = false,
+    /** "Preview Unsaved Changes" is on (ADR-0087): the View menu shows the check mark of the saved setting. */
+    val previewUnsaved: Boolean = false,
     /** A banner with at least one usable button is shown (ADR-0086). */
     val bannerHasActions: Boolean = false,
     /** The open editor text is a script (not a knowledge-workspace note, ADR-0086). */
@@ -336,6 +342,8 @@ fun stateOf(
             }
         ViewAction.AI_PANEL -> if (ctx.knowledgeOpen) disabled(MenuReasons.KNOWLEDGE_UNAVAILABLE) else ENABLED
         ViewAction.SOFT_WRAP -> ENABLED
+        ViewAction.PREVIEW_UNSAVED ->
+            if (ctx.knowledgeOpen || !ctx.editorIsScript) disabled(MenuReasons.NOTES_SAVED_ONLY) else ENABLED
         ViewAction.FOCUS_BANNER -> if (ctx.bannerHasActions) ENABLED else disabled(MenuReasons.NO_BANNER_ACTIONS)
     }
 
@@ -462,6 +470,7 @@ fun viewMenu(): List<MenuEntry> =
         MenuEntry.ViewItem(ViewAction.AI_PANEL),
         MenuEntry.Separator,
         MenuEntry.ViewItem(ViewAction.SOFT_WRAP),
+        MenuEntry.ViewItem(ViewAction.PREVIEW_UNSAVED),
         MenuEntry.Separator,
         MenuEntry.ViewItem(ViewAction.FOCUS_BANNER),
     )

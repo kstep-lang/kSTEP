@@ -169,7 +169,11 @@ class LiveRunController(
     fun runBuffer(
         file: Path,
         text: String,
-    ) = dispatch(DesktopEvent.RunBuffer(file.toAbsolutePath().normalize(), text))
+        auto: Boolean = false,
+    ) = dispatch(DesktopEvent.RunBuffer(file.toAbsolutePath().normalize(), text, auto))
+
+    /** The automatic preview found the buffer of [file] over 1 MiB (ADR-0087): shows KSTEP-D-046, runs nothing. */
+    fun bufferTooLarge(file: Path) = dispatch(DesktopEvent.BufferTooLarge(file.toAbsolutePath().normalize()))
 
     /** Stops watching and running and returns to [DesktopState.Idle] (the workspace was closed, ADR-0058). */
     fun clear() {

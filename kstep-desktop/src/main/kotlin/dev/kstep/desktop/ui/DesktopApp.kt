@@ -310,10 +310,11 @@ fun FrameWindowScope.DesktopApp(
     val initialLayout = remember { layoutStore.load() }
     var editorFraction by remember { mutableStateOf(initialLayout.editorFraction.toFloat()) }
     var softWrap by remember { mutableStateOf(initialLayout.softWrap) }
+    var previewUnsaved by remember { mutableStateOf(initialLayout.previewUnsaved) }
     var bannerFocusSignal by remember { mutableStateOf(0) }
-    // Both settings share one file: every save carries the current value of the other one (ADR-0085).
+    // All three settings share one file: every save carries the current value of the other one (ADR-0085).
     val saveLayout: () -> Unit = {
-        val preferences = LayoutPreferences(editorFraction.toDouble(), softWrap)
+        val preferences = LayoutPreferences(editorFraction.toDouble(), softWrap, previewUnsaved)
         scope.launch(Dispatchers.IO) { layoutStore.save(preferences) }
     }
     val dark = isSystemInDarkTheme()
@@ -852,11 +853,21 @@ fun FrameWindowScope.DesktopApp(
             exportDialogVisible = exportVisible,
             convertDialogVisible = convertState !is ConvertState.Idle,
             softWrap = softWrap,
+            previewUnsaved = previewUnsaved,
             bannerHasActions = BannerActions.hasActions(editorView),
             editorIsScript = !(knowledgeOpen && state.file?.let { knowledge.isWorkspaceFile(it) } == true),
             editorDirty = editorView.dirty,
             draftOfferOpen = editorView.draftOffer != null,
         )
+    AutoPreviewDriver(
+        enabled = previewUnsaved,
+        state = state,
+        editorView = editorView,
+        windowFocused = windowFocused,
+        isScript = menuContext.editorIsScript && !knowledgeOpen,
+        onRun = { file, text -> controller.runBuffer(file, text, auto = true) },
+        onTooLarge = { file -> controller.bufferTooLarge(file) },
+    )
     val onEditAction: (EditAction) -> Unit = {
         editorCommandNonce++
         val kind =
@@ -904,6 +915,13 @@ fun FrameWindowScope.DesktopApp(
             ViewAction.SOFT_WRAP -> {
                 softWrap = !softWrap
                 saveLayout()
+            }
+            ViewAction.PREVIEW_UNSAVED -> {
+                // judged again here, like Run Unsaved: switching on is refused where the preview is saved-only
+                if (stateOf(ViewAction.PREVIEW_UNSAVED, menuContext).enabled || previewUnsaved) {
+                    previewUnsaved = !previewUnsaved
+                    saveLayout()
+                }
             }
             ViewAction.FOCUS_BANNER -> bannerFocusSignal++
         }

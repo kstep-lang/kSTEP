@@ -24,12 +24,14 @@ private val logger = KotlinLogging.logger {}
 data class LayoutPreferences(
     val editorFraction: Double = LayoutPreferencesStore.DEFAULT,
     val softWrap: Boolean = false,
+    /** Automatic preview of the unsaved editor text (ADR-0087). Off by default. */
+    val previewUnsaved: Boolean = false,
 )
 
 /**
  * Persists [LayoutPreferences] as `layout.json` in the desktop config folder. Untrusted on load: a regular file (no
  * symbolic link) of at most 1 KiB, strict UTF-8, `version` 1, a finite number clamped to 0.20..0.80 and an optional
- * boolean `softWrap`; anything else
+ * booleans `softWrap` and `previewUnsaved`; anything else
  * gives the default. Writes are atomic, 0600/0700 where supported, and never throw.
  */
 class LayoutPreferencesStore(
@@ -68,17 +70,20 @@ class LayoutPreferencesStore(
             (obj["editorFraction"] as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull
                 ?: return LayoutPreferences()
         if (!value.isFinite()) return LayoutPreferences()
-        // optional (ADR-0085): absent means off; a value that is not a JSON boolean makes the whole file untrusted
-        val wrapElement = obj["softWrap"]
-        val wrap =
-            when {
-                wrapElement == null -> false
-                wrapElement is JsonPrimitive && !wrapElement.isString ->
-                    wrapElement.booleanOrNull
-                        ?: return LayoutPreferences()
-                else -> return LayoutPreferences()
-            }
-        return LayoutPreferences(value.coerceIn(MIN, MAX), wrap)
+        // optional booleans (ADR-0085, ADR-0087): absent means off; a value that is not a JSON boolean (a string, a
+        // number, null, an object) makes the whole file untrusted
+        val wrap = optionalBoolean(obj, "softWrap") ?: return LayoutPreferences()
+        val previewUnsaved = optionalBoolean(obj, "previewUnsaved") ?: return LayoutPreferences()
+        return LayoutPreferences(value.coerceIn(MIN, MAX), wrap, previewUnsaved)
+    }
+
+    /** `false` when [key] is absent, its value when a JSON boolean, `null` when it is anything else. */
+    private fun optionalBoolean(
+        obj: JsonObject,
+        key: String,
+    ): Boolean? {
+        val element = obj[key] ?: return false
+        return if (element is JsonPrimitive && !element.isString) element.booleanOrNull else null
     }
 
     /** Never throws. */
@@ -113,6 +118,7 @@ class LayoutPreferencesStore(
                     put("version", 1)
                     put("editorFraction", value)
                     put("softWrap", preferences.softWrap)
+                    put("previewUnsaved", preferences.previewUnsaved)
                 }
             Files.writeString(tmp, body.toString())
             Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)

@@ -196,4 +196,64 @@ class RunStateMachineTest :
             val savedOk = step(saved, DesktopEvent.Finished(4, RunResult.Success(model(4)))).state
             savedOk.shouldBeInstanceOf<DesktopState.Ok>().model.origin shouldBe PreviewOrigin.SavedFile
         }
+
+        "an automatic buffer run replaces a running buffer run" {
+            val open = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val ok = step(open, DesktopEvent.Finished(1, RunResult.Success(model(1)))).state
+            val first = step(ok, DesktopEvent.RunBuffer(file, "a", auto = true))
+            val second = step(first.state, DesktopEvent.RunBuffer(file, "b", auto = true))
+            second.state.generation shouldBe 3
+            second.state.shouldBeInstanceOf<DesktopState.Running>().origin shouldBe PreviewOrigin.Buffer("b")
+            second.effects shouldBe listOf(Effect.CancelRun, Effect.StartRun(3, file, "b"))
+            // the late result of the replaced run is dropped
+            val late = step(second.state, DesktopEvent.Finished(2, RunResult.Success(model(2))))
+            late.state shouldBe second.state
+            late.effects.shouldBeEmpty()
+        }
+
+        "an automatic buffer run never replaces a running run of the saved file" {
+            val running = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val t = step(running, DesktopEvent.RunBuffer(file, "a", auto = true))
+            t.state shouldBe running
+            t.effects.shouldBeEmpty()
+        }
+
+        "a manual buffer run still replaces a running run of the saved file" {
+            val running = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val t = step(running, DesktopEvent.RunBuffer(file, "a"))
+            t.state.shouldBeInstanceOf<DesktopState.Running>().origin shouldBe PreviewOrigin.Buffer("a")
+            t.effects shouldBe listOf(Effect.CancelRun, Effect.StartRun(2, file, "a"))
+        }
+
+        "a failed automatic run keeps the last good picture and the sent text as origin" {
+            val open = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val ok = step(open, DesktopEvent.Finished(1, RunResult.Success(model(1)))).state
+            val running = step(ok, DesktopEvent.RunBuffer(file, "bad", auto = true)).state
+            val failed =
+                step(
+                    running,
+                    DesktopEvent.Finished(2, RunResult.Failure(listOf(DesktopError("KSTEP-S-001", 1, 1, "x")))),
+                ).state.shouldBeInstanceOf<DesktopState.Error>()
+            failed.lastGood?.generation shouldBe 1
+            failed.origin shouldBe PreviewOrigin.Buffer("bad")
+        }
+
+        "BufferTooLarge shows KSTEP-D-046 with the good picture, holds no text and cancels a buffer run" {
+            val open = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            val ok = step(open, DesktopEvent.Finished(1, RunResult.Success(model(1)))).state
+            val fromOk = step(ok, DesktopEvent.BufferTooLarge(file))
+            val error = fromOk.state.shouldBeInstanceOf<DesktopState.Error>()
+            error.errors.single().code shouldBe DesktopErrorCodes.UNSAVED_RUN_TOO_LARGE
+            error.lastGood?.generation shouldBe 1
+            error.origin shouldBe PreviewOrigin.SavedFile
+            val buffer = step(ok, DesktopEvent.RunBuffer(file, "a", auto = true)).state
+            step(buffer, DesktopEvent.BufferTooLarge(file)).effects shouldBe listOf(Effect.CancelRun)
+        }
+
+        "BufferTooLarge leaves a running run of the saved file and other files alone" {
+            val running = step(DesktopState.Idle, DesktopEvent.Open(file)).state
+            step(running, DesktopEvent.BufferTooLarge(file)).state shouldBe running
+            val ok = step(running, DesktopEvent.Finished(1, RunResult.Success(model(1)))).state
+            step(ok, DesktopEvent.BufferTooLarge(Path.of("/tmp/other.kstep.kts"))).state shouldBe ok
+        }
     })

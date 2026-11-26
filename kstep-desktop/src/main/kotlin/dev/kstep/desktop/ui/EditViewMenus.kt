@@ -55,10 +55,10 @@ internal fun MenuScope.viewMenuItems(
             is MenuEntry.ViewItem -> {
                 val a = entry.action
                 val state = stateOf(a, ctx)
-                if (a == ViewAction.SOFT_WRAP) {
+                if (a == ViewAction.SOFT_WRAP || a == ViewAction.PREVIEW_UNSAVED) {
                     CheckboxItem(
                         a.menuText(os),
-                        checked = ctx.softWrap,
+                        checked = if (a == ViewAction.SOFT_WRAP) ctx.softWrap else ctx.previewUnsaved,
                         onCheckedChange = { onView(a) },
                         icon = menuIcon(iconOf(a), enabled = state.enabled),
                         enabled = state.enabled,

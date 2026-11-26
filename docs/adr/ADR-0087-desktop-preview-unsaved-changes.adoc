@@ -1,0 +1,52 @@
+= ADR-0087: Preview Unsaved Changes, the automatic preview while typing (Welle D2c-3b)
+:toc:
+
+== Status
+
+Accepted (Welle D2c-3b). Scope: `kstep-desktop` only (one menu item, one setting, one pure scheduler, one reducer event, one small driver in `ui`). No new dependency, no new error code (`KSTEP-D-046` is reused), no change to `kstep-cli`, the worker protocol or `layout.json`'s version (still 1; one optional key is added). Completes the point ADR-0086 left open. Not checked by hand in a real window: the scheduler and the reducer are tested without real time, the Compose wiring compiles, but the menu item, the feel of the 800 ms debounce and the focus handling were not looked at in a running window.
+
+== Context
+
+ADR-0086 made the preview of unsaved text available on request (*Run Unsaved*). Trying a change still meant pressing a key each time. The wish is an opt-in that previews the text while it is typed, without flooding the machine with workers, without ever hiding a good picture behind a half-typed script, and without touching the saved file.
+
+== Decision
+
+D1. A check item *View > Preview Unsaved Changes*, off by default, no key, no toolbar entry. It has its own icon (the run triangle with three dots): the menu icons are pairwise different by a test, so *Run Unsaved*'s icon is not shared. The mark shows the saved setting. The item is disabled with the reason of ADR-0086 ("Notes preview only the saved file") in a knowledge workspace or for a note; it stays enabled with no file open and while a draft offer is open (it merely does nothing then).
+
+D2. Setting. `layout.json` gets the optional key `previewUnsaved` (boolean, `version` stays 1). Absent means off. A value that is not a JSON boolean (a string, a number, `null`, an object) makes the whole file untrusted, like `softWrap` (ADR-0085): the defaults apply. Every save of the file carries all three settings. The file stays far below its 1 KiB limit.
+
+D3. Timing. An automatic run starts 800 ms after the last edit and at most 2 s after the previous automatic start. A later edit is never lost (trailing): the due time is `max(lastEdit + 800 ms, lastAutoStart + 2 s)`. A series of keystrokes gives one run. A manual *Run Unsaved* does not count for the rate limit.
+
+D4. Blocks. No automatic run, and no change of state, while: the setting is off; no file is open; the text is a note; a draft offer is open; the window is not focused; or a run of the saved file is in progress. When a block ends, or the surroundings change in any other way, with a pending difference the scheduler plans afresh, so the run comes 800 ms after the block ended (after the end of the saved-file run, after the focus came back), never at once. Gaining the focus without a difference runs nothing.
+
+D5. Nothing runs twice and nothing loops. The scheduler keeps the *baseline*: the text the shown picture was made from (the saved text when a run of the saved file started or ended, the sent text when a buffer run started). A run starts only when the text differs from the baseline; the sent text becomes the baseline at once. A failed run therefore does not start again for the same text; only another edit or a focus change plans a new run. Typing back to the saved text after a buffer picture runs once more, so that the picture matches the text again. A save starts the normal run of the saved file (ADR-0052); its baseline is the saved text, so the scheduler does not fire a second run.
+
+D6. Replacement. An automatic run replaces a running buffer run (generation + 1, the old worker is killed, its late result is dropped; unchanged from ADR-0086 D7). It never replaces a running run of the saved file: the reducer ignores `RunBuffer(auto = true)` then, in addition to the scheduler's own block. A manual *Run Unsaved* still replaces everything, as before. At most one buffer file lives at a time: the single run executor ends the previous run, and with it the removal of its file, before the next one writes.
+
+D7. A failed automatic run keeps the last good picture; the error bar and the marks come from the run that failed, pinned against the text that was sent (ADR-0086 D8). The picture does not disappear while the user is in the middle of a word.
+
+D8. Size. Text over 1 MiB (UTF-8 bytes, counted without allocating, with cheap prefilters by character count) is not run. When the text crosses the limit, the scheduler reports it once, after the debounce, as the new reducer event `BufferTooLarge`: `KSTEP-D-046` is shown, the last good picture stays, a running buffer run is cancelled, a running run of the saved file is left alone. The event does not carry the text, so no megabyte is copied or kept for the message. Typing on while over the limit reports nothing more; coming back under the limit and crossing it again is a new report. Switching the setting on with an oversized text is one crossing.
+
+D9. Where the logic lives. `run/AutoPreviewScheduler` is pure: no Compose, no thread, no clock; the time is passed in (`now`). `ui/AutoPreviewDriver` only reports facts (text, focus, conditions, state) and carries out the one action the scheduler returns. While the setting is off the driver reports nothing and never calls the controller (`shouldSchedulePreview`). The driver uses the monotonic clock (`System.nanoTime`), not the wall clock, and polls at most every 100 ms; the scheduler compares the text with the last one it saw, which is cheap for strings of different length and for the same object. Export, Save and the input watch never see the buffer (ADR-0086 D9); an automatic run does not replace the watched inputs. A file change resets the scheduler (text, baseline, rate limit, message flag), so nothing of the old file leaks into the new one.
+
+== Rejected
+
+* 1200 ms (more calm) and 400 ms (more immediate) for the debounce: 800 ms is the compromise of the design review.
+* Dimming the old picture to 85 %: ADR-0086 keeps 60 % while a buffer run is in progress; one rule.
+* A key and a toolbar switch: the item is a setting, not an action; a key would invite pressing it by accident.
+* Letting a running automatic run finish before the next starts: the user wants the picture of the text as it is now.
+* A rate limit that drops the last edit: the last edit must always run.
+* A new error code for "too large while typing": `KSTEP-D-046` says exactly that. A new code would also touch the uniqueness test for nothing.
+* Reporting the oversize through the worker runner (as *Run Unsaved* does): that would copy a megabyte for every message.
+
+== Consequences
+
+* The preview follows the text without saving, at most every two seconds, while the window has the focus.
+* One more field in `layout.json`; older versions of the app ignore it (they read `softWrap` strictly and the key set loosely), newer versions read older files as "off".
+* The status line is unchanged: it shows *saved file*, *unsaved buffer* or *unsaved buffer (older)* as in ADR-0086.
+
+== Not covered
+
+* A tokenizer, DSL name completion and regex in find (D2c-4) and D3c are separate waves.
+* Not checked by hand in a real window on any system: the menu item, the feel of the debounce, the focus changes between windows and the interplay with a very slow worker were not tried.
+* The interval and the debounce are constants, not settings.

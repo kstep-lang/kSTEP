@@ -9,6 +9,12 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: automatic preview of unsaved text (Welle D2c-3b, ADR-0087). *View > Preview Unsaved Changes* (check item, off
+  by default, remembered in `layout.json` as the optional key `previewUnsaved`; the file stays version 1) previews the editor text
+  while you type: 800 ms after the last edit, at most one run per 2 s, the last edit always runs. No automatic run while a run of
+  the saved file is in progress, a draft offer is open, the window is not focused, nothing is open or the text is a note; a failed
+  run keeps the last good picture. Text over 1 MiB is not run and reports `KSTEP-D-046` once. No new error code. Not checked by
+  hand in the window.
 * kSTEP Desktop: preview of unsaved text and keys for the banner (Welle D2c-3a, ADR-0086). *View > Run Unsaved*
   (`Shift+Ctrl/Cmd+R`) previews the editor text once, without saving: the text goes to a private folder (not the session folder)
   and the worker reads input files next to the real script. The status line names the picture (`Preview: saved file`,

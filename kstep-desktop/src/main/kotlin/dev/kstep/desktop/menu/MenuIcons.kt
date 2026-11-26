@@ -25,6 +25,7 @@ enum class MenuIconId {
     GO_TO_LINE,
     RUN,
     RUN_UNSAVED,
+    PREVIEW_UNSAVED,
     HOME,
     PREVIOUS_BLOCK,
     NEXT_BLOCK,
@@ -80,6 +81,7 @@ fun iconOf(action: ViewAction): MenuIconId =
         ViewAction.SHOW_ALL -> MenuIconId.SHOW_ALL
         ViewAction.AI_PANEL -> MenuIconId.AI_PANEL
         ViewAction.SOFT_WRAP -> MenuIconId.SOFT_WRAP
+        ViewAction.PREVIEW_UNSAVED -> MenuIconId.PREVIEW_UNSAVED
         ViewAction.FOCUS_BANNER -> MenuIconId.BANNER
     }
 

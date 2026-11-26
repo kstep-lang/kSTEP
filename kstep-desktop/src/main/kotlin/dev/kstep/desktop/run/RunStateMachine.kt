@@ -87,6 +87,19 @@ sealed interface DesktopEvent {
     data class RunBuffer(
         val file: Path,
         val text: String,
+        /**
+         * Started by "Preview Unsaved Changes" (ADR-0087), not by the user: it replaces a running buffer run but never a
+         * running run of the saved file.
+         */
+        val auto: Boolean = false,
+    ) : DesktopEvent
+
+    /**
+     * The automatic preview found the buffer of [file] over 1 MiB (ADR-0087): KSTEP-D-046 is shown, the good picture and
+     * a running run of the saved file stay. The text itself is not carried.
+     */
+    data class BufferTooLarge(
+        val file: Path,
     ) : DesktopEvent
 
     data class Finished(
@@ -142,6 +155,7 @@ class RunStateMachine {
                 }
             }
             is DesktopEvent.RunBuffer -> runBuffer(state, event, nowMs, now)
+            is DesktopEvent.BufferTooLarge -> bufferTooLarge(state, event, now)
             DesktopEvent.Close -> Transition(DesktopState.Idle, listOf(Effect.CancelRun))
             DesktopEvent.Missing -> {
                 val file = state.file
@@ -187,10 +201,40 @@ class RunStateMachine {
                 emptyList(),
             )
         }
+        // An automatic run never replaces the run of the saved file (ADR-0087); a manual one still does (ADR-0086).
+        if (event.auto && state is DesktopState.Running && state.origin == PreviewOrigin.SavedFile) {
+            return Transition(state, emptyList())
+        }
         val gen = state.generation + 1
         return Transition(
             DesktopState.Running(file, gen, state.lastGood, nowMs, PreviewOrigin.Buffer(event.text)),
             listOf(Effect.CancelRun, Effect.StartRun(gen, file, event.text)),
+        )
+    }
+
+    private fun bufferTooLarge(
+        state: DesktopState,
+        event: DesktopEvent.BufferTooLarge,
+        now: Instant,
+    ): Transition {
+        val file = state.file
+        if (file == null || event.file != file) return Transition(state, emptyList())
+        if (state is DesktopState.Running &&
+            state.origin == PreviewOrigin.SavedFile
+        ) {
+            return Transition(state, emptyList())
+        }
+        val error =
+            DesktopError(
+                DesktopErrorCodes.UNSAVED_RUN_TOO_LARGE,
+                null,
+                null,
+                "the unsaved text is larger than 1 MiB; save it to preview",
+            )
+        // the origin is the saved file: no text of 1 MiB or more is kept, and no mark is placed against it
+        return Transition(
+            DesktopState.Error(file, state.generation + 1, listOf(error), state.lastGood, now, PreviewOrigin.SavedFile),
+            listOf(Effect.CancelRun),
         )
     }
 

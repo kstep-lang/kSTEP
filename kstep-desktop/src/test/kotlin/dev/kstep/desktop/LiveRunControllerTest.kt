@@ -240,4 +240,85 @@ class LiveRunControllerTest :
                 controller.close()
             }
         }
+
+        "two quick automatic buffer runs: the first process is killed, only the second result counts".config(
+            timeout = 60.seconds,
+        ) {
+            val firstStarted = CountDownLatch(1)
+            val ran = CopyOnWriteArrayList<String>()
+            val controller =
+                LiveRunController(
+                    runner = { _, gen, _ -> RunResult.Success(model(gen)) },
+                    watcherFactory = { _, _ -> AutoCloseable { } },
+                    bufferRunner = { _, text, gen, onStarted ->
+                        ran += text
+                        if (text == "first") {
+                            onStarted(ProcessBuilder("sleep", "30").start())
+                            firstStarted.countDown()
+                            Thread.sleep(500)
+                        }
+                        RunResult.Success(model(gen))
+                    },
+                )
+            try {
+                controller.open(file)
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok }
+                controller.runBuffer(file, "first", auto = true)
+                firstStarted.await(10, TimeUnit.SECONDS) shouldBe true
+                controller.runBuffer(file, "second", auto = true)
+                val ok = TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok && it.generation == 3L }
+                ok.shouldBeInstanceOf<DesktopState.Ok>().model.origin shouldBe
+                    dev.kstep.desktop.run.PreviewOrigin
+                        .Buffer("second")
+                ran.toList() shouldBe listOf("first", "second")
+            } finally {
+                controller.close()
+            }
+        }
+
+        "an automatic buffer run during the run of the saved file starts nothing".config(timeout = 60.seconds) {
+            val gate = CountDownLatch(1)
+            val ran = CopyOnWriteArrayList<String>()
+            val controller =
+                LiveRunController(
+                    runner = { _, gen, _ ->
+                        gate.await(30, TimeUnit.SECONDS)
+                        RunResult.Success(model(gen))
+                    },
+                    watcherFactory = { _, _ -> AutoCloseable { } },
+                    bufferRunner = { _, text, gen, _ ->
+                        ran += text
+                        RunResult.Success(model(gen))
+                    },
+                )
+            try {
+                controller.open(file) // the run of the saved file is blocked
+                controller.runBuffer(file, "auto", auto = true)
+                controller.state.value.generation shouldBe 1
+                gate.countDown()
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok }.generation shouldBe 1
+                ran.toList() shouldBe emptyList()
+            } finally {
+                controller.close()
+            }
+        }
+
+        "bufferTooLarge shows the error with the good picture and runs nothing".config(timeout = 60.seconds) {
+            val controller =
+                LiveRunController(
+                    runner = { _, gen, _ -> RunResult.Success(model(gen)) },
+                    watcherFactory = { _, _ -> AutoCloseable { } },
+                    bufferRunner = { _, _, _, _ -> error("must not run") },
+                )
+            try {
+                controller.open(file)
+                TestSupport.awaitState(controller, 10_000) { it is DesktopState.Ok }
+                controller.bufferTooLarge(file)
+                val error = controller.state.value.shouldBeInstanceOf<DesktopState.Error>()
+                error.errors.single().code shouldBe "KSTEP-D-046"
+                error.lastGood?.generation shouldBe 1
+            } finally {
+                controller.close()
+            }
+        }
     })

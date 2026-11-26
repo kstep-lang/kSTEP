@@ -125,4 +125,20 @@ class UnsavedBufferStoreTest :
                 store.write("b").shouldBeInstanceOf<UnsavedBufferStore.Written.Failed>()
             }
         }
+
+        "after each ended run only the folder remains: at most one buffer file lives at a time" {
+            withBase { base ->
+                val store = UnsavedBufferStore(base)
+                var maxFiles = 0
+                repeat(5) { i ->
+                    val ok = store.write("run $i").shouldBeInstanceOf<UnsavedBufferStore.Written.Ok>()
+                    val count = Files.list(ok.path.parent).use { it.count() }
+                    if (count > maxFiles) maxFiles = count.toInt()
+                    store.delete(ok.path)
+                    Files.list(ok.path.parent).use { it.count() } shouldBe 0L
+                }
+                maxFiles shouldBe 1
+                store.close()
+            }
+        }
     })

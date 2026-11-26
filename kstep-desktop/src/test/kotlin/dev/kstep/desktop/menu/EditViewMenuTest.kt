@@ -46,6 +46,7 @@ class EditViewMenuTest :
                     MenuEntry.ViewItem(ViewAction.AI_PANEL),
                     MenuEntry.Separator,
                     MenuEntry.ViewItem(ViewAction.SOFT_WRAP),
+                    MenuEntry.ViewItem(ViewAction.PREVIEW_UNSAVED),
                     MenuEntry.Separator,
                     MenuEntry.ViewItem(ViewAction.FOCUS_BANNER),
                 )
@@ -92,6 +93,27 @@ class EditViewMenuTest :
             stateOf(ViewAction.SHOW_ALL, open.copy(nothingChanged = true)) shouldBe
                 ActionState(false, MenuReasons.NOTHING_CHANGED)
             stateOf(ViewAction.SHOW_ALL, open) shouldBe ActionState(true, null)
+        }
+
+        "Preview Unsaved Changes has no key, is enabled for scripts and follows the saved setting" {
+            for (os in MenuOs.entries) {
+                shortcutOf(ViewAction.PREVIEW_UNSAVED, os) shouldBe null
+                registeredShortcut(ViewAction.PREVIEW_UNSAVED, base, os) shouldBe null
+            }
+            ViewAction.PREVIEW_UNSAVED.keyHint shouldBe null
+            ViewAction.PREVIEW_UNSAVED.menuText(MenuOs.MAC) shouldBe "Preview Unsaved Changes"
+            // no file, an open draft offer and unsaved or saved text all leave it enabled
+            stateOf(ViewAction.PREVIEW_UNSAVED, base) shouldBe ActionState(true, null)
+            stateOf(ViewAction.PREVIEW_UNSAVED, open.copy(draftOfferOpen = true)) shouldBe ActionState(true, null)
+            stateOf(ViewAction.PREVIEW_UNSAVED, open.copy(editorDirty = false)) shouldBe ActionState(true, null)
+            // notes preview only the saved file
+            stateOf(ViewAction.PREVIEW_UNSAVED, open.copy(knowledgeOpen = true)) shouldBe
+                ActionState(false, MenuReasons.NOTES_SAVED_ONLY)
+            stateOf(ViewAction.PREVIEW_UNSAVED, open.copy(editorIsScript = false)) shouldBe
+                ActionState(false, MenuReasons.NOTES_SAVED_ONLY)
+            // the check mark follows the saved value
+            base.previewUnsaved shouldBe false
+            base.copy(previewUnsaved = true).previewUnsaved shouldBe true
         }
 
         "Soft Wrap is always available, with no key, and follows the preference" {

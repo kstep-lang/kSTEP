@@ -43,7 +43,7 @@ D9. Export, save and notes. The export, Save and the input watch never see the b
 
 == Not covered
 
-* D2c-3b: the check item *Preview Unsaved Changes* (off by default) with `previewUnsaved` in `layout.json` (strict boolean, version 1), a debounce of 800 ms and at most one run per 2 s, no automatic run while a draft offer is open, for a note, for text over 1 MiB (one `KSTEP-D-046`) or in an unfocused window, an error run that does not replace the good picture, and the tests for debounce, rate limit and replacement while typing.
+* D2c-3b: the check item *Preview Unsaved Changes* (off by default) with `previewUnsaved` in `layout.json` (strict boolean, version 1), a debounce of 800 ms and at most one run per 2 s, no automatic run while a draft offer is open, for a note, for text over 1 MiB (one `KSTEP-D-046`) or in an unfocused window, an error run that does not replace the good picture, and the tests for debounce, rate limit and replacement while typing. Update: covered by ADR-0087.
 * Windows: the folder is checked for link, directory and owner only; there is no ACL hardening (the draft store has none either), and Windows has no worker sandbox.
 * After `kill -9` the folder `kstep-desktop-unsaved-*` stays until the system cleans its temp folder, as the session folder does today. Old folders of other processes are not cleaned up on start: deleting folders by name pattern in a shared folder would be riskier than leaving them.
 * Not checked by hand in a real window on any system; the OCCT-dependent desktop tests are unchanged.

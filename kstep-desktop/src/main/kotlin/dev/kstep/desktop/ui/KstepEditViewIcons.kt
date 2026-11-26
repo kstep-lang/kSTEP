@@ -168,6 +168,24 @@ internal object KstepEditViewIcons {
                         verticalLineTo(12.5f)
                     },
                 )
+            // The run triangle with three dots beside it: the unsaved text is previewed on its own while typing.
+            MenuIconId.PREVIEW_UNSAVED ->
+                listOf(
+                    {
+                        moveTo(2.5f, 3.5f)
+                        lineTo(9.5f, 8.5f)
+                        lineTo(2.5f, 13.5f)
+                        close()
+                    },
+                    {
+                        moveTo(12.5f, 4.5f)
+                        horizontalLineTo(13.5f)
+                        moveTo(12.5f, 8.5f)
+                        horizontalLineTo(13.5f)
+                        moveTo(12.5f, 12.5f)
+                        horizontalLineTo(13.5f)
+                    },
+                )
             MenuIconId.HOME ->
                 listOf(
                     {
