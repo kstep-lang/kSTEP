@@ -1,0 +1,28 @@
+= ADR-0089: Source of the DSL Names in the Editor (Welle D2c-4b)
+:toc:
+
+== Status
+
+Accepted (Welle D2c-4b). Scope: `kstep-desktop` only (`edit/KStepDslNames`, `edit/TokenScanner`, `edit/KotlinTokenizer`, `edit/IncrementalTokenizer`, `ui/SyntaxTransformation`) and tests. No new dependency, no new error code, no change to `layout.json` or any file format. Not checked by hand in a real window.
+
+== Context
+
+The editor colours the names of the script DSL (ADR-0052 D9). The list was hand-kept and tested only for existence, so a name added to the script was never noticed as missing: `styleFaces`, `styleEdges`, `styleInstance`, `inputFile` and `readInput` were not coloured. ADR-0088 left open that a changed name set must reset the incremental tokenizer.
+
+== Decision
+
+D1. The source stays checked-in data. Loading or reflecting on `kstep-script` in the desktop is excluded (sandbox ADR-0062, `DesktopArchitectureTest`: no script evaluation in the desktop JVM). A Gradle generator that scans sources with regular expressions would be a second hand-built mini parser ("public DSL function" is not cleanly definable by regex: private and internal members, overloads, extensions) and would add a build coupling and a configuration-cache risk for about twenty names.
+
+D2. The list is hardened by a completeness test instead. `KStepDslNames` has `scriptNames` (top-level functions of kstep-script and the members of `KStepModelBuilder` and `ExportBlockBuilder`) and `libraryNames` (`vec`, `OcctKernel`); `names` is their union. `KStepDslNamesTest` fails if a public script function is missing from `scriptNames` (the extension `validateModel` is the one documented exception: it is no script entry point), if a name is not declared in the sources, or if a name is a Kotlin keyword. It also checks a minimum number of found declarations so it cannot pass empty.
+
+D3. The name set is swappable: `TokenScanner`, `KotlinTokenizer.tokenize` and `IncrementalTokenizer` take the names (default `KStepDslNames.names`). `IncrementalTokenizer.update` compares the current set with the one of the last scan and calls `reset()` itself when they differ, before the "text unchanged" shortcut.
+
+D4. `SyntaxTransformation` includes the name set in its cache key, so the same text is re-coloured after a name change.
+
+D5. Newly coloured: `styleFaces`, `styleEdges`, `styleInstance`, `inputFile`, `readInput`.
+
+== Consequences
+
+* Adding a public function to the script DSL without listing it fails the build.
+* Like before, a name colours every identifier of that spelling in a script, also a local variable.
+* Not covered: EXPRESS entity names of the schema (hundreds, not a desktop dependency); geometry library functions such as `scale`, `mirror`, `draft`, `pocket` (they collide with ordinary identifiers); no run-time source changes the set yet, the seam exists and is tested; not checked by hand in a real window.

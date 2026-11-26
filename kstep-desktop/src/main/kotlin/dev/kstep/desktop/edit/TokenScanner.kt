@@ -109,6 +109,7 @@ private const val MAX_DEPTH = KotlinTokenizer.MAX_TEMPLATE_DEPTH
  */
 internal class TokenScanner(
     private val text: CharSequence,
+    private val dslNames: Set<String> = KStepDslNames.names,
 ) {
     /**
      * Scans from [from] (0 or a line start) with [state] (restored by the caller) and appends the tokens to [out].
@@ -278,7 +279,7 @@ internal class TokenScanner(
                 while (j < n && KotlinTokenizer.isIdentPart(text[j])) j++
                 val word = text.subSequence(i, j).toString()
                 when {
-                    word in KStepDslNames.names -> emit(i, j, TokenKind.DSL)
+                    word in dslNames -> emit(i, j, TokenKind.DSL)
                     word in KotlinTokenizer.keywords -> emit(i, j, TokenKind.KEYWORD)
                 }
                 return j

@@ -37,5 +37,5 @@ D8. Memory. The line starts are one `IntArray` and the line states one reference
 == Consequences
 
 * Typing in a large script re-tokenizes a line or two; the colours are identical to before.
-* A future wave that makes the DSL names dynamic (D2c-4b) must call `IncrementalTokenizer.reset()` when the names change: the reused rest of the text would otherwise keep the old DSL and keyword tokens.
+* A changed DSL name set must reset the tokenizer, or the reused rest of the text would keep the old DSL tokens; ADR-0089 (D2c-4b) does this automatically in `IncrementalTokenizer.update`.
 * Not covered: relative token offsets or colouring only the visible part would be needed for a fully O(change) pipeline; not checked by hand in a real window.

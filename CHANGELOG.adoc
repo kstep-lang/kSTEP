@@ -9,6 +9,11 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: DSL names in the editor come from a completeness-tested list (Welle D2c-4b, ADR-0089). `styleFaces`,
+  `styleEdges`, `styleInstance`, `inputFile` and `readInput` are now coloured; a test fails when a public script function is
+  missing from the list; the incremental tokenizer resets itself when the name set changes. No new error code, no new
+  dependency, `layout.json` unchanged. Not checked by hand in the window.
+
 * kSTEP Desktop: incremental syntax colouring (Welle D2c-4a, ADR-0088). The editor no longer tokenizes the whole script on
   every change: the tokenizer is a resumable state machine and restarts at the line of the change until its state at a line
   start agrees with the stored one again; a typed character in a 1 MiB script scans about 80 characters instead of about a

@@ -8,6 +8,7 @@ package dev.kstep.desktop.edit
  */
 class IncrementalTokenizer(
     private val maxChars: Int = EditorText.MAX_BYTES,
+    private val names: () -> Set<String> = { KStepDslNames.names },
 ) {
     /** What the last [update] did: how many characters were scanned, whether it was a full scan, fallbacks so far. */
     data class Stats(
@@ -21,12 +22,18 @@ class IncrementalTokenizer(
 
     private var fullFallbacks = 0L
     private var oldText: String? = null
+    private var activeNames: Set<String> = emptySet()
+    private var namesKnown = false
     private var tokens: List<Token> = emptyList()
     private var lineStarts = IntArray(0)
     private var lineStates: Array<LineState> = emptyArray()
 
     /** The tokens of [text]; a NEW list on every change (a list returned earlier is never mutated). */
     fun update(text: String): List<Token> {
+        val current = names()
+        if (namesKnown && activeNames !== current && activeNames != current) reset()
+        activeNames = current
+        namesKnown = true
         val old = oldText
         if (old != null && (text === old || text == old)) {
             lastStats = Stats(0, false, fullFallbacks)
@@ -35,7 +42,7 @@ class IncrementalTokenizer(
         if (text.length > maxChars) {
             reset()
             lastStats = Stats(text.length, true, fullFallbacks)
-            return KotlinTokenizer.tokenize(text)
+            return KotlinTokenizer.tokenize(text, current)
         }
         if (old == null) return fullScan(text)
         return incremental(old, text) ?: run {
@@ -44,7 +51,7 @@ class IncrementalTokenizer(
         }
     }
 
-    /** Forgets the stored text (needed when the DSL names change, ADR-0088). */
+    /** Forgets the stored text; [update] calls it itself when the DSL names change (ADR-0089). */
     fun reset() {
         oldText = null
         tokens = emptyList()
@@ -102,7 +109,7 @@ class IncrementalTokenizer(
         val out = ArrayList<Token>(maxOf(16, text.length / 16))
         val log = LineLog(LineState.INITIAL)
         log.put(0, LineState.INITIAL)
-        TokenScanner(text).run(0, ScanState(), out) { q, live ->
+        TokenScanner(text, activeNames).run(0, ScanState(), out) { q, live ->
             log.add(q, live)
             false
         }
@@ -149,7 +156,7 @@ class IncrementalTokenizer(
         val state = ScanState()
         state.restore(startState)
         val stop =
-            TokenScanner(text).run(resume, state, out) { q, live ->
+            TokenScanner(text, activeNames).run(resume, state, out) { q, live ->
                 log.add(q, live)
                 if (q - 1 >= edit.newEnd) {
                     val m = indexOfLineStart(q - delta)

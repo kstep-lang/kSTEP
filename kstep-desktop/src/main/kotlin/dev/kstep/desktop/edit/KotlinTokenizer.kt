@@ -71,9 +71,12 @@ object KotlinTokenizer {
             "set",
         )
 
-    fun tokenize(text: CharSequence): List<Token> {
+    fun tokenize(
+        text: CharSequence,
+        names: Set<String> = KStepDslNames.names,
+    ): List<Token> {
         val out = ArrayList<Token>(maxOf(16, text.length / 16))
-        TokenScanner(text).run(0, ScanState(), out, null)
+        TokenScanner(text, names).run(0, ScanState(), out, null)
         return out
     }
 

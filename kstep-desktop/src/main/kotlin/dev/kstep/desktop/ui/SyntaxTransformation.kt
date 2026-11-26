@@ -6,6 +6,7 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import dev.kstep.desktop.edit.IncrementalTokenizer
+import dev.kstep.desktop.edit.KStepDslNames
 import dev.kstep.desktop.edit.Token
 
 /**
@@ -15,20 +16,24 @@ import dev.kstep.desktop.edit.Token
  */
 internal class SyntaxTransformation(
     private val colors: EditorColors,
+    private val names: () -> Set<String> = { KStepDslNames.names },
 ) : VisualTransformation {
     private var cachedText: String? = null
     private var cachedResult: AnnotatedString? = null
     private var cachedTokens: List<Token> = emptyList()
-    private val tokenizer = IncrementalTokenizer()
+    private var cachedNames: Set<String>? = null
+    private val tokenizer = IncrementalTokenizer(names = names)
 
     /** The tokens of [text] if the field has coloured exactly that text last, else `null` (no second scan, ADR-0085). */
-    fun tokensFor(text: String): List<Token>? = if (text == cachedText && cachedResult != null) cachedTokens else null
+    fun tokensFor(text: String): List<Token>? =
+        if (text == cachedText && cachedResult != null && names() == cachedNames) cachedTokens else null
 
     override fun filter(text: AnnotatedString): TransformedText {
         val plain = text.text
         val cached = cachedResult
+        val currentNames = names()
         val styled =
-            if (cached != null && plain == cachedText) {
+            if (cached != null && plain == cachedText && currentNames == cachedNames) {
                 cached
             } else {
                 val tokens = tokenizer.update(plain)
@@ -40,6 +45,7 @@ internal class SyntaxTransformation(
                 }.also {
                     cachedTokens = tokens
                     cachedText = plain
+                    cachedNames = currentNames
                     cachedResult = it
                 }
             }
