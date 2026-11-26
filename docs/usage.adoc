@@ -990,6 +990,15 @@ buffer, undoable) or Keep mine (the next save overwrites the disk version); Save
 too large or not UTF-8 text stays preview-only, with the reason in the banner. Closing the window or opening another file with
 unsaved changes asks Save / Don't Save / Cancel; a failed save keeps the window open.
 
+Editor comfort (ADR-0085): with the caret next to a bracket (`()`, `[]`, `{}`) and nothing selected, the bracket and its partner
+are tinted; a bracket without a partner is tinted like an error line. Brackets inside strings, comments and the `${` and `}` of a
+string template are ignored; a partner more than 100,000 characters away is not looked for. *View > Soft Wrap* wraps long lines at
+the edge of the editor instead of scrolling sideways; the choice is remembered (off by default), the line numbers stay on the first
+row of each line and the saved file is not changed. The red and yellow bars in the line-number column move with the text: a bar
+stays on its line while you insert or delete lines, turns hollow when the marked text itself was edited (the error refers to the old
+text) and disappears when that text is deleted. Undo does not bring a bar back; the next run replaces all bars. Files over
+1,000,000 characters show no bars until the next run.
+
 Selection (ADR-0053): moving over a part tints it, a click selects it and opens a panel at the top right of the preview with its name,
 triangle count, size, centroid, colour and position. A click on empty space or Escape (while the preview has the focus) clears the
 selection. A press that moves more than 4 dp is an orbit or pan, not a click. After a re-run the selection stays if a part of that name

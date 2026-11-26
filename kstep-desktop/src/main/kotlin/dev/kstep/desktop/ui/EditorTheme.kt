@@ -20,6 +20,8 @@ internal class EditorColors(
     val matchBackground: Color,
     val currentMatchBackground: Color,
     val errorLineBackground: Color,
+    /** Background of a bracket and its partner next to the caret (ADR-0085). */
+    val bracketMatchBackground: Color,
 ) {
     private val comment = Color(0xFF8A8A8A)
 
@@ -49,6 +51,7 @@ internal class EditorColors(
                 matchBackground = Color(0xFFFFE9A0),
                 currentMatchBackground = Color(0xFFFFB74D),
                 errorLineBackground = Color(0xFFC62828).copy(alpha = 0.14f),
+                bracketMatchBackground = Color(0xFFC9DCF2),
             )
         val DARK =
             EditorColors(
@@ -64,6 +67,7 @@ internal class EditorColors(
                 matchBackground = Color(0xFF51451A),
                 currentMatchBackground = Color(0xFF8A6A1A),
                 errorLineBackground = Color(0xFFFF6B6B).copy(alpha = 0.22f),
+                bracketMatchBackground = Color(0xFF34465C),
             )
     }
 }

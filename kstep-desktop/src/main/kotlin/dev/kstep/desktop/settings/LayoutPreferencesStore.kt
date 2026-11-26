@@ -5,6 +5,7 @@ import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.put
@@ -16,14 +17,19 @@ import java.nio.file.attribute.PosixFilePermissions
 
 private val logger = KotlinLogging.logger {}
 
-/** What the window layout remembers (ADR-0067): the share of the width the editor takes. */
+/**
+ * What the window layout remembers (ADR-0067): the share of the width the editor takes, and whether long lines wrap
+ * (ADR-0085).
+ */
 data class LayoutPreferences(
     val editorFraction: Double = LayoutPreferencesStore.DEFAULT,
+    val softWrap: Boolean = false,
 )
 
 /**
  * Persists [LayoutPreferences] as `layout.json` in the desktop config folder. Untrusted on load: a regular file (no
- * symbolic link) of at most 1 KiB, strict UTF-8, `version` 1, a finite number clamped to 0.20..0.80; anything else
+ * symbolic link) of at most 1 KiB, strict UTF-8, `version` 1, a finite number clamped to 0.20..0.80 and an optional
+ * boolean `softWrap`; anything else
  * gives the default. Writes are atomic, 0600/0700 where supported, and never throw.
  */
 class LayoutPreferencesStore(
@@ -62,7 +68,17 @@ class LayoutPreferencesStore(
             (obj["editorFraction"] as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull
                 ?: return LayoutPreferences()
         if (!value.isFinite()) return LayoutPreferences()
-        return LayoutPreferences(value.coerceIn(MIN, MAX))
+        // optional (ADR-0085): absent means off; a value that is not a JSON boolean makes the whole file untrusted
+        val wrapElement = obj["softWrap"]
+        val wrap =
+            when {
+                wrapElement == null -> false
+                wrapElement is JsonPrimitive && !wrapElement.isString ->
+                    wrapElement.booleanOrNull
+                        ?: return LayoutPreferences()
+                else -> return LayoutPreferences()
+            }
+        return LayoutPreferences(value.coerceIn(MIN, MAX), wrap)
     }
 
     /** Never throws. */
@@ -96,6 +112,7 @@ class LayoutPreferencesStore(
                 buildJsonObject {
                     put("version", 1)
                     put("editorFraction", value)
+                    put("softWrap", preferences.softWrap)
                 }
             Files.writeString(tmp, body.toString())
             Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)

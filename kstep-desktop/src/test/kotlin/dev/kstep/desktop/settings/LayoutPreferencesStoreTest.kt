@@ -144,6 +144,52 @@ class LayoutPreferencesStoreTest :
             }
         }
 
+        "soft wrap round trip, off by default" {
+            withDir {
+                val store = LayoutPreferencesStore(it)
+                store.load().softWrap shouldBe false
+                store.save(LayoutPreferences(0.5, softWrap = true))
+                store.load() shouldBe LayoutPreferences(0.5, softWrap = true)
+                store.save(LayoutPreferences(0.5, softWrap = false))
+                store.load().softWrap shouldBe false
+            }
+        }
+
+        "a file without the soft wrap key means off, the version stays 1" {
+            withDir { c ->
+                Files.writeString(c.resolve(LayoutPreferencesStore.FILE_NAME), """{"version":1,"editorFraction":0.6}""")
+                LayoutPreferencesStore(c).load() shouldBe LayoutPreferences(0.6, softWrap = false)
+                val store = LayoutPreferencesStore(c)
+                store.save(LayoutPreferences(0.6, softWrap = true))
+                Files.readString(c.resolve(LayoutPreferencesStore.FILE_NAME)) shouldBe
+                    """{"version":1,"editorFraction":0.6,"softWrap":true}"""
+            }
+        }
+
+        "a soft wrap value that is not a boolean makes the file untrusted" {
+            withDir { c ->
+                for (bad in listOf("\"true\"", "1", "null", "[]", "{}", "\"\"")) {
+                    val body = """{"version":1,"editorFraction":0.6,"softWrap":$bad}"""
+                    Files.writeString(c.resolve(LayoutPreferencesStore.FILE_NAME), body)
+                    LayoutPreferencesStore(c).load() shouldBe LayoutPreferences()
+                }
+            }
+        }
+
+        "saving one setting carries the other one, the file stays small" {
+            withDir { c ->
+                val store = LayoutPreferencesStore(c)
+                val first = LayoutPreferences(editorFraction = 0.33, softWrap = true)
+                store.save(first)
+                store.save(first.copy(softWrap = false))
+                store.load() shouldBe LayoutPreferences(0.33, false)
+                store.save(first.copy(editorFraction = 0.7))
+                store.load() shouldBe LayoutPreferences(0.7, true)
+                (Files.size(c.resolve(LayoutPreferencesStore.FILE_NAME)) < LayoutPreferencesStore.MAX_BYTES) shouldBe
+                    true
+            }
+        }
+
         "a read-only folder does not throw" {
             withDir { c ->
                 if (!posix(c) || System.getProperty("user.name") == "root") return@withDir

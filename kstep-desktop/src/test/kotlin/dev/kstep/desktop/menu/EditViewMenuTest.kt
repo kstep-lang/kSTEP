@@ -43,6 +43,8 @@ class EditViewMenuTest :
                     MenuEntry.ViewItem(ViewAction.SHOW_ALL),
                     MenuEntry.Separator,
                     MenuEntry.ViewItem(ViewAction.AI_PANEL),
+                    MenuEntry.Separator,
+                    MenuEntry.ViewItem(ViewAction.SOFT_WRAP),
                 )
         }
 
@@ -87,6 +89,27 @@ class EditViewMenuTest :
             stateOf(ViewAction.SHOW_ALL, open.copy(nothingChanged = true)) shouldBe
                 ActionState(false, MenuReasons.NOTHING_CHANGED)
             stateOf(ViewAction.SHOW_ALL, open) shouldBe ActionState(true, null)
+        }
+
+        "Soft Wrap is always available, with no key, and follows the preference" {
+            stateOf(ViewAction.SOFT_WRAP, base) shouldBe ActionState(true, null)
+            stateOf(ViewAction.SOFT_WRAP, open) shouldBe ActionState(true, null)
+            stateOf(ViewAction.SOFT_WRAP, open.copy(knowledgeOpen = true)) shouldBe ActionState(true, null)
+            for (os in MenuOs.entries) {
+                shortcutOf(ViewAction.SOFT_WRAP, os) shouldBe null
+                registeredShortcut(ViewAction.SOFT_WRAP, base, os) shouldBe null
+            }
+            ViewAction.SOFT_WRAP.keyHint shouldBe null
+            ViewAction.SOFT_WRAP.menuText(MenuOs.MAC) shouldBe "Soft Wrap"
+            base.softWrap shouldBe false
+            base.copy(softWrap = true).softWrap shouldBe true
+        }
+
+        "Soft Wrap comes after Next Block and its own separator" {
+            val entries = viewMenu()
+            entries.last() shouldBe MenuEntry.ViewItem(ViewAction.SOFT_WRAP)
+            entries[entries.size - 2] shouldBe MenuEntry.Separator
+            (entries.indexOf(MenuEntry.ViewItem(ViewAction.NEXT_BLOCK)) < entries.size - 2) shouldBe true
         }
 
         "the AI panel is off in a workspace" {

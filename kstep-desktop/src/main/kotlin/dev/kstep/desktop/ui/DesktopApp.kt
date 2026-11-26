@@ -300,7 +300,14 @@ fun FrameWindowScope.DesktopApp(
     var jump by remember { mutableStateOf<EditorJump?>(null) }
     var jumpNonce by remember { mutableStateOf(0) }
     val layoutStore = remember { LayoutPreferencesStore() }
-    var editorFraction by remember { mutableStateOf(layoutStore.load().editorFraction.toFloat()) }
+    val initialLayout = remember { layoutStore.load() }
+    var editorFraction by remember { mutableStateOf(initialLayout.editorFraction.toFloat()) }
+    var softWrap by remember { mutableStateOf(initialLayout.softWrap) }
+    // Both settings share one file: every save carries the current value of the other one (ADR-0085).
+    val saveLayout: () -> Unit = {
+        val preferences = LayoutPreferences(editorFraction.toDouble(), softWrap)
+        scope.launch(Dispatchers.IO) { layoutStore.save(preferences) }
+    }
     val dark = isSystemInDarkTheme()
     val state by controller.state.collectAsState()
     val openCount by controller.openCount.collectAsState()
@@ -836,6 +843,7 @@ fun FrameWindowScope.DesktopApp(
             convertRunning = convertState is ConvertState.Running,
             exportDialogVisible = exportVisible,
             convertDialogVisible = convertState !is ConvertState.Idle,
+            softWrap = softWrap,
         )
     val onEditAction: (EditAction) -> Unit = {
         editorCommandNonce++
@@ -873,6 +881,10 @@ fun FrameWindowScope.DesktopApp(
             ViewAction.AI_PANEL -> {
                 aiVisible = true
                 aiFocus++
+            }
+            ViewAction.SOFT_WRAP -> {
+                softWrap = !softWrap
+                saveLayout()
             }
         }
     }
@@ -1063,7 +1075,8 @@ fun FrameWindowScope.DesktopApp(
                         ScriptEditor(
                             session,
                             editorView,
-                            errors,
+                            // marks follow the open file only: an error list of another file must not be pinned here
+                            if (state.file == editorView.state.path) errors else emptyList(),
                             dark,
                             jump,
                             onFocusChanged = {
@@ -1087,6 +1100,7 @@ fun FrameWindowScope.DesktopApp(
                             },
                             modifier = Modifier.width(windowWidth * effectiveFraction).fillMaxHeight(),
                             errorLine = selectedError?.line,
+                            softWrap = softWrap,
                             findRequest = findRequest,
                             editorCommand = editorCommand,
                             onUserEdit = { selectedError = null },
@@ -1125,10 +1139,7 @@ fun FrameWindowScope.DesktopApp(
                                                     1f - minFraction,
                                                 )
                                         },
-                                    onDragStopped = {
-                                        val saved = editorFraction.toDouble()
-                                        scope.launch(Dispatchers.IO) { layoutStore.save(LayoutPreferences(saved)) }
-                                    },
+                                    onDragStopped = { saveLayout() },
                                 ),
                         )
                         // the tree needs its own width and still leaves the canvas at least the minimum pane width

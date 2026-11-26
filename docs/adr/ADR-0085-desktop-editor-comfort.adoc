@@ -1,0 +1,42 @@
+= ADR-0085: Editor comfort of the desktop app (Welle D2c-2)
+:toc:
+
+== Status
+
+Accepted (Welle D2c-2). Scope: `kstep-desktop` only (new classes in `dev.kstep.desktop.edit`, changes in the editor, the gutter, the View menu and the layout preferences), no new dependency, no new error code. Closes three of the points ADR-0067 D7 moved to D2c: bracket pairs, soft wrap, and error marks that move with edits. Not checked by hand in the window; the logic is tested headless, the Compose wiring compiles and the icon and menu tests run, but typing, wrapping and the marks were not exercised in a real window.
+
+== Context
+
+Three things made the editor feel unfinished: a bracket gave no hint where its partner is, long lines could only be reached by scrolling sideways, and the error marks in the gutter referred to the saved file, so they turned hollow at the first keystroke and pointed at the wrong line after an inserted line.
+
+== Decision
+
+D1. Bracket search (`BracketMatcher`, pure). With an empty selection the candidate is the character before the caret, else the one at the caret; it must be one of `()[]{}` outside a string, template or comment token. An opener scans forward, a closer backward, with a stack that checks the kind. A bracket of the wrong kind first, or the end of the text, gives `Unmatched` (drawn in the error tint); a pair gives `Pair` (drawn in a quiet blue). More than 1,000,000 characters of text, or a partner farther than 100,000 characters away in one direction, gives no answer at all: neither pair nor unmatched is known then. The scan uses the tokens the syntax colouring has already made (no second tokenizer pass; the answer is computed while drawing, so it uses the tokens of the text being drawn). Knowledge notes get no bracket hint: their tokens are per block.
+
+D2. Template boundary. The tokenizer emits `${` and the closing `}` of a template as `TEMPLATE` tokens and `$name` as one too; the expression between them is ordinary code. So the delimiters are never paired, and brackets inside `${ ... }` count (verified in `KotlinTokenizer`, tested). A nested template is covered by the same rule. Limit: the tokens are those of the last coloured text; during fast typing they can be one frame behind, and the hint may then be off for that frame.
+
+D3. Soft wrap. A check item *View > Soft Wrap*, no key, always available (also without a file, and in a workspace). Off by default. On: the editor drops its horizontal scroll and the text field takes the width of the pane (the 8 dp left padding is inside that width, so nothing is subtracted twice). Compose's text field has no wrap switch of its own; wrapping happens as soon as the width is bounded. Switching keeps the logical line at the top of the view: the line is remembered when the switch happens and the scroll is restored after the first layout that follows (with a one-second guard so that a layout that never comes cannot scroll later). The caret, the column display and the saved text are unchanged: wrapping is only visual.
+
+D4. Persistence. `layout.json` stays `"version": 1`; the new key `softWrap` is optional and boolean. Missing means off. Any other type (string, number, null, array, object) makes the whole file untrusted, as for every other bad value of this file: default values, no error. The 1 KiB limit and the atomic write stay. Both settings live in one file, so every save carries the current value of the other one (the divider drag saves the current `softWrap`, the menu saves the current `editorFraction`); a test pins this. An older version of the app either ignores the key or drops the file, depending on its parser; this is accepted.
+
+D5. `LineGeometry` is the one source of positions. Gutter numbers, error bars, block bars, tooltips, the error-line tint, the visible range for search matches and "go to line" ask the same interface for the top and height of a logical line and for the line at a pixel. `FixedLineGeometry` is the old arithmetic. With soft wrap on, `TableLineGeometry` is built from the text layout (the top of the first visual line of every logical line); it is rebuilt when the layout changes, which is signalled by a counter held in Compose state (the layout object itself is a plain field and would not redraw the gutter). If the layout does not belong to the current text (one frame after typing) the fixed geometry is used for that frame. Without wrap no line wraps, so the fixed geometry is exact and the measured table is not built (this saves a pass over all lines on every keystroke). `ScrollTarget.scrollFor` has a new overload taking a geometry; the old one is a wrapper and gives the same values.
+
+D6. Error marks follow the text. When an error list arrives (compared by identity), `ErrorAnchors.build` pins every error with a line to a span of the saved text the run saw (`EditorState.Editing.base`; no change to the run path was needed): the token or the identifier at the column, or the line without leading and trailing blanks when there is no column; an error on a blank line gets an empty span; an error past the last line or without a line gets none. The tracker then replays the difference between the saved text and the buffer. Every later change of the buffer, from any path (typing, paste, replace, Undo, Redo, reload), is described as one `TextEdit` (common prefix and suffix, never inside a surrogate pair) found by comparing the old and the new text, so no edit path has to be hooked. The rules per mark, tested in this order: an edit that swallows the mark removes it (an empty mark only when the edit lies strictly around it); an edit before it, also an insertion exactly at its start, moves it; an edit behind it, also an insertion exactly at its end, leaves it; any other overlap keeps the mark, extends it over the changed text and marks it touched. A line is drawn hollow when all marks on it are touched; the old rule "hollow because the buffer is dirty" is gone, so a mark after an inserted line is still a full bar on the right line.
+
+D7. Undo does not bring a removed mark back, and a touched mark stays touched when the text is restored: the anchors know no history. The next run replaces all of them. Above 1,000,000 characters there are no anchors at all until the next run (the marks disappear instead of costing a full scan on every keystroke). The line tint after an error-bar click is cleared by every edit already (ADR-0067), so it never needs to move. The tooltips and severities per line come from the same anchors.
+
+D8. Kept. `CaretMapper.markedLines` and `ErrorBarText.tooltipsByLine` stay (tests and other callers); the editor no longer calls them. ADR-0067 is not rewritten.
+
+== Rejected
+
+* A contour or an animation for the bracket pair, a glyph in the gutter for a hollow mark, a key for Soft Wrap (the menu entry is enough, and the shortcut table stays unchanged).
+* Hooking the four edit paths of the editor one by one: the diff finds the same edit and cannot be forgotten by a new path.
+* A history of anchors for Undo: the cost and the memory grow with the edit count for a mark that the next run replaces anyway.
+* Re-tokenizing for the brackets: the colouring already holds the tokens.
+
+== Not covered
+
+* Windows and Linux were not run; the menu check item and the wrap behaviour were not seen in a real window on any system.
+* Files with `\r\n`: the line index knows only `\n`, as before; a column then counts the `\r`.
+* A very large file with soft wrap: the position table costs one pass over all lines per layout.
+* A mark pinned while the buffer is already different (a late result) is placed by replaying the difference; if the edit overlaps the mark it comes out touched or gone, which is correct but not the position the run meant.

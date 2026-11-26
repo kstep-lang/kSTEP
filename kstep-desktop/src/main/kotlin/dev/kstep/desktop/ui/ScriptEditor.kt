@@ -21,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -51,15 +52,20 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.kstep.desktop.edit.CaretMapper
+import dev.kstep.desktop.edit.BracketMatch
+import dev.kstep.desktop.edit.BracketMatcher
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
+import dev.kstep.desktop.edit.ErrorAnchorTracker
+import dev.kstep.desktop.edit.FixedLineGeometry
 import dev.kstep.desktop.edit.Indent
+import dev.kstep.desktop.edit.LineGeometry
 import dev.kstep.desktop.edit.LineIndex
 import dev.kstep.desktop.edit.LineJump
 import dev.kstep.desktop.edit.ScrollTarget
 import dev.kstep.desktop.edit.SearchBarText
+import dev.kstep.desktop.edit.TableLineGeometry
 import dev.kstep.desktop.edit.TextReplace
 import dev.kstep.desktop.edit.TextSearch
 import dev.kstep.desktop.menu.ClipboardKeys
@@ -70,7 +76,6 @@ import dev.kstep.desktop.menu.PasteText
 import dev.kstep.desktop.menu.ShortcutKey
 import dev.kstep.desktop.okf.NoteAnalyzer
 import dev.kstep.desktop.run.DesktopError
-import dev.kstep.desktop.run.ErrorBarText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -158,6 +163,8 @@ internal fun ScriptEditor(
     onNotice: (String) -> Unit = {},
     /** The user chose "Open" on the banner of a draft of a file that is not open (ADR-0084). */
     onOpenDraft: (java.nio.file.Path) -> Unit = {},
+    /** Long lines wrap at the editor edge instead of scrolling sideways (ADR-0085). */
+    softWrap: Boolean = false,
 ) {
     val os = remember { MenuOs.current() }
     val colors = if (dark) EditorColors.DARK else EditorColors.LIGHT
@@ -195,10 +202,46 @@ internal fun ScriptEditor(
         onCaret?.invoke(text, field.selection.end)
     }
 
+    val layoutHolder = remember { LayoutHolder() }
     val lineIndex = remember(field.text) { LineIndex(field.text) }
     val lineCount = lineIndex.lineCount
-    val marks = remember(errors, lineCount) { CaretMapper.markedLines(errors, lineCount) }
-    val tooltips = remember(errors, lineCount) { ErrorBarText.tooltipsByLine(errors, lineCount) }
+    // Error marks move with the text (ADR-0085): the tracker replays every change of the buffer onto the anchors.
+    val tracker = remember(editing?.path) { ErrorAnchorTracker() }
+    val anchors = tracker.update(if (editing == null) emptyList() else errors, editing?.base ?: "", field.text)
+    val lineMarks = remember(anchors, field.text) { anchors.lineMarks(field.text) }
+    val marks = lineMarks.severities
+    val tooltips = lineMarks.tooltips
+
+    // One position table for gutter, tooltips, error tint and scrolling (ADR-0085). It is rebuilt when the text layout
+    // changes; the version is a state so that gutter and tooltips redraw (the layout itself is a plain field).
+    var layoutVersion by remember { mutableStateOf(0) }
+    val wrapSwitch = remember { WrapSwitch(softWrap) }
+    val geometry: LineGeometry =
+        remember(layoutVersion, lineIndex, softWrap, lineHeightPx) {
+            buildGeometry(layoutHolder.layout, lineIndex, lineHeightPx, softWrap)
+        }
+    if (wrapSwitch.wrap != softWrap) {
+        // keep the logical line at the top when wrap is switched: remember it now, restore after the new layout
+        wrapSwitch.restoreLine =
+            Snapshot.withoutReadObservation { wrapSwitch.geometry.lineAt(vScroll.value.toFloat()) }
+        wrapSwitch.restoreVersion = layoutVersion
+        wrapSwitch.wrap = softWrap
+    }
+    wrapSwitch.geometry = geometry
+    layoutHolder.track = softWrap || wrapSwitch.restoreLine != null
+    LaunchedEffect(softWrap) {
+        if (softWrap) hScroll.scrollTo(0)
+        delay(WRAP_RESTORE_TIMEOUT_MS)
+        wrapSwitch.restoreLine = null
+    }
+    LaunchedEffect(layoutVersion) {
+        val line = wrapSwitch.restoreLine
+        if (line != null && layoutVersion > wrapSwitch.restoreVersion) {
+            wrapSwitch.restoreLine = null
+            vScroll.scrollTo(geometry.top(line).toInt())
+        }
+    }
+    val bracketCache = remember { BracketCache() }
 
     // Find and go to line (ADR-0067). The bar state lives here: it belongs to the editor, not to the window.
     var bar by remember { mutableStateOf<EditorBar>(EditorBar.None) }
@@ -214,7 +257,6 @@ internal fun ScriptEditor(
     var barFocus by remember { mutableStateOf(BarFocus()) }
     var scrollRequest by remember { mutableStateOf<ScrollRequest?>(null) }
     var scrollNonce by remember { mutableStateOf(0) }
-    val layoutHolder = remember { LayoutHolder() }
     val findOpen = bar is EditorBar.Find
     LaunchedEffect(findRequest?.nonce) {
         val request = findRequest ?: return@LaunchedEffect
@@ -511,17 +553,16 @@ internal fun ScriptEditor(
         Row(Modifier.weight(1f).fillMaxSize()) {
             Box {
                 EditorGutter(
-                    lineCount = lineCount,
                     marks = marks,
-                    stale = view.dirty,
+                    hollow = lineMarks.hollow,
                     scroll = vScroll,
-                    lineHeightPx = lineHeightPx,
+                    geometry = geometry,
                     style = style.copy(color = colors.gutter),
                     measurer = measurer,
                     width = gutterWidth,
                     blockBars = blockBars,
                 )
-                GutterTooltips(tooltips, vScroll, lineHeightPx, gutterWidth)
+                GutterTooltips(tooltips, vScroll, geometry, gutterWidth)
             }
             BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
                 val viewportWidth = maxWidth
@@ -531,17 +572,23 @@ internal fun ScriptEditor(
                     val request = jump ?: return@LaunchedEffect
                     runCatching { focus.requestFocus() }
                     ScrollTarget
-                        .scrollFor(request.line, lineCount, vScroll.value, viewportHeightPx.toInt(), lineHeightPx)
+                        .scrollFor(request.line, geometry, vScroll.value, viewportHeightPx.toInt(), lineHeightPx)
                         ?.let { vScroll.scrollTo(it) }
                 }
                 LaunchedEffect(scrollRequest) {
                     val request = scrollRequest ?: return@LaunchedEffect
                     if (request.focusEditor) runCatching { focus.requestFocus() }
                     ScrollTarget
-                        .scrollFor(request.line, lineCount, vScroll.value, viewportHeightPx.toInt(), lineHeightPx)
+                        .scrollFor(request.line, geometry, vScroll.value, viewportHeightPx.toInt(), lineHeightPx)
                         ?.let { vScroll.scrollTo(it) }
                 }
-                Box(Modifier.fillMaxSize().verticalScroll(vScroll).horizontalScroll(hScroll)) {
+                val scrollModifier =
+                    if (softWrap) {
+                        Modifier.fillMaxSize().verticalScroll(vScroll)
+                    } else {
+                        Modifier.fillMaxSize().verticalScroll(vScroll).horizontalScroll(hScroll)
+                    }
+                Box(scrollModifier) {
                     BasicTextField(
                         value = field,
                         onValueChange = { new ->
@@ -559,7 +606,12 @@ internal fun ScriptEditor(
                             }
                         },
                         readOnly = editing == null,
-                        onTextLayout = { layoutHolder.layout = it },
+                        onTextLayout = {
+                            if (layoutHolder.layout !== it) {
+                                layoutHolder.layout = it
+                                if (layoutHolder.track) layoutVersion++
+                            }
+                        },
                         textStyle = style,
                         cursorBrush = SolidColor(colors.text),
                         visualTransformation = transformation,
@@ -573,17 +625,50 @@ internal fun ScriptEditor(
                                     errorLine?.takeIf { it in 1..lineCount }?.let { line ->
                                         drawRect(
                                             colors.errorLineBackground,
-                                            Offset(-pad, (line - 1) * lineHeightPx),
-                                            Size(size.width + pad, lineHeightPx),
+                                            Offset(-pad, geometry.top(line)),
+                                            Size(size.width + pad, geometry.height(line)),
                                         )
                                     }
-                                    val found = search
                                     val textLayout = layoutHolder.layout
+                                    // the bracket next to the caret and its partner (ADR-0085); scripts only
+                                    val selection = field.selection
+                                    val scriptTransformation = transformation as? SyntaxTransformation
+                                    if (textLayout != null && selection.collapsed && scriptTransformation != null) {
+                                        val shown = field.text
+                                        val tokens = scriptTransformation.tokensFor(shown)
+                                        val bracket =
+                                            if (tokens !=
+                                                null
+                                            ) {
+                                                bracketCache.match(shown, tokens, selection.end)
+                                            } else {
+                                                null
+                                            }
+                                        val limit = textLayout.layoutInput.text.length
+                                        val offsets =
+                                            when (bracket) {
+                                                is BracketMatch.Pair -> listOf(bracket.open, bracket.close)
+                                                is BracketMatch.Unmatched -> listOf(bracket.at)
+                                                null -> emptyList()
+                                            }
+                                        for (o in offsets) {
+                                            if (o + 1 > limit) continue
+                                            drawPath(
+                                                textLayout.getPathForRange(o, o + 1),
+                                                if (bracket is BracketMatch.Pair) {
+                                                    colors.bracketMatchBackground
+                                                } else {
+                                                    colors.errorLineBackground
+                                                },
+                                            )
+                                        }
+                                    }
+                                    val found = search
                                     if (findOpen && found != null && textLayout != null && found.count > 0) {
-                                        val firstLine = (vScroll.value / lineHeightPx).toInt() + 1
-                                        val lastLine = ((vScroll.value + viewportHeightPx) / lineHeightPx).toInt() + 1
+                                        val firstLine = geometry.lineAt(vScroll.value.toFloat())
+                                        val lastLine = geometry.lineAt(vScroll.value + viewportHeightPx)
                                         val from = lineIndex.lineStart(firstLine)
-                                        val to = lineIndex.lineEnd(lastLine.coerceAtMost(lineCount))
+                                        val to = lineIndex.lineEnd(lastLine)
                                         val shown = found.inRange(from, to, MAX_DRAWN_MATCHES)
                                         for (i in shown) {
                                             val start = found.starts[i]
@@ -661,6 +746,59 @@ internal fun ScriptEditor(
 
 private class LayoutHolder {
     var layout: TextLayoutResult? = null
+
+    /** Count layouts (state) only while someone needs the measured positions: soft wrap or a pending restore. */
+    var track: Boolean = false
+}
+
+private const val WRAP_RESTORE_TIMEOUT_MS = 1000L
+
+/** What the editor needs to keep the top line where it was when soft wrap is switched (ADR-0085). */
+private class WrapSwitch(
+    var wrap: Boolean,
+) {
+    var geometry: LineGeometry = FixedLineGeometry(1, 1f)
+    var restoreLine: Int? = null
+    var restoreVersion: Int = 0
+}
+
+/** The answer of the bracket search for the last asked text and caret: drawing asks on every frame. */
+private class BracketCache {
+    private var text: String? = null
+    private var caret = -1
+    private var result: BracketMatch? = null
+
+    fun match(
+        text: String,
+        tokens: List<dev.kstep.desktop.edit.Token>,
+        caret: Int,
+    ): BracketMatch? {
+        if (text !== this.text || caret != this.caret) {
+            result = BracketMatcher.match(text, tokens, caret)
+            this.text = text
+            this.caret = caret
+        }
+        return result
+    }
+}
+
+/**
+ * The positions of the logical lines. Without soft wrap no line wraps, so the fixed line height is exact (and cheaper);
+ * with soft wrap they come from the measured text layout, as long as that layout belongs to the current text.
+ */
+private fun buildGeometry(
+    layout: TextLayoutResult?,
+    index: LineIndex,
+    lineHeightPx: Float,
+    softWrap: Boolean,
+): LineGeometry {
+    if (!softWrap || layout == null || layout.layoutInput.text.length != index.textLength) {
+        return FixedLineGeometry(index.lineCount, lineHeightPx)
+    }
+    val count = index.lineCount
+    val tops = FloatArray(count)
+    for (line in 1..count) tops[line - 1] = layout.getLineTop(layout.getLineForOffset(index.lineStart(line)))
+    return TableLineGeometry.of(count, tops, layout.size.height.toFloat())
 }
 
 private data class ScrollRequest(

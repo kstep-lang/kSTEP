@@ -46,7 +46,9 @@ class HelpMenuTest :
                 groups[0].rows.map { it.label } shouldContainExactly
                     FileAction.entries.filter { it.shortcut != null }.map { it.label }
                 groups[1].rows.map { it.label } shouldContainExactly EditAction.entries.map { it.label }
-                groups[2].rows.map { it.label } shouldContainExactly ViewAction.entries.map { it.label }
+                // Soft Wrap has no key, so it is not in the shortcut overview
+                groups[2].rows.map { it.label } shouldContainExactly
+                    ViewAction.entries.filter { it != ViewAction.SOFT_WRAP }.map { it.label }
                 groups[3].rows.map { it.label } shouldContainExactly
                     listOf(EditorShortcut.FIND_NEXT.label, EditorShortcut.FIND_PREVIOUS.label)
                 groups[1]

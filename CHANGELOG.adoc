@@ -9,6 +9,12 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: editor comfort (Welle D2c-2, ADR-0085). *View > Soft Wrap* (check item, off by default, remembered in
+  `layout.json` as the optional key `softWrap`; the file stays version 1) wraps long lines; gutter, error bars, tooltips and
+  "go to line" follow the wrapped positions. The bracket next to the caret and its partner are tinted (a lone bracket in the
+  error tint); brackets in strings, comments and template delimiters are skipped, search limits 100,000 characters. Error marks
+  in the gutter now move with the text and no longer turn hollow just because the buffer is dirty: they are hollow where the
+  marked text itself was edited and disappear when it is deleted. Not checked by hand in the window.
 * kSTEP Desktop: crash draft (Welle D2c-1, ADR-0084). An unsaved buffer is saved to a draft file in the config folder two seconds
   after the last change and on shutdown; after a crash the next open of that file offers Restore or Discard in a banner (Save is
   blocked until you choose). Drafts are deleted after a save, a Discard or Don't Save, limited to 1 MiB, 32 files and 30 days, and

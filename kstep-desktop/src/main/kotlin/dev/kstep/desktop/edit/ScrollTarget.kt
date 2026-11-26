@@ -18,15 +18,37 @@ object ScrollTarget {
         marginLines: Int = MARGIN_LINES,
     ): Int? {
         if (lineHeightPx <= 0f || viewportPx <= 0) return null
-        val count = lineCount.coerceAtLeast(1)
-        val l = line.coerceIn(1, count)
+        return scrollFor(
+            line,
+            FixedLineGeometry(lineCount, lineHeightPx),
+            scrollPx,
+            viewportPx,
+            lineHeightPx,
+            marginLines,
+        )
+    }
+
+    /**
+     * The same for measured positions (soft wrap, ADR-0085): the top and height of [line] come from [geometry]. The
+     * margin is still counted in lines of [lineHeightPx]; a wrapped line taller than the viewport scrolls to its top.
+     */
+    fun scrollFor(
+        line: Int,
+        geometry: LineGeometry,
+        scrollPx: Int,
+        viewportPx: Int,
+        lineHeightPx: Float,
+        marginLines: Int = MARGIN_LINES,
+    ): Int? {
+        if (lineHeightPx <= 0f || viewportPx <= 0) return null
+        val l = line.coerceIn(1, geometry.lineCount)
         val viewportLines = (viewportPx / lineHeightPx).toInt()
         val margin = minOf(marginLines.coerceAtLeast(0), ((viewportLines - 1) / 2).coerceAtLeast(0))
         val marginPx = margin * lineHeightPx
-        val top = (l - 1).toDouble() * lineHeightPx
-        val bottom = top + lineHeightPx
+        val top = geometry.top(l).toDouble()
+        val bottom = top + geometry.height(l)
         if (top >= scrollPx + marginPx && bottom <= scrollPx + viewportPx - marginPx) return null
-        val max = (count.toDouble() * lineHeightPx - viewportPx).coerceAtLeast(0.0)
+        val max = (geometry.totalHeight.toDouble() - viewportPx).coerceAtLeast(0.0)
         val target = (top - marginPx).coerceIn(0.0, max).toInt()
         return if (target == scrollPx) null else target
     }

@@ -284,6 +284,23 @@ internal object KstepEditViewIcons {
                         horizontalLineTo(11.5f)
                     },
                 )
+            // Three text lines; the middle one wraps down to a short line with a return hook.
+            MenuIconId.SOFT_WRAP ->
+                listOf(
+                    {
+                        moveTo(2.5f, 3.5f)
+                        horizontalLineTo(13.5f)
+                        moveTo(2.5f, 7.5f)
+                        horizontalLineTo(11.5f)
+                        verticalLineTo(11.5f)
+                        horizontalLineTo(7.5f)
+                    },
+                    {
+                        moveTo(9.5f, 9.5f)
+                        lineTo(7.5f, 11.5f)
+                        lineTo(9.5f, 13.5f)
+                    },
+                )
             MenuIconId.KEYBOARD ->
                 listOf(
                     {

@@ -55,13 +55,23 @@ internal fun MenuScope.viewMenuItems(
             is MenuEntry.ViewItem -> {
                 val a = entry.action
                 val state = stateOf(a, ctx)
-                Item(
-                    a.menuText(os),
-                    icon = menuIcon(iconOf(a), enabled = state.enabled),
-                    enabled = state.enabled,
-                    shortcut = registeredShortcut(a, ctx, os)?.let { keyShortcutOf(it, os) },
-                    onClick = { onView(a) },
-                )
+                if (a == ViewAction.SOFT_WRAP) {
+                    CheckboxItem(
+                        a.menuText(os),
+                        checked = ctx.softWrap,
+                        onCheckedChange = { onView(a) },
+                        icon = menuIcon(iconOf(a), enabled = state.enabled),
+                        enabled = state.enabled,
+                    )
+                } else {
+                    Item(
+                        a.menuText(os),
+                        icon = menuIcon(iconOf(a), enabled = state.enabled),
+                        enabled = state.enabled,
+                        shortcut = registeredShortcut(a, ctx, os)?.let { keyShortcutOf(it, os) },
+                        onClick = { onView(a) },
+                    )
+                }
             }
             else -> Unit
         }

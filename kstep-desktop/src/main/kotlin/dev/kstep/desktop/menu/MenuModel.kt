@@ -118,6 +118,9 @@ enum class ViewAction(
     ISOLATE("Isolate", KeyHint('I', false)),
     SHOW_ALL("Show All", KeyHint('V', true)),
     AI_PANEL("Show AI Panel", null),
+
+    /** A check item (ADR-0085): long lines wrap at the editor edge. Always available, no key. */
+    SOFT_WRAP("Soft Wrap", null),
     ;
 
     /** The menu text, with the single-key hint in brackets (two blanks before the bracket). */
@@ -165,6 +168,7 @@ fun shortcutOf(
         ViewAction.HIDE,
         ViewAction.ISOLATE,
         ViewAction.SHOW_ALL,
+        ViewAction.SOFT_WRAP,
         -> null
     }
 
@@ -206,6 +210,8 @@ data class MenuContext(
     val exportDialogVisible: Boolean = false,
     /** The convert dialog is open (in any state), so the export dialog does not open on top of it. */
     val convertDialogVisible: Boolean = false,
+    /** Soft wrap is on (ADR-0085): the View menu shows the check mark. */
+    val softWrap: Boolean = false,
 )
 
 object MenuReasons {
@@ -298,6 +304,7 @@ fun stateOf(
                 else -> ENABLED
             }
         ViewAction.AI_PANEL -> if (ctx.knowledgeOpen) disabled(MenuReasons.KNOWLEDGE_UNAVAILABLE) else ENABLED
+        ViewAction.SOFT_WRAP -> ENABLED
     }
 
 /**
@@ -420,6 +427,8 @@ fun viewMenu(): List<MenuEntry> =
         MenuEntry.ViewItem(ViewAction.SHOW_ALL),
         MenuEntry.Separator,
         MenuEntry.ViewItem(ViewAction.AI_PANEL),
+        MenuEntry.Separator,
+        MenuEntry.ViewItem(ViewAction.SOFT_WRAP),
     )
 
 fun fileMenu(
