@@ -84,7 +84,6 @@ fun FrameWindowScope.FileMenuBar(
     onClearRecent: () -> Unit,
     onEdit: (EditAction) -> Unit,
     onView: (ViewAction) -> Unit,
-    aboutInAppMenu: Boolean,
     onHelp: (HelpAction) -> Unit,
 ) {
     // The Compose Menu has no icon parameter: the icon of the submenu is set on the Swing menu (ADR-0073).
@@ -124,7 +123,7 @@ fun FrameWindowScope.FileMenuBar(
         }
         Menu(MenuTitles.EDIT, mnemonic = mnemonicOf(MenuTitles.EDIT)) { editMenuItems(os, ctx, onEdit) }
         Menu(MenuTitles.VIEW, mnemonic = mnemonicOf(MenuTitles.VIEW)) { viewMenuItems(os, ctx, onView) }
-        Menu(MenuTitles.HELP, mnemonic = mnemonicOf(MenuTitles.HELP)) { helpMenuItems(os, aboutInAppMenu, onHelp) }
+        Menu(MenuTitles.HELP, mnemonic = mnemonicOf(MenuTitles.HELP)) { helpMenuItems(os, onHelp) }
     }
 }
 

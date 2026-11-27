@@ -62,11 +62,75 @@ class HelpMenuTest :
             }
         }
 
-        "Help entries: macOS with the system About has only Keyboard Shortcuts, all else has both" {
-            helpMenuEntries(MenuOs.MAC, true) shouldContainExactly listOf(HelpAction.SHORTCUTS)
-            helpMenuEntries(MenuOs.MAC, false) shouldContainExactly HelpAction.entries
-            helpMenuEntries(MenuOs.WINDOWS, false) shouldContainExactly HelpAction.entries
-            helpMenuEntries(MenuOs.LINUX, false) shouldContainExactly HelpAction.entries
+        "Help entries: About is in Help on every system (hand test D3d-3, ADR-0076 update)" {
+            // macOS gets a second About entry in the application menu, but Help keeps its own: both open one dialog.
+            for (os in MenuOs.entries) {
+                helpMenuEntries(os) shouldContainExactly HelpAction.entries
+                helpMenuEntries(os).last() shouldBe HelpAction.ABOUT
+            }
+        }
+
+        "the View group lists Toggle Hidden, Isolate, Show All, Show AI Panel and Banner Actions with their keys" {
+            fun viewRow(
+                os: MenuOs,
+                label: String,
+            ) = shortcutOverview(os)
+                .single { it.title == "View" }
+                .rows
+                .single { it.label == label }
+                .keys
+            for (os in MenuOs.entries) {
+                viewRow(os, ViewAction.HIDE.label) shouldContainExactly listOf(KeyHint('V', false).hintText(os))
+                viewRow(os, ViewAction.ISOLATE.label) shouldContainExactly listOf(KeyHint('I', false).hintText(os))
+                viewRow(os, ViewAction.SHOW_ALL.label) shouldContainExactly listOf(KeyHint('V', true).hintText(os))
+                viewRow(os, ViewAction.AI_PANEL.label) shouldContainExactly
+                    listOf(checkNotNull(shortcutOf(ViewAction.AI_PANEL, os)).display(os))
+                viewRow(os, ViewAction.FOCUS_BANNER.label) shouldContainExactly
+                    listOf(checkNotNull(shortcutOf(ViewAction.FOCUS_BANNER, os)).display(os))
+            }
+            viewRow(MenuOs.MAC, "Toggle Hidden") shouldContainExactly listOf("V")
+            viewRow(MenuOs.MAC, "Show All") shouldContainExactly listOf("\u21e7V")
+            viewRow(MenuOs.MAC, "Show AI Panel") shouldContainExactly listOf("\u2318K")
+            viewRow(MenuOs.WINDOWS, "Show All") shouldContainExactly listOf("Shift+V")
+            viewRow(MenuOs.WINDOWS, "Show AI Panel") shouldContainExactly listOf("Ctrl+K")
+            viewRow(MenuOs.WINDOWS, "Banner Actions") shouldContainExactly listOf("Ctrl+Shift+B")
+        }
+
+        "Soft Wrap and Preview Unsaved Changes have no key and are deliberately not in the overview" {
+            for (os in MenuOs.entries) {
+                val labels = rows(os).map { it.label }
+                labels.contains(ViewAction.SOFT_WRAP.label) shouldBe false
+                labels.contains(ViewAction.PREVIEW_UNSAVED.label) shouldBe false
+            }
+        }
+
+        "every action with a key has exactly one row, and every row comes from such an action" {
+            for (os in MenuOs.entries) {
+                val expected =
+                    FileAction.entries.filter { it.shortcut != null }.map { it.label } +
+                        EditAction.entries.filter { shortcutOf(it, os) != null }.map { it.label } +
+                        ViewAction.entries
+                            .filter { shortcutOf(it, os) != null || it.keyHint != null }
+                            .map { it.label } +
+                        listOf(EditorShortcut.FIND_NEXT.label, EditorShortcut.FIND_PREVIOUS.label)
+                rows(os).map { it.label }.sorted() shouldContainExactly expected.sorted()
+            }
+        }
+
+        "the shortcut list height follows the window within 160 and 480" {
+            shortcutsMaxHeightDp(100f) shouldBe 160f
+            shortcutsMaxHeightDp(360f) shouldBe 160f
+            shortcutsMaxHeightDp(500f) shouldBe 300f
+            shortcutsMaxHeightDp(680f) shouldBe 480f
+            shortcutsMaxHeightDp(2000f) shouldBe 480f
+        }
+
+        "Redo shows its two keys separated by a slash" {
+            for (os in MenuOs.entries) {
+                val redo = rows(os).single { it.label == EditAction.REDO.label }
+                redo.keys.size shouldBe 2
+                keysText(redo) shouldBe redo.keys.joinToString(" / ")
+            }
         }
 
         "Help entries are always enabled" {

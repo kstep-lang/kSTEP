@@ -9,19 +9,11 @@ enum class HelpAction(
 }
 
 /**
- * The entries of the Help menu in order. On macOS an About entry in the application menu (the system About handler)
- * replaces the one here; if that handler could not be installed ([aboutInAppMenu] false) About stays in Help, so it
- * is never missing. [aboutInAppMenu] is ignored on Windows and Linux, which have no application menu.
+ * The entries of the Help menu in order. About stands here on every system, as the last entry; on macOS the system
+ * application menu offers a second entry that opens the same dialog (D3d-3, ADR-0076 update).
  */
-fun helpMenuEntries(
-    os: MenuOs,
-    aboutInAppMenu: Boolean,
-): List<HelpAction> =
-    if (os == MenuOs.MAC && aboutInAppMenu) {
-        listOf(HelpAction.SHORTCUTS)
-    } else {
-        listOf(HelpAction.SHORTCUTS, HelpAction.ABOUT)
-    }
+@Suppress("UNUSED_PARAMETER")
+fun helpMenuEntries(os: MenuOs): List<HelpAction> = listOf(HelpAction.SHORTCUTS, HelpAction.ABOUT)
 
 /** The Help entries are always available. */
 @Suppress("UNUSED_PARAMETER")
@@ -43,6 +35,17 @@ data class AboutInfo(
             AboutInfo("kSTEP Desktop", version, "Unpublished development tool", "kstep.dev", "https://kstep.dev")
     }
 }
+
+private const val SHORTCUTS_MIN_HEIGHT_DP = 160f
+private const val SHORTCUTS_MAX_HEIGHT_DP = 480f
+private const val SHORTCUTS_WINDOW_MARGIN_DP = 200f
+
+/** The maximum height of the shortcut list for a window of [windowHeightDp]: window height minus 200, within 160..480. */
+fun shortcutsMaxHeightDp(windowHeightDp: Float): Float =
+    (windowHeightDp - SHORTCUTS_WINDOW_MARGIN_DP).coerceIn(SHORTCUTS_MIN_HEIGHT_DP, SHORTCUTS_MAX_HEIGHT_DP)
+
+/** The keys of one row as the dialog shows them: alternatives are separated by " / ". */
+fun keysText(row: ShortcutRow): String = row.keys.joinToString(" / ")
 
 /** One line of the shortcut overview: the label as in the menu, and the keys (more than one if there is an alias). */
 data class ShortcutRow(

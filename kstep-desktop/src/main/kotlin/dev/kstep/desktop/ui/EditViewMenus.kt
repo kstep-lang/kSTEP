@@ -78,14 +78,13 @@ internal fun MenuScope.viewMenuItems(
     }
 }
 
-/** The items of the Help menu (ADR-0076); a separator sits before About when both entries stand here. */
+/** The items of the Help menu (ADR-0076); a separator sits before About. */
 @Composable
 internal fun MenuScope.helpMenuItems(
     os: MenuOs,
-    aboutInAppMenu: Boolean,
     onHelp: (HelpAction) -> Unit,
 ) {
-    for (a in helpMenuEntries(os, aboutInAppMenu)) {
+    for (a in helpMenuEntries(os)) {
         if (a == HelpAction.ABOUT) Separator()
         Item(
             a.label,

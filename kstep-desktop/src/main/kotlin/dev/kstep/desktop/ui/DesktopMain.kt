@@ -183,15 +183,15 @@ private fun installMacQuitHandler(requestQuit: () -> Boolean) {
 }
 
 /**
- * Routes the macOS application-menu "About" entry to [onAbout]. Registered on macOS only. Returns true if the system
- * handler is installed (About then lives in the application menu); false otherwise, so the Help menu keeps About. The
- * handler runs off the UI thread: [onAbout] must only set Compose state.
+ * Routes the macOS application-menu "About" entry to [onAbout]. Registered on macOS only. About is in the Help menu on
+ * all systems; the handler adds the application-menu entry on macOS. The result only says whether it was installed (for
+ * logging). The handler runs off the UI thread: [onAbout] must only set Compose state.
  */
 internal fun installMacAboutHandler(onAbout: () -> Unit): Boolean {
     if (MenuOs.current() != MenuOs.MAC) return false
     return try {
         if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.APP_ABOUT)) {
-            logger.warn { "No macOS about handler available: About stays in the Help menu." }
+            logger.warn { "No macOS about handler available: About is only in the Help menu." }
             false
         } else {
             Desktop.getDesktop().setAboutHandler { onAbout() }

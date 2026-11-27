@@ -1130,6 +1130,14 @@ steps it stops, the counter shows "N+ matches", and Replace all is refused. An e
 In the replacement the dollar sign is only special with regex on: `$0` is the whole match, `$1` to `$9` the groups, `$$` a dollar
 sign; a group that does not exist disables Replace. A selection copied into the field is escaped while regex is on.
 
+=== The Help menu (Desktop)
+
+The Help menu has Keyboard Shortcuts and, below a separator, About kSTEP Desktop, on every system. On macOS the
+application menu has a second About entry; both open the same dialog. The Keyboard Shortcuts list is built from the menu, so
+it shows every key of the File, Edit and View menus and the editor keys. Entries without a key (Soft Wrap, Preview Unsaved
+Changes) are not in the list. The list has a visible scroll bar; its height follows the window (at most 480 dp, at least
+160 dp), so Close stays in view when the window is small. Two keys for one command (Redo) are written with a slash.
+
 === Starting the desktop from the CLI
 
 On macOS, with `kSTEP.app` built or installed (ADR-0082), `kstep desktop` starts the app:

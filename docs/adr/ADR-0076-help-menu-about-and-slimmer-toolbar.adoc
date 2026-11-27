@@ -43,3 +43,15 @@ D9. Two icons, drawn like the others (ADR-0073, ADR-0074): `KEYBOARD` and `INFO`
 * The dialogs have no rendering test; the look in dark mode was not seen.
 * A filter line in the overview (suggestion from the design team) is not done.
 * A visible check of the window needs a hand test with a capture of the window area only.
+
+== Update 2026-11 (D3d-3)
+
+* About stands in the Help menu on every system, as the last entry (`helpMenuEntries(os)`). On macOS the application menu has a
+  second entry; both set the same state (`helpDialog = HelpAction.ABOUT`), so there is one dialog. The `aboutInAppMenu`
+  mechanism of D4 is gone; whether the system handler could be installed is only logged. Reason: a hand test did not find About
+  in Help on the Mac, and the system search of the Help menu finds only normal items.
+* The Keyboard Shortcuts dialog has a visible scroll bar, a width of 280 to 420 dp and a height of window height minus 200 dp,
+  within 160 to 480 dp (`shortcutsMaxHeightDp`). Labels take the free width, keys do not wrap. Alternative keys are joined with " / ".
+* Entries without a key (Soft Wrap, Preview Unsaved Changes) stay out of the list on purpose: the dialog lists keys, not all
+  menu items. A completeness test checks that every action with a key has exactly one row and every row has such an action.
+* Not verified: the look on a Mac; the missing lines of the hand test could not be reproduced from the data.

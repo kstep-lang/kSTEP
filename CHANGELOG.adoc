@@ -9,6 +9,13 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: Help menu and shortcut list fixes from a hand test (Welle D3d-3, ADR-0076 update). About is now in the Help
+  menu on every system, as the last entry; on macOS the application menu keeps a second About entry that opens the same
+  dialog (the `aboutInAppMenu` switch is gone). The Keyboard Shortcuts dialog has a visible scroll bar, a width between 280 and
+  420 dp and a height that follows the window (160 to 480 dp), so the lower groups and Close are reachable in a small window;
+  long labels no longer run into the keys, and Redo shows its two keys as "A / B". Soft Wrap and Preview Unsaved Changes stay
+  out of the list on purpose (no key). New tests check that every action with a key has exactly one row. No new dependency, no
+  error code, no protocol change. Only built and unit tested; the look is not hand-tested yet.
 * kSTEP Desktop: three visual fixes from a hand test (Welle D3d-1, ADR-0094). The "Showing last good result" badge no longer
   runs under the inspection panel: it stays top left while 140 dp remain next to the panel (viewer of 432 dp or more), otherwise
   it moves to the bottom left, and its text wraps. The run status in the toolbar is made of whole segments; when it is too

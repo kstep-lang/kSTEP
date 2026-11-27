@@ -275,9 +275,8 @@ fun FrameWindowScope.DesktopApp(
     // Export dialog (ADR-0057): the controller owns the run; the last format and folder live only for this session.
     val exportState by exporter.state.collectAsState()
     var helpDialog by remember { mutableStateOf<HelpAction?>(null) }
-    var aboutInAppMenu by remember { mutableStateOf(false) }
     val aboutInfo = remember { AboutInfo.of(kstepVersion()) }
-    LaunchedEffect(Unit) { aboutInAppMenu = installMacAboutHandler { helpDialog = HelpAction.ABOUT } }
+    LaunchedEffect(Unit) { installMacAboutHandler { helpDialog = HelpAction.ABOUT } }
     var exportVisible by remember { mutableStateOf(false) }
     val convertHost = rememberConvertHost(window)
     val convertState by convertHost.state.collectAsState()
@@ -1076,7 +1075,6 @@ fun FrameWindowScope.DesktopApp(
         onClearRecent = { updateRecent { it.clear() } },
         onEdit = onEditAction,
         onView = onViewAction,
-        aboutInAppMenu = aboutInAppMenu,
         onHelp = { helpDialog = it },
     )
 

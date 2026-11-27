@@ -777,6 +777,13 @@ scan before either lands.
   `VIEWER_CONTROLS_HINT` are public in `kstep-viewer`. The preview label in the status line is no longer weighted, so the run
   status keeps its room. Tests: matrix of badge, hint and panel rectangles (300 to 1200 dp), scene test with the real hint,
   status scene tests at 1184 and 800 dp. Open: viewer height below about 400 dp with a panel taller than 240 dp.
+* Welle D3d-3 (ADR-0076 update): About is in Help on all systems (`helpMenuEntries(os)`, the `aboutInAppMenu` switch removed from
+  `FileMenuBar`, `DesktopApp`, `EditViewMenus`; the macOS application-menu handler stays and opens the same dialog). The shortcut
+  dialog (`HelpDialogs.kt`) got a `VerticalScrollbar`, `widthIn(280..420)`, a window-dependent height (`shortcutsMaxHeightDp`,
+  160 to 480 dp) and a " / " separator for alternative keys (`keysText`). Tests in `HelpMenuTest`: About last on every OS, the
+  View keys, Soft Wrap and Preview Unsaved Changes absent, one row per action with a key, height bounds, Redo keys. Open: hand
+  test on macOS (both About entries, scroll bar, small window), the missing lines of the hand test were not reproduced (the data
+  was already complete by test; a cut-off lower list is the likely cause).
 * Welle D3c-3 (ADR-0093): a selection outline in `kstep-viewer` (`SelectionOutline`, `CanvasHighlight.outlineSelectT/haloRgb`,
   `DesktopApp` sets the halo colour). The silhouette is the set of projected edges that exactly one selected triangle of a part
   touches (a fixed-size hash on edges quantised to 1/16 px, the part index in the key); drawn twice with Skia `drawLines`
