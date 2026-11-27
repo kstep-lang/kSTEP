@@ -15,6 +15,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -28,6 +29,10 @@ import dev.kstep.desktop.pick.InspectionText
 import dev.kstep.desktop.pick.MultiInfo
 import dev.kstep.desktop.pick.MultiInspection
 import dev.kstep.desktop.pick.ShowInScriptMessage
+
+internal const val TAG_INSPECT_PANEL = "inspect.panel"
+internal const val TAG_INSPECT_SHOW_IN_SCRIPT = "inspect.showInScript"
+internal const val TAG_INSPECT_MESSAGE = "inspect.message"
 
 private val LABEL = Color(0xFF8A8A8A)
 private const val HEX_PREFIX_LENGTH = 1
@@ -56,10 +61,12 @@ internal fun InspectionPanel(
     background: Color,
     modifier: Modifier = Modifier,
     action: ShowInScriptUi? = null,
+    probe: ((String, Rect) -> Unit)? = null,
 ) {
     Column(
         modifier
-            .width(260.dp)
+            .width(ViewerOverlayLayout.PANEL_WIDTH_DP.dp)
+            .tagged(TAG_INSPECT_PANEL, probe)
             .background(background.copy(alpha = 0.92f))
             .border(1.dp, LABEL.copy(alpha = 0.5f))
             .padding(10.dp),
@@ -79,6 +86,7 @@ internal fun InspectionPanel(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        action?.let { ShowInScriptButton(it, probe) }
         Line("Triangles", InspectionText.triangles(part.triangleCount))
         Line("Size", InspectionText.size(part))
         Line("Centroid", InspectionText.point(part.centroid))
@@ -93,7 +101,7 @@ internal fun InspectionPanel(
                 modifier = Modifier.padding(start = 6.dp),
             )
         }
-        action?.let { ShowInScriptRow(it) }
+        action?.let { ShowInScriptMessageLine(it, probe) }
     }
 }
 
@@ -105,10 +113,12 @@ internal fun GroupInspectionPanel(
     background: Color,
     modifier: Modifier = Modifier,
     action: ShowInScriptUi? = null,
+    probe: ((String, Rect) -> Unit)? = null,
 ) {
     Column(
         modifier
-            .width(260.dp)
+            .width(ViewerOverlayLayout.PANEL_WIDTH_DP.dp)
+            .tagged(TAG_INSPECT_PANEL, probe)
             .background(background.copy(alpha = 0.92f))
             .border(1.dp, LABEL.copy(alpha = 0.5f))
             .padding(10.dp),
@@ -128,11 +138,12 @@ internal fun GroupInspectionPanel(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        action?.let { ShowInScriptButton(it, probe) }
         Line("Parts", GroupInspection.partsLine(info))
         Line("Triangles", GroupInspection.triangles(info))
         Line("Size", GroupInspection.size(info))
         Line("Center", InspectionText.point(info.center))
-        action?.let { ShowInScriptRow(it) }
+        action?.let { ShowInScriptMessageLine(it, probe) }
     }
 }
 
@@ -147,25 +158,32 @@ internal fun MultiInspectionPanel(
     background: Color,
     modifier: Modifier = Modifier,
     action: ShowInScriptUi? = null,
+    probe: ((String, Rect) -> Unit)? = null,
 ) {
     Column(
         modifier
-            .width(260.dp)
+            .width(ViewerOverlayLayout.PANEL_WIDTH_DP.dp)
+            .tagged(TAG_INSPECT_PANEL, probe)
             .background(background.copy(alpha = 0.92f))
             .border(1.dp, LABEL.copy(alpha = 0.5f))
             .padding(10.dp),
     ) {
         Text(MultiInspection.title(info), fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
+        action?.let { ShowInScriptButton(it, probe) }
         Line("Triangles", MultiInspection.triangles(info))
         Line("Combined size", MultiInspection.size(info))
         names.forEach { Text(it, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-        action?.let { ShowInScriptRow(it) }
+        action?.let { ShowInScriptMessageLine(it, probe) }
     }
 }
 
+/** The button right below the title, so it never moves when the message below appears (ADR-0094). */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ShowInScriptRow(action: ShowInScriptUi) {
+private fun ShowInScriptButton(
+    action: ShowInScriptUi,
+    probe: ((String, Rect) -> Unit)?,
+) {
     val button: @Composable () -> Unit = {
         TextButton(onClick = action.onClick, enabled = action.enabled) { Text("Show in Script", fontSize = 12.sp) }
     }
@@ -177,17 +195,27 @@ private fun ShowInScriptRow(action: ShowInScriptUi) {
                     Text(reason, color = Color.White, fontSize = 12.sp)
                 }
             },
-            modifier = Modifier.padding(top = 2.dp),
+            modifier = Modifier.padding(top = 2.dp).tagged(TAG_INSPECT_SHOW_IN_SCRIPT, probe),
         ) { button() }
     } else {
-        Box(Modifier.padding(top = 2.dp)) { button() }
+        Box(Modifier.padding(top = 2.dp).tagged(TAG_INSPECT_SHOW_IN_SCRIPT, probe)) { button() }
     }
-    action.message?.let { message ->
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(message.text, color = LABEL, fontSize = 11.sp, maxLines = 3, modifier = Modifier.weight(1f))
-            message.findQuery?.let { query ->
-                TextButton(onClick = { action.onFind(query) }) { Text("Find", fontSize = 11.sp) }
-            }
+}
+
+/** The message of the last attempt, the last line of the panel; no height is reserved for it (ADR-0094). */
+@Composable
+private fun ShowInScriptMessageLine(
+    action: ShowInScriptUi,
+    probe: ((String, Rect) -> Unit)?,
+) {
+    val message = action.message ?: return
+    Row(
+        Modifier.padding(top = 6.dp).tagged(TAG_INSPECT_MESSAGE, probe),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(message.text, color = LABEL, fontSize = 11.sp, maxLines = 3, modifier = Modifier.weight(1f))
+        message.findQuery?.let { query ->
+            TextButton(onClick = { action.onFind(query) }) { Text("Find", fontSize = 11.sp) }
         }
     }
 }

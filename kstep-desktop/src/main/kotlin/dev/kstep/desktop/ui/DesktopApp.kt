@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -47,10 +46,8 @@ import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -144,7 +141,6 @@ import dev.kstep.desktop.pick.VisibilityCounts
 import dev.kstep.desktop.pick.VisibilityMachine
 import dev.kstep.desktop.pick.VisibilityScene
 import dev.kstep.desktop.pick.VisibilityState
-import dev.kstep.desktop.pick.visibilityStatusText
 import dev.kstep.desktop.recent.RecentCheck
 import dev.kstep.desktop.recent.RecentEntry
 import dev.kstep.desktop.recent.RecentFilesStore
@@ -165,7 +161,8 @@ import dev.kstep.desktop.run.sandboxNotice
 import dev.kstep.desktop.settings.LayoutPreferences
 import dev.kstep.desktop.settings.LayoutPreferencesStore
 import dev.kstep.desktop.status.PreviewOriginLabel
-import dev.kstep.desktop.status.StatusLineText
+import dev.kstep.desktop.status.StatusSegment
+import dev.kstep.desktop.status.StatusSegments
 import dev.kstep.desktop.status.previewOriginLabel
 import dev.kstep.geometry.TriangleMesh
 import dev.kstep.viewer.camera.ViewerCameraState
@@ -1393,12 +1390,16 @@ fun FrameWindowScope.DesktopApp(
                                         openFromRecent,
                                     )
                                 }
-                                Badge(state)
+                                Badge(
+                                    state,
+                                    panelShown =
+                                        selectedPart != null || multiInfo != null || selectedGroup != null,
+                                )
                                 selectedPart?.let {
                                     InspectionPanel(
                                         it,
                                         MaterialTheme.colorScheme.background,
-                                        Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                        Modifier.align(Alignment.TopEnd).padding(ViewerOverlayLayout.MARGIN_DP.dp),
                                         action = showInScriptUi(it.name, parts?.parts?.indexOf(it) ?: -1),
                                     )
                                 }
@@ -1408,7 +1409,7 @@ fun FrameWindowScope.DesktopApp(
                                         it,
                                         MultiInspection.nameLines(selection.value.parts),
                                         MaterialTheme.colorScheme.background,
-                                        Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                        Modifier.align(Alignment.TopEnd).padding(ViewerOverlayLayout.MARGIN_DP.dp),
                                         action = ShowInScriptUi(enabled = false, disabledReason = reason),
                                     )
                                 }
@@ -1428,7 +1429,7 @@ fun FrameWindowScope.DesktopApp(
                                     GroupInspectionPanel(
                                         it,
                                         MaterialTheme.colorScheme.background,
-                                        Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                        Modifier.align(Alignment.TopEnd).padding(ViewerOverlayLayout.MARGIN_DP.dp),
                                         action = showInScriptUi(it.name, -1),
                                     )
                                 }
@@ -1536,15 +1537,8 @@ private fun Toolbar(
             exportText = exportNotice?.text?.takeIf { !knowledgeOpen },
             onShowInFolder = onShowInFolder,
             sandboxNotice = sandboxNotice,
-            statusText =
-                listOfNotNull(
-                    knowledgeLabel,
-                    statusText(state),
-                    transientNotice,
-                    aiStatus,
-                    visibilityStatusText(counts),
-                ).filter { it.isNotEmpty() }.joinToString(StatusLineText.SEPARATOR) +
-                    if (editor.dirty) "  ·  unsaved changes" else "",
+            statusSegments =
+                statusSegmentsFor(state, knowledgeLabel, transientNotice, aiStatus, counts, editor.dirty),
             previewLabel =
                 previewOriginLabel(state.lastGood?.origin, editor.text.takeIf { editor.state is EditorState.Editing })
                     ?.takeIf { editor.dirty || it != PreviewOriginLabel.SAVED },
@@ -1564,20 +1558,39 @@ private fun ToolbarDivider() {
     )
 }
 
-private fun statusText(state: DesktopState): String =
-    when (state) {
-        DesktopState.Idle -> ""
-        is DesktopState.Running -> "● Running…"
-        is DesktopState.Ok ->
-            listOfNotNull(
-                ErrorBarText.statusOk(state.model.durationMs, state.model.triangles),
-                ErrorBarText.triangleWarning(state.model.triangles),
-                state.model.notes.firstOrNull(),
-            ).joinToString("  ·  ")
-        is DesktopState.Error -> "● Error"
-        is DesktopState.NativeUnavailable -> "● Geometry unavailable"
-        is DesktopState.Waiting -> state.hint
-    }
+/** The run status as segments (ADR-0094); the state text is made here, the status package only gets plain values. */
+private fun statusSegmentsFor(
+    state: DesktopState,
+    knowledgeLabel: String?,
+    transientNotice: String?,
+    aiStatus: String?,
+    counts: VisibilityCounts,
+    dirty: Boolean,
+): List<StatusSegment> {
+    val ok = state as? DesktopState.Ok
+    val runState =
+        when (state) {
+            DesktopState.Idle -> null
+            is DesktopState.Running -> "● Running…"
+            is DesktopState.Ok -> "● Ok"
+            is DesktopState.Error -> "● Error"
+            is DesktopState.NativeUnavailable -> "● Geometry unavailable"
+            is DesktopState.Waiting -> state.hint
+        }
+    return StatusSegments.build(
+        knowledgeLabel = knowledgeLabel,
+        runState = runState,
+        durationMs = ok?.model?.durationMs,
+        triangles = ok?.model?.triangles,
+        triangleWarning = ok?.let { ErrorBarText.triangleWarning(it.model.triangles) },
+        note = ok?.model?.notes?.firstOrNull(),
+        transientNotice = transientNotice,
+        aiStatus = aiStatus,
+        hidden = counts.hidden,
+        transparent = counts.transparent,
+        dirty = dirty,
+    )
+}
 
 @Composable
 private fun Canvas(
@@ -1660,23 +1673,13 @@ private fun Canvas(
 
 /** Marks a canvas that shows an outdated result: a yellow dot and the time of the last good run (Zhuo). */
 @Composable
-private fun Badge(state: DesktopState) {
+private fun Badge(
+    state: DesktopState,
+    panelShown: Boolean,
+) {
     val error = state as? DesktopState.Error ?: return
     val lastGood = error.lastGood ?: return
-    Box(Modifier.padding(12.dp)) {
-        Row(
-            Modifier.background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.size(8.dp).clip(RectangleShape).background(WARN))
-            Text(
-                ErrorBarText.lastGoodBadge(lastGood.finishedAt),
-                color = Color.White,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(start = 6.dp),
-            )
-        }
-    }
+    BadgeBox(ErrorBarText.lastGoodBadge(lastGood.finishedAt), panelShown)
 }
 
 private fun notInFolderText(note: Path): String =

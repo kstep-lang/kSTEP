@@ -1070,6 +1070,7 @@ click) and `Show all`, `Isolate`, `Hide` in the toolbar. The slider sets the opa
 not drawn and not picked; a click picks the nearest opaque part, and a transparent one only if no opaque part is hit. A hidden part
 that was selected stays selected, so its panel and tree row remain. The setting survives a re-run of the same file (parts that vanished
 are dropped), is reset when you open another file, and is not saved. It is a view setting only: the script and an export do not change.
+When the toolbar is too narrow the status line leaves out the least important parts (duration, triangle count first); its tooltip then shows the full text.
 The status line and the tree header count the hidden and transparent parts. Known limit: parts are sorted by the depth of the middle of
 each triangle, so a part inside a transparent hull can show over it when the hull has large slanted triangles; and only the front side of
 a transparent hull is drawn. The colour transparency written in a STEP file is not drawn in the desktop.

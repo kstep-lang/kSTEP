@@ -9,6 +9,13 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: three visual fixes from a hand test (Welle D3d-1, ADR-0094). The "Showing last good result" badge no longer
+  runs under the inspection panel: it stays top left while 140 dp remain next to the panel (viewer of 432 dp or more), otherwise
+  it moves to the bottom left, and its text wraps. The run status in the toolbar is made of whole segments; when it is too
+  narrow, duration and triangle count go first, then medium and high segments, while the state, the hidden count and
+  "unsaved changes" stay; the full text is the tooltip and the accessibility text. Show in Script sits right below the title in
+  all inspection panels and its message is the last line, so the button no longer jumps. No new dependency, no error code, no
+  protocol change. Only observed on macOS, not verified on Windows or Linux.
 * kSTEP Desktop: selected parts get an outline (Welle D3c-3, ADR-0093). The silhouette of the selected parts is drawn in the
   accent colour with a thin halo in the surface colour; the fill tint of a selected part is lighter while the outline is shown
   (0.30 instead of 0.45). The outline is seen through other parts and through transparent ones (x-ray); a hidden part has none.

@@ -1,0 +1,33 @@
+= ADR-0094: Viewer Overlay Placement, Status Line Priority and Show in Script Position (Welle D3d-1)
+:toc:
+
+== Status
+
+Accepted (Welle D3d-1). Scope: `kstep-desktop` packages `ui` and `status` and their tests. No new dependency, no error code, no migration (nothing is persisted), no worker or protocol change. The findings come from a hand test on macOS; nothing was checked on Windows or Linux.
+
+== Context
+
+A hand test of the desktop viewer showed three visual faults: the "Showing last good result" badge ran under the inspection panel in a narrow viewer; the status line cut its text in the middle ("2 hidden" and "unsaved changes" disappeared behind an ellipsis while the duration stayed); and the Show in Script button jumped down when its message appeared.
+
+== Decision
+
+D1. Badge placement. `ViewerOverlayLayout` (pure, no Compose) decides: without a panel the badge stays top left with the viewer width minus 2 x 12 dp. With a panel it needs 12 + 260 + 8 + 12 = 292 dp on the right, so it keeps top left while at least 140 dp remain (a viewer of 432 dp or more) and moves to the bottom left otherwise, with the full width minus the margins. The bottom is only the fallback because the panel never reaches it. The badge text wraps (at most 3 lines, no ellipsis); the dot stays 8 dp. The panel width and margin come from `ViewerOverlayLayout` as the single source.
+
+D2. Status line segments. The run status is a list of whole segments with a priority. A character budget (`CHAR_DP` = 7.0 dp per character at 12 sp, deliberately wide: one segment too early is better than one cut) is derived from the available width. Segments are dropped in this order: duration, triangle count, then the medium ones (triangle warning, note, transparent count), then the high ones (knowledge label, transient notice, AI status); inside a class the last one goes first. Essential segments (state, hidden count, unsaved changes) are never dropped. There is no ellipsis marker; only an essential overflow can still end in a Compose ellipsis. The full text is the accessibility description and the tooltip as soon as a segment is left out. The preview origin ("Preview: saved file") stays its own text node outside the budget and is never cut.
+
+D3. Show in Script position. The button sits directly below the title line in all three panels; the message is the last line of the panel. No height is reserved: without a message the panel is as high as before, with one it grows by the message row only.
+
+== Alternatives not taken
+
+* Badge always at the bottom (Rams): one rule less, but the badge would leave the place where the eye starts. Kept as fallback only.
+* Duration dropped last (Raskin): the duration is the least actionable value of the line; hidden parts and unsaved changes change what the user sees or loses.
+
+== Security
+
+All texts were already made safe (`DisplayName.escaped`) before they reach the status line or the panels. `StatusSegments` works on plain strings and adds no raw data; tooltip and accessibility text show only these strings. No logging of content, no new input path.
+
+== Consequences and open points
+
+* `CHAR_DP` is an estimate, not a measurement; a font with wider glyphs could still make an essential run overflow into the ellipsis.
+* The badge may sit at the bottom left in a very narrow viewer; the viewer's own controls there are not moved.
+* Not checked by hand on Windows and Linux.

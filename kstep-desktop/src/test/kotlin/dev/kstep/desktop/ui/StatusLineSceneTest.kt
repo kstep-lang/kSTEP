@@ -9,9 +9,14 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import dev.kstep.desktop.run.SandboxNotice
+import dev.kstep.desktop.status.FittedStatus
+import dev.kstep.desktop.status.StatusSegment
+import dev.kstep.desktop.status.StatusSegments
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.floats.shouldBeGreaterThanOrEqual
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
 import kotlin.time.Duration.Companion.seconds
 
 /** The status line composed headlessly at a window width of 900 dp: nothing overlaps, the sandbox notice is whole. */
@@ -24,7 +29,8 @@ class StatusLineSceneTest :
             fileName: String?,
             export: String?,
             sandboxNotice: SandboxNotice?,
-            status: String,
+            status: List<StatusSegment>,
+            fitted: MutableList<FittedStatus> = mutableListOf(),
         ): Map<String, Rect> {
             val bounds = HashMap<String, Rect>()
             val scene = ImageComposeScene(width = widthDp, height = 40, density = Density(1f))
@@ -36,7 +42,8 @@ class StatusLineSceneTest :
                             exportText = export,
                             onShowInFolder = {},
                             sandboxNotice = sandboxNotice,
-                            statusText = status,
+                            statusSegments = status,
+                            fitProbe = { fitted += it },
                             probe = { tag, rect -> bounds[tag] = rect },
                         )
                     }
@@ -62,7 +69,8 @@ class StatusLineSceneTest :
         }
 
         val longName = "a-very-long-script-name-for-a-bracket-assembly-of-many-parts.kstep.kts"
-        val statusText = "● Running…  ·  12 ms  ·  4,312 triangles"
+        val statusText =
+            StatusSegments.build(null, "● Running…", 12L, 4312, null, null, null, null, 0, 0, false)
         val exportText = "Exported bracket.step (12.4 KB)"
 
         "export line, sandbox notice, long name and status do not overlap and stay inside the row".config(
@@ -94,8 +102,38 @@ class StatusLineSceneTest :
             bounds.containsKey("status.export") shouldBe false
         }
 
+        val busy =
+            StatusSegments.build(null, "● Ok", 1234L, 12345, "Large model", null, "Saved", null, 2, 3, true)
+
+        "a wide toolbar shows the whole status, with hidden and unsaved changes, and no ellipsis".config(
+            timeout = 60.seconds,
+        ) {
+            val fitted = mutableListOf<FittedStatus>()
+            val wide = StatusSegments.build(null, "● Ok", 1234L, 12345, null, null, null, null, 2, 0, true)
+            measure(1200, "a.kstep.kts", null, null, wide, fitted)
+            val last = fitted.last()
+            last.droppedCount shouldBe 0
+            last.shown shouldContain "2 hidden"
+            last.shown shouldContain "unsaved changes"
+            last.shown shouldNotContain "…"
+        }
+
+        "a narrow toolbar keeps unsaved changes, drops duration and triangles first, and keeps the full text".config(
+            timeout = 60.seconds,
+        ) {
+            val fitted = mutableListOf<FittedStatus>()
+            measure(500, "a.kstep.kts", null, null, busy, fitted)
+            val last = fitted.last()
+            last.shown shouldContain "unsaved changes"
+            last.shown shouldContain "2 hidden"
+            last.shown shouldNotContain "ms"
+            last.shown shouldNotContain "triangles"
+            last.full shouldContain "1234 ms"
+            last.full shouldContain "12,345 triangles"
+        }
+
         "nothing to show right of the name leaves no separator or run node".config(timeout = 60.seconds) {
-            val bounds = measure(900, "a.kstep.kts", null, null, "")
+            val bounds = measure(900, "a.kstep.kts", null, null, emptyList())
             bounds.keys shouldBe setOf("status.file")
         }
     })

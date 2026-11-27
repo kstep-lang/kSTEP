@@ -765,6 +765,13 @@ scan before either lands.
   `KSTEP-D-041` (start failed). Recent now also keeps single notes with their workspace folder (`recent.json` version 1, additive
   `root`). Known gaps: macOS only, no single instance (every call is a new instance), the shell environment (AI keys) does not
   reach the app, "Started" only means the start was handed over. Checked by hand on one Mac only.
+* Welle D3d-1 (ADR-0094): three visual fixes in `kstep-desktop` (packages `ui`, `status`). `ViewerOverlayLayout` places the
+  last-good badge (top left while 140 dp fit next to the 260 dp panel, i.e. from a 432 dp viewer; else bottom left; wrapping text).
+  `StatusSegments` builds the run status from prioritised whole segments and `fit` drops duration, triangles, medium, then high
+  ones (never state, hidden, unsaved changes), no ellipsis marker, full text as tooltip and accessibility text. In the inspection
+  panels the Show in Script button sits below the title and the message is the last line (no reserved height). Tests: pure
+  placement and segment tests, headless scene tests (no overlap at 660 to 300 dp, button offset equal with and without message).
+  Open: hand-testing on Windows and Linux (only macOS observed), `CHAR_DP` is an estimate.
 * Welle D3c-3 (ADR-0093): a selection outline in `kstep-viewer` (`SelectionOutline`, `CanvasHighlight.outlineSelectT/haloRgb`,
   `DesktopApp` sets the halo colour). The silhouette is the set of projected edges that exactly one selected triangle of a part
   touches (a fixed-size hash on edges quantised to 1/16 px, the part index in the key); drawn twice with Skia `drawLines`
