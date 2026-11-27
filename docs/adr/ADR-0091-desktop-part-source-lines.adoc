@@ -1,0 +1,46 @@
+= ADR-0091: Part Source Lines from the Worker (Welle D3c-1)
+:toc:
+
+== Status
+
+Accepted (Welle D3c-1). Scope: `kstep-script` (`KStepScriptHost`, `KStepModel`, `ScriptCallSite`), `kstep-preview` (`RenderedPart`, `PartSpan`), `kstep-cli` (`putParts`, `DesktopPartLimits`) and `kstep-desktop` (`PartListParser`, `PartTable`, `PartSourceResolver`, `LiveRunController`, `EditorSession`, `ScriptEditor`, `DesktopApp`) and tests. No new dependency, no new error code (`KSTEP-D-050` stays free), no migration, `layout.json` unchanged. Not checked by hand in a real window.
+
+== Context
+
+ADR-0068 found the script text of a part by its name, a heuristic: the name is set in `product(..) { name = ".." }`, usually far from `shape(...)`/`place(...)`, and two parts of one name could not be told apart. The worker knows more: it runs the script. This wave lets the worker report the script line of the call that put each part into the model, and lets "Show in Script" select the name (or mark that line) instead of only moving the caret.
+
+== Decision
+
+D1. Capture. `KStepModelBuilder` records, at every `shape(...)` and `place(...)` call, the 1-based line of the innermost JVM stack frame whose file name equals the source name of the running evaluation (`java.lang.StackWalker`, at most 256 frames, no class references, never throws). The host sets the source name in a thread-local around `host.eval` (`file.name` for a file, the display name for a buffer, the given name for inline code) and restores it in a `finally`; user code never supplies it and nothing is reflected on script classes. The lists `shapeSourceLines` and `placementSourceLines` of `KStepModel` run parallel to `shapes` and `placements` (empty or equal length, read with `getOrNull`). `ShapeAssignment` and `UsagePlacement` stay unchanged. Outside the host (unit tests, other threads) every entry is `null`.
+
+D2. Worker JSON. `PreviewRenderer` gives each rendered part the line of its own `place(...)` call, else the line of the `shape(...)` call of its product definition (looked up by identity). `putParts` writes `sourceLine` only for 1..10,000,000 and only in the desktop worker branch; the public `kstep render --output json` never contains it (tested). The desktop validates the field strictly: absent is fine, otherwise a plain integer in range, anything else (string, fraction, `true`, JSON `null`, `1e3`, above `Int`, 0, negative) makes the whole part list invalid (`KSTEP-D-012`, selection off), like every other malformed field.
+
+D3. The evaluated text. A line number is meaningful only against the text it was computed from, so `DesktopModel.sourceText` holds exactly that text. It is set by `LiveRunController`, never by the worker. A buffer run stores the buffer. A file run reads the saved file through the editor loader (same size limit and line-end normalization, no BOM) before and after the run and keeps the text only when both readings are equal; a note (routed file) or a failed read gives `null`. This refines the original idea of taking the buffer at run start: runs started by the file watcher have no UI buffer, and the file is what the worker read. Because `DesktopModel` is a data class, `equals` compares this text (at most 1 MiB), as `PreviewOrigin.Buffer` already does.
+
+D4. Resolution (`PartSourceResolver`, pure). The line is used only when the shown `sourceText` equals the editor buffer exactly (`ShowInScriptInput.positionUsable`; the revision is not used because it also counts caret moves). Then, in order: (1) exactly one literal `"name"` on the reported line: select the name without quotes; (2) otherwise, with exactly one part of that name, the unique literal in the whole script (ADR-0068 locator): select the name; (3) otherwise mark the whole line, trimmed (an empty line puts the caret at its start), with the message "Marked the line where this part is added; its name is defined elsewhere." and the Find action when the name is searchable. Without a usable position, or with a line outside the text, the ADR-0068 heuristic answers as before (it now selects the name when it finds exactly one literal). Every offset is cross-checked (`isNameAt`: inside the text, quotes on both sides, text equals the name) before it is used.
+
+D5. Editor selection. `EditorSession.requestSelection(start, end, expectedRevision)` selects the range and puts the caret at its end; it is refused unless the buffer is still at the expected revision and `0 <= start <= end <= length`. It creates no history entry, so Undo/Redo behave as before, and any later revision drops the selection (`EditorView.selectionStart` equals `caret` again). `ScriptEditor` takes the range over with the normal selection colour. Keys (typing, arrows, Escape) are unchanged: no new branch in the shortcut routing.
+
+== Honest limits: line only, call site not name definition
+
+* Only the line is known, no column. The selected name is therefore found by text on that line or by the unique literal; if neither works, the line is marked, not the name.
+* It is the line of the `shape`/`place` call, not of the place where the part's name is defined; that is why the line marker exists and why its message says so.
+* A call that spans several lines reports the line on which the call starts, not an argument line (measured, test `KStepModelSourceLineTest`).
+* A sub-assembly placed more than once: its leaf instances share the inner `place(...)` line; the outer instances cannot be told apart.
+* A name built at run time is not a literal: the line is marked, the Find action is not offered.
+* A script that calls `stepFile` on another thread reports no lines (the source name is per thread), so the heuristic answers.
+* Names over 256 characters are cut by the worker: the cut name does not match, so the line is marked or the heuristic reports "not found".
+* A script that fakes its own `SourceFile` (hand-made bytecode) can at most mark a wrong line in the buffer; it cannot select outside it.
+
+== Security
+
+`sourceLine` comes from untrusted worker output: it is a strict integer in 1..10,000,000, otherwise the whole list is invalid; it is used only against the exactly equal text, checked against the line count and cross-checked with `isNameAt`, and only the editor buffer is ever read. The line is never interpreted as a path or code and nothing is logged (no names, texts or lines). The stack walk is bounded (256 frames) and takes no class references; the thread-local is restored in a `finally` (the host is reused). The doubled file read is bounded by the editor limit (1 MiB) and closes its stream through the editor loader. `requestSelection` checks the revision and the bounds atomically under the session lock.
+
+== Compatibility, no protocol version
+
+The field is additive. The desktop parser reads only named fields and ignores unknown ones (checked by test), so a desktop that predates this wave would read the new worker JSON; and a worker without the field is read as "no line" (heuristic). Worker and desktop ship in one distribution, so the warm-worker protocol version is unchanged and the payload is passed through as is.
+
+== Consequences
+
+* Show in Script selects the name, or marks the call line, and tells the user which; two parts of one name each lead to their own line.
+* Open: columns, sub-assemblies placed more than once, a name defined elsewhere (the definition site), multi-select and the other D3c items listed in ADR-0068.

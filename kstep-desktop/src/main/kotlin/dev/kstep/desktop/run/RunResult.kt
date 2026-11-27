@@ -24,6 +24,12 @@ data class DesktopModel(
     val scriptExportTargets: List<ScriptExportTarget> = emptyList(),
     /** The text the picture came from (ADR-0086): set by the reducer, never by the worker. */
     val origin: PreviewOrigin = PreviewOrigin.SavedFile,
+    /**
+     * Exactly the text that was evaluated, line ends normalized (ADR-0091): set by the [LiveRunController], never by
+     * the worker. `null` when it is unknown. Part source lines are only valid against this text. Being a data class
+     * member it takes part in `equals` (at most 1 MiB), as [PreviewOrigin.Buffer] already does.
+     */
+    val sourceText: String? = null,
 )
 
 /** The end of one run of the render worker. */

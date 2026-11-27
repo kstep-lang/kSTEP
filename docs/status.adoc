@@ -765,6 +765,10 @@ scan before either lands.
   `KSTEP-D-041` (start failed). Recent now also keeps single notes with their workspace folder (`recent.json` version 1, additive
   `root`). Known gaps: macOS only, no single instance (every call is a new instance), the shell environment (AI keys) does not
   reach the app, "Started" only means the start was handed over. Checked by hand on one Mac only.
+* Welle D3c-1 (ADR-0091): part source lines in `kstep-desktop`. The worker reports the script line of each part's `shape`/`place`
+  call (stack walk bounded to 256 frames, desktop worker only), the desktop validates it strictly and trusts it only against exactly
+  the evaluated text. Show in Script selects the name, else the unique literal, else marks the call line (line only, no column).
+  No new error code, no protocol change. The window behaviour was not exercised by hand.
 * Welle D2c-4c (ADR-0090): safe regular-expression search, whole word and group references in Replace in `kstep-desktop`
   (`SafeRegex`: a Pike VM, O(text x program), all limits counted; `SearchPattern`; `TextSearch.Result` has match ends and a
   limit; `TextReplace` has `$n` templates and runs off the UI thread). Also the flake of `EditorBannerKeysSceneTest` is fixed in

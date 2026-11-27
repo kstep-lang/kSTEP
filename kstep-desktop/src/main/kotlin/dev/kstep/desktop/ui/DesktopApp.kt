@@ -85,8 +85,8 @@ import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
-import dev.kstep.desktop.edit.PartSourceLocator
-import dev.kstep.desktop.edit.SourceLocation
+import dev.kstep.desktop.edit.PartSourceResolution
+import dev.kstep.desktop.edit.PartSourceResolver
 import dev.kstep.desktop.export.ExportController
 import dev.kstep.desktop.export.ExportFormat
 import dev.kstep.desktop.export.ExportNotice
@@ -127,6 +127,7 @@ import dev.kstep.desktop.pick.PickIndex
 import dev.kstep.desktop.pick.SelectionEvent
 import dev.kstep.desktop.pick.SelectionMachine
 import dev.kstep.desktop.pick.SelectionState
+import dev.kstep.desktop.pick.ShowInScriptInput
 import dev.kstep.desktop.pick.ShowInScriptMessage
 import dev.kstep.desktop.pick.ShowInScriptMessages
 import dev.kstep.desktop.pick.TreeViewLogic
@@ -794,32 +795,44 @@ fun FrameWindowScope.DesktopApp(
             else -> null
         }
     }
-    val showInScript: (String) -> Unit = { name ->
+    val showInScript: (String, Int) -> Unit = { name, part ->
         if (showInScriptReason(name) == null) {
             val snapshot = editorView
             val text = snapshot.text
             val differs = snapshot.dirty
+            // ADR-0091: the part's script line is only trusted against the exact text that was evaluated
+            val info = parts?.parts?.getOrNull(part)?.takeIf { it.name == name }
+            val usable = ShowInScriptInput.positionUsable(info, display?.sourceText, text)
+            val sameCount = parts?.countOfName(name) ?: 0
             showNotice = null
             scope.launch {
-                val location = withContext(Dispatchers.Default) { PartSourceLocator.locate(text, name) }
+                val resolution =
+                    withContext(Dispatchers.Default) {
+                        PartSourceResolver.resolve(text, name, info?.sourceLine, usable, sameCount)
+                    }
                 // the buffer may have changed while searching: offsets would no longer be valid
                 if (session.view.value.revision == snapshot.revision) {
-                    if (location is SourceLocation.Found) {
-                        session.requestCaret(location.offset)
+                    val range =
+                        when (resolution) {
+                            is PartSourceResolution.Name -> resolution.start to resolution.end
+                            is PartSourceResolution.Line -> resolution.start to resolution.end
+                            is PartSourceResolution.Heuristic -> null
+                        }
+                    if (range != null && session.requestSelection(range.first, range.second, snapshot.revision)) {
                         jumpNonce++
-                        jump = EditorJump(CaretMapper.lineColumn(text, location.offset).first, jumpNonce)
+                        jump = EditorJump(CaretMapper.lineColumn(text, range.first).first, jumpNonce)
                     }
-                    ShowInScriptMessages.of(location, name, differs)?.let { showNotice = name to it }
+                    ShowInScriptMessages.of(resolution, name, differs)?.let { showNotice = name to it }
                 }
             }
         }
     }
-    val showInScriptUi: (String) -> ShowInScriptUi = { name ->
+    val showInScriptUi: (String, Int) -> ShowInScriptUi = { name, part ->
         val reason = showInScriptReason(name)
         ShowInScriptUi(
             enabled = reason == null,
             disabledReason = reason,
-            onClick = { showInScript(name) },
+            onClick = { showInScript(name, part) },
             message = showNotice?.takeIf { it.first == name }?.second,
             onFind = { query ->
                 findNonce++
@@ -1245,7 +1258,7 @@ fun FrameWindowScope.DesktopApp(
                                         it,
                                         MaterialTheme.colorScheme.background,
                                         Modifier.align(Alignment.TopEnd).padding(12.dp),
-                                        action = showInScriptUi(it.name),
+                                        action = showInScriptUi(it.name, parts?.parts?.indexOf(it) ?: -1),
                                     )
                                 }
                                 selectedGroup?.let {
@@ -1253,7 +1266,7 @@ fun FrameWindowScope.DesktopApp(
                                         it,
                                         MaterialTheme.colorScheme.background,
                                         Modifier.align(Alignment.TopEnd).padding(12.dp),
-                                        action = showInScriptUi(it.name),
+                                        action = showInScriptUi(it.name, -1),
                                     )
                                 }
                                 if (showProgress) {

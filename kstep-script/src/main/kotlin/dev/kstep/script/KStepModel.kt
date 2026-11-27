@@ -47,11 +47,18 @@ data class KStepModel(
     val violations: List<DslViolation>,
     val shapes: List<ShapeAssignment> = emptyList(),
     /**
+     * 1-based script line of the call that registered each entry of [shapes] (ADR-0091); empty or as long as
+     * [shapes]. Access only through `getOrNull`: an entry is `null` when the call site is unknown.
+     */
+    val shapeSourceLines: List<Int?> = emptyList(),
+    /**
      * Component placements registered via [KStepModelBuilder.place] (ADR-0028). Like [shapes], a
      * separate additive channel: it never becomes a `roots` entry and is only consulted when
      * `kstep export` merges geometry.
      */
     val placements: List<UsagePlacement> = emptyList(),
+    /** Like [shapeSourceLines], parallel to [placements] (ADR-0091); empty or as long as [placements]. */
+    val placementSourceLines: List<Int?> = emptyList(),
     /**
      * Instance colours registered via [KStepModelBuilder.styleInstance] (ADR-0044): one colour for one placed occurrence.
      * A separate additive channel like [placements]; only `kstep export` consults it when geometry is merged.
@@ -95,6 +102,11 @@ class KStepModelBuilder internal constructor() {
     private val registeredShapes = mutableListOf<ShapeAssignment>()
     private val registeredPlacements = mutableListOf<UsagePlacement>()
     private val registeredUsageStyles = mutableListOf<UsageStyle>()
+    private val shapeLines = mutableListOf<Int?>()
+    private val placementLines = mutableListOf<Int?>()
+
+    // Read once at construction, inside the host's evaluation on the calling thread (ADR-0091); null elsewhere.
+    private val scriptSourceName: String? = KStepScriptHost.currentSourceName()
     private var declaredExportTargets: List<ScriptExportTarget>? = null
     private val styles = java.util.IdentityHashMap<ProductDefinition, StyleAccumulator>()
 
@@ -122,6 +134,7 @@ class KStepModelBuilder internal constructor() {
      */
     fun shape(assignment: ShapeAssignment) {
         registeredShapes += assignment.copy(style = ShapeStyle.NONE)
+        shapeLines += ScriptCallSite.line(scriptSourceName)
         applyStyle(assignment.productDefinition, assignment.style)
     }
 
@@ -135,6 +148,7 @@ class KStepModelBuilder internal constructor() {
         layer: String? = null,
     ) {
         registeredShapes += ShapeAssignment(productDefinition, shape, shapeName)
+        shapeLines += ScriptCallSite.line(scriptSourceName)
         if (colour != null || layer != null) style(productDefinition, colour, layer)
     }
 
@@ -298,6 +312,7 @@ class KStepModelBuilder internal constructor() {
         rotation: Rotation = Rotation.IDENTITY,
     ) {
         registeredPlacements += UsagePlacement(usage, RigidPlacement(translation, rotation))
+        placementLines += ScriptCallSite.line(scriptSourceName)
     }
 
     /** [place] with a ready-made [RigidPlacement]. */
@@ -306,6 +321,7 @@ class KStepModelBuilder internal constructor() {
         placement: RigidPlacement,
     ) {
         registeredPlacements += UsagePlacement(usage, placement)
+        placementLines += ScriptCallSite.line(scriptSourceName)
     }
 
     /** [place] for a raw [ValidationResult]: an invalid usage contributes its violations instead of aborting the script. */
@@ -392,7 +408,9 @@ class KStepModelBuilder internal constructor() {
             roots = validRoots.toList(),
             violations = collectedViolations.toList(),
             shapes = styledShapes(),
+            shapeSourceLines = shapeLines.toList(),
             placements = registeredPlacements.toList(),
+            placementSourceLines = placementLines.toList(),
             usageStyles = registeredUsageStyles.toList(),
             exportTargets = declaredExportTargets.orEmpty(),
         )

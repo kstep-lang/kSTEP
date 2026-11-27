@@ -126,7 +126,7 @@ class ShowInScriptSceneTest :
                         counts = VisibilityCounts(0, 0),
                         onCycleNode = {},
                         onCycleSelected = {},
-                        onShowInScript = { names += it },
+                        onShowInScript = { name, _ -> names += name },
                     )
                 }
                 scene.render()

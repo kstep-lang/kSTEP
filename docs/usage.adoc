@@ -896,6 +896,15 @@ before a late failure. Names are shown with control and bidirectional characters
 
 Warnings (exit code stays 0): `KSTEP-C-016` unknown block attribute ignored, `KSTEP-C-017` unterminated block attribute ignored.
 
+== Show in Script (Desktop)
+
+In the Desktop app, *Show in Script* (inspection panel, or a double click on a leaf in the assembly tree) selects the part's name in
+the editor (ADR-0068, ADR-0091). The worker reports the script line of the `shape(...)`/`place(...)` call behind each part, so the
+name on that line is selected; if the name is not on that line but occurs once in the script, that occurrence is selected; otherwise
+the whole call line is marked and the message "Marked the line where this part is added; its name is defined elsewhere." appears.
+This works only while the editor still holds exactly the text that was run; after an edit the app falls back to searching for the
+name as a literal. Only the line is known, not the column.
+
 == Reading input files from a script
 
 A script can read files that lie next to it and have the desktop preview follow them (ADR-0080):

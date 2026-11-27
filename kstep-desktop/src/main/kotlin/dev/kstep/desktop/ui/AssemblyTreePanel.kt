@@ -131,7 +131,7 @@ internal fun AssemblyTreePanel(
     onCycleSelected: () -> Unit,
     modifier: Modifier = Modifier,
     /** A double click on a part (leaf) asks to show its name in the script (ADR-0068); groups keep fold/unfold. */
-    onShowInScript: (String) -> Unit = {},
+    onShowInScript: (String, Int) -> Unit = { _, _ -> },
 ) {
     val accent = if (dark) ACCENT_DARK else ACCENT_LIGHT
     val panelBackground = lerp(background, if (dark) Color.White else Color.Black, if (dark) 0.04f else 0.03f)
@@ -276,7 +276,7 @@ internal fun AssemblyTreePanel(
                                 if (tree.isGroup(node)) {
                                     onView(TreeViewLogic.toggle(tree, view, node))
                                 } else {
-                                    onShowInScript(tree.name(node))
+                                    onShowInScript(tree.name(node), tree.partOf(node))
                                 }
                             }
                         }

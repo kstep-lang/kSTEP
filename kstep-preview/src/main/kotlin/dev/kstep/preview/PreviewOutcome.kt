@@ -39,6 +39,8 @@ class RenderedPart(
     val triangleCount: Int,
     val placement: dev.kstep.geometry.Placement,
     val color: dev.kstep.geometry.MeshColor,
+    /** 1-based script line of the `place`/`shape` call behind this part (ADR-0091), or `null` when unknown. */
+    val sourceLine: Int? = null,
 )
 
 /**

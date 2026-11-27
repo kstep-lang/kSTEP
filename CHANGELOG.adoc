@@ -9,6 +9,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: Show in Script selects the name, or marks the call line (Welle D3c-1, ADR-0091). The render worker now reports
+  the script line of the `shape(...)`/`place(...)` call behind each part (`sourceLine`, desktop worker only; the public
+  `kstep render --output json` is unchanged). Show in Script selects the name on that line, else the unique name literal, else
+  the whole line with the message "Marked the line where this part is added; its name is defined elsewhere."; two parts of one
+  name lead to their own lines. A line is trusted only against exactly the text that was evaluated; otherwise the name search of
+  ADR-0068 answers as before. Line only, no column; the line of the call, not of the name definition. No new error code, no new
+  dependency, no protocol change, `layout.json` unchanged. Not checked by hand in the window.
+
 * kSTEP Desktop: regular-expression search, whole word and group references in Replace (Welle D2c-4c, ADR-0090). The find bar
   has the switches `Aa`, `\b` (whole word) and `.*` (regex). The regex is a non-backtracking subset (a Pike VM, so no pattern
   can freeze the window): literals, `.`, classes, `^ $ \b \B`, groups, `|` and greedy quantifiers; back-references,

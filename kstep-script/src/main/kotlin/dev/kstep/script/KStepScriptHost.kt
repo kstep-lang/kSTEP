@@ -87,6 +87,13 @@ object KStepScriptHost {
     /** The recorder of the running file evaluation on this thread, or `null` (inline source, other thread). */
     internal fun currentRecorder(): InputRecorder? = context.get()
 
+    // The source name of the running evaluation (ADR-0091): the file name JVM stack frames of the script carry.
+    // Set by the host only, never read from user code; always restored in a finally block.
+    private val sourceName = ThreadLocal<String?>()
+
+    /** The source name of the running evaluation on this thread, or `null` (not inside the host). */
+    internal fun currentSourceName(): String? = sourceName.get()
+
     /** Evaluates a `*.kstep.kts` file. */
     fun eval(file: File): KStepScriptOutcome = evalRecording(file).outcome
 
@@ -95,7 +102,8 @@ object KStepScriptHost {
      * (ADR-0080): relative, `/`-separated, sorted, duplicate-free. A file is recorded before it is read, so a
      * missing file is reported too. Empty after a compilation error (the script never ran).
      */
-    fun evalRecording(file: File): RecordedEvaluation = evalWith(createRecorder(file)) { file.toScriptSource() }
+    fun evalRecording(file: File): RecordedEvaluation =
+        evalWith(createRecorder(file), file.name) { file.toScriptSource() }
 
     /**
      * Evaluates [code] as if it were the file [displayName] in [scriptDir] (ADR-0086): input files resolve against
@@ -106,14 +114,17 @@ object KStepScriptHost {
         code: String,
         displayName: String,
         scriptDir: File,
-    ): RecordedEvaluation = evalWith(createRecorderForDir(scriptDir)) { code.toScriptSource(displayName) }
+    ): RecordedEvaluation = evalWith(createRecorderForDir(scriptDir), displayName) { code.toScriptSource(displayName) }
 
     private fun evalWith(
         recorder: InputRecorder?,
+        scriptSourceName: String,
         source: () -> SourceCode,
     ): RecordedEvaluation {
         val previous = context.get()
+        val previousName = sourceName.get()
         context.set(recorder)
+        sourceName.set(scriptSourceName)
         try {
             val outcome = evalToOutcome { host.eval(source(), compilationConfig, null) }
             val dependencies =
@@ -121,6 +132,7 @@ object KStepScriptHost {
             return RecordedEvaluation(outcome, dependencies)
         } finally {
             if (previous == null) context.remove() else context.set(previous)
+            if (previousName == null) sourceName.remove() else sourceName.set(previousName)
         }
     }
 
@@ -150,7 +162,7 @@ object KStepScriptHost {
     fun eval(
         code: String,
         fileName: String = "inline.kstep.kts",
-    ): KStepScriptOutcome = evalToOutcome { host.eval(code.toScriptSource(fileName), compilationConfig, null) }
+    ): KStepScriptOutcome = evalWith(null, fileName) { code.toScriptSource(fileName) }.outcome
 
     // Wraps the actual host.eval(...) invocation itself in a broad catch: kotlin-scripting
     // normally reports both compile errors (ResultWithDiagnostics.Failure) and script-runtime

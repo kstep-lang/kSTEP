@@ -16,6 +16,8 @@ class PartInfo(
     val bboxMin: DoubleArray,
     val bboxMax: DoubleArray,
     val centroid: DoubleArray,
+    /** 1-based script line of the call behind this part (ADR-0091), or `null` when the worker gave none. */
+    val sourceLine: Int? = null,
 )
 
 /** The validated part list of one model; [triangleToPart] maps a GLB triangle index to a part index. */
@@ -26,7 +28,13 @@ class PartTable(
     private val byName: Map<String, Int> =
         HashMap<String, Int>().also { map -> parts.forEachIndexed { i, p -> map.putIfAbsent(p.name, i) } }
 
+    private val nameCounts: Map<String, Int> =
+        HashMap<String, Int>().also { map -> parts.forEach { p -> map.merge(p.name, 1, Int::plus) } }
+
     val triangleCount: Int get() = triangleToPart.size
+
+    /** How many parts carry exactly this [name]. */
+    fun countOfName(name: String): Int = nameCounts[name] ?: 0
 
     /** Part index of triangle [t], `-1` when out of range. */
     fun partOfTriangle(t: Int): Int = if (t in triangleToPart.indices) triangleToPart[t] else -1

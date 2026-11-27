@@ -66,6 +66,7 @@ internal class PartSpan(
     val sourceTriangleCount: Int,
     val placement: Placement,
     val color: MeshColor,
+    val sourceLine: Int? = null,
 )
 
 /**
@@ -96,7 +97,7 @@ internal fun mapSpansToGlbIndexed(
         val count = pointer - glbFirst
         if (count > 0) {
             partOfSpan[i] = out.size
-            out += RenderedPart(span.name, glbFirst, count, span.placement, span.color)
+            out += RenderedPart(span.name, glbFirst, count, span.placement, span.color, span.sourceLine)
         }
     }
     return out to partOfSpan
@@ -106,7 +107,9 @@ private fun single(
     first: ShapeAssignment,
     mesh: TriangleMesh,
     color: MeshColor,
-): PartSpan = PartSpan(partDisplayName(first.productDefinition), 0, mesh.triangleCount, Placement.IDENTITY, color)
+    sourceLine: Int?,
+): PartSpan =
+    PartSpan(partDisplayName(first.productDefinition), 0, mesh.triangleCount, Placement.IDENTITY, color, sourceLine)
 
 private fun partDisplayName(pd: ProductDefinition): String =
     pd.formation.ofProduct.name
@@ -414,7 +417,10 @@ object PreviewRenderer {
                             model.shapes.size,
                             previewedShapeIndex = 0,
                             exportParts = singlePart,
-                            partSpans = listOf(single(first, mesh, MeshColor.NEUTRAL)),
+                            partSpans =
+                                listOf(
+                                    single(first, mesh, MeshColor.NEUTRAL, model.shapeSourceLines.getOrNull(0)),
+                                ),
                         )
                     } else {
                         val colored =
@@ -429,7 +435,10 @@ object PreviewRenderer {
                             previewedShapeIndex = 0,
                             colored = colored,
                             exportParts = singlePart,
-                            partSpans = listOf(single(first, mesh, colour.toMeshColor())),
+                            partSpans =
+                                listOf(
+                                    single(first, mesh, colour.toMeshColor(), model.shapeSourceLines.getOrNull(0)),
+                                ),
                         )
                     }
                 }
@@ -546,6 +555,15 @@ object PreviewRenderer {
             exportOrder.map { (pd, colour, placements) ->
                 MeshExportPart("${pd.id}", meshOf.getValue(pd), colour, placements)
             }
+        // Script lines (ADR-0091): the instance's own place(...) call, else the shape(...) call of its part.
+        val shapeLineOf = IdentityHashMap<ProductDefinition, Int>()
+        for ((i, assignment) in model.shapes.withIndex()) {
+            model.shapeSourceLines.getOrNull(i)?.let { shapeLineOf[assignment.productDefinition] = it }
+        }
+        val placeLineOf = IdentityHashMap<NextAssemblyUsageOccurrence, Int>()
+        for ((i, placement) in model.placements.withIndex()) {
+            model.placementSourceLines.getOrNull(i)?.let { placeLineOf[placement.usage] = it }
+        }
         val spans = ArrayList<PartSpan>(instances.size)
         var cursor = 0
         for ((i, instance) in instances.withIndex()) {
@@ -557,6 +575,7 @@ object PreviewRenderer {
                     count,
                     parts[i].placement,
                     parts[i].color,
+                    instance.usage?.let { placeLineOf[it] } ?: shapeLineOf[instance.productDefinition],
                 )
             cursor += count
         }

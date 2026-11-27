@@ -1,6 +1,7 @@
 package dev.kstep.desktop.pick
 
 import dev.kstep.cli.okf.DisplayName
+import dev.kstep.desktop.edit.PartSourceResolution
 import dev.kstep.desktop.edit.SourceLocation
 
 /** A line of text below the "Show in Script" button; [findQuery] set means a Find action is offered (ADR-0068). */
@@ -14,6 +15,19 @@ object ShowInScriptMessages {
     const val DISABLED_NO_SCRIPT = "No script for this model"
     const val DISABLED_NO_NAME = "Selection has no name"
     const val DISABLED_KNOWLEDGE = "Not available in a knowledge note"
+    const val LINE_MARKED = "Marked the line where this part is added; its name is defined elsewhere."
+
+    /** The message for a resolution (ADR-0091), or null when the selection itself is the feedback. */
+    fun of(
+        resolution: PartSourceResolution,
+        name: String,
+        bufferDiffers: Boolean,
+    ): ShowInScriptMessage? =
+        when (resolution) {
+            is PartSourceResolution.Name -> of(SourceLocation.Found(resolution.start), name, bufferDiffers)
+            is PartSourceResolution.Line -> ShowInScriptMessage(LINE_MARKED, resolution.findQuery)
+            is PartSourceResolution.Heuristic -> of(resolution.location, name, bufferDiffers)
+        }
 
     /** The message for a located name, or null when nothing needs saying (the jump itself is the feedback). */
     fun of(

@@ -37,6 +37,17 @@ class MapSpansToGlbTest :
             parts.sumOf { it.triangleCount } shouldBe kept.size
         }
 
+        "the source line survives the mapping and null stays null (ADR-0091)" {
+            val spans =
+                listOf(
+                    PartSpan("a", 0, 2, Placement.IDENTITY, MeshColor.NEUTRAL, 7),
+                    PartSpan("gone", 2, 2, Placement.IDENTITY, MeshColor.NEUTRAL, 8),
+                    PartSpan("c", 4, 1, Placement.IDENTITY, MeshColor.NEUTRAL, null),
+                )
+            val parts = mapSpansToGlb(spans, intArrayOf(0, 1, 4))
+            parts.map { it.name to it.sourceLine } shouldBe listOf("a" to 7, "c" to null)
+        }
+
         "no kept triangles gives no parts" {
             mapSpansToGlb(listOf(span("a", 0, 2)), IntArray(0)) shouldBe emptyList()
         }

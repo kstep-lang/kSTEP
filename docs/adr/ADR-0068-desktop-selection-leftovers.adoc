@@ -38,4 +38,6 @@ Names come from an untrusted script or worker output. Length is bounded (254), t
 
 == Follow-up (Welle D3c)
 
+Update: source positions per part and selecting the name are done in ADR-0091 (line only, no column).
+
 Source positions per part in the worker JSON (additive in `PreviewOutcome`/`RenderedPart`), selecting the name in the editor, a 3D context menu or shortcut, multi-select, BVH or GPU picking, an outline instead of a tint, a `Modifier.Node` cursor when the API is stable, support in knowledge notes, hand-testing of cursor, tooltip and Escape focus on every platform.

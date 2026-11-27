@@ -201,12 +201,22 @@ internal fun ScriptEditor(
 
     var field by remember {
         mutableStateOf(
-            TextFieldValue(view.text, TextRange(view.caret.coerceIn(0, view.text.length))),
+            TextFieldValue(
+                view.text,
+                TextRange(
+                    view.selectionStart.coerceIn(0, view.text.length),
+                    view.caret.coerceIn(0, view.text.length),
+                ),
+            ),
         )
     }
     LaunchedEffect(view.revision) {
         val text = view.text
-        field = TextFieldValue(text, TextRange(view.caret.coerceIn(0, text.length)))
+        field =
+            TextFieldValue(
+                text,
+                TextRange(view.selectionStart.coerceIn(0, text.length), view.caret.coerceIn(0, text.length)),
+            )
         onCaret?.invoke(text, field.selection.end)
     }
 

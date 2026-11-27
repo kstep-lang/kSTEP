@@ -47,6 +47,8 @@ class EditorView(
     val draftElsewhere: Draft? = null,
     /** The code of the once-per-session notice that drafts are not written. */
     val draftNotice: String? = null,
+    /** Start of the selection that ends at [caret] (ADR-0091); equal to [caret] when nothing is selected. */
+    val selectionStart: Int = caret,
 ) {
     val text: String get() = (state as? EditorState.Editing)?.text ?: ""
     val dirty: Boolean get() = (state as? EditorState.Editing)?.dirty == true
@@ -87,6 +89,8 @@ class EditorSession(
     private var state: EditorState = EditorState.NoFile
     private var revision = 0
     private var caret = 0
+    private var selectionStart = 0 // valid only while selectionRevision == revision (ADR-0091)
+    private var selectionRevision = -1
     private var pulse = 0
     private var offer: RecoveryOffer? = null
     private var elsewhere: Draft? = null
@@ -116,7 +120,18 @@ class EditorSession(
 
     private fun publish() {
         mutableView.value =
-            EditorView(state, revision, caret, pulse, history.canUndo, history.canRedo, offer, elsewhere, notice)
+            EditorView(
+                state,
+                revision,
+                caret,
+                pulse,
+                history.canUndo,
+                history.canRedo,
+                offer,
+                elsewhere,
+                notice,
+                if (selectionRevision == revision) selectionStart else caret,
+            )
     }
 
     /** Loads [path] into the editor (replaces any current buffer; the caller has already handled unsaved changes). */
@@ -276,6 +291,26 @@ class EditorSession(
             publish()
         }
     }
+
+    /**
+     * Selects `[start, end)` and puts the caret at [end] (ADR-0091). Ignored (`false`) unless the buffer is still at
+     * [expectedRevision] and `0 <= start <= end <= text.length`. No history entry; any later revision drops the selection.
+     */
+    fun requestSelection(
+        start: Int,
+        end: Int,
+        expectedRevision: Int,
+    ): Boolean =
+        synchronized(lock) {
+            val editing = state as? EditorState.Editing ?: return false
+            if (revision != expectedRevision || start < 0 || start > end || end > editing.text.length) return false
+            caret = end
+            revision++
+            selectionStart = start
+            selectionRevision = revision
+            publish()
+            true
+        }
 
     fun undo() = stepHistory(redo = false)
 

@@ -93,7 +93,15 @@ object PartListParser {
             val hex = (obj["color"] as? JsonPrimitive)?.takeIf { it.isString }?.content
             if (hex == null || !colorPattern.matches(hex)) return invalid(index, "invalid color")
             if (!colorMatches(hex, mesh, first.toInt())) return invalid(index, "color differs from the geometry")
-            raws += RawPart(name, first.toInt(), count.toInt(), placement, hex.uppercase())
+            // ADR-0091: absent is fine (older worker), present must be a plain integer in range; a JSON null is not.
+            val line =
+                if (!obj.containsKey("sourceLine")) {
+                    null
+                } else {
+                    sourceLine(obj["sourceLine"])
+                        ?: return invalid(index, "invalid sourceLine")
+                }
+            raws += RawPart(name, first.toInt(), count.toInt(), placement, hex.uppercase(), line)
         }
         if (expectedFirst != total.toLong()) return invalid(-1, "triangle ranges do not cover the mesh")
 
@@ -112,7 +120,11 @@ object PartListParser {
         val count: Int,
         val placement: PartPlacement,
         val colorHex: String,
+        val sourceLine: Int?,
     )
+
+    private fun sourceLine(e: JsonElement?): Int? =
+        integer(e)?.takeIf { it in 1L..DesktopPartLimits.MAX_SOURCE_LINE.toLong() }?.toInt()
 
     private fun invalid(
         index: Int,
@@ -197,6 +209,6 @@ object PartListParser {
             } else {
                 DoubleArray(3) { (min[it] + max[it]) / 2.0 }
             }
-        return PartInfo(raw.name, raw.first, raw.count, raw.placement, raw.colorHex, min, max, centroid)
+        return PartInfo(raw.name, raw.first, raw.count, raw.placement, raw.colorHex, min, max, centroid, raw.sourceLine)
     }
 }

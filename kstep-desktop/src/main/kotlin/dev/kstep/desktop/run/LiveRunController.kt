@@ -53,6 +53,8 @@ class LiveRunController(
         null,
     /** `true` when [file] is shown by another runner (a note, ADR-0058): there is only the saved file to preview. */
     private val isRouted: (Path) -> Boolean = { false },
+    /** Reads the saved script as the editor would, `null` when that fails (ADR-0091); never throws. */
+    private val sourceTextReader: (Path) -> String? = ::readScriptSourceText,
 ) : AutoCloseable {
     private val machine = RunStateMachine()
     private val lock = Any()
@@ -244,10 +246,17 @@ class LiveRunController(
     ) {
         if (synchronized(lock) { generation != latestGeneration || closed.get() }) return
         val startedMs = clock()
-        val result =
+        var sourceText: String? = buffer
+        val rawResult =
             try {
                 if (buffer == null) {
-                    runner(file, generation) { process -> onStarted(generation, process) }
+                    // The text the line numbers belong to (ADR-0091): the saved file read before and after the run;
+                    // only an unchanged file counts. Notes are not scripts.
+                    val before = if (isRouted(file)) null else readSource(file)
+                    val ran = runner(file, generation) { process -> onStarted(generation, process) }
+                    val after = if (before == null) null else readSource(file)
+                    sourceText = before?.takeIf { it == after }
+                    ran
                 } else {
                     runBufferOne(file, buffer, generation)
                 }
@@ -266,6 +275,12 @@ class LiveRunController(
                     ),
                 )
             }
+        val result =
+            if (rawResult is RunResult.Success) {
+                rawResult.copy(model = rawResult.model.copy(sourceText = sourceText))
+            } else {
+                rawResult
+            }
         synchronized(lock) { if (current?.first == generation) current = null }
         logger.info {
             "run gen=$generation kind=${if (buffer == null) "file" else "buffer"} " +
@@ -276,6 +291,14 @@ class LiveRunController(
         if (buffer == null) result.dependencies?.let { replaceDependencies(generation, file, it) }
         dispatch(DesktopEvent.Finished(generation, result))
     }
+
+    // A reader that fails only costs the part lines of this run, never the run itself (ADR-0091).
+    private fun readSource(file: Path): String? =
+        try {
+            sourceTextReader(file)
+        } catch (_: RuntimeException) {
+            null
+        }
 
     private fun runBufferOne(
         file: Path,

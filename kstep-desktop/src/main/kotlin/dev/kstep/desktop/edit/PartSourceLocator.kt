@@ -30,6 +30,14 @@ object PartSourceLocator {
     const val MAX_NAME_CHARS = TextSearch.MAX_QUERY_CHARS - 2
     const val DEFAULT_BUDGET_NANOS = 500_000_000L
 
+    /** `"name"` with the quotes when [name] can be searched as a plain literal, else `null` (ADR-0068, ADR-0091). */
+    fun literalQuery(name: String): String? {
+        if (name.isEmpty() || name.length > MAX_NAME_CHARS) return null
+        if (name.any { it == '"' || it == '\\' || it == '$' || it < ' ' || it == '\u007F' }) return null
+        val query = "\"" + name + "\""
+        return query.takeIf { TextSearch.sanitizeQuery(it) == query }
+    }
+
     fun locate(
         text: String,
         name: String,
@@ -38,11 +46,7 @@ object PartSourceLocator {
     ): SourceLocation {
         if (name.isEmpty()) return SourceLocation.NotFound
         if (name.length > MAX_NAME_CHARS) return SourceLocation.TooLong
-        if (name.any { it == '"' || it == '\\' || it == '$' || it < ' ' || it == '\u007F' }) {
-            return SourceLocation.NotLiteral
-        }
-        val query = "\"" + name + "\""
-        if (TextSearch.sanitizeQuery(query) != query) return SourceLocation.NotLiteral
+        val query = literalQuery(name) ?: return SourceLocation.NotLiteral
         val deadline = nanoTime() + budgetNanos
         if (nanoTime() >= deadline) return SourceLocation.TimedOut
         var aborted = false

@@ -357,6 +357,7 @@ internal fun JsonObjectBuilder.putParts(parts: List<RenderedPart>) {
                 putJsonArray("placement") { part.placement.rowMajor3x4().forEach { add(it) } }
                 val c = part.color
                 put("color", "#%02X%02X%02X".format(channel(c.r), channel(c.g), channel(c.b)))
+                part.sourceLine?.takeIf { it in 1..DesktopPartLimits.MAX_SOURCE_LINE }?.let { put("sourceLine", it) }
             }
         }
     }
@@ -442,6 +443,9 @@ private fun JsonObjectBuilder.putOcct(occt: OcctAvailability) {
 object DesktopPartLimits {
     const val MAX_PARTS: Int = 4096
     const val MAX_NAME_CHARS: Int = 256
+
+    /** Script line of a part (ADR-0091); the same value the script host uses as its own limit. */
+    const val MAX_SOURCE_LINE: Int = dev.kstep.script.ScriptSourceLimits.MAX_SOURCE_LINE
 
     /** Assembly tree (ADR-0054): groups come on top of the parts, so the node limit is twice the part limit. */
     const val MAX_TREE_NODES: Int = 8192
