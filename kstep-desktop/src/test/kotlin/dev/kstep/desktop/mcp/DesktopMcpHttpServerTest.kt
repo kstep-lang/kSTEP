@@ -1,6 +1,7 @@
 package dev.kstep.desktop.mcp
 
 import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.collections.shouldBeIn
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
@@ -203,8 +204,10 @@ class DesktopMcpHttpServerTest :
                         fx.t,
                         hostHeader = "127.0.0.1:${fx.port}",
                         extra = listOf("Host: evil.com"),
-                    ).status shouldBe
-                    403
+                    ).status shouldBeIn
+                    // Two Host headers: our check answers 403; a newer JDK (Temurin 21.0.13 on CI) already refuses
+                    // the request with 400 before our handler runs. Either way it is rejected and the body stays closed.
+                    listOf(400, 403)
                 Raw.mcp(fx.port, ping, fx.t, hostHeader = null).status shouldBe 403
                 fx.server.bodyOpens.get() shouldBe 2
             }
