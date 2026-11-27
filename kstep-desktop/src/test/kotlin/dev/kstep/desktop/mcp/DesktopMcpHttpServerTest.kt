@@ -1,6 +1,7 @@
 package dev.kstep.desktop.mcp
 
 import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.collections.shouldBeIn
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
@@ -208,7 +209,10 @@ class DesktopMcpHttpServerTest :
                 // A request with two Host headers is deliberately not asserted: what the JDK HttpServer hands to the
                 // handler for a repeated header differs between JDK builds (Temurin 21.0.13 passes one value on), and a
                 // browser, the DNS-rebinding client this check is for, can only send one Host header.
-                Raw.mcp(fx.port, ping, fx.t, hostHeader = null).status shouldBe 403
+                // No Host header at all: our check answers 403; a newer JDK probably refuses an HTTP/1.1 request without
+                // Host with 400 before the handler runs (not reproduced locally). Either way it is rejected, and the
+                // body counter below proves that no body was opened for it.
+                Raw.mcp(fx.port, ping, fx.t, hostHeader = null).status shouldBeIn listOf(400, 403)
                 fx.server.bodyOpens.get() shouldBe 2
             }
         }
