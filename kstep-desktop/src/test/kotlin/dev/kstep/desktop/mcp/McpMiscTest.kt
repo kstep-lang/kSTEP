@@ -101,12 +101,36 @@ class McpDialogStateTest :
             mcpDialogState(McpServerStatus.Off, settings, true, false).warningText shouldBe null
         }
 
-        "the hint names what an agent can read and says it cannot change anything" {
-            val hint = McpDialogText.HINT
+        "the hint names what an agent can read and says it cannot change anything while changes are off" {
+            val hint = McpDialogText.hint(false)
+            hint.endsWith("Changes are turned off.") shouldBe true
             listOf("127.0.0.1", "token", "errors", "parts", "selection", "cannot change anything").forEach {
                 hint shouldContain it
             }
             hint shouldNotContain "only to read the status and the editor text"
+        }
+
+        "the hint with changes allowed says what may change and never claims it cannot change anything" {
+            val hint = McpDialogText.hint(true)
+            hint shouldNotContain "cannot change anything"
+            listOf("editor text", "runs", "selection", "visibility", "cannot save").forEach { hint shouldContain it }
+        }
+
+        "the permission switch is locked while the server is off but a saved permission can be taken back" {
+            val off = mcpDialogState(McpServerStatus.Off, McpSettings(), false, false)
+            off.actionsEnabled shouldBe false
+            off.actionsChecked shouldBe false
+            off.actionsReason shouldBe McpDialogText.ACTIONS_LOCKED
+            val offButOn = mcpDialogState(McpServerStatus.Off, McpSettings(allowActions = true), false, false)
+            offButOn.actionsChecked shouldBe true
+            offButOn.actionsEnabled shouldBe true
+            offButOn.actionsReason shouldBe null
+            val running = mcpDialogState(McpServerStatus.Running(7391, 7391), McpSettings(), true, false)
+            running.actionsEnabled shouldBe true
+            running.actionsReason shouldBe null
+            listOf(McpServerStatus.NoFreePort(1, 2), McpServerStatus.TokenUnavailable).forEach {
+                mcpDialogState(it, McpSettings(), true, false).actionsEnabled shouldBe false
+            }
         }
 
         "the port is editable only while the server is not running" {

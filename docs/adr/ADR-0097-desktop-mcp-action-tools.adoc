@@ -1,0 +1,130 @@
+= ADR-0097: Action Tools of the Desktop MCP Server (Welle MCP-3)
+:toc:
+
+== Status
+
+Accepted (Welle MCP-3). Scope: `kstep-desktop` (package `mcp`; `ui/DesktopMcpActionPort.kt`, `ui/DesktopApp.kt`, `ui/DesktopMain.kt`,
+`ui/McpServerDialog.kt`, `ui/ScriptEditor.kt`; `edit/EditorSession.kt`; `pick/VisibilityMachine.kt`; `status`). No new
+dependency and no database, so there is no migration. `mcp.json` keeps `version: 1` and gets one optional field, `allowActions`;
+an old file loads with `false`, and the parser of the previous version reads only the keys it knows, so a file written by this
+version still loads there (checked by reading its parser, not by running it). Built and unit tested on macOS only; the tools were not
+tried by hand with a real agent and the dialog and the status line were not looked at on a screen (see Open points).
+
+== Context
+
+ADR-0095 and ADR-0096 gave an agent eight read tools. An agent that works on a script must also change something: replace text,
+start a run, select parts and set the visibility. That is a different trust level, because the agent text lands in the editor of
+the user.
+
+== Decision
+
+D1. A second switch, off by default. The dialog has "Allow agents to make changes" under the server switch. It is stored as
+`allowActions` in `mcp.json`. It can only be turned on while the server runs; it can always be turned off, also while the server is
+off (otherwise a saved permission could not be taken back). The value is read at every call, never copied at the start of the
+server, so a switch-off acts on the next call without a restart. Every block that changes something checks it again on the UI
+thread, so a call that is already waiting for the UI thread is refused too (`ACTIONS_DISABLED`). The status line shows "MCP edit" as
+an essential segment while the server runs with the permission, otherwise "MCP". There is no confirmation dialog: the switch is the
+decision.
+
+D2. Order of a call. (1) rate limit (`RATE_LIMITED`), (2) permission (`ACTIONS_DISABLED`), (3) arguments (`INVALID_ARGUMENTS`),
+(4) the tool. Under the lock a call never reaches the port; even invalid arguments give `ACTIONS_DISABLED`.
+
+D3. The port. `McpActionPort` (package `mcp`, free of Compose and AWT) is everything the tools may ask of the window. It has no
+method to save, export, open, close or touch the clipboard (a test checks the method names by reflection, a second one checks the
+source of the window side). `DesktopMcpActionPort` (package `ui`) implements it, reads the editor fresh from the session and starts
+runs only through the same entries as the menu (`forceRun`, `runBuffer`), judged by the same rules (`stateOf`).
+
+D4. `McpUiBridge.onUiMutating`. A block that changes state is either never run (`UI_BUSY`) or its result is delivered: a compare and
+set decides at the timeout whether the caller cancels (block not begun) or waits not cancellable (block begun) for at most 60 s; then
+the call ends with `INTERNAL` and a log entry, so a hung event thread cannot hold one of the four HTTP workers for ever (the block itself keeps running).
+A block checks everything first and changes afterwards, so a failure never leaves a half change. The bridge runs on `Dispatchers.Main`
+(the Swing event thread), created in `DesktopMain`.
+
+D5. Meaning of `revision`. In all action tools `revision` is the text revision (`sha256:...`, the same function as `get_script`), computed
+from the new text on the worker thread. The `snapshotRevision` of ADR-0096 is published asynchronously and is not returned. Every
+change of the text needs `expectedRevision`; a different text gives `STALE_REVISION` with the current `revision`.
+
+D6. Conflict rule. The optimistic revision is the only protection. The search bar and the banner do not block; only an open draft
+offer does (`DRAFT_OFFER_OPEN`). The comparison and the replacement happen under the lock of the session (`EditorSession.applyAgentEdit`),
+so the user typing at the same moment either wins (the agent gets `STALE_REVISION`) or is first in the undo order. An agent edit is one
+undo step of kind OTHER: it never merges with typing before it, and typing after it does not merge with it, so Undo removes exactly
+the agent edit. There is no coalescing, no focus change (`EditorJump.focusEditor = false`) and no camera movement. The caret and
+the error marks move with the change like with any edit.
+
+D7. Tools (all start with the description "[Changes the app; requires 'Allow agents to make changes'.]").
+
+* `kstep_desktop_set_script {text, expectedRevision}` replaces the whole text. Same text: `changed:false`, no undo step, no notice.
+* `kstep_desktop_replace_in_script {oldText, newText, expectedRevision}` replaces `oldText` if it occurs exactly once
+  (`NOT_FOUND`, `AMBIGUOUS` with `count`).
+* `kstep_desktop_run {mode?, waitMs?}` starts a run like the menu. The default mode is `unsaved` when the buffer is dirty, else `saved`;
+  the mode that was used is in the answer. `waitMs` (0..30000, not clamped) waits for `finished`, `failed {errorCount}` or `timeout`.
+  A knowledge note gives `NOT_A_SCRIPT`.
+* `kstep_desktop_select {mode, names?, occurrence?}` with `replace|add|toggle|clear`, by part name, `occurrence` 0-based as in `get_parts`
+  (the design text said "1-based"; 0-based was chosen to match `get_parts`). Names are compared exactly. An unknown name changes
+  nothing (`NOT_FOUND {missing}`). The selection holds at most 1000 parts (`truncated`).
+* `kstep_desktop_set_visibility {action, parts?}` with `hide|show|isolate|show_all|toggle_transparent`. `hide` and `show` are explicit
+  and idempotent, unlike the toggles of the menu, because that is easier for an agent. Without `parts` the selection is used.
+* `kstep_desktop_show_in_script {part}` selects the place of a part in the editor (`BUFFER_NOT_RUN` when the shown model was not
+  made from the text in the editor).
+
+New codes: `ACTIONS_DISABLED`, `STALE_REVISION`, `NOT_A_SCRIPT`, `DRAFT_OFFER_OPEN`, `TEXT_TOO_LARGE`, `INVALID_TEXT`, `NOT_FOUND`,
+`AMBIGUOUS`, `RATE_LIMITED`, `BUFFER_NOT_RUN`, `SANDBOX_UNAVAILABLE`. Structured extra fields (`revision`, `count`, `missing`, `retryAfterMs`) are fixed
+values; `missing` is cleaned (ANSI, bidi), clipped and holds at most 20 names with `missingTotal`.
+
+D8. Limits. At most 20 action calls per second (sliding window), at least one second between two started runs
+(`retryAfterMs`), and at most one call that waits for a run at a time (there are only four HTTP workers and a wait holds one for up to 30 s).
+
+D9. Text rules. Agent text is never trusted. At most 1 MiB of UTF-8, lines of at most 20,000 characters, no lone surrogate, no control
+character except tab, line feed and carriage return, no DEL, C1, byte order mark, noncharacters, U+2028/2029 and no bidirectional
+control (a "Trojan Source" guard). This is stricter than what the editor accepts from a file. `\r\n` and `\r` become `\n`. The search
+for `oldText` is Knuth-Morris-Pratt, linear in time, because `indexOf` is quadratic and a 1 MiB text with a 64 KiB needle would be a
+denial of service. For the result of a replacement only size and line length are checked, so a file that already holds such
+characters can still be edited. Agent text is never sent back, only a hash and counts.
+
+D10. Body limit. The request body is limited to 1 MiB for the whole JSON envelope (ADR-0095). A `set_script` with exactly 1 MiB of
+text cannot be sent over HTTP (the server answers 413), and escapes only make the body larger. `TEXT_TOO_LARGE` is therefore reachable
+over HTTP mainly through `replace_in_script` when the result grows. The check stays (defence in depth) and is tested on the registry.
+The body limit was not raised, so ADR-0095 is untouched.
+
+D11. Honest side effects.
+
+* With "Preview Unsaved Changes" on (ADR-0087), a `set_script` or `replace_in_script` starts an automatic run exactly like typing does
+  (see D12 for the sandbox).
+* A change by an agent schedules a crash draft (ADR-0084) like every edit. That is not saving the script file.
+* The notice "Edited by agent -- Undo to revert" (4 s) and "Run started by agent" use a nonce so a repeated text restarts the timer.
+
+D12. Code execution. A script is code. `run` (and an automatic preview started by an agent edit) executes the script an agent
+wrote, with the rights of the user, in the user flow sandbox (ADR-0062). Inside the sandbox the script can still read any file, and a
+failed run can return what it read through the error message that `get_errors` shows. Without a sandbox (Windows, Linux without
+bubblewrap, a failed probe) it would have network access, write access to the home folder and could start processes. Therefore the
+tools fail closed: `kstep_desktop_run` is refused with `SANDBOX_UNAVAILABLE` unless the sandbox is active, and `set_script` /
+`replace_in_script` are refused with the same code while "Preview Unsaved Changes" is on and no sandbox is active (the edit would start a
+run by itself). Port methods `runIsSandboxed` and `autoPreviewOn`. The dialog subtitle and hint say that the permission lets agents run
+their own code as the user.
+
+== Alternatives rejected
+
+* A confirmation dialog at every change: it would make the tools useless; the switch is the decision.
+* Frame the camera on a selection or a part: an agent must not move the user's view.
+* `mode` of `run` as required: the default follows what the user would do (run what they see).
+
+== Not included (MCP-4)
+
+Saving, export, opening files and folders, paths, the clipboard, a screenshot of the viewer, a flash of the changed lines in the
+gutter, a pen glyph.
+
+== Open points
+
+* Not tried by hand with a real agent; the dialog, the status line and the notices were not looked at on a screen.
+* Group names for `select` and `show_in_script`; the context menu allows groups, the tools take part names only.
+* `run` in a knowledge workspace is refused conservatively (`NOT_A_SCRIPT`).
+* A wrong type of `allowActions` in `mcp.json` sets the whole file to its defaults (server off too), the same strictness as for
+  `enabled` and `port`.
+
+== Consequences
+
+* A program with the token can now change the editor text of the user (not the file), start runs and change selection and visibility.
+  Switch the permission off when you do not need it.
+* A run executes code an agent wrote, as the user. With a sandbox this still allows reading every file the user can read; without a
+  sandbox the tools refuse (D12). Do not give the token to an agent you do not trust.
+* `McpUiBridge` is used by the action tools; the read tools still use only the snapshot.

@@ -3,6 +3,7 @@ package dev.kstep.desktop.mcp
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -169,6 +170,40 @@ class McpPreferencesStoreTest :
                     """[]""",
                     """not json""",
                 ).forEach { loadOf(dir, it) shouldBe default }
+            }
+        }
+
+        "allowActions is off when the field is missing and survives a round trip" {
+            withDir { dir ->
+                loadOf(dir, """{"version":1,"enabled":true,"port":8000}""").allowActions shouldBe false
+                loadOf(dir, """{"version":1,"enabled":true,"allowActions":true}""") shouldBe
+                    McpSettings(true, 7391, true)
+                val store = McpPreferencesStore(dir)
+                store.save(McpSettings(true, 7400, true)) shouldBe true
+                store.load() shouldBe McpSettings(true, 7400, true)
+                Files.readString(dir.resolve(McpPreferencesStore.FILE_NAME)) shouldContain "\"allowActions\":true"
+                store.save(McpSettings(true, 7400)) shouldBe true
+                Files.readString(dir.resolve(McpPreferencesStore.FILE_NAME)) shouldContain "\"allowActions\":false"
+            }
+        }
+
+        "a wrong type of allowActions gives all defaults: server off and no changes" {
+            withDir { dir ->
+                listOf(
+                    """{"version":1,"enabled":true,"allowActions":"true"}""",
+                    """{"version":1,"enabled":true,"allowActions":1}""",
+                    """{"version":1,"enabled":true,"allowActions":null}""",
+                    """{"version":1,"enabled":true,"allowActions":{}}""",
+                    """{"version":1,"enabled":true,"allowActions":[]}""",
+                ).forEach { loadOf(dir, it) shouldBe default }
+            }
+        }
+
+        "a file with the new field stays within the 1 KiB limit" {
+            withDir { dir ->
+                McpPreferencesStore(dir).save(McpSettings(true, 65535, true)) shouldBe true
+                (Files.size(dir.resolve(McpPreferencesStore.FILE_NAME)) < McpPreferencesStore.MAX_BYTES) shouldBe true
+                McpPreferencesStore(dir).load() shouldBe McpSettings(true, 65535, true)
             }
         }
 

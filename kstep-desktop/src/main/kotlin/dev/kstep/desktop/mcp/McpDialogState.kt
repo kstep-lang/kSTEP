@@ -9,10 +9,32 @@ object McpDialogText {
     const val PORT_LOCKED = "Turn the server off to change the port"
     const val PORT_RANGE = "Use a port between 1024 and 65535"
     const val NO_TOKEN = "Turn the server on once to create a token"
-    const val HINT =
+    const val ACTIONS_SWITCH = "Allow agents to make changes"
+    const val ACTIONS_SUBTITLE =
+        "Agents may then change the editor text (never saved to disk), start runs, and change the selection and " +
+            "the visibility of parts. A run executes the script an agent wrote, as you: inside the script sandbox it " +
+            "can still read your files; without a sandbox (Windows, or Linux without bubblewrap) runs are refused. " +
+            "Undo reverts an edit."
+    const val ACTIONS_LOCKED = "Turn the server on to change this"
+
+    private const val HINT_LOCAL =
         "Only reachable from this computer (127.0.0.1). Any program on this computer that has the token can use " +
-            "kSTEP Desktop through it — in this version only to read: the status, the editor text, the errors of the " +
-            "last run, the parts, the assembly tree and the selection. It cannot change anything yet."
+            "kSTEP Desktop through it"
+    private const val HINT_READ =
+        "to read: the status, the editor text, the errors of the last run, the parts, the assembly tree and the " +
+            "selection."
+
+    /** The hint under the port, for the state of the permission to make changes. */
+    fun hint(allowActions: Boolean): String =
+        if (allowActions) {
+            "$HINT_LOCAL, $HINT_READ It may also change things: the editor text (not saved to disk), runs, the " +
+                "selection and the visibility of parts. It cannot save, export or open files itself, but it can have " +
+                "the app run a script it wrote: that script runs as you, can read any file and is only refused " +
+                "when no sandbox is available."
+        } else {
+            "$HINT_LOCAL, but only $HINT_READ Agents cannot change anything. Changes are turned off."
+        }
+
     const val REGEN_TITLE = "Regenerate token?"
     const val REGEN_TEXT = "Agents using the current token lose access until you add the new command again."
     const val TOKEN_MASK = "••••••••••••"
@@ -48,6 +70,10 @@ data class McpDialogState(
     val copyEnabled: Boolean,
     val copyReason: String?,
     val commandPreview: String,
+    val actionsChecked: Boolean,
+    val actionsEnabled: Boolean,
+    val actionsReason: String?,
+    val hintText: String,
 )
 
 fun mcpDialogState(
@@ -79,6 +105,11 @@ fun mcpDialogState(
         copyEnabled = hasToken,
         copyReason = if (hasToken) null else McpDialogText.NO_TOKEN,
         commandPreview = McpCommand.preview(running?.port ?: settings.port),
+        actionsChecked = settings.allowActions,
+        // turning it off always works, so a saved permission can be taken back while the server is off
+        actionsEnabled = running != null || settings.allowActions,
+        actionsReason = if (running != null || settings.allowActions) null else McpDialogText.ACTIONS_LOCKED,
+        hintText = McpDialogText.hint(settings.allowActions),
     )
 }
 

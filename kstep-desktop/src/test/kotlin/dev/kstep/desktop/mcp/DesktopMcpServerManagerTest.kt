@@ -105,6 +105,23 @@ class DesktopMcpServerManagerTest :
             }
         }
 
+        "a fast allowActions change is not overwritten by the delayed save of setEnabled" {
+            withDir { dir ->
+                val base = freeBase()
+                val rig = Rig(dir, McpSettings(true, base, allowActions = true))
+                try {
+                    rig.manager.startFromSettings()
+                    rig.settle()
+                    rig.manager.setEnabled(false)
+                    rig.manager.setAllowActions(false)
+                    rig.settle()
+                    rig.prefs.load() shouldBe McpSettings(false, base, allowActions = false)
+                } finally {
+                    rig.manager.shutdown()
+                }
+            }
+        }
+
         "the saved setting starts the server at app start" {
             withDir { dir ->
                 val base = freeBase()
@@ -232,6 +249,72 @@ class DesktopMcpServerManagerTest :
                 reachable(base) shouldBe false
                 McpShutdown.register(rig.manager)
                 McpShutdown.stopAll()
+            }
+        }
+
+        "the permission to make changes is off by default and can only be turned on while the server runs" {
+            withDir { dir ->
+                val base = freeBase()
+                val rig = Rig(dir, McpSettings(false, base))
+                try {
+                    rig.manager.startFromSettings()
+                    rig.settle()
+                    rig.manager.allowActions.value shouldBe false
+                    rig.manager.setAllowActions(true) shouldBe ActionsChange.SERVER_NOT_RUNNING
+                    rig.manager.allowActions.value shouldBe false
+                    rig.manager.setEnabled(true)
+                    rig.settle()
+                    rig.manager.setAllowActions(true) shouldBe ActionsChange.CHANGED
+                    rig.manager.allowActions.value shouldBe true
+                    rig.prefs.load().allowActions shouldBe true
+                } finally {
+                    rig.manager.shutdown()
+                }
+            }
+        }
+
+        "the permission can always be turned off, also while the server is off" {
+            withDir { dir ->
+                val rig = Rig(dir, McpSettings(false, freeBase(), true))
+                try {
+                    rig.manager.startFromSettings()
+                    rig.settle()
+                    rig.manager.allowActions.value shouldBe true
+                    rig.manager.setAllowActions(false) shouldBe ActionsChange.CHANGED
+                    rig.prefs.load().allowActions shouldBe false
+                } finally {
+                    rig.manager.shutdown()
+                }
+            }
+        }
+
+        "the permission survives switching the server, regenerating the token and a restart" {
+            withDir { dir ->
+                val base = freeBase()
+                val rig = Rig(dir, McpSettings(true, base, true))
+                try {
+                    rig.manager.startFromSettings()
+                    rig.settle()
+                    rig.manager.setEnabled(false)
+                    rig.settle()
+                    rig.prefs.load() shouldBe McpSettings(false, base, true)
+                    rig.manager.setEnabled(true)
+                    rig.settle()
+                    rig.manager.regenerateToken() shouldBe true
+                    rig.manager.adoptActualPort()
+                    rig.prefs.load() shouldBe McpSettings(true, base, true)
+                    rig.manager.allowActions.value shouldBe true
+                } finally {
+                    rig.manager.shutdown()
+                }
+                val again = Rig(dir)
+                try {
+                    again.manager.startFromSettings()
+                    again.settle()
+                    again.manager.allowActions.value shouldBe true
+                } finally {
+                    again.manager.shutdown()
+                }
             }
         }
     })

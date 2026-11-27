@@ -122,6 +122,12 @@ class DesktopMcpHttpServerTest :
                         "kstep_desktop_get_selection",
                         "kstep_desktop_get_view",
                         "kstep_desktop_find_in_script",
+                        "kstep_desktop_set_script",
+                        "kstep_desktop_replace_in_script",
+                        "kstep_desktop_run",
+                        "kstep_desktop_select",
+                        "kstep_desktop_set_visibility",
+                        "kstep_desktop_show_in_script",
                     )
 
                 val status =

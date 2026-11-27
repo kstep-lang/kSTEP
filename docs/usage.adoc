@@ -1153,7 +1153,7 @@ claude mcp add --transport http kstep-desktop http://127.0.0.1:7391/mcp --header
 
 If the port is busy the server takes the next free one (up to nine further) and the dialog says so; "Use ... from now on" stores
 that port. "Regenerate Token..." replaces the token at once; agents that use the old one lose access. While the server runs, the
-status line shows "MCP", which lights up briefly when an agent calls. In this version there are eight tools and all of them only read:
+status line shows "MCP", which lights up briefly when an agent calls. There are fourteen tools: eight only read (the next list), six change the app and are described below:
 
 * `kstep_desktop_get_status`: file, unsaved changes, state of the preview, size of the model.
 * `kstep_desktop_get_script`: the editor text including unsaved changes, with a revision hash; more than 1 MiB is cut and marked.
@@ -1168,6 +1168,42 @@ Every answer has `snapshotRevision`, a number that changes when what the window 
 starts at 0 again when the app starts). Lists are cut at fixed limits and say `truncated`; an answer is never larger than 1 MiB
 (except `kstep_desktop_get_script`). A tool refuses arguments it does not know. Any program on your computer that has the token can
 use them, so treat it like a password.
+
+==== Letting an agent make changes
+
+Under the server switch, "Allow agents to make changes" is off by default. You can turn it on only while the server runs, and you can
+always turn it off. It is checked at every call, so switching it off acts at once and also stops a call that is already waiting. While it is on,
+the status line shows "MCP edit". The six tools below do nothing without it (`ACTIONS_DISABLED`). None of them can save or export a file,
+open a file or use the clipboard, and none moves the camera.
+
+[cols="2,5"]
+|===
+|Tool |What it does
+
+|`kstep_desktop_set_script`
+|Replaces the whole editor text. Needs `expectedRevision` (from `get_script`); otherwise `STALE_REVISION`.
+
+|`kstep_desktop_replace_in_script`
+|Replaces `oldText` if it occurs exactly once (`NOT_FOUND`, `AMBIGUOUS`). Needs `expectedRevision`.
+
+|`kstep_desktop_run`
+|Starts a run like the menu: `mode` `saved` or `unsaved` (default: `unsaved` when there are unsaved changes). With `waitMs` (up to 30000) it
+waits and answers `finished`, `failed` or `timeout`. At most one run per second.
+
+|`kstep_desktop_select`
+|`replace`, `add`, `toggle` or `clear` the selection by part name; `occurrence` (0-based) picks one part of that name.
+
+|`kstep_desktop_set_visibility`
+|`hide`, `show`, `isolate`, `show_all` or `toggle_transparent` for named parts, or for the selection when `parts` is left out.
+
+|`kstep_desktop_show_in_script`
+|Selects, in the editor, the place where a part is made (needs a script that was run unchanged). The editor does not take the focus.
+|===
+
+A typical round: `get_script` (note `revision`), `replace_in_script` with that `expectedRevision`, `run` with `waitMs` 5000, then `get_errors`.
+An agent edit is one step in the undo history of its own: press Undo (Cmd/Ctrl+Z) to take it back. The edit is never saved; the file on disk
+changes only when you save. If "Preview Unsaved Changes" is on, an agent edit starts the automatic preview run just like typing does. Like every
+edit it also schedules a crash draft. Agent text may not contain control or bidirectional characters and is limited to 1 MiB.
 
 === Starting the desktop from the CLI
 

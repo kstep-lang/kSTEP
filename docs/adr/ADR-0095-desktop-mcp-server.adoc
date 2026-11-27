@@ -128,5 +128,5 @@ until a token exists.
 == Roadmap
 
 * MCP-2: more reading (selection, visibility, errors). Done differently, through the snapshot and not through `McpUiBridge`: see ADR-0096.
-* MCP-3: acting tools. Then "Show AI Panel" and "MCP Server..." move into their own menu "Agents" and the status segment becomes
+* MCP-3: acting tools (done, see ADR-0097). Then "Show AI Panel" and "MCP Server..." move into their own menu "Agents" and the status segment becomes
   high priority.

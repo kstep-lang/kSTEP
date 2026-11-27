@@ -110,6 +110,35 @@ class DesktopArchitectureTest :
                 }.shouldBeEmpty()
         }
 
+        "the action port has no way to save, export, open, close or touch the clipboard (ADR-0097)" {
+            val forbidden = listOf("save", "export", "open", "close", "clipboard")
+            dev.kstep.desktop.mcp.McpActionPort::class.java.methods
+                .map { it.name.lowercase() }
+                .filter { name -> forbidden.any { name.contains(it) } }
+                .shouldBeEmpty()
+        }
+
+        "the window side of the action port neither saves, exports, opens files nor uses the clipboard (ADR-0097)" {
+            val text =
+                sources()
+                    .single { (path, _) ->
+                        root.relativize(path).toString().replace('\\', '/') ==
+                            "dev/kstep/desktop/ui/DesktopMcpActionPort.kt"
+                    }.second
+            val code =
+                text.lineSequence().filter {
+                    !it.trimStart().startsWith(
+                        "*",
+                    ) &&
+                        !it.trimStart().startsWith("/*")
+                }
+            val banned = listOf(".save(", "saveAndWait", "export", "clipboard", "Files.", ".open(", "Clipboard")
+            code
+                .flatMap { line -> banned.filter { line.contains(it) }.map { "$it in: ${line.trim()}" } }
+                .toList()
+                .shouldBeEmpty()
+        }
+
         "com.sun.net.httpserver is only used by the MCP HTTP server (ADR-0095)" {
             sources()
                 .filter { (path, text) ->

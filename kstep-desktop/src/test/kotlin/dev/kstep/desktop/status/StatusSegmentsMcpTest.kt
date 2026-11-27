@@ -67,4 +67,57 @@ class StatusSegmentsMcpTest :
             val range = fitted.ranges.getValue("mcp")
             fitted.shown.substring(range.first, range.last + 1) shouldBe "MCP"
         }
+
+        "with permission to make changes the segment reads MCP edit and is essential" {
+            val segment =
+                StatusSegments
+                    .build(
+                        knowledgeLabel = null,
+                        runState = "● Ok",
+                        durationMs = null,
+                        triangles = null,
+                        triangleWarning = null,
+                        note = null,
+                        transientNotice = null,
+                        aiStatus = null,
+                        hidden = 0,
+                        transparent = 0,
+                        dirty = false,
+                        mcp = "MCP",
+                        mcpEditable = true,
+                    ).single { it.id == "mcp" }
+            segment.text shouldBe "MCP edit"
+            segment.priority shouldBe SegmentPriority.ESSENTIAL
+        }
+
+        "without the permission it stays the quiet MCP segment of medium priority" {
+            val segment = build("MCP").single { it.id == "mcp" }
+            segment.text shouldBe "MCP"
+            segment.priority shouldBe SegmentPriority.MEDIUM
+            segment.dropRank shouldBe 1
+        }
+
+        "MCP edit survives a narrow line next to the state, hidden and unsaved changes" {
+            val segments =
+                StatusSegments.build(
+                    knowledgeLabel = null,
+                    runState = "● Running…",
+                    durationMs = 1234L,
+                    triangles = 12345,
+                    triangleWarning = "Large model",
+                    note = "A note",
+                    transientNotice = "Saved",
+                    aiStatus = "AI ready",
+                    hidden = 3,
+                    transparent = 2,
+                    dirty = true,
+                    mcp = "MCP",
+                    mcpEditable = true,
+                )
+            val fitted = StatusSegments.fit(segments, 40)
+            val shown = fitted.shown.split(StatusLineText.SEPARATOR)
+            listOf("MCP edit", "● Running…", "3 hidden", "unsaved changes").forEach { (it in shown) shouldBe true }
+            val range = fitted.ranges.getValue("mcp")
+            fitted.shown.substring(range.first, range.last + 1) shouldBe "MCP edit"
+        }
     })

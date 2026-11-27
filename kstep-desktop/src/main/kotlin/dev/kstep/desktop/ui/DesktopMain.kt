@@ -19,10 +19,12 @@ import dev.kstep.desktop.edit.AtomicSaver
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.export.ExportController
 import dev.kstep.desktop.mcp.DesktopMcpServerManager
+import dev.kstep.desktop.mcp.McpActionHost
 import dev.kstep.desktop.mcp.McpActivityTracker
 import dev.kstep.desktop.mcp.McpPreferencesStore
 import dev.kstep.desktop.mcp.McpShutdown
 import dev.kstep.desktop.mcp.McpTokenStore
+import dev.kstep.desktop.mcp.McpUiBridge
 import dev.kstep.desktop.mcp.SnapshotHost
 import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
@@ -33,8 +35,10 @@ import dev.kstep.desktop.run.WorkerRunner
 import dev.kstep.desktop.run.WorkerSandbox
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
+import kotlinx.coroutines.Dispatchers
 import java.awt.Desktop
 import java.awt.Dimension
+import java.awt.EventQueue
 import java.awt.Frame
 import javax.swing.SwingUtilities
 
@@ -110,9 +114,12 @@ fun runDesktopApp(args: Array<String>) {
         // window publishes; the activity tracker drives the quiet light in the status line.
         val mcpHost = remember { SnapshotHost(kstepVersion()) }
         val mcpActivity = remember { McpActivityTracker() }
+        // The action tools (ADR-0097) run their changes on the Swing event thread through this bridge.
+        val mcpActions =
+            remember { McpActionHost(McpUiBridge(Dispatchers.Main, { EventQueue.isDispatchThread() })) }
         val mcp =
             remember {
-                DesktopMcpServerManager(McpPreferencesStore(), McpTokenStore(), mcpHost, mcpActivity).also {
+                DesktopMcpServerManager(McpPreferencesStore(), McpTokenStore(), mcpHost, mcpActivity, mcpActions).also {
                     McpShutdown.register(it)
                     it.startFromSettings()
                 }
@@ -167,8 +174,10 @@ fun runDesktopApp(args: Array<String>) {
                 mcp = mcp,
                 mcpHost = mcpHost,
                 mcpActivity = mcpActivity,
+                mcpActions = mcpActions,
                 onQuit = { requestQuit() },
                 userSandbox = userSandbox.state,
+                resolveUserSandbox = userSandbox::resolve,
             )
         }
     }

@@ -46,6 +46,7 @@ object StatusSegments {
         transparent: Int,
         dirty: Boolean,
         mcp: String? = null,
+        mcpEditable: Boolean = false,
     ): List<StatusSegment> {
         val all =
             listOf(
@@ -61,7 +62,12 @@ object StatusSegments {
                 StatusSegment(note.orEmpty(), SegmentPriority.MEDIUM),
                 StatusSegment(transientNotice.orEmpty(), SegmentPriority.HIGH),
                 StatusSegment(aiStatus.orEmpty(), SegmentPriority.HIGH),
-                StatusSegment(mcp.orEmpty(), SegmentPriority.MEDIUM, dropRank = 1, id = MCP_SEGMENT_ID),
+                if (mcpEditable && mcp != null) {
+                    // agents may change things: the user must never miss it, so the segment stays (ADR-0097)
+                    StatusSegment("MCP edit", SegmentPriority.ESSENTIAL, id = MCP_SEGMENT_ID)
+                } else {
+                    StatusSegment(mcp.orEmpty(), SegmentPriority.MEDIUM, dropRank = 1, id = MCP_SEGMENT_ID)
+                },
                 StatusSegment(if (hidden > 0) "$hidden hidden" else "", SegmentPriority.ESSENTIAL),
                 StatusSegment(if (transparent > 0) "$transparent transparent" else "", SegmentPriority.MEDIUM),
                 StatusSegment(if (dirty) "unsaved changes" else "", SegmentPriority.ESSENTIAL),

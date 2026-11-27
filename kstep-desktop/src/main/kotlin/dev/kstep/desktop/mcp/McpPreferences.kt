@@ -15,6 +15,8 @@ import java.nio.file.Path
 data class McpSettings(
     val enabled: Boolean = false,
     val port: Int = McpPreferencesStore.DEFAULT_PORT,
+    /** ADR-0097: agents may change things (editor text, runs, selection, visibility). Off by default. */
+    val allowActions: Boolean = false,
 )
 
 /**
@@ -50,7 +52,13 @@ class McpPreferencesStore(
                 is JsonPrimitive -> if (element.isString) null else element.intOrNull
                 else -> null
             }?.takeIf { it in MIN_PORT..MAX_PORT } ?: return McpSettings()
-        return McpSettings(enabled, port)
+        val allowActions =
+            when (val element = obj["allowActions"]) {
+                null -> false
+                is JsonPrimitive -> if (element.isString) null else element.booleanOrNull
+                else -> null
+            } ?: return McpSettings()
+        return McpSettings(enabled, port, allowActions)
     }
 
     /** `false` when the file could not be written (shown as `KSTEP-D-052`); never throws. */
@@ -60,6 +68,7 @@ class McpPreferencesStore(
                 put("version", 1)
                 put("enabled", settings.enabled)
                 put("port", settings.port.coerceIn(MIN_PORT, MAX_PORT))
+                put("allowActions", settings.allowActions)
             }
         return PrivateConfigFile.writeAtomic(dir, FILE_NAME, "mcp", body.toString())
     }

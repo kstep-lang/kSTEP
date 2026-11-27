@@ -115,4 +115,4 @@ parts, the assembly tree and the selection, and that it cannot change anything y
 
 == Roadmap
 
-* MCP-3: acting tools through `McpUiBridge`, then the menu "Agents".
+* MCP-3: acting tools through `McpUiBridge`, then the menu "Agents". Done in ADR-0097 (the menu "Agents" is still open).

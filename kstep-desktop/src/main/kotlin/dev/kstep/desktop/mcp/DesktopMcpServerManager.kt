@@ -34,6 +34,9 @@ sealed interface McpServerStatus {
     data object TokenUnavailable : McpServerStatus
 }
 
+/** The outcome of [DesktopMcpServerManager.setAllowActions]. */
+enum class ActionsChange { CHANGED, SERVER_NOT_RUNNING, SAVE_FAILED }
+
 /** The outcome of [DesktopMcpServerManager.setPort]. */
 enum class PortChange { CHANGED, OUT_OF_RANGE, SERVER_RUNNING, SAVE_FAILED }
 
@@ -47,10 +50,18 @@ class DesktopMcpServerManager(
     private val tokens: McpTokenStore,
     private val host: McpHost,
     private val activity: McpActivityTracker,
-    private val serverFactory: (token: () -> McpToken?) -> DesktopMcpServerHandle =
-        { token ->
+    /** The UI link of the action tools (ADR-0097); without a port in it every action answers `UI_BUSY`. */
+    private val actions: McpActionHost = McpActionHost(McpUiBridge(Dispatchers.Default, { false })),
+    private val serverFactory: (token: () -> McpToken?, allowActions: () -> Boolean) -> DesktopMcpServerHandle =
+        { token, allowActions ->
+            // the permission is read at every call, never copied at start (ADR-0097 D1)
+            val context = McpActionContext(actions, allowActions = allowActions)
             DesktopMcpServerHandle.of(
-                DesktopMcpHttpServer(McpProtocol(McpToolRegistry(host), host.appVersion), token, activity),
+                DesktopMcpHttpServer(
+                    McpProtocol(McpToolRegistry(host, actions = context), host.appVersion),
+                    token,
+                    activity,
+                ),
             )
         },
 ) {
@@ -67,7 +78,12 @@ class DesktopMcpServerManager(
     private val saveFailedFlow = MutableStateFlow(false)
     private val hasTokenFlow = MutableStateFlow(false)
 
+    private val allowActionsFlow = MutableStateFlow(false)
+
     val status: StateFlow<McpServerStatus> get() = statusFlow
+
+    /** Agents may change things (ADR-0097); off by default and saved with the settings. */
+    val allowActions: StateFlow<Boolean> get() = allowActionsFlow
     val settingsState: StateFlow<McpSettings> get() = settingsFlow
 
     /** `KSTEP-D-052`: the last attempt to save the settings failed. */
@@ -81,6 +97,7 @@ class DesktopMcpServerManager(
     fun startFromSettings() {
         val loaded = preferences.load()
         settingsFlow.value = loaded
+        allowActionsFlow.value = loaded.allowActions
         scope.launch {
             hasTokenFlow.value = tokens.current() != null
             if (loaded.enabled) doStart(loaded.port)
@@ -91,9 +108,24 @@ class DesktopMcpServerManager(
         val next = settingsFlow.value.copy(enabled = on)
         settingsFlow.value = next
         scope.launch {
-            saveFailedFlow.value = !preferences.save(next)
+            // Save the latest snapshot, not the captured one: a setting changed meanwhile must not be overwritten.
+            saveFailedFlow.value = !preferences.save(settingsFlow.value)
             if (on) doStart(next.port) else doStop()
         }
+    }
+
+    /**
+     * Switches the permission for agents to make changes (ADR-0097). Turning it on needs a running server; turning it
+     * off always works, also while the server is off, so a saved permission can always be taken back.
+     */
+    fun setAllowActions(on: Boolean): ActionsChange {
+        if (on && statusFlow.value !is McpServerStatus.Running) return ActionsChange.SERVER_NOT_RUNNING
+        val next = settingsFlow.value.copy(allowActions = on)
+        settingsFlow.value = next
+        allowActionsFlow.value = on
+        val saved = preferences.save(next)
+        saveFailedFlow.value = !saved
+        return if (saved) ActionsChange.CHANGED else ActionsChange.SAVE_FAILED
     }
 
     /** Only while the server does not run. Saves the new port. */
@@ -169,7 +201,7 @@ class DesktopMcpServerManager(
             hasTokenFlow.value = true
             val last = minOf(preferred + FALLBACK_PORTS, McpPreferencesStore.MAX_PORT)
             for (candidate in preferred..last) {
-                val server = serverFactory { tokenRef }
+                val server = serverFactory({ tokenRef }, { settingsFlow.value.allowActions })
                 try {
                     val actual = server.start(candidate)
                     running = server

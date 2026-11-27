@@ -782,6 +782,14 @@ scan before either lands.
   2 s deadline that is reported as `SEARCH_TIMEOUT`). Tests: tools (44), publisher, mapper, real-server cases for protocol 2025-06-18
   and 2025-03-26, dialog hint, two more architecture rules (no own regex, no run or file access in the package). Not done: a hand test
   with a real agent, any run on Windows or Linux, UI-local error texts in `get_errors`, an isolate flag, acting tools (MCP-3).
+* Welle MCP-3 (ADR-0097): six action tools in `kstep-desktop` behind the switch "Allow agents to make changes" (`McpSettings.allowActions`,
+  `DesktopMcpServerManager.setAllowActions`, read at every call and again inside each UI block). `McpActionPort` (no save, export, open,
+  close or clipboard method, checked by a test) with `DesktopMcpActionPort` in `ui`; `McpUiBridge.onUiMutating` (never half done);
+  `McpAgentText` (limits, forbidden characters, linear search), `McpRateLimiter`, `McpActionTools`; `EditorSession.applyAgentEdit` (one undo
+  step of its own kind), `VisibilityMachine.showParts`/`toggleTransparentParts`, `EditorJump.focusEditor`, "MCP edit" status segment and
+  agent notices. Tests: registry (FakePort, about 35 cases), text rules, rate limits, bridge, session (undo order, never saved), manager,
+  real server, port, status, architecture. Not done: a hand test with a real agent, a look at the dialog and status line on a screen, any
+  run on Windows or Linux, group names in `select`, the menu "Agents", Save/Export/files (MCP-4).
 * Welle D3d-1 (ADR-0094): three visual fixes in `kstep-desktop` (packages `ui`, `status`). `ViewerOverlayLayout` places the
   last-good badge (top left while 140 dp fit next to the 260 dp panel, i.e. from a 432 dp viewer; else bottom left; wrapping text).
   `StatusSegments` builds the run status from prioritised whole segments and `fit` drops duration, triangles, medium, then high

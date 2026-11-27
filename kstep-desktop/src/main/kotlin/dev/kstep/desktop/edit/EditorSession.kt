@@ -54,6 +54,9 @@ class EditorView(
     val dirty: Boolean get() = (state as? EditorState.Editing)?.dirty == true
 }
 
+/** What [EditorSession.applyAgentEdit] did (ADR-0097). */
+enum class AgentEditOutcome { APPLIED, UNCHANGED, STALE, NOT_EDITING, DRAFT_OFFER_OPEN }
+
 /** Runs [task] after [delayMs]; closing the result cancels it. Injectable so the tests need no real time. */
 fun interface DraftTimer {
     fun schedule(
@@ -280,6 +283,32 @@ class EditorSession(
             if (editing.text != expected) return false
             replaceText(text, minOf(caret, text.length))
             return true
+        }
+    }
+
+    /**
+     * An edit by an agent through the MCP server (ADR-0097), applied only if the editor text still equals [expected],
+     * atomically under the lock. One undo step of its own kind ([EditKind.OTHER]): it never merges with the typing
+     * before it, and typing after it does not merge with it, so Undo removes exactly this edit. The caret moves with the
+     * change (before it stays, after it shifts, inside it goes to the end of the new text). Nothing is saved.
+     */
+    fun applyAgentEdit(
+        expected: String,
+        newText: String,
+    ): AgentEditOutcome {
+        synchronized(lock) {
+            val editing = state as? EditorState.Editing ?: return AgentEditOutcome.NOT_EDITING
+            if (offer != null) return AgentEditOutcome.DRAFT_OFFER_OPEN
+            if (editing.text != expected) return AgentEditOutcome.STALE
+            val change = TextEdit.between(editing.text, newText) ?: return AgentEditOutcome.UNCHANGED
+            val mapped =
+                when {
+                    caret <= change.start -> caret
+                    caret >= change.oldEnd -> caret + change.delta
+                    else -> change.newEnd
+                }.coerceIn(0, newText.length)
+            replaceText(newText, mapped)
+            return AgentEditOutcome.APPLIED
         }
     }
 

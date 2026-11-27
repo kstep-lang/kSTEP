@@ -1,5 +1,6 @@
 package dev.kstep.desktop.mcp
 
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -42,6 +43,70 @@ internal sealed class McpArg(
             val p = v as? JsonPrimitive ?: return null
             if (!p.isString) return null
             return p.content.takeIf { it.length in minLength..maxLength }
+        }
+    }
+
+    /** One of a fixed set of strings (ADR-0097). */
+    class EnumArg(
+        name: String,
+        description: String,
+        required: Boolean,
+        val values: List<String>,
+        val default: String? = null,
+    ) : McpArg(name, description, required) {
+        override fun schema(): JsonObject =
+            buildJsonObject {
+                put("type", "string")
+                put("description", description)
+                put("enum", buildJsonArray { values.forEach { add(JsonPrimitive(it)) } })
+                if (default != null) put("default", default)
+            }
+
+        override fun read(v: JsonElement): Any? {
+            val p = v as? JsonPrimitive ?: return null
+            if (!p.isString) return null
+            return p.content.takeIf { it in values }
+        }
+
+        override fun default(): Any? = default
+    }
+
+    /** A list of strings (ADR-0097): only string elements, length limits per element and for the list. */
+    class StringListArg(
+        name: String,
+        description: String,
+        required: Boolean,
+        val minItems: Int,
+        val maxItems: Int,
+        val itemMin: Int,
+        val itemMax: Int,
+    ) : McpArg(name, description, required) {
+        override fun schema(): JsonObject =
+            buildJsonObject {
+                put("type", "array")
+                put("description", description)
+                put(
+                    "items",
+                    buildJsonObject {
+                        put("type", "string")
+                        put("minLength", itemMin)
+                        put("maxLength", itemMax)
+                    },
+                )
+                put("minItems", minItems)
+                put("maxItems", maxItems)
+            }
+
+        override fun read(v: JsonElement): Any? {
+            val array = v as? JsonArray ?: return null
+            if (array.size !in minItems..maxItems) return null
+            val out = ArrayList<String>(array.size)
+            for (element in array) {
+                val p = element as? JsonPrimitive ?: return null
+                if (!p.isString || p.content.length !in itemMin..itemMax) return null
+                out += p.content
+            }
+            return out
         }
     }
 
@@ -109,6 +174,8 @@ internal sealed class McpArg(
 /** The arguments a tool accepts. Anything else is refused (ADR-0096 D4). */
 internal class McpArgSpec(
     val args: List<McpArg> = emptyList(),
+    /** Rules that involve several arguments; `false` means `INVALID_ARGUMENTS` (ADR-0097). */
+    val crossCheck: (McpParsedArgs) -> Boolean = { true },
 ) {
     /** The `inputSchema` of the tool. */
     fun schema(): JsonObject =
@@ -142,7 +209,9 @@ internal class McpArgSpec(
             if (spec.required) throw invalid()
             spec.default()?.let { values[spec.name] = it }
         }
-        return McpParsedArgs(values)
+        val parsed = McpParsedArgs(values)
+        if (!crossCheck(parsed)) throw invalid()
+        return parsed
     }
 
     private fun invalid() = McpToolException(McpToolCodes.INVALID_ARGUMENTS)
@@ -161,4 +230,9 @@ internal class McpParsedArgs(
     fun bool(name: String): Boolean = values[name] as Boolean? ?: false
 
     fun int(name: String): Int? = values[name] as Int?
+
+    @Suppress("UNCHECKED_CAST")
+    fun strings(name: String): List<String>? = values[name] as List<String>?
+
+    fun has(name: String): Boolean = name in values
 }

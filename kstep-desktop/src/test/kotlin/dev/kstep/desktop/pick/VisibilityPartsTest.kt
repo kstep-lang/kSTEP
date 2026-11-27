@@ -61,4 +61,24 @@ class VisibilityPartsTest :
             val foreign = VisibilityState(mapOf("gone" to Visibility.Hidden))
             VisibilityMachine.anyNotVisible(foreign, scene) shouldBe false
         }
+
+        "showParts makes the parts visible again and is the same instance when nothing changes" {
+            val hidden = VisibilityMachine.hideParts(none, scene, intArrayOf(0, 1, 2))
+            val shown = VisibilityMachine.showParts(hidden, scene, intArrayOf(1))
+            modes(shown) shouldBe
+                listOf(Visibility.Hidden, Visibility.Visible, Visibility.Hidden, Visibility.Visible)
+            (VisibilityMachine.showParts(shown, scene, intArrayOf(1, 3)) === shown) shouldBe true
+            (VisibilityMachine.showParts(none, scene, intArrayOf(99, -1)) === none) shouldBe true
+        }
+
+        "toggleTransparentParts makes all transparent, or visible again when all already are" {
+            val t = VisibilityMachine.toggleTransparentParts(none, scene, intArrayOf(0, 1))
+            modes(t) shouldBe
+                listOf(Visibility.Transparent, Visibility.Transparent, Visibility.Visible, Visibility.Visible)
+            val mixed = VisibilityMachine.toggleTransparentParts(t, scene, intArrayOf(1, 2))
+            modes(mixed)[2] shouldBe Visibility.Transparent
+            modes(VisibilityMachine.toggleTransparentParts(mixed, scene, intArrayOf(1, 2)))[1] shouldBe
+                Visibility.Visible
+            (VisibilityMachine.toggleTransparentParts(none, scene, intArrayOf(77)) === none) shouldBe true
+        }
     })

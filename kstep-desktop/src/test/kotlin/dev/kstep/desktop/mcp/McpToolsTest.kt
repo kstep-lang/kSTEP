@@ -30,10 +30,10 @@ private const val SCRIPT = "kstep_desktop_get_script"
 
 class McpToolsTest :
     StringSpec({
-        "every tool has a prefixed unique name, a description and an object schema; exactly eight" {
+        "every tool has a prefixed unique name, a description and an object schema; exactly fourteen" {
             val tools = registry(FakeHost()).all
-            tools.size shouldBe 8
-            tools.map { it.name }.toSet().size shouldBe 8
+            tools.size shouldBe 14
+            tools.map { it.name }.toSet().size shouldBe 14
             tools.map { it.name } shouldContainExactly
                 listOf(
                     "kstep_desktop_get_status",
@@ -44,6 +44,12 @@ class McpToolsTest :
                     "kstep_desktop_get_selection",
                     "kstep_desktop_get_view",
                     "kstep_desktop_find_in_script",
+                    "kstep_desktop_set_script",
+                    "kstep_desktop_replace_in_script",
+                    "kstep_desktop_run",
+                    "kstep_desktop_select",
+                    "kstep_desktop_set_visibility",
+                    "kstep_desktop_show_in_script",
                 )
             tools.forEach {
                 it.name shouldStartWith "kstep_desktop_"

@@ -594,7 +594,7 @@ class McpReadToolsTest :
             var reads = 0
             val host = FakeHost(snap(scene = scene3(), runReport = report(errorList(2))), onRead = { reads++ })
             val reg = McpToolRegistry(host)
-            for (t in reg.all) {
+            for (t in reg.all.filter { !it.acting }) {
                 reads = 0
                 val args = if (t.name == FIND) """{"query":"box"}""" else "{}"
                 reg.call(t.name, Json.parseToJsonElement(args).jsonObject, V)
@@ -605,7 +605,7 @@ class McpReadToolsTest :
         "snapshotRevision is in the answer of every tool" {
             val s = snap(scene = scene3(), revision = 42)
             val reg = McpToolRegistry(FakeHost(s))
-            for (t in reg.all) {
+            for (t in reg.all.filter { !it.acting }) {
                 val args = if (t.name == FIND) """{"query":"box"}""" else "{}"
                 val r = reg.call(t.name, Json.parseToJsonElement(args).jsonObject, V)
                 r.sc().num("snapshotRevision") shouldBe 42

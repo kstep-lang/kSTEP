@@ -9,6 +9,15 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: six MCP tools that change the app (Welle MCP-3, ADR-0097), behind a second switch "Allow agents to make changes"
+  in View > MCP Server... (off by default, stored as `allowActions` in `mcp.json`, checked at every call): `kstep_desktop_set_script`,
+  `kstep_desktop_replace_in_script` (both need the `expectedRevision` from `get_script`; one undo step of their own; the file is
+  never saved), `kstep_desktop_run` (like the menu, optionally waits), `kstep_desktop_select`, `kstep_desktop_set_visibility` and
+  `kstep_desktop_show_in_script`. At most 20 calls per second, one run per second, one waiting call at a time. Agent text is checked
+  (1 MiB, no control or bidi characters). The status line shows "MCP edit" while changes are allowed and a short notice after an
+  agent edit or run. New fixed codes `ACTIONS_DISABLED`, `STALE_REVISION`, `NOT_A_SCRIPT`, `DRAFT_OFFER_OPEN`, `TEXT_TOO_LARGE`,
+  `INVALID_TEXT`, `NOT_FOUND`, `AMBIGUOUS`, `RATE_LIMITED`, `BUFFER_NOT_RUN`. With "Preview Unsaved Changes" on, an agent edit starts
+  the automatic run like typing. Only built and unit tested on macOS; not yet tried by hand with a real agent.
 * kSTEP Desktop: six more read-only MCP tools (Welle MCP-2, ADR-0096): `kstep_desktop_get_errors`, `kstep_desktop_get_parts`,
   `kstep_desktop_get_assembly_tree`, `kstep_desktop_get_selection`, `kstep_desktop_get_view` and `kstep_desktop_find_in_script`
   (the same safe search as the find bar, with a time limit). They read an extended snapshot that the window publishes (errors,

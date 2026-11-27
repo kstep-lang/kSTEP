@@ -29,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
@@ -95,8 +96,13 @@ import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.export.ScriptExportPreference
+import dev.kstep.desktop.mcp.AgentNoticeKind
 import dev.kstep.desktop.mcp.DesktopMcpServerManager
+import dev.kstep.desktop.mcp.McpActionHost
+import dev.kstep.desktop.mcp.McpActionScene
 import dev.kstep.desktop.mcp.McpActivityTracker
+import dev.kstep.desktop.mcp.McpRunMode
+import dev.kstep.desktop.mcp.McpRunOutcome
 import dev.kstep.desktop.mcp.McpServerStatus
 import dev.kstep.desktop.mcp.McpSnapshotPublisher
 import dev.kstep.desktop.mcp.McpViewInput
@@ -167,6 +173,7 @@ import dev.kstep.desktop.run.UserSandboxState
 import dev.kstep.desktop.run.sandboxNotice
 import dev.kstep.desktop.settings.LayoutPreferences
 import dev.kstep.desktop.settings.LayoutPreferencesStore
+import dev.kstep.desktop.status.AgentNotice
 import dev.kstep.desktop.status.PreviewOriginLabel
 import dev.kstep.desktop.status.StatusSegment
 import dev.kstep.desktop.status.StatusSegments
@@ -185,8 +192,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.awt.FileDialog
 import java.awt.Frame
 import java.nio.file.Path
@@ -223,8 +233,10 @@ fun FrameWindowScope.DesktopApp(
     mcp: DesktopMcpServerManager,
     mcpHost: SnapshotHost,
     mcpActivity: McpActivityTracker,
+    mcpActions: McpActionHost,
     onQuit: () -> Unit,
     userSandbox: StateFlow<UserSandboxState> = MutableStateFlow(UserSandboxState.Unknown),
+    resolveUserSandbox: () -> UserSandboxState = { userSandbox.value },
 ) {
     val sandboxState by userSandbox.collectAsState()
     val sandboxNotice = sandboxNotice(sandboxState)
@@ -257,9 +269,12 @@ fun FrameWindowScope.DesktopApp(
     }
     var actionError by remember { mutableStateOf<DesktopError?>(null) }
     var transientNotice by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(transientNotice) {
+    // a notice an agent caused is shorter; the nonce restarts the timer when the same text comes again (ADR-0097)
+    var noticeNonce by remember { mutableStateOf(0) }
+    LaunchedEffect(transientNotice, noticeNonce) {
         if (transientNotice != null) {
-            delay(NOTICE_MS)
+            val agent = transientNotice == AgentNotice.EDITED || transientNotice == AgentNotice.RUN
+            delay(if (agent) AgentNotice.DURATION_MS else NOTICE_MS)
             transientNotice = null
         }
     }
@@ -277,6 +292,7 @@ fun FrameWindowScope.DesktopApp(
     // The MCP server (ADR-0095): its dialog, the "MCP" status segment and the quiet light while an agent is calling.
     var mcpDialogVisible by remember { mutableStateOf(false) }
     val mcpStatus by mcp.status.collectAsState()
+    val mcpAllowActions by mcp.allowActions.collectAsState()
     val mcpLastLit by mcpActivity.lastLitAtMs.collectAsState()
     var mcpLit by remember { mutableStateOf(false) }
     LaunchedEffect(mcpLastLit) {
@@ -376,7 +392,8 @@ fun FrameWindowScope.DesktopApp(
     var treeVisible by remember { mutableStateOf(true) }
     // Visibility (ADR-0055): lives here, per session. A re-run of the same file keeps it (vanished parts are dropped),
     // another file starts clean. Derived arrays are built once per change, never per frame or per hover.
-    var visibilityState by remember { mutableStateOf(VisibilityState()) }
+    val visibilityHolder = remember { mutableStateOf(VisibilityState()) }
+    var visibilityState by visibilityHolder
     val visibilityScene = remember(parts, tree) { parts?.let { VisibilityScene.of(it, tree) } }
     val visibilityView: State<VisibilityView?> =
         remember(visibilityScene, tree, parts) {
@@ -1025,6 +1042,69 @@ fun FrameWindowScope.DesktopApp(
             McpViewInput.of(selection.value, visibilityState, softWrapNow.value, previewUnsavedNow.value)
         }.distinctUntilChanged().collect { mcpPublisher.onView(it) }
     }
+    // The action tools of the MCP server reach the window through this port (ADR-0097); it is set while the window lives.
+    val menuContextNow = rememberUpdatedState(menuContext)
+    val knowledgeOpenNow = rememberUpdatedState(knowledgeOpen)
+    val partsNowState = rememberUpdatedState(parts)
+    val treeNowState = rememberUpdatedState(tree)
+    val sceneNowState = rememberUpdatedState(visibilityScene)
+    val displayNowState = rememberUpdatedState(display)
+    DisposableEffect(mcpActions, session, controller) {
+        mcpActions.port =
+            DesktopMcpActionPort(
+                session = session,
+                menuContext = { menuContextNow.value },
+                knowledgeOpen = { knowledgeOpenNow.value },
+                runStarter = { mode ->
+                    when (mode) {
+                        McpRunMode.SAVED -> controller.forceRun()
+                        McpRunMode.UNSAVED -> {
+                            val editing = session.view.value.state as? EditorState.Editing
+                            if (editing != null) controller.runBuffer(editing.path, editing.text)
+                        }
+                    }
+                },
+                generation = { controller.state.value.generation },
+                runAwaiter = { after, timeoutMs ->
+                    val ended =
+                        runBlocking {
+                            withTimeoutOrNull(timeoutMs) {
+                                controller.state.first {
+                                    it.generation > after && it !is DesktopState.Running && it !is DesktopState.Idle
+                                }
+                            }
+                        }
+                    when (ended) {
+                        null -> null
+                        is DesktopState.Error -> McpRunOutcome.Failed(ended.errors.size)
+                        is DesktopState.NativeUnavailable -> McpRunOutcome.Failed(0)
+                        else -> McpRunOutcome.Finished
+                    }
+                },
+                selectionGet = { selection.value },
+                selectionSet = { selection.value = it },
+                visibilityGet = { visibilityHolder.value },
+                visibilitySet = { visibilityHolder.value = it },
+                sceneNow = {
+                    val p = partsNowState.value
+                    val vs = sceneNowState.value
+                    if (p != null && vs != null) McpActionScene(p, treeNowState.value, vs) else null
+                },
+                partsNow = { partsNowState.value },
+                displaySourceText = { displayNowState.value?.sourceText },
+                jumpTo = { line ->
+                    jumpNonce++
+                    jump = EditorJump(line, jumpNonce, focusEditor = false)
+                },
+                sandboxed = { resolveUserSandbox() is UserSandboxState.Active },
+                autoPreview = { previewUnsavedNow.value },
+                notice = { kind ->
+                    transientNotice = if (kind == AgentNoticeKind.EDITED) AgentNotice.EDITED else AgentNotice.RUN
+                    noticeNonce++
+                },
+            )
+        onDispose { mcpActions.port = null }
+    }
     AutoPreviewDriver(
         enabled = previewUnsaved,
         state = state,
@@ -1267,6 +1347,7 @@ fun FrameWindowScope.DesktopApp(
                         },
                         aiStatus = aiStatusText(aiRepair, aiNow, ai.limitsInUse.maxAttempts),
                         mcpRunning = mcpStatus as? McpServerStatus.Running,
+                        mcpEditable = mcpAllowActions,
                         mcpLit = mcpLit,
                     )
 
@@ -1551,6 +1632,7 @@ private fun Toolbar(
     transientNotice: String?,
     sandboxNotice: SandboxNotice? = null,
     mcpRunning: McpServerStatus.Running? = null,
+    mcpEditable: Boolean = false,
     mcpLit: Boolean = false,
 ) {
     Row(
@@ -1587,13 +1669,18 @@ private fun Toolbar(
                     counts,
                     editor.dirty,
                     mcpRunning?.let { "MCP" },
+                    mcpEditable && mcpRunning != null,
                 ),
             previewLabel =
                 previewOriginLabel(state.lastGood?.origin, editor.text.takeIf { editor.state is EditorState.Editing })
                     ?.takeIf { editor.dirty || it != PreviewOriginLabel.SAVED },
             accent = if (isSystemInDarkTheme()) ACCENT_DARK else ACCENT_LIGHT,
             mcpLit = mcpLit,
-            mcpTooltip = mcpRunning?.let { "MCP server running on 127.0.0.1:${it.port} — View › MCP Server…" },
+            mcpTooltip =
+                mcpRunning?.let {
+                    "MCP server running on 127.0.0.1:${it.port}" +
+                        (if (mcpEditable) " — agents may make changes" else "") + " — View › MCP Server…"
+                },
         )
     }
 }
@@ -1618,6 +1705,7 @@ private fun statusSegmentsFor(
     counts: VisibilityCounts,
     dirty: Boolean,
     mcp: String? = null,
+    mcpEditable: Boolean = false,
 ): List<StatusSegment> {
     val ok = state as? DesktopState.Ok
     val runState =
@@ -1642,6 +1730,7 @@ private fun statusSegmentsFor(
         transparent = counts.transparent,
         dirty = dirty,
         mcp = mcp,
+        mcpEditable = mcpEditable,
     )
 }
 

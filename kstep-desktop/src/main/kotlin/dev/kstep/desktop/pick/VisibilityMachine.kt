@@ -142,6 +142,31 @@ object VisibilityMachine {
         parts: IntArray,
     ): VisibilityState = setEach(s, scene, parts.size, { parts[it] }, Visibility.Hidden)
 
+    /** The parts become Visible (explicit, unlike a toggle); indices outside the scene are skipped. */
+    fun showParts(
+        s: VisibilityState,
+        scene: VisibilityScene,
+        parts: IntArray,
+    ): VisibilityState = setEach(s, scene, parts.size, { parts[it] }, Visibility.Visible)
+
+    /** All of [parts] Transparent, or Visible again when every one of them already is Transparent. */
+    fun toggleTransparentParts(
+        s: VisibilityState,
+        scene: VisibilityScene,
+        parts: IntArray,
+    ): VisibilityState {
+        val inScene = parts.filter { it in 0 until scene.size }
+        if (inScene.isEmpty()) return s
+        val allTransparent = inScene.all { effective(s, scene, it) == Visibility.Transparent }
+        return setEach(
+            s,
+            scene,
+            parts.size,
+            { parts[it] },
+            if (allTransparent) Visibility.Visible else Visibility.Transparent,
+        )
+    }
+
     /** Whether any part of [scene] is hidden or transparent, i.e. whether "Show All" would change anything. */
     fun anyNotVisible(
         s: VisibilityState,

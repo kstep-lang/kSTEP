@@ -96,6 +96,8 @@ private const val MAX_DRAWN_MATCHES = 500
 internal data class EditorJump(
     val line: Int,
     val nonce: Int,
+    /** `false` for a jump an agent asked for: the editor scrolls but does not take the keyboard focus (ADR-0097). */
+    val focusEditor: Boolean = true,
 )
 
 /** What an Edit-menu command asks of the editor. */
@@ -680,7 +682,7 @@ internal fun ScriptEditor(
                 val viewportHeightPx = with(density) { viewportHeight.toPx() }
                 LaunchedEffect(jump) {
                     val request = jump ?: return@LaunchedEffect
-                    runCatching { focus.requestFocus() }
+                    if (request.focusEditor) runCatching { focus.requestFocus() }
                     ScrollTarget
                         .scrollFor(request.line, geometry, vScroll.value, viewportHeightPx.toInt(), lineHeightPx)
                         ?.let { vScroll.scrollTo(it) }

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -97,6 +98,22 @@ internal fun McpServerDialog(
                         state.warningText?.let { Text(it, fontSize = 12.sp, color = DIM) }
                     }
                 }
+                Row(
+                    Modifier.padding(start = 24.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Switch(
+                        checked = state.actionsChecked,
+                        enabled = state.actionsEnabled,
+                        onCheckedChange = { manager.setAllowActions(it) },
+                    )
+                    Column {
+                        Text(McpDialogText.ACTIONS_SWITCH, fontSize = 14.sp)
+                        Text(McpDialogText.ACTIONS_SUBTITLE, fontSize = 12.sp, color = DIM)
+                        state.actionsReason?.let { Text(it, fontSize = 12.sp, color = DIM) }
+                    }
+                }
                 state.useActualPortLabel?.let { label ->
                     TextButton(onClick = { manager.adoptActualPort() }) { Text(label) }
                 }
@@ -127,7 +144,7 @@ internal fun McpServerDialog(
                                 }
                             },
                 )
-                Text(McpDialogText.HINT, fontSize = 12.sp, color = DIM)
+                Text(state.hintText, fontSize = 12.sp, color = DIM)
                 // not wrapped in a SelectionContainer: the preview cannot be selected, only copied with the buttons
                 Text(
                     state.commandPreview,

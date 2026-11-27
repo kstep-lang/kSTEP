@@ -6,7 +6,6 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import java.security.MessageDigest
 
 /** The stable error codes of a tool result (`isError: true`). The messages are fixed texts, never exception text. */
 object McpToolCodes {
@@ -19,6 +18,19 @@ object McpToolCodes {
     const val INVALID_PATTERN = "INVALID_PATTERN"
     const val SEARCH_TIMEOUT = "SEARCH_TIMEOUT"
 
+    // ADR-0097: the action tools
+    const val ACTIONS_DISABLED = "ACTIONS_DISABLED"
+    const val STALE_REVISION = "STALE_REVISION"
+    const val NOT_A_SCRIPT = "NOT_A_SCRIPT"
+    const val DRAFT_OFFER_OPEN = "DRAFT_OFFER_OPEN"
+    const val TEXT_TOO_LARGE = "TEXT_TOO_LARGE"
+    const val INVALID_TEXT = "INVALID_TEXT"
+    const val NOT_FOUND = "NOT_FOUND"
+    const val AMBIGUOUS = "AMBIGUOUS"
+    const val RATE_LIMITED = "RATE_LIMITED"
+    const val BUFFER_NOT_RUN = "BUFFER_NOT_RUN"
+    const val SANDBOX_UNAVAILABLE = "SANDBOX_UNAVAILABLE"
+
     val MESSAGES =
         mapOf(
             NO_FILE to "No script or note is open in the editor.",
@@ -28,6 +40,18 @@ object McpToolCodes {
             INVALID_ARGUMENTS to "The arguments do not match the input schema of the tool.",
             INVALID_PATTERN to "The search pattern is not valid.",
             SEARCH_TIMEOUT to "The search took too long.",
+            ACTIONS_DISABLED to "Agents may not make changes. The user can allow it in View > MCP Server.",
+            STALE_REVISION to "The editor text changed since it was read. Read it again.",
+            NOT_A_SCRIPT to "The editor shows a knowledge note, not a kSTEP script.",
+            DRAFT_OFFER_OPEN to "A recovered draft waits for the user's decision.",
+            TEXT_TOO_LARGE to "The text is too large.",
+            INVALID_TEXT to "The text contains characters that are not allowed.",
+            NOT_FOUND to "Nothing matches.",
+            AMBIGUOUS to "More than one place matches.",
+            RATE_LIMITED to "Too many calls. Try again later.",
+            BUFFER_NOT_RUN to "The editor text has not been run yet.",
+            SANDBOX_UNAVAILABLE to
+                "No sandbox is available on this system, so agents may not start runs or edit while Preview Unsaved Changes is on.",
         )
 }
 
@@ -38,6 +62,12 @@ object McpToolCodes {
 class McpToolException(
     val code: String,
     val reason: String? = null,
+    /**
+     * Fixed structured fields (revision, counts, retryAfterMs, and the cleaned and clipped names in `missing`).
+     * They may repeat names the caller sent, but only after McpJson.text cleaning and clipping and only to that
+     * same caller; never free text of the caller.
+     */
+    val extra: JsonObject? = null,
 ) : RuntimeException(null, null, false, false)
 
 /** The arguments of a call are not valid (JSON-RPC `-32602`). */
@@ -48,7 +78,11 @@ internal class McpToolDef(
     val name: String,
     val description: String,
     val args: McpArgSpec,
-    val call: (args: McpParsedArgs, snapshot: DesktopStateSnapshot, protocolVersion: String) -> JsonObject,
+    /** An action tool (ADR-0097): changes the app, needs the permission, runs through [actingCall]. */
+    val acting: Boolean = false,
+    val actingCall: ((args: McpParsedArgs, ctx: McpActionContext) -> JsonObject)? = null,
+    val call: (args: McpParsedArgs, snapshot: DesktopStateSnapshot, protocolVersion: String) -> JsonObject =
+        { _, _, _ -> throw McpToolException(McpToolCodes.INTERNAL) },
 ) {
     val inputSchema: JsonObject get() = args.schema()
 }
@@ -89,6 +123,7 @@ data class McpToolLimits(
 internal class McpToolRegistry(
     private val host: McpHost,
     private val limits: McpToolLimits = McpToolLimits(),
+    private val actions: McpActionContext? = null,
 ) {
     private val emptySchema =
         buildJsonObject {
@@ -115,7 +150,7 @@ internal class McpToolRegistry(
                         "unsaved changes, with a revision hash. Long text is shortened. Read only.",
                 args = none,
             ) { _, snapshot, _ -> script(snapshot) },
-        ) + McpReadTools.definitions(limits)
+        ) + McpReadTools.definitions(limits) + McpActionTools.definitions()
 
     private val byName = all.associateBy { it.name }
 
@@ -151,26 +186,45 @@ internal class McpToolRegistry(
         val structured = protocolVersion == McpProtocol.STRUCTURED_VERSION
         val tool = byName[name] ?: throw McpInvalidParams()
         return try {
-            val parsed = tool.args.parse(args ?: JsonObject(emptyMap()))
-            val result = tool.call(parsed, host.snapshot, protocolVersion)
-            mcpToolResult(result, structured)
+            if (tool.acting) {
+                callActing(tool, args, structured)
+            } else {
+                val parsed = tool.args.parse(args ?: JsonObject(emptyMap()))
+                mcpToolResult(tool.call(parsed, host.snapshot, protocolVersion), structured)
+            }
         } catch (e: McpToolException) {
-            errorResult(e.code, e.reason, structured)
+            errorResult(e.code, e.reason, structured, e.extra)
         } catch (_: Exception) {
             errorResult(McpToolCodes.INTERNAL, null, structured)
         }
+    }
+
+    /** The fixed order of an action call (ADR-0097): rate limit, permission, arguments, the tool itself. */
+    private fun callActing(
+        tool: McpToolDef,
+        args: JsonObject?,
+        structured: Boolean,
+    ): JsonObject {
+        val ctx = actions
+        if (ctx != null && !ctx.window.tryAcquire(ctx.clock())) throw McpToolException(McpToolCodes.RATE_LIMITED)
+        if (ctx == null || !ctx.allowActions()) throw McpToolException(McpToolCodes.ACTIONS_DISABLED)
+        val parsed = tool.args.parse(args ?: JsonObject(emptyMap()))
+        val run = tool.actingCall ?: throw McpToolException(McpToolCodes.INTERNAL)
+        return mcpToolResult(run(parsed, ctx), structured)
     }
 
     private fun errorResult(
         code: String,
         reason: String?,
         structured: Boolean,
+        extra: JsonObject? = null,
     ): JsonObject {
         val message = McpToolCodes.MESSAGES[code] ?: McpToolCodes.MESSAGES.getValue(McpToolCodes.INTERNAL)
         val body =
             buildJsonObject {
                 put("code", code)
                 if (reason != null) put("reason", reason)
+                extra?.forEach { (k, v) -> put(k, v) }
             }
         return buildJsonObject {
             put("isError", true)
@@ -180,7 +234,8 @@ internal class McpToolRegistry(
                     add(
                         buildJsonObject {
                             put("type", "text")
-                            put("text", if (reason != null) "$code: $message ($reason)" else "$code: $message")
+                            val head = if (reason != null) "$code: $message ($reason)" else "$code: $message"
+                            put("text", if (extra != null) "$head $extra" else head)
                         },
                     )
                 },
@@ -238,12 +293,11 @@ internal class McpToolRegistry(
         val bytes = text.toByteArray(Charsets.UTF_8)
         val truncated = bytes.size > limits.maxScriptBytes
         val shown = if (truncated) cutAtCodePoint(bytes, limits.maxScriptBytes) else text
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         return buildJsonObject {
             put("snapshotRevision", s.revision)
             put("kind", if (s.editorKind == EditorKind.NOTE) "note" else "script")
             put("text", shown)
-            put("revision", "sha256:" + digest.joinToString("") { "%02x".format(it) })
+            put("revision", McpAgentText.revisionOf(text))
             put("lines", if (text.isEmpty()) 0 else text.count { it == '\n' } + 1)
             put("dirty", s.dirty)
             put("totalBytes", bytes.size)
