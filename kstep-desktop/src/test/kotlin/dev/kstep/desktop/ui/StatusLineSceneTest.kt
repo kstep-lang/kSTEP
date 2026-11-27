@@ -1,6 +1,7 @@
 package dev.kstep.desktop.ui
 
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.ImageComposeScene
@@ -10,6 +11,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import dev.kstep.desktop.run.SandboxNotice
 import dev.kstep.desktop.status.FittedStatus
+import dev.kstep.desktop.status.PreviewOriginLabel
 import dev.kstep.desktop.status.StatusSegment
 import dev.kstep.desktop.status.StatusSegments
 import io.kotest.core.spec.style.StringSpec
@@ -31,12 +33,15 @@ class StatusLineSceneTest :
             sandboxNotice: SandboxNotice?,
             status: List<StatusSegment>,
             fitted: MutableList<FittedStatus> = mutableListOf(),
+            previewLabel: PreviewOriginLabel? = null,
+            leadingDp: Int = 0,
         ): Map<String, Rect> {
             val bounds = HashMap<String, Rect>()
             val scene = ImageComposeScene(width = widthDp, height = 40, density = Density(1f))
             try {
                 scene.setContent {
                     Row(Modifier.width(widthDp.dp).height(40.dp)) {
+                        if (leadingDp > 0) Spacer(Modifier.width(leadingDp.dp))
                         StatusLine(
                             fileName = fileName,
                             exportText = export,
@@ -45,6 +50,7 @@ class StatusLineSceneTest :
                             statusSegments = status,
                             fitProbe = { fitted += it },
                             probe = { tag, rect -> bounds[tag] = rect },
+                            previewLabel = previewLabel,
                         )
                     }
                 }
@@ -135,5 +141,37 @@ class StatusLineSceneTest :
         "nothing to show right of the name leaves no separator or run node".config(timeout = 60.seconds) {
             val bounds = measure(900, "a.kstep.kts", null, null, emptyList())
             bounds.keys shouldBe setOf("status.file")
+        }
+
+        "at 1200 px the run status is whole next to the preview label and the two do not overlap".config(
+            timeout = 60.seconds,
+        ) {
+            val fitted = mutableListOf<FittedStatus>()
+            val full = StatusSegments.build(null, "● Ok", 123L, 12345, null, null, null, null, 0, 0, true)
+            // 1184 dp = 1200 - 2 * 8; the leading spacer stands in for the toolbar buttons (assumption: 360 dp).
+            val bounds =
+                measure(1184, "assembly.kstep.kts", null, null, full, fitted, PreviewOriginLabel.SAVED, leadingDp = 360)
+            fitted.last().droppedCount shouldBe 0
+            noOverlap(bounds)
+        }
+
+        "the preview label is never cut and unsaved changes stays at 800 dp" {
+            val fitted = mutableListOf<FittedStatus>()
+            val full = StatusSegments.build(null, "● Ok", 123L, 12345, null, null, null, null, 0, 0, true)
+            // preview label unweighted (ADR-0094 Update)
+            val wide = measure(2000, "a.kstep.kts", null, null, full, mutableListOf(), PreviewOriginLabel.UNSAVED_OLDER)
+            val bounds =
+                measure(
+                    800,
+                    "assembly.kstep.kts",
+                    null,
+                    null,
+                    full,
+                    fitted,
+                    PreviewOriginLabel.UNSAVED_OLDER,
+                    leadingDp = 360,
+                )
+            bounds.getValue("status.origin").width shouldBe wide.getValue("status.origin").width
+            fitted.last().shown shouldContain "unsaved changes"
         }
     })

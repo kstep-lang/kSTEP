@@ -130,8 +130,10 @@ internal fun RowScope.StatusLine(
                 fontSize = 12.sp,
                 color = if (previewLabel == PreviewOriginLabel.SAVED) DIM else accent,
                 maxLines = 1,
+                softWrap = false,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false).tagged(TAG_STATUS_ORIGIN, probe),
+                // Unweighted (ADR-0094 D3d-2): it takes its natural width, the run status gets the rest.
+                modifier = Modifier.tagged(TAG_STATUS_ORIGIN, probe),
             )
         }
     }

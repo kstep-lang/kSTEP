@@ -75,7 +75,23 @@ import java.awt.Cursor
 import org.jetbrains.skia.Color as SkiaColor
 import org.jetbrains.skia.Paint as SkiaPaint
 
-private const val HINT_TEXT = "Drag to orbit · Shift-drag to pan · Scroll to zoom · Double-click or R to reset"
+/** The controls hint shown over the viewer at the untouched HOME pose (ADR-0017); also measured by the desktop overlay layout (ADR-0094). */
+const val VIEWER_CONTROLS_HINT = "Drag to orbit · Shift-drag to pan · Scroll to zoom · Double-click or R to reset"
+
+/** The controls hint box including its 12 dp outer margin; the caller aligns it (BoxScope `Modifier.align`). */
+@Composable
+fun ViewerControlsHint(modifier: Modifier = Modifier) {
+    Text(
+        VIEWER_CONTROLS_HINT,
+        modifier =
+            modifier
+                .padding(12.dp)
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+        color = Color.White,
+        style = MaterialTheme.typography.bodySmall,
+    )
+}
 
 /**
  * Renders [mesh] as an interactive, orbitable projection, painter's-algorithm-ordered and
@@ -457,7 +473,7 @@ private fun ShapeCanvasInternal(
                     // pointerInput(Unit) block armed with its own detectDragGestures -- so exactly
                     // one of onDrag/onPan runs per drag, decided once at the initial press by
                     // whether it looks like a "pan" gesture (middle-button OR held Shift; see
-                    // HINT_TEXT and docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc). Built from
+                    // VIEWER_CONTROLS_HINT and docs/adr/ADR-0017-viewer-pan-and-part-colors.adoc). Built from
                     // the same public gesture-detection primitives detectDragGestures itself uses
                     // internally (awaitFirstDown/awaitTouchSlopOrCancel/drag), so touch-slop
                     // behavior (no jitter-orbit from a near-stationary press) is preserved exactly.
@@ -775,17 +791,7 @@ private fun ShapeCanvasInternal(
         // visual clutter sitting on top of the shape (Raskin's "don't make me dismiss what I've
         // already learned").
         if (showHint) {
-            Text(
-                HINT_TEXT,
-                modifier =
-                    Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(12.dp)
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                color = Color.White,
-                style = MaterialTheme.typography.bodySmall,
-            )
+            ViewerControlsHint(Modifier.align(Alignment.BottomCenter))
         }
     }
 }

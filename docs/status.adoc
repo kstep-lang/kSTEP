@@ -772,6 +772,11 @@ scan before either lands.
   panels the Show in Script button sits below the title and the message is the last line (no reserved height). Tests: pure
   placement and segment tests, headless scene tests (no overlap at 660 to 300 dp, button offset equal with and without message).
   Open: hand-testing on Windows and Linux (only macOS observed), `CHAR_DP` is an estimate.
+* Welle D3d-2 (ADR-0094): the badge in the bottom-left fallback stands above a reserve for the controls hint
+  (`ViewerOverlayLayout.hintReserveDp` = 28 + 16 per line, `BadgePlacement.bottomInsetDp`); `ViewerControlsHint` and
+  `VIEWER_CONTROLS_HINT` are public in `kstep-viewer`. The preview label in the status line is no longer weighted, so the run
+  status keeps its room. Tests: matrix of badge, hint and panel rectangles (300 to 1200 dp), scene test with the real hint,
+  status scene tests at 1184 and 800 dp. Open: viewer height below about 400 dp with a panel taller than 240 dp.
 * Welle D3c-3 (ADR-0093): a selection outline in `kstep-viewer` (`SelectionOutline`, `CanvasHighlight.outlineSelectT/haloRgb`,
   `DesktopApp` sets the halo colour). The silhouette is the set of projected edges that exactly one selected triangle of a part
   touches (a fixed-size hash on edges quantised to 1/16 px, the part index in the key); drawn twice with Skia `drawLines`

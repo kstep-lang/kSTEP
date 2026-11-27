@@ -101,6 +101,8 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* kSTEP Viewer: the controls hint is now the public composable `ViewerControlsHint` with the constant `VIEWER_CONTROLS_HINT`
+  (same text, same drawing; Welle D3d-2, ADR-0094), so the desktop layout can reserve room for it.
 * kSTEP Desktop: the first command-line argument is judged like a dropped path (ADR-0083): it can be a script, a note or a
   folder, a link or an unsupported type is refused with `KSTEP-D-033`, and a malformed path no longer crashes the start.
 * `ImportWorkerLaunch.command` takes an optional `java` launcher (default unchanged); `WorkerSandbox.detect` likewise.
@@ -131,6 +133,10 @@ minor versions may contain breaking changes.
 
 === Fixed
 
+* kSTEP Desktop: two leftovers of the D3d-1 hand test (Welle D3d-2, ADR-0094). In a narrow viewer the "last good result"
+  badge at the bottom left no longer overlaps the controls hint: it stands above a reserve of 28 dp plus 16 dp per hint line.
+  At 1200 px the run status no longer lost duration and triangles: the preview label next to it no longer takes half of the
+  free room. Only observed on macOS.
 * kSTEP Desktop: the Export tooltip now names the Convert dialog ("Close the convert dialog first") instead of
   "Open a script first" while that dialog is open; toolbar and File menu use the same rule.
 * kSTEP Desktop: the off state of Tree and AI Panel no longer looks disabled.

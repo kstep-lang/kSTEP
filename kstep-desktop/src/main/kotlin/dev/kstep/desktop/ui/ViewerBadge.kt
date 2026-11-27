@@ -42,8 +42,12 @@ internal fun BadgeBox(
         Row(
             Modifier
                 .align(align)
-                .padding(ViewerOverlayLayout.MARGIN_DP.dp)
-                .widthIn(max = placement.maxWidthDp.dp)
+                .padding(
+                    start = ViewerOverlayLayout.MARGIN_DP.dp,
+                    top = ViewerOverlayLayout.MARGIN_DP.dp,
+                    end = ViewerOverlayLayout.MARGIN_DP.dp,
+                    bottom = placement.bottomInsetDp.dp,
+                ).widthIn(max = placement.maxWidthDp.dp)
                 .testTag(TAG_VIEWER_BADGE)
                 .let { if (probe == null) it else it.onGloballyPositioned { c -> probe(c.boundsInRoot()) } }
                 .background(Color.Black.copy(alpha = 0.55f))

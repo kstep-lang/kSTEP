@@ -29,5 +29,20 @@ All texts were already made safe (`DisplayName.escaped`) before they reach the s
 == Consequences and open points
 
 * `CHAR_DP` is an estimate, not a measurement; a font with wider glyphs could still make an essential run overflow into the ellipsis.
-* The badge may sit at the bottom left in a very narrow viewer; the viewer's own controls there are not moved.
+* The badge may sit at the bottom left in a very narrow viewer; since D3d-2 it stands above the controls hint (done, see Update).
 * Not checked by hand on Windows and Linux.
+
+== Update (D3d-2)
+
+* *Badge and controls hint.* In the bottom-left fallback the badge is stacked above a reserve for the controls hint:
+  `28 + 16 * L` dp (`L` = hint lines at the viewer width, greedy wrap at an estimated 7.0 dp per character; 2 lines at 410 dp
+  = 60 dp, 3 lines at 300 dp = 76 dp). The reserve applies whether or not the hint is shown, so the badge never jumps (also
+  not after the first orbit). Not chosen: hiding the hint (it is the only help for the controls and belongs to `kstep-viewer`)
+  and measuring at run time (a measure-write-layout loop, flicker, extra recomposition). The reserve is generous; a headless
+  scene test with the real hint proves it holds.
+* *Status line.* The cause of the missing duration and triangles at 1200 px was weight sharing: the run status and the preview
+  label both had `weight(1f, fill = false)`, so each got half and the unused part of the label was lost. `CHAR_DP = 7.0` stays
+  an explicit estimate. The label now has no weight (natural width, never cut, ADR-0064); the run status gets the rest. D2
+  (whole segments, no ellipsis inside a segment) is unchanged.
+* *Known limit.* A viewer lower than about 400 dp with an inspection panel taller than 240 dp can still touch the badge in the
+  fallback. Not solved, documented.
