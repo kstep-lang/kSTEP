@@ -91,4 +91,19 @@ class McpSnapshotMapperTest :
             s.toString().contains("SECRET-TEXT") shouldBe false
             s.toString().contains("a.kstep.kts") shouldBe false
         }
+
+        "the run report of an error state carries the buffer text, a clean ok state has none" {
+            val err =
+                listOf(
+                    dev.kstep.desktop.run
+                        .DesktopError("KSTEP-S-001", 1, 1, "x"),
+                )
+            val failed =
+                DesktopState.Error(file, 1, err, null, Instant.EPOCH, PreviewOrigin.Buffer("src"))
+            val s = McpSnapshotMapper.of(editing("src"), failed, false, true)
+            s.runReport!!.severity shouldBe dev.kstep.desktop.run.Severity.ERROR
+            s.runReport!!.bufferText shouldBe "src"
+            McpSnapshotMapper.of(editing("box()"), DesktopState.Ok(file, 1, model()), false, true).runReport shouldBe
+                null
+        }
     })

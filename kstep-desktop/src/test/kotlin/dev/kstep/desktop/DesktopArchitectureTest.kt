@@ -75,6 +75,41 @@ class DesktopArchitectureTest :
                 }.shouldBeEmpty()
         }
 
+        "the mcp package never compiles a pattern of its own, agent patterns use SafeRegex only (ADR-0096)" {
+            val forbidden =
+                listOf(
+                    "Regex(",
+                    ".toRegex(",
+                    "java.util.regex",
+                    " Pattern.compile(",
+                    "(Pattern.compile(",
+                    "kotlin.text.Regex",
+                )
+            // McpTokenStore checks the shape of its own token with a fixed pattern; nothing a caller sends reaches it.
+            mcpSources()
+                .filter { (path, _) -> path.fileName.toString() != "McpTokenStore.kt" }
+                .flatMap { (path, text) ->
+                    forbidden.filter { text.contains(it) }.map { "${root.relativize(path)} uses $it" }
+                }.shouldBeEmpty()
+        }
+
+        "the mcp package neither runs nor evaluates a script and reads no file except in the two stores (ADR-0096)" {
+            val noRun = listOf("LiveRunController", "WarmWorker", "WorkerRunner", "UserScriptSandbox")
+            val noFiles = listOf("Files.", "FileInputStream", "Path.of(", "File(")
+            mcpSources()
+                .flatMap { (path, text) ->
+                    val name = path.fileName.toString()
+                    val run = noRun.filter { text.contains(it) }
+                    val files =
+                        if (name in setOf("McpTokenStore.kt", "McpPreferences.kt")) {
+                            emptyList()
+                        } else {
+                            noFiles.filter { text.contains(it) }
+                        }
+                    (run + files).map { "${root.relativize(path)} uses $it" }
+                }.shouldBeEmpty()
+        }
+
         "com.sun.net.httpserver is only used by the MCP HTTP server (ADR-0095)" {
             sources()
                 .filter { (path, text) ->

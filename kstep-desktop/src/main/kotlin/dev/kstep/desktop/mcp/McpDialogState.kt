@@ -11,7 +11,8 @@ object McpDialogText {
     const val NO_TOKEN = "Turn the server on once to create a token"
     const val HINT =
         "Only reachable from this computer (127.0.0.1). Any program on this computer that has the token can use " +
-            "kSTEP Desktop through it — in this version only to read the status and the editor text."
+            "kSTEP Desktop through it — in this version only to read: the status, the editor text, the errors of the " +
+            "last run, the parts, the assembly tree and the selection. It cannot change anything yet."
     const val REGEN_TITLE = "Regenerate token?"
     const val REGEN_TEXT = "Agents using the current token lose access until you add the new command again."
     const val TOKEN_MASK = "••••••••••••"

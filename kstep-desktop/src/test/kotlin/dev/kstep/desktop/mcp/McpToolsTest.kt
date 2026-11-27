@@ -1,6 +1,7 @@
 package dev.kstep.desktop.mcp
 
 import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldStartWith
 import kotlinx.serialization.json.JsonNull
@@ -29,10 +30,21 @@ private const val SCRIPT = "kstep_desktop_get_script"
 
 class McpToolsTest :
     StringSpec({
-        "every tool has a prefixed unique name, a description and an object schema; there are exactly two" {
+        "every tool has a prefixed unique name, a description and an object schema; exactly eight" {
             val tools = registry(FakeHost()).all
-            tools.size shouldBe 2
-            tools.map { it.name }.toSet().size shouldBe 2
+            tools.size shouldBe 8
+            tools.map { it.name }.toSet().size shouldBe 8
+            tools.map { it.name } shouldContainExactly
+                listOf(
+                    "kstep_desktop_get_status",
+                    "kstep_desktop_get_script",
+                    "kstep_desktop_get_errors",
+                    "kstep_desktop_get_parts",
+                    "kstep_desktop_get_assembly_tree",
+                    "kstep_desktop_get_selection",
+                    "kstep_desktop_get_view",
+                    "kstep_desktop_find_in_script",
+                )
             tools.forEach {
                 it.name shouldStartWith "kstep_desktop_"
                 it.description.isNotBlank() shouldBe true
@@ -42,7 +54,25 @@ class McpToolsTest :
                 it.inputSchema
                     .getValue("additionalProperties")
                     .jsonPrimitive.boolean shouldBe false
+                val props = it.inputSchema.getValue("properties").jsonObject
+                props.keys shouldBe
+                    it.args.args
+                        .map { a -> a.name }
+                        .toSet()
+                props.values.forEach { p ->
+                    p.jsonObject.containsKey("type") shouldBe true
+                    p.jsonObject.containsKey("description") shouldBe true
+                }
+                val required =
+                    it.inputSchema["required"]?.jsonArray?.map { r -> r.jsonPrimitive.content } ?: emptyList()
+                required shouldBe
+                    it.args.args
+                        .filter { a -> a.required }
+                        .map { a -> a.name }
             }
+            tools.first { it.name.endsWith("find_in_script") }.inputSchema.getValue("required").jsonArray.map {
+                it.jsonPrimitive.content
+            } shouldBe listOf("query")
         }
 
         "get_status reports a model with parts and triangles" {
@@ -60,6 +90,7 @@ class McpToolsTest :
                 .jsonPrimitive.content shouldBe "part.kstep.kts"
             s.getValue("workspace") shouldBe JsonNull
             s.getValue("draftOfferOpen").jsonPrimitive.boolean shouldBe false
+            s.getValue("snapshotRevision").jsonPrimitive.int shouldBe 7
         }
 
         "get_status covers every run state" {

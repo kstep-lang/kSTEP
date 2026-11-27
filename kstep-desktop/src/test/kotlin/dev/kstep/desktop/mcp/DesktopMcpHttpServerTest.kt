@@ -113,7 +113,16 @@ class DesktopMcpHttpServerTest :
                         it.jsonObject
                             .getValue("name")
                             .jsonPrimitive.content
-                    }.shouldContainExactly("kstep_desktop_get_status", "kstep_desktop_get_script")
+                    }.shouldContainExactly(
+                        "kstep_desktop_get_status",
+                        "kstep_desktop_get_script",
+                        "kstep_desktop_get_errors",
+                        "kstep_desktop_get_parts",
+                        "kstep_desktop_get_assembly_tree",
+                        "kstep_desktop_get_selection",
+                        "kstep_desktop_get_view",
+                        "kstep_desktop_find_in_script",
+                    )
 
                 val status =
                     fx.call(rpc("tools/call", params = """{"name":"kstep_desktop_get_status","arguments":{}}"""))

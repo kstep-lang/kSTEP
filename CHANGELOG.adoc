@@ -9,6 +9,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: six more read-only MCP tools (Welle MCP-2, ADR-0096): `kstep_desktop_get_errors`, `kstep_desktop_get_parts`,
+  `kstep_desktop_get_assembly_tree`, `kstep_desktop_get_selection`, `kstep_desktop_get_view` and `kstep_desktop_find_in_script`
+  (the same safe search as the find bar, with a time limit). They read an extended snapshot that the window publishes (errors,
+  parts, tree, selection without hover, visibility, settings), so the window never waits for an agent and one call sees one
+  consistent picture. Every answer has `snapshotRevision` (also `kstep_desktop_get_status` and `kstep_desktop_get_script`).
+  Answers of the list tools are at most 1 MiB and say `truncated`; texts from scripts and workers are cleaned. New fixed codes
+  `INVALID_ARGUMENTS`, `INVALID_PATTERN` and `SEARCH_TIMEOUT`. Only built and unit tested on macOS; not yet tried by hand with a
+  real agent.
 * kSTEP Desktop: a built-in MCP server, read only (Welle MCP-1, ADR-0095). View > MCP Server... opens a dialog with a switch
   (off by default), the port (7391, the next nine are tried when it is busy), the command preview and the buttons Copy Command,
   Copy Token and Regenerate Token. The server listens on 127.0.0.1 only and checks method, path, Host, Origin and a bearer token
@@ -117,6 +125,8 @@ minor versions may contain breaking changes.
 
 === Changed
 
+* kSTEP Desktop: the MCP tools now refuse arguments they do not know or that do not fit (`INVALID_ARGUMENTS`), also `kstep_desktop_get_status`
+  and `kstep_desktop_get_script`; before, extra arguments were ignored (ADR-0096 D4). The hint of the MCP dialog lists what an agent can read.
 * kSTEP Viewer: the controls hint is now the public composable `ViewerControlsHint` with the constant `VIEWER_CONTROLS_HINT`
   (same text, same drawing; Welle D3d-2, ADR-0094), so the desktop layout can reserve room for it.
 * kSTEP Desktop: the first command-line argument is judged like a dropped path (ADR-0083): it can be a script, a note or a

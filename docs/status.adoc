@@ -774,6 +774,14 @@ scan before either lands.
   checks in order, body never opened before the token, limits, hostile JSON, leaks, log, regenerate, overload, thread cleanup,
   slow body), tools, stores, manager with real ports, dialog model, menu, status, architecture rules. Not done: a hand test with a
   real `claude mcp add`, a look at the dialog and the status segment on screen, any run on Windows or Linux.
+* Welle MCP-2 (ADR-0096): six read-only tools in `kstep-desktop` (package `mcp`). `DesktopStateSnapshot` carries references to the
+  immutable run report, scene (`McpScene`), selection without hover, visibility and settings plus `revision`; `McpSnapshotPublisher`
+  (identity and value comparison, `snapshotFlow` in `DesktopApp`, no extra recomposition) publishes in O(1). `McpArgSpec` makes the
+  schema and the validation of all eight tools (`INVALID_ARGUMENTS`); `McpResponseBudget` keeps list answers below 1 MiB measured on
+  the finished result; `McpReadTools` has the tools (`find_in_script` only through `SearchPattern`/`TextSearch`/`SafeRegex`, with a
+  2 s deadline that is reported as `SEARCH_TIMEOUT`). Tests: tools (44), publisher, mapper, real-server cases for protocol 2025-06-18
+  and 2025-03-26, dialog hint, two more architecture rules (no own regex, no run or file access in the package). Not done: a hand test
+  with a real agent, any run on Windows or Linux, UI-local error texts in `get_errors`, an isolate flag, acting tools (MCP-3).
 * Welle D3d-1 (ADR-0094): three visual fixes in `kstep-desktop` (packages `ui`, `status`). `ViewerOverlayLayout` places the
   last-good badge (top left while 140 dp fit next to the 260 dp panel, i.e. from a 432 dp viewer; else bottom left; wrapping text).
   `StatusSegments` builds the run status from prioritised whole segments and `fit` drops duration, triangles, medium, then high

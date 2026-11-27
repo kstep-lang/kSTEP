@@ -1153,10 +1153,21 @@ claude mcp add --transport http kstep-desktop http://127.0.0.1:7391/mcp --header
 
 If the port is busy the server takes the next free one (up to nine further) and the dialog says so; "Use ... from now on" stores
 that port. "Regenerate Token..." replaces the token at once; agents that use the old one lose access. While the server runs, the
-status line shows "MCP", which lights up briefly when an agent calls. In this version there are two tools and both only read:
-`kstep_desktop_get_status` (file, unsaved changes, state of the preview, size of the model) and `kstep_desktop_get_script`
-(the editor text including unsaved changes, with a revision hash; more than 1 MiB is cut and marked). Any program on your
-computer that has the token can use them, so treat it like a password.
+status line shows "MCP", which lights up briefly when an agent calls. In this version there are eight tools and all of them only read:
+
+* `kstep_desktop_get_status`: file, unsaved changes, state of the preview, size of the model.
+* `kstep_desktop_get_script`: the editor text including unsaved changes, with a revision hash; more than 1 MiB is cut and marked.
+* `kstep_desktop_get_errors`: the problems of the last run as the error bar shows them, and whether the text changed since.
+* `kstep_desktop_get_parts`: the parts of the shown model (name, size, position, colour, script line, hidden, transparent, selected).
+* `kstep_desktop_get_assembly_tree`: the assembly hierarchy as a nested tree.
+* `kstep_desktop_get_selection`: the selected part, parts or group.
+* `kstep_desktop_get_view`: hidden and transparent counts, opacity, soft wrap, preview unsaved.
+* `kstep_desktop_find_in_script`: finds text in the editor with the same safe search as the find bar.
+
+Every answer has `snapshotRevision`, a number that changes when what the window shows changes (a pointer move does not count; it
+starts at 0 again when the app starts). Lists are cut at fixed limits and say `truncated`; an answer is never larger than 1 MiB
+(except `kstep_desktop_get_script`). A tool refuses arguments it does not know. Any program on your computer that has the token can
+use them, so treat it like a password.
 
 === Starting the desktop from the CLI
 

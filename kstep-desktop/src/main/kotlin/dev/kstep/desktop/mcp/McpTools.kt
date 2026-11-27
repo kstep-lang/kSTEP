@@ -13,22 +13,31 @@ object McpToolCodes {
     const val NO_FILE = "NO_FILE"
     const val UI_BUSY = "UI_BUSY"
 
-    /** Reserved: `get_script` shortens instead of refusing. */
     const val TOO_LARGE = "TOO_LARGE"
     const val INTERNAL = "INTERNAL"
+    const val INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
+    const val INVALID_PATTERN = "INVALID_PATTERN"
+    const val SEARCH_TIMEOUT = "SEARCH_TIMEOUT"
 
     val MESSAGES =
         mapOf(
             NO_FILE to "No script or note is open in the editor.",
             UI_BUSY to "The window did not answer in time. Try again.",
-            TOO_LARGE to "The result is too large.",
+            TOO_LARGE to "The editor text or the result is too large.",
             INTERNAL to "The tool failed.",
+            INVALID_ARGUMENTS to "The arguments do not match the input schema of the tool.",
+            INVALID_PATTERN to "The search pattern is not valid.",
+            SEARCH_TIMEOUT to "The search took too long.",
         )
 }
 
-/** A tool failed with a stable [code]. No message and no stack trace: nothing of it can leak. */
+/**
+ * A tool failed with a stable [code]. No message and no stack trace: nothing of it can leak. [reason] is an optional
+ * fixed text that never repeats anything the caller sent.
+ */
 class McpToolException(
     val code: String,
+    val reason: String? = null,
 ) : RuntimeException(null, null, false, false)
 
 /** The arguments of a call are not valid (JSON-RPC `-32602`). */
@@ -38,14 +47,42 @@ internal class McpInvalidParams : RuntimeException(null, null, false, false)
 internal class McpToolDef(
     val name: String,
     val description: String,
-    val inputSchema: JsonObject,
-    val call: (args: JsonObject, snapshot: DesktopStateSnapshot, protocolVersion: String) -> JsonObject,
-)
+    val args: McpArgSpec,
+    val call: (args: McpParsedArgs, snapshot: DesktopStateSnapshot, protocolVersion: String) -> JsonObject,
+) {
+    val inputSchema: JsonObject get() = args.schema()
+}
+
+/** The `tools/call` result around [body]; with [structured] the body is also `structuredContent`. */
+internal fun mcpToolResult(
+    body: JsonObject,
+    structured: Boolean,
+    isError: Boolean = false,
+): JsonObject =
+    buildJsonObject {
+        put("isError", isError)
+        put(
+            "content",
+            buildJsonArray {
+                add(
+                    buildJsonObject {
+                        put("type", "text")
+                        put("text", body.toString())
+                    },
+                )
+            },
+        )
+        if (structured) put("structuredContent", body)
+    }
 
 /** Limits of the read tools. */
 data class McpToolLimits(
     /** The most UTF-8 bytes of editor text one `get_script` call returns. */
     val maxScriptBytes: Int = 1 shl 20,
+    /** The most bytes of one answer of the list tools (ADR-0096 D5). */
+    val maxResponseBytes: Int = McpResponseBudget.MAX_RESPONSE_BYTES,
+    /** How long `find_in_script` may run. */
+    val searchTimeoutMs: Long = 2000,
 )
 
 /** The tools of this wave: both only read the published snapshot. */
@@ -60,6 +97,8 @@ internal class McpToolRegistry(
             put("additionalProperties", false)
         }
 
+    private val none = McpArgSpec()
+
     val all: List<McpToolDef> =
         listOf(
             McpToolDef(
@@ -67,16 +106,16 @@ internal class McpToolRegistry(
                 description =
                     "Reads what kSTEP Desktop shows: the open file, whether it has unsaved changes, the state of " +
                         "the live preview and the size of the model. Read only.",
-                inputSchema = emptySchema,
+                args = none,
             ) { _, snapshot, version -> status(snapshot, version) },
             McpToolDef(
                 name = "kstep_desktop_get_script",
                 description =
                     "Reads the text in the editor of kSTEP Desktop (a script or a knowledge note), including " +
                         "unsaved changes, with a revision hash. Long text is shortened. Read only.",
-                inputSchema = emptySchema,
+                args = none,
             ) { _, snapshot, _ -> script(snapshot) },
-        )
+        ) + McpReadTools.definitions(limits)
 
     private val byName = all.associateBy { it.name }
 
@@ -112,21 +151,27 @@ internal class McpToolRegistry(
         val structured = protocolVersion == McpProtocol.STRUCTURED_VERSION
         val tool = byName[name] ?: throw McpInvalidParams()
         return try {
-            val result = tool.call(args ?: JsonObject(emptyMap()), host.snapshot, protocolVersion)
-            toolResult(result, isError = false, structured = structured)
+            val parsed = tool.args.parse(args ?: JsonObject(emptyMap()))
+            val result = tool.call(parsed, host.snapshot, protocolVersion)
+            mcpToolResult(result, structured)
         } catch (e: McpToolException) {
-            errorResult(e.code, structured)
+            errorResult(e.code, e.reason, structured)
         } catch (_: Exception) {
-            errorResult(McpToolCodes.INTERNAL, structured)
+            errorResult(McpToolCodes.INTERNAL, null, structured)
         }
     }
 
     private fun errorResult(
         code: String,
+        reason: String?,
         structured: Boolean,
     ): JsonObject {
         val message = McpToolCodes.MESSAGES[code] ?: McpToolCodes.MESSAGES.getValue(McpToolCodes.INTERNAL)
-        val body = buildJsonObject { put("code", code) }
+        val body =
+            buildJsonObject {
+                put("code", code)
+                if (reason != null) put("reason", reason)
+            }
         return buildJsonObject {
             put("isError", true)
             put(
@@ -135,7 +180,7 @@ internal class McpToolRegistry(
                     add(
                         buildJsonObject {
                             put("type", "text")
-                            put("text", "$code: $message")
+                            put("text", if (reason != null) "$code: $message ($reason)" else "$code: $message")
                         },
                     )
                 },
@@ -144,32 +189,12 @@ internal class McpToolRegistry(
         }
     }
 
-    private fun toolResult(
-        body: JsonObject,
-        isError: Boolean,
-        structured: Boolean,
-    ): JsonObject =
-        buildJsonObject {
-            put("isError", isError)
-            put(
-                "content",
-                buildJsonArray {
-                    add(
-                        buildJsonObject {
-                            put("type", "text")
-                            put("text", body.toString())
-                        },
-                    )
-                },
-            )
-            if (structured) put("structuredContent", body)
-        }
-
     private fun status(
         s: DesktopStateSnapshot,
         protocolVersion: String,
     ): JsonObject =
         buildJsonObject {
+            put("snapshotRevision", s.revision)
             put("appVersion", host.appVersion)
             put("protocolVersion", protocolVersion)
             put(
@@ -215,6 +240,7 @@ internal class McpToolRegistry(
         val shown = if (truncated) cutAtCodePoint(bytes, limits.maxScriptBytes) else text
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         return buildJsonObject {
+            put("snapshotRevision", s.revision)
             put("kind", if (s.editorKind == EditorKind.NOTE) "note" else "script")
             put("text", shown)
             put("revision", "sha256:" + digest.joinToString("") { "%02x".format(it) })

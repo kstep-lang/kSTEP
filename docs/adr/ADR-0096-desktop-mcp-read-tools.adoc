@@ -1,0 +1,118 @@
+= ADR-0096: Read Tools of the Desktop MCP Server (Welle MCP-2)
+:toc:
+
+== Status
+
+Accepted (Welle MCP-2). Scope: `kstep-desktop` (package `mcp`, one change in `ui/DesktopApp.kt`). No new dependency, no new error
+code of the desktop (`KSTEP-D-xxx`), no migration: `mcp.json`, `mcp-token` and `layout.json` are not touched and there is no
+database. Only macOS was used for the build and the tests; the tools were not tried by hand with a real agent yet (see Open points).
+
+== Context
+
+ADR-0095 gave an agent two tools: status and editor text. An agent that edits a script also needs to see the result: the errors of
+the last run, the parts and the assembly tree, what is selected, how the preview is set, and where in the text something is. All
+of this is already known to the window. This wave adds six read-only tools. It adds no acting tool.
+
+== Decision
+
+D1. Snapshot instead of `McpUiBridge`. The roadmap of ADR-0095 said "through `McpUiBridge`". That is not done. A call that asks the
+UI thread can wait, can time out (`UI_BUSY`) and can see the window at two moments. The snapshot has none of these problems: one call
+reads the snapshot once and sees one consistent picture, and the window never waits for a tool. `McpUiBridge` stays for the acting
+tools of MCP-3.
+
+D2. What the snapshot holds. `DesktopStateSnapshot` gets fields at the end (all with defaults, so ADR-0095 code and tests are
+unchanged): `revision`, `runReport` (errors or warnings of the last run, where the run's text came from), `scene` (the shown model:
+`PartTable`, `AssemblyTree`, generation), `selection` (without hover), `visibility` and `viewSettings`. These are references to
+immutable objects, so publishing costs O(1); the O(n) work (JSON, the selected mask, the keys of the parts) is done by the tool
+call in the HTTP worker thread. The references are published through an `AtomicReference`; the objects behind them do not change, and
+their `lazy` fields are synchronised.
+
+* `McpSnapshotPublisher` (UI thread, no Compose) compares what arrives: the editor and the run state by identity, the view by value.
+  Nothing changed: nothing is published and the revision stays.
+* The view (selection, visibility, soft wrap, preview unsaved) is read in a `snapshotFlow` inside a `LaunchedEffect`, outside the
+  composition. `hovered`, `treeHover` and the range anchor are dropped before the comparison: a pointer move (about 30 times a
+  second) changes nothing that is compared, so there is no new revision, no publish and no extra recomposition.
+* The `McpScene` of a model is created once per `DesktopModel` instance; the same model gives the same scene. While the native
+  bridge is unavailable the scene is `null`, like the window (`display`).
+* `snapshotRevision` (a number) is in the answer of all eight tools. It counts the changes of what the window shows, starting at 0
+  in every app session (after a restart it starts again at 0). It is not the `revision` of `get_script` (a hash of the text); the
+  names differ on purpose.
+
+A selection can be one frame older than the model after a re-run (`SceneReplaced` is applied in the next effect). The selection
+logic drops what the new model no longer has, so one answer is never a mix of two models, but it can briefly show the old selection
+on the new model.
+
+D3. Tools. All are read only, all have `additionalProperties: false`.
+
+* `kstep_desktop_get_errors` (`limit` 1..200, default 200) -- `run`, `origin`, `editedSinceRun`, `errors [{code, message, line,
+  column, severity}]`, `total`, `truncated`. The errors are the ones of the error bar (errors of a failed run, or the warnings of a
+  model such as `KSTEP-D-012`), with the positions of the run, not moved anchors. `editedSinceRun` compares the editor text with the
+  text of an unsaved-buffer run, or is `dirty` for a saved-file run; `null` without a report or an editor.
+* `kstep_desktop_get_parts` (`offset` 0..4095, `limit` 1..4096) -- `model {generation, partCount}` or `null`, `parts [{index, name,
+  occurrence, triangles, size, centroid, position, color, sourceLine, hidden, transparent, selected}]`, `total`, `offset`,
+  `truncated`. Lengths are mm. `offset` lets an agent read on when `truncated` is true.
+* `kstep_desktop_get_assembly_tree` (`maxDepth` 1..65 (the root is level 1; the parser allows depth 0..64), `maxNodes` 1..8192) -- a nested `tree`, built iteratively from the pre-order
+  array; a part has `partIndex`, a group has `partCount`; `childrenOmitted` marks cut children; `totalNodes`, `emittedNodes`,
+  `truncated`, `depthLimited`; without a tree `tree: null` and `reason` (`noModel`, `noTree`).
+* `kstep_desktop_get_selection` -- `null`, a `part`, `parts` (several) or a `group`, with the same figures as the inspection panel
+  (`GroupInspection`, `MultiInspection`). At most five names, then `moreNames`. A hover is not a selection.
+* `kstep_desktop_get_view` -- `model`, `partCount`, `hiddenCount`, `transparentCount`, `opacityPercent`, `previewOrigin`,
+  `settings {softWrap, previewUnsaved}`. There is no isolate flag: isolate only makes the other parts transparent (ADR-0055), it is
+  not a state of its own. No camera data.
+* `kstep_desktop_find_in_script` (`query` 1..256 required; `regex`, `wholeWord`, `matchCase` false; `limit` 1..200, default 50) --
+  the same search as the find bar (`SearchPattern`, `TextSearch`, `SafeRegex`, ADR-0090), `matches [{line, column, length, text,
+  contextStartColumn}]`, `truncated`, `stoppedBy` (`limit`, `stepBudget`, `responseSize`, `null`). Lines and columns are 1-based,
+  columns count UTF-16 units, as in the window. `text` is the line around the match, at most 200 units, cleaned.
+
+D4. Arguments. One description (`McpArgSpec`) makes the `inputSchema` and does the validation, so they cannot drift. The rules: an
+unknown key, a missing required key, a wrong type, a `null`, a number that is not a plain integer (`1.0`, `1e3`, `"3"`), a value
+out of range, a string longer than its limit and more than 16 keys are all `INVALID_ARGUMENTS`. This replaces "extra arguments are
+ignored" of ADR-0095 D6 for all eight tools, including the two of MCP-1 (a client that sends `{}` or nothing is not affected). A bad
+argument is a tool result with `isError: true` (so the model can correct itself), not a JSON-RPC `-32602`; `-32602` stays for an
+unknown tool and for `arguments` that is not an object. The answer never repeats the value or the name of an unknown field.
+New fixed codes: `INVALID_ARGUMENTS`, `INVALID_PATTERN` (with `reason`, the text of the find bar for that pattern error, which never
+contains the pattern), `SEARCH_TIMEOUT`; `TOO_LARGE` is now used (editor text above 1 MiB for the search, or an answer that does not
+fit even with no entry).
+
+D5. Limits. 200 errors, 4096 parts, 8192 tree nodes, depth 65 levels, 200 matches, context 200 units, 16 argument keys, searches stop
+after 2 seconds or the step budget of `SafeRegex` (5 * 10^7). The answer of a list tool is at most 1 MiB. This is measured on the
+finished `tools/call` result, because with `2025-06-18` the body is in the answer twice and the text copy is an escaped string, so it
+is larger than the body. `McpResponseBudget.fit` takes the whole list if it fits, otherwise a binary search finds the largest
+prefix (at most about 13 builds of a body of at most about 2 MiB; short-lived garbage, bounded by the four workers) and sets
+`truncated`. `get_script` is not changed: it keeps its limit of ADR-0095 (1 MiB of text, an answer up to about 12 MiB).
+`TextSearch` ends silently with an empty result when the search is stopped; the tool therefore notes in its own flag that the
+deadline was the reason and answers `SEARCH_TIMEOUT` instead of "no matches".
+
+D6. Untrusted text. Names of parts and groups, messages of the worker and the script text are data of a third party. They are only
+ever JSON strings made from a value, cleaned with `NameSanitizer.cleanText` (ANSI removed, tab and line break become a space,
+control and bidirectional characters become U+FFFD: what the error bar does), and cut (256 units for a name, 1000 for a message, 200
+for the context, never inside a surrogate pair). Numbers that are not finite become `null`, since `NaN` is not JSON. A colour is only
+passed on when it is `#rrggbb`. The tools use `NameSanitizer` and not `DisplayName` of the CLI module, because the architecture rule
+forbids the import of `dev.kstep.cli` in this package; `MultiInspection.nameLines` (which uses `DisplayName`, clip 40) is not used.
+The architecture test now also forbids in the package: `Regex(`, `.toRegex(`, `java.util.regex` (a pattern of an agent only goes
+through `SafeRegex` and `TextSearch`; the fixed token-shape check of `McpTokenStore` is the one exception), the run and worker
+classes, and file access outside the two stores. No tool evaluates a script or opens a file. Logging stays at the class name.
+
+D7. Dialog text. The hint of the dialog now says that an agent can read the status, the editor text, the errors of the last run, the
+parts, the assembly tree and the selection, and that it cannot change anything yet.
+
+== Alternatives
+
+* A UI-thread bridge for each call (D1): rejected, see D1.
+* A revision counter in the UI state: rejected, the publisher counts changes of what the tools can see, which is what an agent needs.
+* Putting JSON in the snapshot: rejected, the UI would do O(n) work on every change.
+* A size estimate per entry instead of measuring: possible if the garbage of the binary search is ever a problem.
+
+== Consequences and open points
+
+* Not tried by hand with a real agent; only built and unit tested on macOS (not Windows, not Linux).
+* The error bar also shows UI-local texts (knowledge errors, action errors, the reason of an unavailable native bridge). They are
+  not part of the run state and are not in `get_errors`; `run: "unavailable"` is reported, its cause is not.
+* Error positions belong to the text of the run; `editedSinceRun` says when they may be stale.
+* Isolate cannot be told from "the others are transparent".
+* `snapshotRevision` restarts at 0 with every app start.
+* Strict arguments are a change for clients that sent extra fields to the two MCP-1 tools.
+
+== Roadmap
+
+* MCP-3: acting tools through `McpUiBridge`, then the menu "Agents".

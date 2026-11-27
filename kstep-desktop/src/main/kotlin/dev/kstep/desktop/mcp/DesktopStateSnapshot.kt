@@ -1,5 +1,7 @@
 package dev.kstep.desktop.mcp
 
+import dev.kstep.desktop.pick.SelectionState
+import dev.kstep.desktop.pick.VisibilityState
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicReference
 
@@ -26,6 +28,16 @@ class DesktopStateSnapshot(
     val draftOfferOpen: Boolean,
     val knowledgeWorkspace: Boolean,
     val waitingHint: String?,
+    /** Changes whenever what the window shows changes (ADR-0096 D2); a hover does not count. 0 before the first publish. */
+    val revision: Long = 0L,
+    /** The errors or warnings of the last run, or `null`. */
+    val runReport: McpRunReport? = null,
+    /** The shown model (parts, tree), or `null` without one. */
+    val scene: McpScene? = null,
+    /** The selection without hover, or `null` when nothing is selected. */
+    val selection: SelectionState? = null,
+    val visibility: VisibilityState = VisibilityState(),
+    val viewSettings: McpViewSettings = McpViewSettings(),
 ) {
     override fun toString(): String = "DesktopStateSnapshot(kind=$editorKind, run=$run, dirty=$dirty)"
 

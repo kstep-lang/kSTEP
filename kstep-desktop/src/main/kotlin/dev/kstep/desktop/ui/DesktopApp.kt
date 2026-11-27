@@ -39,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -97,7 +98,8 @@ import dev.kstep.desktop.export.ScriptExportPreference
 import dev.kstep.desktop.mcp.DesktopMcpServerManager
 import dev.kstep.desktop.mcp.McpActivityTracker
 import dev.kstep.desktop.mcp.McpServerStatus
-import dev.kstep.desktop.mcp.McpSnapshotMapper
+import dev.kstep.desktop.mcp.McpSnapshotPublisher
+import dev.kstep.desktop.mcp.McpViewInput
 import dev.kstep.desktop.mcp.SnapshotHost
 import dev.kstep.desktop.menu.AboutInfo
 import dev.kstep.desktop.menu.EditAction
@@ -182,6 +184,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.awt.FileDialog
@@ -1009,8 +1012,18 @@ fun FrameWindowScope.DesktopApp(
             draftOfferOpen = editorView.draftOffer != null,
         )
     // The tools of the MCP server only read this snapshot; the window never waits for them (ADR-0095).
-    LaunchedEffect(editorView, state, knowledgeOpen, menuContext.editorIsScript) {
-        mcpHost.publish(McpSnapshotMapper.of(editorView, state, knowledgeOpen, menuContext.editorIsScript))
+    val mcpPublisher = remember(mcpHost) { McpSnapshotPublisher(mcpHost) }
+    LaunchedEffect(mcpPublisher, editorView, state, knowledgeOpen, menuContext.editorIsScript) {
+        mcpPublisher.onEditorOrRun(editorView, state, knowledgeOpen, menuContext.editorIsScript)
+    }
+    // Selection, visibility and settings are read here, outside the composition, and without hover (ADR-0096 D2):
+    // a pointer move changes nothing that is compared, so it neither publishes nor recomposes.
+    val softWrapNow = rememberUpdatedState(softWrap)
+    val previewUnsavedNow = rememberUpdatedState(previewUnsaved)
+    LaunchedEffect(mcpPublisher) {
+        snapshotFlow {
+            McpViewInput.of(selection.value, visibilityState, softWrapNow.value, previewUnsavedNow.value)
+        }.distinctUntilChanged().collect { mcpPublisher.onView(it) }
     }
     AutoPreviewDriver(
         enabled = previewUnsaved,

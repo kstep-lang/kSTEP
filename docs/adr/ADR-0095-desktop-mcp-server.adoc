@@ -88,7 +88,7 @@ of this wave uses it; the next wave's tools will.
   text), `lines`, `dirty`, `totalBytes`, `truncated`, `notice` (for a note). The text is cut at 1 MiB of UTF-8 bytes on a code point
   boundary. After JSON escaping one copy of the text can still be about 6 MiB in the worst case (control characters become `\u00XX`); with `2025-06-18` the text is in `content` and in `structuredContent`, so the answer can be about twice that.
 
-Both take no arguments (`additionalProperties: false`; extra arguments are ignored). A tool failure is a normal result with
+Both take no arguments (`additionalProperties: false`; extra arguments were ignored in this wave; ADR-0096 D4 replaces that rule: they are refused with `INVALID_ARGUMENTS`). A tool failure is a normal result with
 `isError: true` and a stable code with a fixed text: `NO_FILE`, `UI_BUSY`, `TOO_LARGE` (reserved), `INTERNAL`. Exception text is
 never sent; a failure is logged at debug level with the class name only. Paths and the script text are always JSON strings built
 from the value, never put together with string concatenation.
@@ -125,6 +125,6 @@ until a token exists.
 
 == Roadmap
 
-* MCP-2: more reading (selection, visibility, errors) through `McpUiBridge`.
+* MCP-2: more reading (selection, visibility, errors). Done differently, through the snapshot and not through `McpUiBridge`: see ADR-0096.
 * MCP-3: acting tools. Then "Show AI Panel" and "MCP Server..." move into their own menu "Agents" and the status segment becomes
   high priority.

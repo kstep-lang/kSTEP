@@ -101,6 +101,14 @@ class McpDialogStateTest :
             mcpDialogState(McpServerStatus.Off, settings, true, false).warningText shouldBe null
         }
 
+        "the hint names what an agent can read and says it cannot change anything" {
+            val hint = McpDialogText.HINT
+            listOf("127.0.0.1", "token", "errors", "parts", "selection", "cannot change anything").forEach {
+                hint shouldContain it
+            }
+            hint shouldNotContain "only to read the status and the editor text"
+        }
+
         "the port is editable only while the server is not running" {
             mcpDialogState(McpServerStatus.Off, settings, true, false).portEditable shouldBe true
             mcpDialogState(McpServerStatus.NoFreePort(1, 2), settings, true, false).portEditable shouldBe true

@@ -1,6 +1,13 @@
 package dev.kstep.desktop.mcp
 
 import dev.kstep.desktop.TestSupport
+import dev.kstep.desktop.model.PartInfo
+import dev.kstep.desktop.model.PartPlacement
+import dev.kstep.desktop.model.PartTable
+import dev.kstep.desktop.pick.AssemblyTree
+import dev.kstep.desktop.pick.SelectionState
+import dev.kstep.desktop.pick.VisibilityState
+import dev.kstep.desktop.run.DesktopError
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.net.InetSocketAddress
@@ -29,7 +36,71 @@ fun snap(
     draft: Boolean = false,
     knowledge: Boolean = false,
     hint: String? = null,
-) = DesktopStateSnapshot(path, kind, text, dirty, run, origin, parts, triangles, draft, knowledge, hint)
+    revision: Long = 7L,
+    runReport: McpRunReport? = null,
+    scene: McpScene? = null,
+    selection: SelectionState? = null,
+    visibility: VisibilityState = VisibilityState(),
+    settings: McpViewSettings = McpViewSettings(),
+) = DesktopStateSnapshot(
+    path,
+    kind,
+    text,
+    dirty,
+    run,
+    origin,
+    parts,
+    triangles,
+    draft,
+    knowledge,
+    hint,
+    revision,
+    runReport,
+    scene,
+    selection,
+    visibility,
+    settings,
+)
+
+/** A part with a unit box at [x] (mm), [triangles] triangles. */
+fun partInfo(
+    name: String,
+    index: Int,
+    triangles: Int = 12,
+    sourceLine: Int? = index + 1,
+    color: String = "#336699",
+) = PartInfo(
+    name = name,
+    firstTriangle = index * triangles,
+    triangleCount = triangles,
+    placement = PartPlacement(doubleArrayOf(index.toDouble(), 0.0, 0.0), DoubleArray(9)),
+    colorHex = color,
+    bboxMin = doubleArrayOf(index.toDouble(), 0.0, 0.0),
+    bboxMax = doubleArrayOf(index + 2.0, 3.0, 4.0),
+    centroid = doubleArrayOf(index + 1.0, 1.5, 2.0),
+    sourceLine = sourceLine,
+)
+
+fun partTable(vararg names: String): PartTable {
+    val parts = names.mapIndexed { i, n -> partInfo(n, i) }
+    val map = IntArray(parts.sumOf { it.triangleCount }) { t -> t / 12 }
+    return PartTable(parts, map)
+}
+
+fun partTable(parts: List<PartInfo>): PartTable = PartTable(parts, IntArray(0))
+
+/** A scene of the named parts without a tree. */
+fun sceneOf(vararg names: String) = McpScene(partTable(*names), null, 3L)
+
+/** A tree from `(name, parent, partOf)` triples in pre-order. */
+fun treeOf(vararg nodes: Triple<String, Int, Int>) =
+    AssemblyTree(
+        Array(nodes.size) { nodes[it].first },
+        IntArray(nodes.size) { nodes[it].second },
+        IntArray(nodes.size) { nodes[it].third },
+    )
+
+fun errorList(n: Int) = List(n) { DesktopError("KSTEP-S-001", it + 1, 2, "problem $it") }
 
 class RawResponse(
     val status: Int,
