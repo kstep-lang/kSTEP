@@ -10,6 +10,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import dev.kstep.cli.WorkerTempDir
+import dev.kstep.cli.kstepVersion
 import dev.kstep.cli.okf.DisplayName
 import dev.kstep.desktop.aiwire.AiController
 import dev.kstep.desktop.draft.DraftStore
@@ -17,6 +18,12 @@ import dev.kstep.desktop.drop.StartArgument
 import dev.kstep.desktop.edit.AtomicSaver
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.export.ExportController
+import dev.kstep.desktop.mcp.DesktopMcpServerManager
+import dev.kstep.desktop.mcp.McpActivityTracker
+import dev.kstep.desktop.mcp.McpPreferencesStore
+import dev.kstep.desktop.mcp.McpShutdown
+import dev.kstep.desktop.mcp.McpTokenStore
+import dev.kstep.desktop.mcp.SnapshotHost
 import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.okf.KnowledgeWorkspaceController
 import dev.kstep.desktop.run.AiCandidateCompiler
@@ -99,6 +106,17 @@ fun runDesktopApp(args: Array<String>) {
             }
         // Own session directory and worker for exports: the live preview is never disturbed (ADR-0057).
         val exporter = remember { ExportController.production(userSandbox) }
+        // The built-in MCP server (ADR-0095): off unless the saved settings say on. The host only holds the snapshot the
+        // window publishes; the activity tracker drives the quiet light in the status line.
+        val mcpHost = remember { SnapshotHost(kstepVersion()) }
+        val mcpActivity = remember { McpActivityTracker() }
+        val mcp =
+            remember {
+                DesktopMcpServerManager(McpPreferencesStore(), McpTokenStore(), mcpHost, mcpActivity).also {
+                    McpShutdown.register(it)
+                    it.startFromSettings()
+                }
+            }
         val state by controller.state.collectAsState()
         val editor by session.view.collectAsState()
         val frame = remember { arrayOfNulls<Frame>(1) }
@@ -109,6 +127,8 @@ fun runDesktopApp(args: Array<String>) {
             if (confirmUnsaved(frame[0], session)) {
                 // the draft of what the user just saved or discarded must not be written again by the shutdown hook
                 session.finishForQuit()
+                // first: the JDK's HTTP dispatcher thread is not a daemon and would keep the JVM alive
+                mcp.shutdown()
                 controller.close()
                 session.close()
                 ai.close()
@@ -144,6 +164,9 @@ fun runDesktopApp(args: Array<String>) {
                 ai = ai,
                 exporter = exporter,
                 knowledge = knowledge,
+                mcp = mcp,
+                mcpHost = mcpHost,
+                mcpActivity = mcpActivity,
                 onQuit = { requestQuit() },
                 userSandbox = userSandbox.state,
             )

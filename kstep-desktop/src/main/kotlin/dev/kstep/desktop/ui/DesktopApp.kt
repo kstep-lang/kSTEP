@@ -94,6 +94,11 @@ import dev.kstep.desktop.export.ExportState
 import dev.kstep.desktop.export.ExportText
 import dev.kstep.desktop.export.Overwrite
 import dev.kstep.desktop.export.ScriptExportPreference
+import dev.kstep.desktop.mcp.DesktopMcpServerManager
+import dev.kstep.desktop.mcp.McpActivityTracker
+import dev.kstep.desktop.mcp.McpServerStatus
+import dev.kstep.desktop.mcp.McpSnapshotMapper
+import dev.kstep.desktop.mcp.SnapshotHost
 import dev.kstep.desktop.menu.AboutInfo
 import dev.kstep.desktop.menu.EditAction
 import dev.kstep.desktop.menu.FileAction
@@ -212,6 +217,9 @@ fun FrameWindowScope.DesktopApp(
     ai: AiController,
     exporter: ExportController,
     knowledge: KnowledgeWorkspaceController,
+    mcp: DesktopMcpServerManager,
+    mcpHost: SnapshotHost,
+    mcpActivity: McpActivityTracker,
     onQuit: () -> Unit,
     userSandbox: StateFlow<UserSandboxState> = MutableStateFlow(UserSandboxState.Unknown),
 ) {
@@ -263,6 +271,18 @@ fun FrameWindowScope.DesktopApp(
     val aiUi by ai.ui.collectAsState()
     val aiRepair by ai.repair.collectAsState()
     var aiVisible by remember { mutableStateOf(false) }
+    // The MCP server (ADR-0095): its dialog, the "MCP" status segment and the quiet light while an agent is calling.
+    var mcpDialogVisible by remember { mutableStateOf(false) }
+    val mcpStatus by mcp.status.collectAsState()
+    val mcpLastLit by mcpActivity.lastLitAtMs.collectAsState()
+    var mcpLit by remember { mutableStateOf(false) }
+    LaunchedEffect(mcpLastLit) {
+        if (McpActivityTracker.isLit(mcpLastLit, System.currentTimeMillis())) {
+            mcpLit = true
+            delay(McpActivityTracker.LIT_MS)
+            mcpLit = false
+        }
+    }
     var aiFocus by remember { mutableStateOf(0) }
     var aiNow by remember { mutableStateOf(System.currentTimeMillis()) }
     val aiRunning = aiRepair is RepairState.Requesting || aiRepair is RepairState.Compiling
@@ -988,6 +1008,10 @@ fun FrameWindowScope.DesktopApp(
             editorDirty = editorView.dirty,
             draftOfferOpen = editorView.draftOffer != null,
         )
+    // The tools of the MCP server only read this snapshot; the window never waits for them (ADR-0095).
+    LaunchedEffect(editorView, state, knowledgeOpen, menuContext.editorIsScript) {
+        mcpHost.publish(McpSnapshotMapper.of(editorView, state, knowledgeOpen, menuContext.editorIsScript))
+    }
     AutoPreviewDriver(
         enabled = previewUnsaved,
         state = state,
@@ -1041,6 +1065,7 @@ fun FrameWindowScope.DesktopApp(
                 aiVisible = true
                 aiFocus++
             }
+            ViewAction.MCP_SERVER -> mcpDialogVisible = true
             ViewAction.SOFT_WRAP -> {
                 softWrap = !softWrap
                 saveLayout()
@@ -1151,6 +1176,7 @@ fun FrameWindowScope.DesktopApp(
                 null -> Unit
             }
             convertHost.ConvertDialogHost()
+            if (mcpDialogVisible) McpServerDialog(mcp) { mcpDialogVisible = false }
             if (exportVisible) {
                 ExportDialog(
                     sandboxNotice = sandboxNotice,
@@ -1227,6 +1253,8 @@ fun FrameWindowScope.DesktopApp(
                             if (aiVisible) aiFocus++
                         },
                         aiStatus = aiStatusText(aiRepair, aiNow, ai.limitsInUse.maxAttempts),
+                        mcpRunning = mcpStatus as? McpServerStatus.Running,
+                        mcpLit = mcpLit,
                     )
 
                     val totalPx = with(LocalDensity.current) { windowWidth.toPx() }
@@ -1509,6 +1537,8 @@ private fun Toolbar(
     knowledgeLabel: String?,
     transientNotice: String?,
     sandboxNotice: SandboxNotice? = null,
+    mcpRunning: McpServerStatus.Running? = null,
+    mcpLit: Boolean = false,
 ) {
     Row(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
@@ -1536,11 +1566,21 @@ private fun Toolbar(
             onShowInFolder = onShowInFolder,
             sandboxNotice = sandboxNotice,
             statusSegments =
-                statusSegmentsFor(state, knowledgeLabel, transientNotice, aiStatus, counts, editor.dirty),
+                statusSegmentsFor(
+                    state,
+                    knowledgeLabel,
+                    transientNotice,
+                    aiStatus,
+                    counts,
+                    editor.dirty,
+                    mcpRunning?.let { "MCP" },
+                ),
             previewLabel =
                 previewOriginLabel(state.lastGood?.origin, editor.text.takeIf { editor.state is EditorState.Editing })
                     ?.takeIf { editor.dirty || it != PreviewOriginLabel.SAVED },
             accent = if (isSystemInDarkTheme()) ACCENT_DARK else ACCENT_LIGHT,
+            mcpLit = mcpLit,
+            mcpTooltip = mcpRunning?.let { "MCP server running on 127.0.0.1:${it.port} — View › MCP Server…" },
         )
     }
 }
@@ -1564,6 +1604,7 @@ private fun statusSegmentsFor(
     aiStatus: String?,
     counts: VisibilityCounts,
     dirty: Boolean,
+    mcp: String? = null,
 ): List<StatusSegment> {
     val ok = state as? DesktopState.Ok
     val runState =
@@ -1587,6 +1628,7 @@ private fun statusSegmentsFor(
         hidden = counts.hidden,
         transparent = counts.transparent,
         dirty = dirty,
+        mcp = mcp,
     )
 }
 

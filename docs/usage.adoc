@@ -1138,6 +1138,26 @@ it shows every key of the File, Edit and View menus and the editor keys. Entries
 Changes) are not in the list. The list has a visible scroll bar; its height follows the window (at most 480 dp, at least
 160 dp), so Close stays in view when the window is small. Two keys for one command (Redo) are written with a slash.
 
+=== MCP server for agents (Desktop)
+
+kSTEP Desktop can run a small MCP server that lets an agent (for example Claude Code) see what the window shows. It is off
+until you switch it on: View > MCP Server... opens a dialog with the switch, the port (7391 by default) and the buttons that
+copy the connect command. The server listens on 127.0.0.1 only, and every request needs the token, which is created when you
+switch the server on for the first time and kept in the config folder (`mcp-token`, readable by you only). The dialog never shows
+the token; "Copy Command" puts the whole command on the clipboard:
+
+[source,shell]
+----
+claude mcp add --transport http kstep-desktop http://127.0.0.1:7391/mcp --header "Authorization: Bearer <token>"
+----
+
+If the port is busy the server takes the next free one (up to nine further) and the dialog says so; "Use ... from now on" stores
+that port. "Regenerate Token..." replaces the token at once; agents that use the old one lose access. While the server runs, the
+status line shows "MCP", which lights up briefly when an agent calls. In this version there are two tools and both only read:
+`kstep_desktop_get_status` (file, unsaved changes, state of the preview, size of the model) and `kstep_desktop_get_script`
+(the editor text including unsaved changes, with a revision hash; more than 1 MiB is cut and marked). Any program on your
+computer that has the token can use them, so treat it like a password.
+
 === Starting the desktop from the CLI
 
 On macOS, with `kSTEP.app` built or installed (ADR-0082), `kstep desktop` starts the app:

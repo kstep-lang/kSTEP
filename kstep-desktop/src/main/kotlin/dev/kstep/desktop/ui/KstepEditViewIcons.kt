@@ -316,6 +316,25 @@ internal object KstepEditViewIcons {
                         horizontalLineTo(11.5f)
                     },
                 )
+            // A plug: two prongs, the body and the cable.
+            MenuIconId.MCP_SERVER ->
+                listOf(
+                    {
+                        moveTo(6.5f, 2.5f)
+                        verticalLineTo(5.5f)
+                        moveTo(10.5f, 2.5f)
+                        verticalLineTo(5.5f)
+                        moveTo(4.5f, 5.5f)
+                        horizontalLineTo(12.5f)
+                        verticalLineTo(7.5f)
+                        arcTo(4f, 4f, 0f, false, true, 4.5f, 7.5f)
+                        close()
+                    },
+                    {
+                        moveTo(8.5f, 11.5f)
+                        verticalLineTo(13.5f)
+                    },
+                )
             // Three text lines; the middle one wraps down to a short line with a return hook.
             MenuIconId.SOFT_WRAP ->
                 listOf(

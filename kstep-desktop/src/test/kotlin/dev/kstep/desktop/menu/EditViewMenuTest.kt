@@ -44,6 +44,7 @@ class EditViewMenuTest :
                     MenuEntry.ViewItem(ViewAction.SHOW_ALL),
                     MenuEntry.Separator,
                     MenuEntry.ViewItem(ViewAction.AI_PANEL),
+                    MenuEntry.ViewItem(ViewAction.MCP_SERVER),
                     MenuEntry.Separator,
                     MenuEntry.ViewItem(ViewAction.SOFT_WRAP),
                     MenuEntry.ViewItem(ViewAction.PREVIEW_UNSAVED),

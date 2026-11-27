@@ -765,6 +765,15 @@ scan before either lands.
   `KSTEP-D-041` (start failed). Recent now also keeps single notes with their workspace folder (`recent.json` version 1, additive
   `root`). Known gaps: macOS only, no single instance (every call is a new instance), the shell environment (AI keys) does not
   reach the app, "Started" only means the start was handed over. Checked by hand on one Mac only.
+* Welle MCP-1 (ADR-0095): a built-in, read-only MCP server in `kstep-desktop` (package `mcp`, `PrivateConfigFile` in `settings`).
+  `DesktopMcpHttpServer` (JDK `HttpServer`, 127.0.0.1, `POST /mcp`, stateless, fixed check order with the token before the body,
+  4 daemon workers and a queue of 16), `McpProtocol`/`McpToolRegistry` (two tools), `McpTokenStore` and `McpPreferencesStore`
+  (strict loading, 0600), `DesktopMcpServerManager` (off by default, port fallback up to +9, never rewrites the stored port),
+  `McpUiBridge` (built and tested, unused by the tools), `McpSnapshotMapper`. UI: View > MCP Server..., `McpServerDialog`, the
+  "MCP" status segment with a 600 ms light. `jdk.httpserver` added to the jlink modules. Tests: HTTP server (about 25 cases:
+  checks in order, body never opened before the token, limits, hostile JSON, leaks, log, regenerate, overload, thread cleanup,
+  slow body), tools, stores, manager with real ports, dialog model, menu, status, architecture rules. Not done: a hand test with a
+  real `claude mcp add`, a look at the dialog and the status segment on screen, any run on Windows or Linux.
 * Welle D3d-1 (ADR-0094): three visual fixes in `kstep-desktop` (packages `ui`, `status`). `ViewerOverlayLayout` places the
   last-good badge (top left while 140 dp fit next to the 260 dp panel, i.e. from a 432 dp viewer; else bottom left; wrapping text).
   `StatusSegments` builds the run status from prioritised whole segments and `fit` drops duration, triangles, medium, then high

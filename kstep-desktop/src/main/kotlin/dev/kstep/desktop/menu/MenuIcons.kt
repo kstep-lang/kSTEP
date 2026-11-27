@@ -34,6 +34,7 @@ enum class MenuIconId {
     ISOLATE,
     SHOW_ALL,
     AI_PANEL,
+    MCP_SERVER,
     SOFT_WRAP,
     BANNER,
     KEYBOARD,
@@ -80,6 +81,7 @@ fun iconOf(action: ViewAction): MenuIconId =
         ViewAction.ISOLATE -> MenuIconId.ISOLATE
         ViewAction.SHOW_ALL -> MenuIconId.SHOW_ALL
         ViewAction.AI_PANEL -> MenuIconId.AI_PANEL
+        ViewAction.MCP_SERVER -> MenuIconId.MCP_SERVER
         ViewAction.SOFT_WRAP -> MenuIconId.SOFT_WRAP
         ViewAction.PREVIEW_UNSAVED -> MenuIconId.PREVIEW_UNSAVED
         ViewAction.FOCUS_BANNER -> MenuIconId.BANNER

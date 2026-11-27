@@ -90,6 +90,9 @@ tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     jvmArgumentProviders.add(workerClasspathArg)
     systemProperty("java.awt.headless", "true")
+    // The MCP server logs method, status and tool names at DEBUG, never tokens or script text (ADR-0095): the tests
+    // turn that level on to check it.
+    systemProperty("org.slf4j.simpleLogger.log.dev.kstep.desktop.mcp", "debug")
     systemProperty("kstep.occt.require", occtRequire)
     systemProperty("kstep.sandbox.require", sandboxRequire)
     systemProperty("kstep.desktop.fixtures", fixturesDir)
@@ -360,6 +363,7 @@ val packagingBaseModules =
         "jdk.accessibility",
         "jdk.charsets",
         "jdk.crypto.ec",
+        "jdk.httpserver",
         "jdk.management",
         "jdk.unsupported",
         "jdk.zipfs",

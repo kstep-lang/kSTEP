@@ -18,6 +18,73 @@ class DesktopArchitectureTest :
                 stream.filter { it.toString().endsWith(".kt") }.map { it to Files.readString(it) }.toList()
             }
 
+        fun mcpSources() =
+            sources().filter { (path, _) ->
+                root
+                    .relativize(path)
+                    .toString()
+                    .replace('\\', '/')
+                    .startsWith("dev/kstep/desktop/mcp/")
+            }
+
+        "the mcp package is pure logic: no Compose, UI, AWT, Swing, process start, HTTP client or AI wire (ADR-0095)" {
+            val forbidden =
+                listOf(
+                    "androidx.compose",
+                    "org.jetbrains.compose",
+                    "dev.kstep.desktop.ui",
+                    "java.awt",
+                    "javax.swing",
+                    "ProcessBuilder",
+                    "Runtime.getRuntime().exec",
+                    "java.net.http",
+                    "dev.kstep.desktop.aiwire",
+                )
+            mcpSources()
+                .flatMap { (path, text) ->
+                    forbidden.filter { text.contains(it) }.map { "${root.relativize(path)} uses $it" }
+                }.shouldBeEmpty()
+        }
+
+        "the mcp package imports nothing from the script module and nothing from the CLI (ADR-0095)" {
+            mcpSources()
+                .flatMap { (path, text) ->
+                    text
+                        .lineSequence()
+                        .filter { it.startsWith("import dev.kstep.script.") || it.startsWith("import dev.kstep.cli.") }
+                        .map { "${root.relativize(path)}: $it" }
+                        .toList()
+                }.shouldBeEmpty()
+        }
+
+        "the mcp package writes files only in the token store and the preferences store (ADR-0095)" {
+            val writes =
+                listOf(
+                    "Files.write",
+                    "Files.newOutputStream",
+                    "Files.move",
+                    "Files.createTempFile",
+                    "Files.delete",
+                    "FileOutputStream",
+                    "PrivateConfigFile.writeAtomic",
+                )
+            mcpSources()
+                .filter { (path, _) -> path.fileName.toString() !in setOf("McpTokenStore.kt", "McpPreferences.kt") }
+                .flatMap { (path, text) ->
+                    writes.filter { text.contains(it) }.map { "${root.relativize(path)} uses $it" }
+                }.shouldBeEmpty()
+        }
+
+        "com.sun.net.httpserver is only used by the MCP HTTP server (ADR-0095)" {
+            sources()
+                .filter { (path, text) ->
+                    text.contains("com.sun.net.httpserver") &&
+                        root.relativize(path).toString().replace('\\', '/') !=
+                        "dev/kstep/desktop/mcp/DesktopMcpHttpServer.kt"
+                }.map { root.relativize(it.first).toString() }
+                .shouldBeEmpty()
+        }
+
         "the desktop JVM never evaluates a script itself" {
             val forbidden = listOf("KStepScriptHost", "PreviewRenderer", "KStepScript", "runRender(")
             sources()

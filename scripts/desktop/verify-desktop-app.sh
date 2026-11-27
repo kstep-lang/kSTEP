@@ -25,6 +25,8 @@ MANIFEST="$WORKER/worker-classpath.txt"
 [ -x "$JAVA" ] || fail "the bundled runtime has no executable bin/java"
 "$JAVA" -version 2>&1 | head -1 | grep -q '"21' || fail "the bundled java is not 21: $("$JAVA" -version 2>&1 | head -1)"
 echo "bundled java: $("$JAVA" -version 2>&1 | head -1)"
+# The built-in MCP server (ADR-0095) uses com.sun.net.httpserver: the runtime must carry jdk.httpserver.
+"$JAVA" --list-modules 2>/dev/null | grep -q '^jdk.httpserver' || fail "the bundled runtime has no jdk.httpserver module (ADR-0095)"
 
 # 2. The launcher passes the worker folder.
 [ -f "$CFG" ] || fail "missing $CFG"

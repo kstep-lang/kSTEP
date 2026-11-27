@@ -1,0 +1,130 @@
+= ADR-0095: A Built-in MCP Server in kSTEP Desktop, Read-only (Welle MCP-1)
+:toc:
+
+== Status
+
+Accepted (Welle MCP-1). Scope: `kstep-desktop` (new package `mcp`, a small helper in `settings`, the View menu, the status
+line, one dialog, the packaging module list). No new dependency, three new error codes (`KSTEP-D-050` to `KSTEP-D-052`), no
+migration (`mcp.json` and `mcp-token` are new files; `layout.json` is not touched). Only macOS was used for the build and the
+tests; the dialog and the server were not run against a real agent by hand yet (see Open points).
+
+== Context
+
+`kstep-mcp` (stdio, built on the MCP Kotlin SDK) gives an agent the CLI's functions. It does not know the running desktop
+window. An agent that should see what the user sees (the open file, unsaved changes, the state of the live preview) needs a
+server inside the desktop process. This wave builds the foundation and only two read-only tools. Acting tools (selecting parts,
+editing text, running) are later waves; they are not in this one on purpose, so the trust model can be judged on tools that cannot
+change anything.
+
+== Decision
+
+D1. Transport. MCP over HTTP in the "streamable" form, reduced to POST: one endpoint `POST /mcp` on `127.0.0.1`, one JSON object
+per request, one JSON object (or `202` without a body for a notification) per answer, no SSE, no batch, no `Mcp-Session-Id`
+(stateless, so there is no session state to attack). A `GET` (a client trying to open an SSE stream) is answered `405` with
+`Allow: POST`; that is the form the specification gives for "no server stream", and the client falls back to POST. The protocol
+versions `2025-06-18` and `2025-03-26` are negotiated in `initialize` (the older one is the fallback). The header
+`MCP-Protocol-Version` is optional; when it is sent it must be one of the two, otherwise `400`. `structuredContent` is added to a
+tool result only for `2025-06-18`.
+
+D2. Implementation. `com.sun.net.httpserver` of the JDK (module `jdk.httpserver`) and a small JSON-RPC layer on
+`kotlinx.serialization.json`. No new library. Not the MCP SDK of `kstep-mcp`: its server transports for HTTP run on Ktor, which
+would put ktor-server-core, an engine (Netty or CIO) and plugins into the desktop app (more attack surface, more jlink modules),
+and the checks of D3 (Host, Origin, token before body, size limit) would have to be built anyway. For two tools the own layer is
+smaller and fully testable. `jdk.httpserver` is added to the jlink module list of the packaged app (`packagingBaseModules`);
+`verify-desktop-app.sh` checks that the bundled runtime has it. Without it the packaged app would fail with
+`NoClassDefFoundError` on the first switch-on, which no unit test can see.
+
+D3. Security model. Off by default; the server starts only after a user action (the switch in the dialog) or when the saved
+setting says on. The server binds the literal address `127.0.0.1` (not `getLoopbackAddress`, which may be `::1`) and refuses to
+run if the bound address is not a loopback address. The checks run in this order, the first violation wins, and the request body
+is not opened before the token has been checked:
+
+. method not `POST` -> `405` (also the CORS preflight `OPTIONS`; no `Access-Control-*` header is ever sent)
+. path not exactly `/mcp`, or any query -> `404`
+. `Host` missing, repeated, or not `127.0.0.1:<port>` / `localhost:<port>` -> `403` (DNS rebinding)
+. `Origin` present but repeated, or not `http://127.0.0.1:<port>` / `http://localhost:<port>` -> `403` (`null` too); absent is fine
+. `Authorization` not exactly one `Bearer <43 characters>` that matches (constant-time compare) -> `401` with `WWW-Authenticate: Bearer`
+. `Content-Type` not `application/json` (parameters allowed) -> `415`
+. declared `Content-Length` over 1 MiB -> `413`; then at most 1 MiB + 1 byte is read (this covers chunked bodies) -> `413`
+. strict UTF-8 and JSON; failure -> `400` with `-32700`; a JSON array (batch) or a non-object -> `400` with `-32600`
+. `MCP-Protocol-Version` header, see D1
+. the call; an unknown method gives `-32601`, an unknown tool or bad arguments `-32602` (HTTP `200`)
+
+Rejections have no body, so no text of the application can leak through them, and carry `Connection: close` and
+`Cache-Control: no-store`. The token is 32 bytes from `SecureRandom`, base64url without padding (43 characters), created lazily
+the first time the server is switched on, kept in `mcp-token` in the config folder (folder `rwx------`, file created `rw-------`
+by the file attribute at creation, written through a temporary file and an atomic move). It is loaded as untrusted input: regular
+file, no symbolic link, at most 128 bytes, exact shape, and exactly `rw-------` where POSIX permissions exist. A file with wider
+permissions is not repaired silently; it is treated as absent and the next switch-on creates a new token. The token never appears
+in the dialog (a mask), in a log, in an exception or in `toString`; it leaves the process only through the Copy buttons, on a
+click. "Regenerate Token" replaces the file atomically and a running server uses the new token for the next request (the old one
+gets `401`).
+
+D4. Process limits. A fixed pool of 4 daemon worker threads with a queue of 16; when it is full the connection is refused or
+dropped at once (no unbounded queue). The JDK reads some limits only once, from system properties, when its class loads;
+`McpHttpDefaults.apply()` sets them (only if the user has not): `maxReqTime=10`, `maxRspTime=10`, `maxReqHeaders=64`,
+`maxReqHeaderSize=16384`, `jdk.httpserver.maxConnections=64`, `drainAmount=0`. `drainAmount=0` makes the server close the
+connection after a rejection instead of reading up to 64 KiB of an unauthorised body. `maxRspTime` is the JDK's timer from the end
+of the headers to the end of the response, so a body that is sent slowly after authentication is cut off after about 10 seconds
+(there is a test for it: it takes 10 seconds). The call is applied in `main` and again in `start` (idempotent). The dispatcher
+thread of the JDK server is not a daemon: `stop()` must run on every way out. `DesktopMcpServerManager.shutdown()` is the first
+step of `requestQuit` (close button, File > Quit, macOS quit handler) and `main` has a `finally` with `McpShutdown.stopAll()`.
+
+D5. Port. Default `7391`, saved range 1024..65535. If the preferred port is busy the server tries the next nine and reports the
+one that worked ("Port 7391 was busy -- running on 7392"). The stored setting is never changed by the fallback; only the button
+"Use 7392 from now on" stores it. If all ten are busy the status is `KSTEP-D-050`. The port can only be edited while the server is
+off.
+
+D6. Tools. Both read only the latest published snapshot, never the UI thread: the window publishes an immutable
+`DesktopStateSnapshot` (a reference to the editor string, not a copy) into an `AtomicReference` after every change, and the tools
+read that. `McpUiBridge.onUi` (run a block on the UI thread, with a timeout, cancelled when late) exists and is tested, but no tool
+of this wave uses it; the next wave's tools will.
+
+* `kstep_desktop_get_status` -- `appVersion`, `protocolVersion`, `file {name, path}` or `null`, `dirty`,
+  `run` (`idle`, `running`, `ok`, `error`, `unavailable`), `waitingHint`, `previewOrigin` (`savedFile`, `unsavedBuffer`),
+  `parts`, `triangles` (`null` without a model), `draftOfferOpen`, `workspace` (`knowledge` or `null`). `unavailable` is the native
+  bridge missing; it is reported as it is.
+* `kstep_desktop_get_script` -- `kind` (`script`, `note`), `text`, `revision` (`sha256:<hex>` of the UTF-8 bytes of the *whole*
+  text), `lines`, `dirty`, `totalBytes`, `truncated`, `notice` (for a note). The text is cut at 1 MiB of UTF-8 bytes on a code point
+  boundary. After JSON escaping one copy of the text can still be about 6 MiB in the worst case (control characters become `\u00XX`); with `2025-06-18` the text is in `content` and in `structuredContent`, so the answer can be about twice that.
+
+Both take no arguments (`additionalProperties: false`; extra arguments are ignored). A tool failure is a normal result with
+`isError: true` and a stable code with a fixed text: `NO_FILE`, `UI_BUSY`, `TOO_LARGE` (reserved), `INTERNAL`. Exception text is
+never sent; a failure is logged at debug level with the class name only. Paths and the script text are always JSON strings built
+from the value, never put together with string concatenation.
+
+D7. Visible. View > "MCP Server..." (no key, always available, in the group of Show AI Panel) opens the dialog: a switch with the
+status text, the port field, the command preview with the literal `<token>` (not selectable), and the buttons Copy Command, Copy
+Token, Regenerate Token (with a confirmation whose default is Cancel). Closing the dialog leaves the server running. While the
+server runs the status line shows the segment "MCP" (medium priority; it is the last medium segment dropped); it takes the accent
+colour for 600 ms after an authenticated, well-formed call (throttled, no animation), so rejected traffic can never light it. The
+tooltip says on which address it runs. The Copy buttons are disabled with a reason ("Turn the server on once to create a token")
+until a token exists.
+
+== Alternatives not taken
+
+* The MCP SDK with Ktor (see D2).
+* SSE and sessions: more state and more code for no gain with read-only tools.
+* A fixed token in the settings file: the token is a credential and gets its own `0600` file.
+* Opening the server on all interfaces or with TLS: a local desktop tool; the loopback address and the token are the boundary.
+
+== Consequences and open points
+
+* Any program on the computer that has the token (same user, or a user who can read the file) can read the status and the editor
+  text. That is the trust boundary; the dialog says so. The clipboard is not cleared by the application.
+* No TLS. On the loopback this is accepted; a hostile local process can also read the process memory.
+* Windows: the `0600` permissions do not exist there; the token file sits in the user profile (`%APPDATA%`), whose ACL protects it
+  only as far as the profile does. This was not checked on Windows.
+* Windows and Linux were not run by hand at all; only macOS was used.
+* A hand test with a real `claude mcp add --transport http ...` is still open (a `GET` from the client must give `405` and the
+  client must fall back to POST; the unit tests check the `405`, not the client).
+* The dialog and the status segment were compiled and unit-tested at the model level (`McpDialogState`, `StatusSegments`), but not
+  looked at on a screen.
+* A hostile body is limited in size (1 MiB), in time (about 10 s) and in worker count (4), but a token holder can still occupy the
+  four workers for those 10 seconds.
+
+== Roadmap
+
+* MCP-2: more reading (selection, visibility, errors) through `McpUiBridge`.
+* MCP-3: acting tools. Then "Show AI Panel" and "MCP Server..." move into their own menu "Agents" and the status segment becomes
+  high priority.

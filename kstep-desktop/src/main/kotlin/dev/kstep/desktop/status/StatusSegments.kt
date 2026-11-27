@@ -10,6 +10,8 @@ data class StatusSegment(
     val text: String,
     val priority: SegmentPriority,
     val dropRank: Int = 0,
+    /** Names a segment the UI treats specially (the "MCP" light, ADR-0095); `null` for all others. */
+    val id: String? = null,
 )
 
 /** [shown] is what fits, [full] is everything (tooltip and accessibility text), [droppedCount] the segments left out. */
@@ -17,6 +19,8 @@ data class FittedStatus(
     val shown: String,
     val full: String,
     val droppedCount: Int,
+    /** The character range in [shown] of each kept segment that has an id. */
+    val ranges: Map<String, IntRange> = emptyMap(),
 )
 
 /**
@@ -41,6 +45,7 @@ object StatusSegments {
         hidden: Int,
         transparent: Int,
         dirty: Boolean,
+        mcp: String? = null,
     ): List<StatusSegment> {
         val all =
             listOf(
@@ -56,6 +61,7 @@ object StatusSegments {
                 StatusSegment(note.orEmpty(), SegmentPriority.MEDIUM),
                 StatusSegment(transientNotice.orEmpty(), SegmentPriority.HIGH),
                 StatusSegment(aiStatus.orEmpty(), SegmentPriority.HIGH),
+                StatusSegment(mcp.orEmpty(), SegmentPriority.MEDIUM, dropRank = 1, id = MCP_SEGMENT_ID),
                 StatusSegment(if (hidden > 0) "$hidden hidden" else "", SegmentPriority.ESSENTIAL),
                 StatusSegment(if (transparent > 0) "$transparent transparent" else "", SegmentPriority.MEDIUM),
                 StatusSegment(if (dirty) "unsaved changes" else "", SegmentPriority.ESSENTIAL),
@@ -90,8 +96,21 @@ object StatusSegments {
             dropped++
             shown = segments.filterIndexed { i, _ -> kept[i] }.joinToString(StatusLineText.SEPARATOR) { it.text }
         }
-        return FittedStatus(shown, full, dropped)
+        return FittedStatus(shown, full, dropped, rangesOf(segments.filterIndexed { i, _ -> kept[i] }))
     }
+
+    private fun rangesOf(shown: List<StatusSegment>): Map<String, IntRange> {
+        val ranges = LinkedHashMap<String, IntRange>()
+        var at = 0
+        shown.forEach { segment ->
+            segment.id?.let { ranges[it] = at until at + segment.text.length }
+            at += segment.text.length + StatusLineText.SEPARATOR.length
+        }
+        return ranges
+    }
+
+    /** The id of the segment that shows the MCP server (ADR-0095). */
+    const val MCP_SEGMENT_ID = "mcp"
 
     fun maxChars(widthDp: Float): Int = (widthDp / CHAR_DP).toInt()
 }

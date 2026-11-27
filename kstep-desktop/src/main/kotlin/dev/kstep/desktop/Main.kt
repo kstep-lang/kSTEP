@@ -1,6 +1,8 @@
 package dev.kstep.desktop
 
 import dev.kstep.desktop.ai.AiLogging
+import dev.kstep.desktop.mcp.McpHttpDefaults
+import dev.kstep.desktop.mcp.McpShutdown
 import dev.kstep.desktop.ui.runDesktopApp
 
 /**
@@ -11,5 +13,12 @@ import dev.kstep.desktop.ui.runDesktopApp
 fun main(args: Array<String>) {
     // Before the first logger exists: Koog logs whole prompts at DEBUG (ADR-0056).
     AiLogging.quiet()
-    runDesktopApp(args)
+    // The JDK HTTP server reads its limits once, when its class loads (ADR-0095).
+    McpHttpDefaults.apply()
+    try {
+        runDesktopApp(args)
+    } finally {
+        // the JDK's dispatcher thread is not a daemon: a server left running would keep the JVM alive
+        McpShutdown.stopAll()
+    }
 }

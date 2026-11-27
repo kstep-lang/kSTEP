@@ -122,6 +122,9 @@ enum class ViewAction(
     SHOW_ALL("Show All", KeyHint('V', true)),
     AI_PANEL("Show AI Panel", null),
 
+    /** Opens the dialog of the built-in MCP server (ADR-0095). Always available, no key. */
+    MCP_SERVER("MCP Server…", null),
+
     /** A check item (ADR-0085): long lines wrap at the editor edge. Always available, no key. */
     SOFT_WRAP("Soft Wrap", null),
 
@@ -177,6 +180,7 @@ fun shortcutOf(
         ViewAction.FOCUS_BANNER -> sc('B', shift = true)
         ViewAction.PREVIOUS_BLOCK -> Shortcut(ShortcutKey.Up, alt = true)
         ViewAction.NEXT_BLOCK -> Shortcut(ShortcutKey.Down, alt = true)
+        ViewAction.MCP_SERVER,
         ViewAction.HOME,
         ViewAction.TRANSPARENT,
         ViewAction.HIDE,
@@ -341,6 +345,7 @@ fun stateOf(
                 else -> ENABLED
             }
         ViewAction.AI_PANEL -> if (ctx.knowledgeOpen) disabled(MenuReasons.KNOWLEDGE_UNAVAILABLE) else ENABLED
+        ViewAction.MCP_SERVER -> ENABLED
         ViewAction.SOFT_WRAP -> ENABLED
         ViewAction.PREVIEW_UNSAVED ->
             if (ctx.knowledgeOpen || !ctx.editorIsScript) disabled(MenuReasons.NOTES_SAVED_ONLY) else ENABLED
@@ -468,6 +473,7 @@ fun viewMenu(): List<MenuEntry> =
         MenuEntry.ViewItem(ViewAction.SHOW_ALL),
         MenuEntry.Separator,
         MenuEntry.ViewItem(ViewAction.AI_PANEL),
+        MenuEntry.ViewItem(ViewAction.MCP_SERVER),
         MenuEntry.Separator,
         MenuEntry.ViewItem(ViewAction.SOFT_WRAP),
         MenuEntry.ViewItem(ViewAction.PREVIEW_UNSAVED),

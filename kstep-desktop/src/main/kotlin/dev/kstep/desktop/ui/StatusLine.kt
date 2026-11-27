@@ -27,7 +27,10 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.desktop.run.SandboxNotice
@@ -73,6 +76,10 @@ internal fun RowScope.StatusLine(
     /** What the picture came from (ADR-0086); drawn in the accent colour when it is an unsaved buffer. */
     previewLabel: PreviewOriginLabel? = null,
     accent: Color = ACCENT_LIGHT,
+    /** The "MCP" segment shows in the accent colour while an agent is using the server (ADR-0095). */
+    mcpLit: Boolean = false,
+    /** An extra tooltip line while the MCP server runs (ADR-0095); `null` when it is off. */
+    mcpTooltip: String? = null,
 ) {
     val hasRight = exportText != null || sandboxNotice != null || statusSegments.isNotEmpty() || previewLabel != null
     Text(
@@ -119,7 +126,14 @@ internal fun RowScope.StatusLine(
             }
         }
         if (statusSegments.isNotEmpty()) {
-            RunStatusText(statusSegments, fitProbe, Modifier.weight(1f, fill = false).tagged(TAG_STATUS_RUN, probe))
+            RunStatusText(
+                statusSegments,
+                fitProbe,
+                Modifier.weight(1f, fill = false).tagged(TAG_STATUS_RUN, probe),
+                mcpLit,
+                accent,
+                mcpTooltip,
+            )
         }
         if (previewLabel != null) {
             if (statusSegments.isNotEmpty()) {
@@ -149,6 +163,9 @@ private fun RunStatusText(
     segments: List<StatusSegment>,
     fitProbe: ((FittedStatus) -> Unit)?,
     modifier: Modifier,
+    mcpLit: Boolean = false,
+    accent: Color = ACCENT_LIGHT,
+    mcpTooltip: String? = null,
 ) {
     BoxWithConstraints(modifier) {
         val fitted = StatusSegments.fit(segments, StatusSegments.maxChars(maxWidth.value))
@@ -156,7 +173,7 @@ private fun RunStatusText(
         var cut by remember { mutableStateOf(false) }
         val text: @Composable () -> Unit = {
             Text(
-                fitted.shown,
+                lightUp(fitted, mcpLit, accent),
                 fontSize = 12.sp,
                 color = DIM,
                 maxLines = 1,
@@ -165,16 +182,38 @@ private fun RunStatusText(
                 modifier = Modifier.semantics { contentDescription = fitted.full },
             )
         }
-        if (fitted.droppedCount > 0 || cut) {
+        if (fitted.droppedCount > 0 || cut || (mcpTooltip != null && fitted.ranges.containsKey("mcp"))) {
             TooltipArea(
                 tooltip = {
                     Box(Modifier.background(Color.Black.copy(alpha = 0.8f)).padding(6.dp)) {
-                        Text(fitted.full, color = Color.White, fontSize = 12.sp)
+                        Text(
+                            if (mcpTooltip != null) fitted.full + "\n" + mcpTooltip else fitted.full,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                        )
                     }
                 },
             ) { text() }
         } else {
             text()
         }
+    }
+}
+
+/** The shown status; the MCP segment is drawn in the accent colour when [lit]. Same text, same width. */
+private fun lightUp(
+    fitted: FittedStatus,
+    lit: Boolean,
+    accent: Color,
+): androidx.compose.ui.text.AnnotatedString {
+    val range = fitted.ranges[StatusSegments.MCP_SEGMENT_ID]
+    if (!lit || range == null) {
+        return androidx.compose.ui.text
+            .AnnotatedString(fitted.shown)
+    }
+    return buildAnnotatedString {
+        append(fitted.shown.substring(0, range.first))
+        withStyle(SpanStyle(color = accent)) { append(fitted.shown.substring(range.first, range.last + 1)) }
+        append(fitted.shown.substring(range.last + 1))
     }
 }

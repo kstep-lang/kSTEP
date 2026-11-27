@@ -46,11 +46,13 @@ class HelpMenuTest :
                 groups[0].rows.map { it.label } shouldContainExactly
                     FileAction.entries.filter { it.shortcut != null }.map { it.label }
                 groups[1].rows.map { it.label } shouldContainExactly EditAction.entries.map { it.label }
-                // Soft Wrap and Preview Unsaved Changes have no key, so it is not in the shortcut overview
+                // Soft Wrap, Preview Unsaved Changes and MCP Server have no key, so they are not in the overview
                 groups[2].rows.map { it.label } shouldContainExactly
                     ViewAction.entries
                         .filter {
-                            it != ViewAction.SOFT_WRAP && it != ViewAction.PREVIEW_UNSAVED
+                            it != ViewAction.SOFT_WRAP &&
+                                it != ViewAction.PREVIEW_UNSAVED &&
+                                it != ViewAction.MCP_SERVER
                         }.map { it.label }
                 groups[3].rows.map { it.label } shouldContainExactly
                     listOf(EditorShortcut.FIND_NEXT.label, EditorShortcut.FIND_PREVIOUS.label)

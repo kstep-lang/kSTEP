@@ -9,6 +9,15 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: a built-in MCP server, read only (Welle MCP-1, ADR-0095). View > MCP Server... opens a dialog with a switch
+  (off by default), the port (7391, the next nine are tried when it is busy), the command preview and the buttons Copy Command,
+  Copy Token and Regenerate Token. The server listens on 127.0.0.1 only and checks method, path, Host, Origin and a bearer token
+  (kept in `mcp-token`, mode 0600) before it reads a request body; bodies are limited to 1 MiB. Two tools:
+  `kstep_desktop_get_status` and `kstep_desktop_get_script`. The status line shows "MCP" while the server runs and lights up for
+  a moment on an authenticated call. New error codes `KSTEP-D-050` (no free port), `KSTEP-D-051` (token not stored) and
+  `KSTEP-D-052` (settings not saved); new files `mcp.json` and `mcp-token` in the config folder; `jdk.httpserver` added to the
+  runtime of the packaged app. Only built and unit tested on macOS; not yet tried by hand with a real agent, and not on Windows or
+  Linux.
 * kSTEP Desktop: Help menu and shortcut list fixes from a hand test (Welle D3d-3, ADR-0076 update). About is now in the Help
   menu on every system, as the last entry; on macOS the application menu keeps a second About entry that opens the same
   dialog (the `aboutInAppMenu` switch is gone). The Keyboard Shortcuts dialog has a visible scroll bar, a width between 280 and

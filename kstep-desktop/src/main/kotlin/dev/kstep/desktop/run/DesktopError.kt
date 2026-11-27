@@ -69,4 +69,10 @@ object DesktopErrorCodes {
     const val SESSION_DIR_UNSAFE = "KSTEP-D-047"
     const val UNSAVED_RUN_WRITE_FAILED = "KSTEP-D-048"
     const val SCRIPT_DIR_MISMATCH = "KSTEP-D-049"
+
+    // The MCP server (ADR-0095): no free port in the fallback range, the token could not be stored, the settings could
+    // not be saved.
+    const val MCP_NO_FREE_PORT = "KSTEP-D-050"
+    const val MCP_TOKEN_WRITE_FAILED = "KSTEP-D-051"
+    const val MCP_SETTINGS_WRITE_FAILED = "KSTEP-D-052"
 }
