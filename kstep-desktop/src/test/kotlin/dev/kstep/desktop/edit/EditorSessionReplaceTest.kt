@@ -46,7 +46,7 @@ class EditorSessionReplaceTest :
                 session.open(file)
                 TestSupport.await(30_000) { session.view.value.state is EditorState.Editing } shouldBe true
                 session.view.value.dirty shouldBe false
-                val (t, caret) = TextReplace.replaceAt(text(session), 4, 3, "2")
+                val (t, caret) = TextReplace.replaceAt(text(session), 4, 7, "2")
                 session.replaceText(t, caret)
                 text(session) shouldBe "one 2"
                 session.view.value.dirty shouldBe true

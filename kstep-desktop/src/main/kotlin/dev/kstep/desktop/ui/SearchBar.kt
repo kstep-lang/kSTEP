@@ -130,7 +130,8 @@ private fun BarField(
 
 /**
  * The find bar (and, with [withReplace], the replace row): a 32 dp line that pushes the text down (no overlay).
- * Case matching is a labelled toggle ("Aa"), there is no regular expression and no whole-word switch (ADR-0067).
+ * Three labelled toggles follow the field: "Aa" (match case), `\b` (whole word) and `.*` (regular expression, the safe
+ * subset of ADR-0090). An invalid pattern turns the field border red and replaces the counter by the message.
  */
 @Composable
 internal fun FindBar(
@@ -139,6 +140,9 @@ internal fun FindBar(
     colors: EditorColors,
     counter: String,
     matchCase: Boolean,
+    wholeWord: Boolean,
+    regex: Boolean,
+    queryInvalid: Boolean,
     canReplace: Boolean,
     replaceAllEnabled: Boolean,
     replaceAllHint: String?,
@@ -146,6 +150,8 @@ internal fun FindBar(
     onQuery: (String) -> Unit,
     onReplacement: (String) -> Unit,
     onMatchCase: (Boolean) -> Unit,
+    onWholeWord: (Boolean) -> Unit,
+    onRegex: (Boolean) -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onReplace: () -> Unit,
@@ -167,17 +173,21 @@ internal fun FindBar(
     ) {
         BarField(
             initialQuery,
-            "Find",
+            SearchBarText.findPlaceholder(regex),
             colors,
             TextSearch::sanitizeQuery,
             onQuery,
             onQueryFocus,
             queryFocus,
             Modifier.width(220.dp),
+            invalid = queryInvalid,
             selectAllOnOpen = true,
             openKey = bar.nonce,
         )
         BarButton("Aa", colors, active = matchCase, onClick = { onMatchCase(!matchCase) })
+        BarButton("\\b", colors, active = wholeWord, onClick = { onWholeWord(!wholeWord) })
+        BarButton(".*", colors, active = regex, onClick = { onRegex(!regex) })
+        Box(Modifier.width(8.dp))
         BarButton("‹", colors, onClick = onPrevious)
         BarButton("›", colors, onClick = onNext)
         Text(
@@ -200,7 +210,7 @@ internal fun FindBar(
         ) {
             BarField(
                 initialReplacement,
-                "Replace with",
+                SearchBarText.replacePlaceholder(regex),
                 colors,
                 TextReplace::sanitizeReplacement,
                 onReplacement,

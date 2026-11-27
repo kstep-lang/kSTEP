@@ -9,6 +9,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: regular-expression search, whole word and group references in Replace (Welle D2c-4c, ADR-0090). The find bar
+  has the switches `Aa`, `\b` (whole word) and `.*` (regex). The regex is a non-backtracking subset (a Pike VM, so no pattern
+  can freeze the window): literals, `.`, classes, `^ $ \b \B`, groups, `|` and greedy quantifiers; back-references,
+  look-around and lazy quantifiers are refused with a short message. Every limit is a count, not a clock (pattern 256
+  characters, repeat 100, program 2,000 instructions, text 1 MiB, 10,000 matches, 50 million steps). Replace knows `$0`..`$9`
+  and `$$` with regex on; search and replace run off the UI thread. No new error code, no new dependency, `layout.json`
+  unchanged. Not checked by hand in the window.
+
 * kSTEP Desktop: DSL names in the editor come from a completeness-tested list (Welle D2c-4b, ADR-0089). `styleFaces`,
   `styleEdges`, `styleInstance`, `inputFile` and `readInput` are now coloured; a test fails when a public script function is
   missing from the list; the incremental tokenizer resets itself when the name set changes. No new error code, no new

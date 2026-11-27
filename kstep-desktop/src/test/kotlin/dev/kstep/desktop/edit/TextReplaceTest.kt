@@ -70,12 +70,84 @@ class TextReplaceTest :
         }
 
         "replace at one position" {
-            TextReplace.replaceAt("hello world", 6, 5, "kSTEP") shouldBe ("hello kSTEP" to 11)
+            TextReplace.replaceAt("hello world", 6, 11, "kSTEP") shouldBe ("hello kSTEP" to 11)
         }
 
         "the replacement is sanitised" {
             TextReplace.sanitizeReplacement("a\r\nb") shouldBe "ab"
             TextReplace.sanitizeReplacement("x".repeat(5000)).length shouldBe 4096
             TextReplace.sanitizeReplacement("x".repeat(4095) + "😀") shouldBe "x".repeat(4095)
+        }
+
+        fun rx(
+            p: String,
+            matchCase: Boolean = true,
+        ) = (SearchPattern.compile(p, true, matchCase, false) as SearchPattern.Compile.Ok).pattern
+
+        fun rall(
+            text: String,
+            p: String,
+            r: String,
+        ) = TextReplace.replaceAllChecked(text, rx(p), r)
+
+        "group references: $0 $1 $$ and the dollar signs that stay" {
+            (rall("ab cd", "(\\w)(\\w)", "$2$1") as TextReplace.Outcome.Ok).text shouldBe "ba dc"
+            (rall("ab", "a(b)", "[$0|$1]") as TextReplace.Outcome.Ok).text shouldBe "[ab|b]"
+            (rall("ab", "ab", "$$1") as TextReplace.Outcome.Ok).text shouldBe "$1"
+            (rall("ab", "ab", "\$x") as TextReplace.Outcome.Ok).text shouldBe "\$x"
+            (rall("ab", "ab", "cost$") as TextReplace.Outcome.Ok).text shouldBe "cost$"
+            (rall("ab", "(a)b", "$12") as TextReplace.Outcome.Ok).text shouldBe "a2"
+        }
+
+        "a group that does not exist is refused, one that did not take part is empty" {
+            rall("ab", "ab", "$1") shouldBe TextReplace.Outcome.BadTemplate(1)
+            rall("ab", "(a)(b)", "$9") shouldBe TextReplace.Outcome.BadTemplate(9)
+            (rall("b", "(a)?b", "<$1>") as TextReplace.Outcome.Ok).text shouldBe "<>"
+        }
+
+        "a literal search never interprets the dollar sign" {
+            all("a", "a", "$1$$").shouldBeInstanceOf<TextReplace.Outcome.Ok>().text shouldBe "$1$$"
+        }
+
+        "empty matches are replaced where they are" {
+            (rall("ab", "x*", "-") as TextReplace.Outcome.Ok).text shouldBe "-a-b-"
+            (rall("bab", "a*", "-") as TextReplace.Outcome.Ok).text shouldBe "-b-b-"
+        }
+
+        "a variable-length replacement is checked against the limits" {
+            val text = "ab".repeat(5000)
+            rall(text, "(ab)", "$1".repeat(1000)) shouldBe TextReplace.Outcome.TooLarge
+            rall(text, "(ab)", "$1$1").shouldBeInstanceOf<TextReplace.Outcome.Ok>()
+        }
+
+        "an incomplete search refuses Replace all, a huge text too" {
+            val text = "a".repeat(SafeRegex.MAX_TEXT_CHARS + 1)
+            rall(text, "a", "b") shouldBe TextReplace.Outcome.TextTooLarge
+            rall("a".repeat(10_001), "a", "b") shouldBe TextReplace.Outcome.TooManyMatches
+        }
+
+        "replace one: the match at or after the caret, with its groups" {
+            val ok =
+                TextReplace
+                    .replaceOne(
+                        "x1 y2 z3",
+                        rx("(\\w)(\\d)"),
+                        "$2$1",
+                        3,
+                    ).shouldBeInstanceOf<TextReplace.Outcome.Ok>()
+            ok.text shouldBe "x1 2y z3"
+            ok.caret shouldBe 5
+            TextReplace
+                .replaceOne("x1 y2", rx("(\\w)(\\d)"), "$2$1", 4)
+                .shouldBeInstanceOf<TextReplace.Outcome.Ok>()
+                .text shouldBe "1x y2"
+            TextReplace.replaceOne("x", rx("y"), "z", 0) shouldBe TextReplace.Outcome.NoMatches
+        }
+
+        "a huge expansion of one whole-text match is refused before it is built" {
+            val text = ("x".repeat(9_999) + "\n").repeat(100)
+            val template = "$0".repeat(2048)
+            rall(text, "[\\s\\S]+", template) shouldBe TextReplace.Outcome.TooLarge
+            TextReplace.replaceOne(text, rx("[\\s\\S]+"), template, 0) shouldBe TextReplace.Outcome.TooLarge
         }
     })

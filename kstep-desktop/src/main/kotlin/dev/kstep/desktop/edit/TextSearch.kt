@@ -1,19 +1,26 @@
 package dev.kstep.desktop.edit
 
-/** Literal text search of the editor (ADR-0067): linear, no regular expressions, bounded in every dimension. */
+/** Text search of the editor (ADR-0067, ADR-0090): literal or the safe regex subset, linear, bounded in every dimension. */
 object TextSearch {
     const val MAX_QUERY_CHARS = 256
     const val MAX_MATCHES = 10_000
     private const val CHECK_INTERVAL = 8192
 
+    enum class Limit { NONE, MATCHES, STEP_BUDGET, TEXT_TOO_LARGE }
+
     class Result(
         val starts: IntArray,
-        val length: Int,
+        val ends: IntArray,
         val truncated: Boolean,
-        val query: String,
-        val matchCase: Boolean,
+        val pattern: SearchPattern?,
+        val limit: Limit = Limit.NONE,
+        internal val steps: Long = 0,
+        /** `count x slotCount` capture slots of a regex search that asked for them. */
+        internal val groups: IntArray? = null,
     ) {
         val count: Int get() = starts.size
+
+        fun lengthOf(i: Int): Int = ends[i] - starts[i]
 
         /** Index of the first match starting at or after [offset]; wraps to 0; -1 when there is no match. */
         fun firstAtOrAfter(offset: Int): Int {
@@ -31,7 +38,11 @@ object TextSearch {
 
         fun previous(current: Int): Int = if (starts.isEmpty()) -1 else (current - 1).mod(starts.size)
 
-        /** Indexes of the matches that touch [fromOffset, toOffset), at most [cap] (binary search for the start). */
+        /**
+         * Indexes of the matches that touch [fromOffset, toOffset), at most [cap]. The matches are sorted and disjoint,
+         * so both `starts` and `ends` grow; the binary search runs over `ends`. An empty match counts when it lies in
+         * the window.
+         */
         fun inRange(
             fromOffset: Int,
             toOffset: Int,
@@ -40,10 +51,10 @@ object TextSearch {
             if (starts.isEmpty() || toOffset <= fromOffset) return IntRange.EMPTY
             var lo = 0
             var hi = starts.size
-            val from = fromOffset - length + 1
             while (lo < hi) {
                 val mid = (lo + hi) ushr 1
-                if (starts[mid] < from) lo = mid + 1 else hi = mid
+                val touches = ends[mid] > fromOffset || starts[mid] >= fromOffset
+                if (touches) hi = mid else lo = mid + 1
             }
             var end = lo
             while (end < starts.size && starts[end] < toOffset && end - lo < cap) end++
@@ -53,17 +64,93 @@ object TextSearch {
 
     private val EMPTY_INTS = IntArray(0)
 
+    private fun empty(
+        pattern: SearchPattern?,
+        limit: Limit = Limit.NONE,
+    ) = Result(EMPTY_INTS, EMPTY_INTS, false, pattern, limit)
+
+    /** The old literal entry point, kept for the callers that only know a query (the part locator, the tests). */
     fun find(
         text: String,
         query: String,
         matchCase: Boolean,
         maxMatches: Int = MAX_MATCHES,
         shouldContinue: () -> Boolean = { true },
+    ): Result = find(text, SearchPattern.Literal(query, matchCase, false), maxMatches, shouldContinue)
+
+    fun find(
+        text: String,
+        pattern: SearchPattern,
+        maxMatches: Int = MAX_MATCHES,
+        shouldContinue: () -> Boolean = { true },
+        captureGroups: Boolean = false,
+    ): Result =
+        when (pattern) {
+            is SearchPattern.Literal -> findLiteral(text, pattern, maxMatches, shouldContinue)
+            is SearchPattern.Regex -> findRegex(text, pattern, maxMatches, shouldContinue, captureGroups)
+        }
+
+    private fun findRegex(
+        text: String,
+        pattern: SearchPattern.Regex,
+        maxMatches: Int,
+        shouldContinue: () -> Boolean,
+        captureGroups: Boolean,
     ): Result {
+        if (text.length > SafeRegex.MAX_TEXT_CHARS) return empty(pattern, Limit.TEXT_TOO_LARGE)
+        val run =
+            SafeRegex.findAll(
+                text,
+                pattern.compiled.program,
+                maxMatches,
+                captures = captureGroups,
+                shouldContinue = shouldContinue,
+            ) ?: return empty(pattern)
+        val limit =
+            when {
+                run.budgetExhausted -> Limit.STEP_BUDGET
+                run.truncated -> Limit.MATCHES
+                else -> Limit.NONE
+            }
+        return Result(
+            run.starts,
+            run.ends,
+            limit != Limit.NONE,
+            pattern,
+            limit,
+            run.steps,
+            run.groups,
+        )
+    }
+
+    private fun isAsciiWord(cp: Int): Boolean =
+        cp in 'a'.code..'z'.code || cp in 'A'.code..'Z'.code || cp in '0'.code..'9'.code || cp == '_'.code
+
+    /** `\b` semantics at [start] and [end] of a match (the same as the regex path wraps its pattern in). */
+    private fun wordBounded(
+        text: String,
+        start: Int,
+        end: Int,
+    ): Boolean {
+        val before = if (start > 0) text.codePointBefore(start) else -1
+        val first = text.codePointAt(start)
+        val last = text.codePointBefore(end)
+        val after = if (end < text.length) text.codePointAt(end) else -1
+        return isAsciiWord(before) != isAsciiWord(first) && isAsciiWord(last) != isAsciiWord(after)
+    }
+
+    private fun findLiteral(
+        text: String,
+        pattern: SearchPattern.Literal,
+        maxMatches: Int,
+        shouldContinue: () -> Boolean,
+    ): Result {
+        val query = pattern.query
+        val matchCase = pattern.matchCase
         if (query.isEmpty() ||
             query.length > text.length
         ) {
-            return Result(EMPTY_INTS, query.length, false, query, matchCase)
+            return empty(pattern)
         }
         val len = query.length
         val found = ArrayList<Int>()
@@ -76,7 +163,7 @@ object TextSearch {
         val firstUpper = first.uppercaseChar()
         while (i <= last) {
             if (i >= nextCheck) {
-                if (!shouldContinue()) return Result(EMPTY_INTS, len, false, query, matchCase)
+                if (!shouldContinue()) return empty(pattern)
                 nextCheck = i + CHECK_INTERVAL
             }
             val at =
@@ -95,14 +182,14 @@ object TextSearch {
                         }
                         p++
                         if (p >= nextCheck) {
-                            if (!shouldContinue()) return Result(EMPTY_INTS, len, false, query, matchCase)
+                            if (!shouldContinue()) return empty(pattern)
                             nextCheck = p + CHECK_INTERVAL
                         }
                     }
                     hit
                 }
             if (at < 0 || at > last) break
-            if (splitsPair(text, at, at + len)) {
+            if (splitsPair(text, at, at + len) || (pattern.wholeWord && !wordBounded(text, at, at + len))) {
                 i = at + 1
                 continue
             }
@@ -113,7 +200,14 @@ object TextSearch {
             found.add(at)
             i = at + len
         }
-        return Result(found.toIntArray(), len, truncated, query, matchCase)
+        val starts = found.toIntArray()
+        return Result(
+            starts,
+            IntArray(starts.size) { starts[it] + len },
+            truncated,
+            pattern,
+            if (truncated) Limit.MATCHES else Limit.NONE,
+        )
     }
 
     private fun splitsPair(

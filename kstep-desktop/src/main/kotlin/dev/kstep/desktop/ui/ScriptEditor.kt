@@ -22,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -63,8 +64,10 @@ import dev.kstep.desktop.edit.Indent
 import dev.kstep.desktop.edit.LineGeometry
 import dev.kstep.desktop.edit.LineIndex
 import dev.kstep.desktop.edit.LineJump
+import dev.kstep.desktop.edit.SafeRegex
 import dev.kstep.desktop.edit.ScrollTarget
 import dev.kstep.desktop.edit.SearchBarText
+import dev.kstep.desktop.edit.SearchPattern
 import dev.kstep.desktop.edit.TableLineGeometry
 import dev.kstep.desktop.edit.TextReplace
 import dev.kstep.desktop.edit.TextSearch
@@ -86,6 +89,7 @@ private const val FONT_SIZE_SP = 13f
 private const val LINE_HEIGHT_FACTOR = 1.45f
 private const val SEARCH_DEBOUNCE_MS = 150L
 private const val NOTICE_MS = 3000L
+private const val PATTERN_ERROR_DELAY_MS = 300L
 private const val MAX_DRAWN_MATCHES = 500
 
 /** A request to bring a line into view (an error-bar click or a block jump); [nonce] makes equal lines distinct. */
@@ -254,6 +258,8 @@ internal fun ScriptEditor(
     var query by remember { mutableStateOf("") }
     var replacement by remember { mutableStateOf("") }
     var matchCase by remember { mutableStateOf(false) }
+    var wholeWord by remember { mutableStateOf(false) }
+    var regex by remember { mutableStateOf(false) }
     var goToInput by remember { mutableStateOf("") }
     var search by remember { mutableStateOf<TextSearch.Result?>(null) }
     var current by remember { mutableStateOf(-1) }
@@ -263,16 +269,37 @@ internal fun ScriptEditor(
     var scrollRequest by remember { mutableStateOf<ScrollRequest?>(null) }
     var scrollNonce by remember { mutableStateOf(0) }
     val findOpen = bar is EditorBar.Find
+    // The compiled pattern is part of every key below: the case folding is compiled into a regex program (ADR-0090).
+    val compiled =
+        remember(query, regex, matchCase, wholeWord) { SearchPattern.compile(query, regex, matchCase, wholeWord) }
+    val pattern = (compiled as? SearchPattern.Compile.Ok)?.pattern
+    var patternError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(compiled) {
+        patternError = null
+        if (compiled is SearchPattern.Compile.Rejected) {
+            // Frame time, not wall-clock time: the delay is the same in the app and in a headless scene test.
+            val started = withFrameNanos { it }
+            while (withFrameNanos { it } - started < PATTERN_ERROR_DELAY_MS * 1_000_000L) Unit
+            patternError = SearchBarText.patternError(compiled.reason, compiled.escapeChar)
+        }
+    }
+    // A text taken from the document (selection, "show in script") is a literal: with regex on it is quoted, never
+    // interpreted, and the switch is left alone. Too long once quoted: not taken over.
+    val asQuery: (String) -> String? = { raw ->
+        val clean = TextSearch.sanitizeQuery(raw)
+        val q = if (regex) SafeRegex.quote(clean) else clean
+        if (q.length <= TextSearch.MAX_QUERY_CHARS) q else null
+    }
     LaunchedEffect(findRequest?.nonce) {
         val request = findRequest ?: return@LaunchedEffect
-        query = TextSearch.sanitizeQuery(request.query)
+        query = asQuery(request.query) ?: query
         barNonce++
         pendingNavigate = false
         bar = EditorBar.Find(false, barNonce)
     }
 
-    LaunchedEffect(findOpen, query, matchCase, field.text) {
-        if (!findOpen || query.isEmpty()) {
+    LaunchedEffect(findOpen, pattern, field.text) {
+        if (!findOpen || query.isEmpty() || pattern == null) {
             search = null
             current = -1
             return@LaunchedEffect
@@ -280,7 +307,7 @@ internal fun ScriptEditor(
         if (!pendingNavigate) delay(SEARCH_DEBOUNCE_MS)
         val text = field.text
         val found =
-            withContext(Dispatchers.Default) { TextSearch.find(text, query, matchCase, shouldContinue = { isActive }) }
+            withContext(Dispatchers.Default) { TextSearch.find(text, pattern, shouldContinue = { isActive }) }
         search = found
         current = found.firstAtOrAfter(field.selection.start)
         if (pendingNavigate) {
@@ -316,8 +343,9 @@ internal fun ScriptEditor(
         barNonce++
         val selected = field.selection
         if (!selected.collapsed && selected.length <= TextSearch.MAX_QUERY_CHARS) {
-            val picked = TextSearch.sanitizeQuery(field.text.substring(selected.min, selected.max))
-            if (picked.isNotEmpty() && picked == field.text.substring(selected.min, selected.max)) query = picked
+            val raw = field.text.substring(selected.min, selected.max)
+            val picked = TextSearch.sanitizeQuery(raw)
+            if (picked.isNotEmpty() && picked == raw) query = asQuery(raw) ?: query
         }
         bar = EditorBar.Find(withReplace, barNonce)
         pendingNavigate = query.isNotEmpty()
@@ -401,33 +429,62 @@ internal fun ScriptEditor(
             null -> Unit
         }
     }
-    val doReplace: () -> Unit = {
-        if (editing != null && query.isNotEmpty()) {
-            session.onTextChanged(field.text, field.selection.end)
-            val fresh = TextSearch.find(field.text, query, matchCase)
-            val idx = fresh.firstAtOrAfter(field.selection.start)
-            if (idx >= 0 && !fresh.truncated) {
-                val (text, caret) = TextReplace.replaceAt(field.text, fresh.starts[idx], fresh.length, replacement)
-                if (TextReplace.withinLimits(text)) {
-                    session.replaceText(text, caret)
+    // Replace runs off the UI thread (a regex search can take a while); the result is only applied when the text is
+    // still the one it was computed from (ADR-0090).
+    var replaceBusy by remember { mutableStateOf(false) }
+    val applyReplace: (String, TextReplace.Outcome, Boolean) -> Unit = { snapshot, outcome, all ->
+        if (field.text != snapshot) {
+            notice = SearchBarText.TEXT_CHANGED
+        } else {
+            when (outcome) {
+                is TextReplace.Outcome.Ok -> {
+                    session.replaceText(outcome.text, outcome.caret.coerceAtMost(outcome.text.length))
                     onUserEdit()
-                    pendingNavigate = true
-                } else {
-                    notice = SearchBarText.replaceError(TextReplace.Outcome.TooLarge)
+                    if (all) notice = SearchBarText.replaced(outcome.count) else pendingNavigate = true
+                }
+                TextReplace.Outcome.NoMatches -> if (all) notice = SearchBarText.replaceError(outcome)
+                else -> notice = SearchBarText.replaceError(outcome)
+            }
+        }
+    }
+    val doReplace: () -> Unit = {
+        val pat = pattern
+        if (editing != null && query.isNotEmpty() && pat != null && !replaceBusy) {
+            session.onTextChanged(field.text, field.selection.end)
+            val snapshot = field.text
+            val from = field.selection.start
+            val repl = replacement
+            replaceBusy = true
+            scope.launch {
+                try {
+                    val outcome =
+                        withContext(Dispatchers.Default) {
+                            TextReplace.replaceOne(snapshot, pat, repl, from, shouldContinue = { isActive })
+                        }
+                    applyReplace(snapshot, outcome, false)
+                } finally {
+                    replaceBusy = false
                 }
             }
         }
     }
     val doReplaceAll: () -> Unit = {
-        if (editing != null && query.isNotEmpty()) {
+        val pat = pattern
+        if (editing != null && query.isNotEmpty() && pat != null && !replaceBusy) {
             session.onTextChanged(field.text, field.selection.end)
-            when (val outcome = TextReplace.replaceAllChecked(field.text, query, matchCase, replacement)) {
-                is TextReplace.Outcome.Ok -> {
-                    session.replaceText(outcome.text, outcome.caret.coerceAtMost(outcome.text.length))
-                    onUserEdit()
-                    notice = SearchBarText.replaced(outcome.count)
+            val snapshot = field.text
+            val repl = replacement
+            replaceBusy = true
+            scope.launch {
+                try {
+                    val outcome =
+                        withContext(Dispatchers.Default) {
+                            TextReplace.replaceAllChecked(snapshot, pat, repl, shouldContinue = { isActive })
+                        }
+                    applyReplace(snapshot, outcome, true)
+                } finally {
+                    replaceBusy = false
                 }
-                else -> notice = SearchBarText.replaceError(outcome)
             }
         }
     }
@@ -517,6 +574,12 @@ internal fun ScriptEditor(
             }
             return@Column
         }
+        val templateError =
+            if (pattern == null) {
+                null
+            } else {
+                (TextReplace.compileTemplate(replacement, pattern) as? TextReplace.TemplateCompile.MissingGroup)?.group
+            }
         when (val open = bar) {
             is EditorBar.Find ->
                 FindBar(
@@ -524,12 +587,34 @@ internal fun ScriptEditor(
                     initialQuery = query,
                     initialReplacement = replacement,
                     colors = colors,
-                    counter = SearchBarText.counter(query, search, current),
+                    counter =
+                        if (compiled is SearchPattern.Compile.Rejected) {
+                            ""
+                        } else {
+                            SearchBarText.counter(
+                                query,
+                                search,
+                                current,
+                            )
+                        },
                     matchCase = matchCase,
-                    canReplace = editing != null && query.isNotEmpty(),
+                    wholeWord = wholeWord,
+                    regex = regex,
+                    queryInvalid = patternError != null,
+                    canReplace = editing != null && query.isNotEmpty() && pattern != null && templateError == null,
                     replaceAllEnabled = search?.truncated != true,
-                    replaceAllHint = if (search?.truncated == true) "Too many matches (over 10,000)" else null,
-                    notice = notice,
+                    replaceAllHint =
+                        when {
+                            templateError != null ->
+                                SearchBarText.replaceError(
+                                    TextReplace.Outcome.BadTemplate(templateError),
+                                )
+                            search?.limit == TextSearch.Limit.STEP_BUDGET ->
+                                SearchBarText.replaceError(TextReplace.Outcome.Incomplete)
+                            search?.truncated == true -> "Too many matches (over 10,000)"
+                            else -> null
+                        },
+                    notice = notice ?: patternError,
                     onQuery = {
                         query = it
                         pendingNavigate = true
@@ -537,6 +622,14 @@ internal fun ScriptEditor(
                     onReplacement = { replacement = it },
                     onMatchCase = {
                         matchCase = it
+                        pendingNavigate = true
+                    },
+                    onWholeWord = {
+                        wholeWord = it
+                        pendingNavigate = true
+                    },
+                    onRegex = {
+                        regex = it
                         pendingNavigate = true
                     },
                     onPrevious = { navigate(search?.previous(current) ?: -1) },
@@ -679,9 +772,11 @@ internal fun ScriptEditor(
                                         val shown = found.inRange(from, to, MAX_DRAWN_MATCHES)
                                         for (i in shown) {
                                             val start = found.starts[i]
-                                            if (start + found.length > textLayout.layoutInput.text.length) continue
+                                            // an empty match is drawn as a one-character marker
+                                            val end = if (found.lengthOf(i) == 0) start + 1 else found.ends[i]
+                                            if (end > textLayout.layoutInput.text.length) continue
                                             drawPath(
-                                                textLayout.getPathForRange(start, start + found.length),
+                                                textLayout.getPathForRange(start, end),
                                                 if (i ==
                                                     current
                                                 ) {

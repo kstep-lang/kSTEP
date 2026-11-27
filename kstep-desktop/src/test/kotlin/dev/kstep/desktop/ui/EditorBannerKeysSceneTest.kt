@@ -26,6 +26,7 @@ import dev.kstep.desktop.draft.RecoveryOffer
 import dev.kstep.desktop.edit.EditorState
 import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.edit.LineEnding
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import java.nio.file.Path
@@ -52,14 +53,16 @@ class EditorBannerKeysSceneTest :
         class Harness {
             val calls = mutableListOf<String>()
             var editorFocused = false
+            var bannerHasFocus = false
 
             /** The focus as it was when the keys were done, before closing the scene clears every focus. */
             var editorFocusedAtEnd = false
         }
 
-        fun run(body: (ImageComposeScene, Harness, (Int) -> Unit) -> Unit): Harness {
+        fun run(body: (SceneClock, Harness, (Int) -> Unit) -> Unit): Harness {
             val h = Harness()
             val scene = ImageComposeScene(width = 600, height = 200)
+            val clock = SceneClock(scene)
             try {
                 var signal by mutableStateOf(0)
                 scene.setContent {
@@ -70,7 +73,7 @@ class EditorBannerKeysSceneTest :
                             dark = false,
                             onReload = { h.calls += "reload" },
                             onKeepMine = { h.calls += "keep" },
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().onFocusChanged { h.bannerHasFocus = it.hasFocus },
                             onRestore = { h.calls += "restore" },
                             onDiscard = { h.calls += "discard" },
                             focusSignal = signal,
@@ -86,11 +89,10 @@ class EditorBannerKeysSceneTest :
                         )
                     }
                 }
-                scene.render()
-                body(scene, h) {
+                clock.frame()
+                body(clock, h) {
                     signal = it
-                    scene.render()
-                    scene.render()
+                    clock.renderUntil("banner button focus") { h.bannerHasFocus }
                 }
                 h.editorFocusedAtEnd = h.editorFocused
             } finally {
@@ -99,41 +101,46 @@ class EditorBannerKeysSceneTest :
             return h
         }
 
-        fun ImageComposeScene.press(key: Key) {
-            sendKeyEvent(key(KeyEventType.KeyDown, key))
-            render()
-            sendKeyEvent(key(KeyEventType.KeyUp, key))
-            render()
+        fun SceneClock.press(key: Key) {
+            scene.sendKeyEvent(key(KeyEventType.KeyDown, key))
+            frame()
+            scene.sendKeyEvent(key(KeyEventType.KeyUp, key))
+            frame()
         }
 
         "the shortcut puts the focus on Restore, Tab moves to Discard, Enter presses it and the editor gets the focus"
             .config(timeout = 60.seconds) {
                 val h =
-                    run { scene, _, focusBanner ->
+                    run { clock, h, focusBanner ->
                         focusBanner(1)
-                        scene.press(Key.Tab)
-                        scene.press(Key.Enter)
+                        clock.press(Key.Tab)
+                        clock.press(Key.Enter)
+                        clock.renderUntil("Discard pressed") { h.calls.isNotEmpty() }
+                        clock.renderUntil("editor focus") { h.editorFocused }
                     }
-                h.calls shouldBe listOf("discard")
+                withClue("calls=${h.calls}") { h.calls shouldBe listOf("discard") }
                 h.editorFocusedAtEnd shouldBe true
             }
 
-        "Enter on the first button presses Restore exactly once" {
+        "Enter on the first button presses Restore exactly once".config(timeout = 60.seconds) {
             val h =
-                run { scene, _, focusBanner ->
+                run { clock, h, focusBanner ->
                     focusBanner(1)
-                    scene.press(Key.Enter)
+                    clock.press(Key.Enter)
+                    clock.renderUntil("Restore pressed") { h.calls.isNotEmpty() }
+                    clock.advance(200) // a second, wrong press would show up here
                 }
-            h.calls shouldBe listOf("restore")
+            withClue("calls=${h.calls}") { h.calls shouldBe listOf("restore") }
         }
 
-        "Escape leaves without a callback" {
+        "Escape leaves without a callback".config(timeout = 60.seconds) {
             val h =
-                run { scene, _, focusBanner ->
+                run { clock, h, focusBanner ->
                     focusBanner(1)
-                    scene.press(Key.Escape)
+                    clock.press(Key.Escape)
+                    clock.renderUntil("editor focus") { h.editorFocused }
                 }
-            h.calls shouldBe emptyList()
+            withClue("calls=${h.calls}") { h.calls shouldBe emptyList() }
             h.editorFocusedAtEnd shouldBe true
         }
     })

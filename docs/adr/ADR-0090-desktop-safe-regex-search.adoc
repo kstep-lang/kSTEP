@@ -1,0 +1,60 @@
+= ADR-0090: Safe Regular-Expression and Whole-Word Search (Welle D2c-4c)
+:toc:
+
+== Status
+
+Accepted (Welle D2c-4c). Scope: `kstep-desktop` only (`edit/SafeRegex`, `edit/SearchPattern`, `edit/TextSearch`, `edit/TextReplace`, `edit/SearchBarText`, `ui/SearchBar`, `ui/ScriptEditor`) and tests. No new dependency, no new error code (messages are texts in the bar, like `SearchBarText.replaceError`; `KSTEP-D-050` stays free), no persistent setting (the switches are not stored), `layout.json` unchanged. Not checked by hand in a real window.
+
+== Context
+
+ADR-0067 D7 postponed regular-expression search "only with an engine that cannot backtrack catastrophically, or a time limit", and a whole-word switch. The find bar searches a script of up to 1 MiB while you type, so a hostile or merely unlucky pattern must not freeze the window.
+
+== Decision
+
+D1. Engine: a Pike VM (`SafeRegex`), written for the desktop. It runs in O(text x program) for every pattern: each program counter is visited at most once per text position, so `(a+)+$` on 100,000 "a" and a "!" costs the same as `a+$`.
+
+D2. Rejected alternatives. `java.util.regex` with a time limit: the limit depends on the machine (a slow CI runner or a busy laptop changes the result), the only way to stop it is to interrupt a thread, and a test with a time limit is flaky by construction (lesson of Welle R). RE2/J: a new dependency and different semantics from what we document. A pre-scan of "dangerous" patterns: incomplete by nature (five audit rounds in Welle R kept finding variants).
+
+D3. Every limit is a count, never a clock: pattern 256 characters (the query limit), repeat `{m,n}` at most 100, program at most 2,000 instructions (computed bottom-up with saturation before anything is expanded, so `(a{100}){100}` is refused at once), nesting 32, capture groups 9, text for a regex search 1 MiB (over it: "File too large for regex search"), matches 10,000, VM steps 50,000,000 for one search (over it: the matches found so far are kept, the counter shows "N+ matches", and Replace all is refused as incomplete).
+
+D4. Grammar (everything else is rejected with a short message that never repeats the pattern):
+
+[cols="1,3"]
+|===
+| Literals, `.`
+| Any character except line breaks (`.` excludes `\n` and `\r`). A pair of surrogates is one character.
+| Classes
+| `[a-c]`, `[^x]`, `\d \w \s` and `\D \W \S`, also inside classes. `]` first in a class is a literal.
+| Anchors
+| `^` at the text start or after `\n`; `$` at the text end, before `\n` and before `\r\n`; `\b`, `\B`.
+| Groups
+| `( )` (at most 9) and `(?: )`.
+| Alternation
+| `a|b`; the first alternative that works wins (leftmost-first, as in Perl and Java).
+| Quantifiers
+| Greedy `* + ? {m} {m,} {m,n}`.
+| Escapes
+| `\n \t \r \f`, and a backslash before any ASCII punctuation character.
+|===
+
+Rejected: back-references (`\1`, `\k`), look-around, lazy and possessive quantifiers, inline flags and named groups, any other escape (the message names that one character, only if it is printable ASCII), an unknown `{` sequence (`a{x` is not read as text), a quantifier at the start, after `|` or `(`, or on an anchor.
+
+D5. Meaning of the character classes. `\w`, `\d`, `\s` and `\b` are ASCII only: an umlaut or an emoji is a boundary. Case folding (without "Aa") is per code point, `lower(upper(c))`, on both sides; classes test the character, its lower and its upper case, then negate. So "Straße" does not match "STRASSE" and "é" matches "É".
+
+D6. Empty matches advance by one code point. An empty match directly after a non-empty one is dropped: `a*` on "bab" gives [0,0], [1,2], [3,3] (Java and JavaScript would also report [2,2]). The highlight draws an empty match as a one-character marker.
+
+D7. Whole word. The literal search checks `\b` semantics at both ends of a hit (ASCII word characters), the regex search wraps the pattern as `\b(?:P)\b`, so both agree. A failed check continues at hit + 1 so "ab ab" is found in "xab ab".
+
+D8. Replace. With "regex" on, the replacement knows `$0` to `$9` (whole match and groups), `$$` is a dollar sign, any other `$` stays, `$12` is group 1 followed by "2", a group that did not take part is empty, a group beyond the pattern ("No group 9 in the pattern") disables Replace. The captures come from the same single VM pass that finds the matches. A literal search never interprets `$`. The result is counted while it is built and refused over the limits of `EditorText`. Many replacements are still one undo step.
+
+D9. The search and the replace never run on the UI thread. The result of Replace is applied only if the text is still the one it was computed from, otherwise a notice says "Text changed, try again". A selection or a "Show in Script" name that fills the find field is quoted (`SafeRegex.quote`) when regex is on; the switch is never flipped silently; a text that is too long once quoted is not taken over.
+
+D10. Bar. `Aa`, `\b` and `.*` follow the field. An invalid pattern clears the matches at once, the field border turns red and the message appears after 300 ms of frame time (not wall-clock time, so a headless test is deterministic); the counter stays empty meanwhile.
+
+D11. Banner test flake (found while preparing this wave). The failure in CI run 45909022284 was a failed assertion (`calls` was empty), not a timeout: the focus effect of the banner had not finished when Enter was sent, so the key reached no button, or the focus arrived between key down and key up. The tests now render frames until the banner reports focus (`SceneClock.renderUntil`) before sending keys, wait for the effect they check, and print the recorded calls on failure. The timeout of 60 s is a guard, not the fix. Stated as fixed only after a green CI run; locally 50 of 50 runs passed (see `docs/status.adoc`).
+
+== Consequences
+
+* Regex search is safe by construction and deterministic. It is not a full regular-expression dialect, and says so.
+* ADR-0067 D7 is superseded in part: regular-expression search and the whole-word switch exist.
+* Not covered: Unicode `\w` and `\b`, case folding across several characters ("ß" to "SS"), back-references, look-around, lazy quantifiers; no tooltip on the switches; not checked by hand in a real window.

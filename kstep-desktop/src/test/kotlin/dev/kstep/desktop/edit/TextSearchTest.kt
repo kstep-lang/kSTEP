@@ -37,8 +37,10 @@ class TextSearchTest :
         "special case folding keeps the match length and valid offsets" {
             for (q in listOf("ß", "İ", "ǅ", "ǆ", "ς", "σ")) {
                 val r = find("x${q}y$q", q, matchCase = false)
-                r.length shouldBe q.length
-                for (s in r.starts) (s + r.length <= 4 + q.length) shouldBe true
+                for (i in 0 until r.count) {
+                    r.lengthOf(i) shouldBe q.length
+                    (r.starts[i] + r.lengthOf(i) <= 4 + q.length) shouldBe true
+                }
             }
         }
 
@@ -111,5 +113,44 @@ class TextSearchTest :
                 TextSearch.find(mib, "a".repeat(100), mc).truncated shouldBe true
             }
             TextSearch.find("ab".repeat(524_288), "ab", false).truncated shouldBe true
+        }
+
+        fun whole(
+            text: String,
+            q: String,
+            matchCase: Boolean = true,
+        ) = TextSearch.find(text, SearchPattern.Literal(q, matchCase, true)).starts.toList()
+
+        "whole word keeps the edges: start, end, neighbours" {
+            whole("ab", "ab") shouldBe listOf(0)
+            whole("ab cab ab", "ab") shouldBe listOf(0, 7)
+            whole("xab ab", "ab") shouldBe listOf(4)
+            whole("ab_ ab1 ab", "ab") shouldBe listOf(8)
+            whole("(ab)", "ab") shouldBe listOf(1)
+        }
+
+        "whole word: ASCII word characters only, so an umlaut or an emoji is a boundary" {
+            whole("üab ab😀", "ab") shouldBe listOf(1, 4)
+            whole("Ab AB", "ab", matchCase = false) shouldBe listOf(0, 3)
+            whole("Ab AB", "ab", matchCase = true) shouldBe emptyList()
+        }
+
+        "whole word with a query that ends in a symbol follows the boundary rule" {
+            whole("foo(x) foo( ", "foo(") shouldBe listOf(0)
+        }
+
+        "inRange works with variable lengths and empty matches" {
+            val r =
+                TextSearch.Result(
+                    intArrayOf(0, 5, 5, 9),
+                    intArrayOf(3, 5, 8, 9),
+                    false,
+                    null,
+                )
+            r.inRange(3, 5).toList() shouldBe emptyList()
+            r.inRange(4, 6).toList() shouldBe listOf(1, 2)
+            r.inRange(5, 6).toList() shouldBe listOf(1, 2)
+            r.inRange(9, 10).toList() shouldBe listOf(3)
+            r.inRange(0, 100).toList() shouldBe listOf(0, 1, 2, 3)
         }
     })

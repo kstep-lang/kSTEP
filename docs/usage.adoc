@@ -1070,6 +1070,29 @@ are removed. The files contain your text: they are readable only by you (mode 06
 Limits: two instances editing the same file overwrite each other's draft (the last writer wins); after `kill -9` or a power
 failure the last two to twenty seconds are lost; you can delete the `drafts` folder at any time.
 
+=== Find and replace
+
+The Edit menu opens the find bar, with or without the replace row. Three switches follow the field: `Aa`
+matches case, `\b` matches whole words only, `.*` reads the field as a regular expression. A word is made of the ASCII letters,
+digits and `_`; an umlaut or an emoji ends a word.
+
+The regular expression is a safe subset that cannot freeze the window (ADR-0090):
+
+[cols="1,3"]
+|===
+| `.`  | any character except a line break
+| `[a-c]` `[^x]` `\d` `\w` `\s` `\D` `\W` `\S` | classes (`\d`, `\w`, `\s` are ASCII only)
+| `^` `$` `\b` `\B` | start and end of a line, word boundaries
+| `( )` `(?: )` `\|` | groups (at most 9 capturing) and alternation, the first alternative that works wins
+| `*` `+` `?` `{m}` `{m,}` `{m,n}` | greedy repeats (at most 100)
+|===
+
+Back-references, look-around, lazy and possessive repeats, inline flags and named groups are refused with a message. Limits:
+a pattern of 256 characters, 2,000 instructions after expansion, a file of 1 MiB, 10,000 matches. If a search needs too many
+steps it stops, the counter shows "N+ matches", and Replace all is refused. An empty match right after a match is not reported.
+In the replacement the dollar sign is only special with regex on: `$0` is the whole match, `$1` to `$9` the groups, `$$` a dollar
+sign; a group that does not exist disables Replace. A selection copied into the field is escaped while regex is on.
+
 === Starting the desktop from the CLI
 
 On macOS, with `kSTEP.app` built or installed (ADR-0082), `kstep desktop` starts the app:
