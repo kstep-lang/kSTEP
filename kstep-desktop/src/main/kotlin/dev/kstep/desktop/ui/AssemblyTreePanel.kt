@@ -47,6 +47,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -66,10 +67,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.model.PartTable
 import dev.kstep.desktop.pick.AssemblyTree
+import dev.kstep.desktop.pick.ClickIntent
+import dev.kstep.desktop.pick.ClickIntents
 import dev.kstep.desktop.pick.PartMode
 import dev.kstep.desktop.pick.SelectionEvent
+import dev.kstep.desktop.pick.SelectionMachine
 import dev.kstep.desktop.pick.SelectionState
 import dev.kstep.desktop.pick.TreeKey
 import dev.kstep.desktop.pick.TreeViewLogic
@@ -77,6 +82,9 @@ import dev.kstep.desktop.pick.TreeViewState
 import dev.kstep.desktop.pick.VisibilityArrays
 import dev.kstep.desktop.pick.VisibilityCounts
 import dev.kstep.desktop.pick.visibilityHeaderText
+import androidx.compose.ui.input.pointer.isCtrlPressed as isPointerCtrlPressed
+import androidx.compose.ui.input.pointer.isMetaPressed as isPointerMetaPressed
+import androidx.compose.ui.input.pointer.isShiftPressed as isPointerShiftPressed
 
 internal val TREE_WIDTH = 240.dp
 private val LABEL = Color(0xFF8A8A8A)
@@ -95,6 +103,17 @@ private const val HIDDEN_TEXT_ALPHA = 0.45f
 private const val SELECT_FOCUS_ALPHA = 0.22f
 private const val SELECT_BLUR_ALPHA = 0.18f
 private const val HOVER_ALPHA = 0.06f
+
+/** One press on a tree row: where it landed, when, and with which button and modifier keys (ADR-0092). */
+internal class TreePress(
+    val zone: PressZone,
+    val nanos: Long,
+    val x: Float,
+    val secondary: Boolean,
+    val shift: Boolean,
+    val meta: Boolean,
+    val ctrl: Boolean,
+)
 
 /** The node of the current selection in [tree], `-1` when nothing (or nothing of this tree) is selected. */
 internal fun selectedNodeOf(
@@ -132,6 +151,12 @@ internal fun AssemblyTreePanel(
     modifier: Modifier = Modifier,
     /** A double click on a part (leaf) asks to show its name in the script (ADR-0068); groups keep fold/unfold. */
     onShowInScript: (String, Int) -> Unit = { _, _ -> },
+    /** One flag per part while more than one part is selected (ADR-0092), else `null`. */
+    multiMask: State<BooleanArray?> = remember { mutableStateOf(null) },
+    os: MenuOs = remember { MenuOs.current() },
+    /** The row's context menu was asked for (secondary click, Menu key, Shift+F10); the selection is already updated. */
+    onContext: (MenuRequest) -> Unit = {},
+    focusRequester: FocusRequester = remember { FocusRequester() },
 ) {
     val accent = if (dark) ACCENT_DARK else ACCENT_LIGHT
     val panelBackground = lerp(background, if (dark) Color.White else Color.Black, if (dark) 0.04f else 0.03f)
@@ -139,8 +164,8 @@ internal fun AssemblyTreePanel(
     // depends on the tree and the open state only, never on selection or hover (30 hover events a second)
     val rows = remember(tree, view) { TreeViewLogic.visibleRows(tree, view) }
     val listState = rememberLazyListState()
-    val focusRequester = remember { FocusRequester() }
     var focused by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
     var lastPressNode by remember { mutableStateOf(-1) }
     var lastPressAt by remember { mutableStateOf(0L) }
 
@@ -151,6 +176,51 @@ internal fun AssemblyTreePanel(
             val part = tree.partOf(node)
             dispatch(SelectionEvent.ClickAt(part, table.parts[part].name, table.occurrenceOf(part)))
         }
+    }
+
+    /** The panel-relative pixel position just below the row of [node] (the header, then the row's offset). */
+    fun rowBottomPx(node: Int): Float {
+        val at = java.util.Arrays.binarySearch(rows, node)
+        val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == at }
+        val header = with(density) { HEADER_HEIGHT.toPx() }
+        return header + (item?.let { it.offset + it.size }?.toFloat() ?: with(density) { ROW_HEIGHT.toPx() })
+    }
+
+    /** Right-click and friends: a row that is not part of the selection replaces it, then the menu is requested. */
+    fun openContext(
+        node: Int,
+        xPx: Float,
+    ) {
+        if (tree.isGroup(node)) {
+            if (selection.value.selectedGroup != tree.key(node)) dispatch(SelectionEvent.SelectGroup(tree.key(node)))
+        } else {
+            val part = tree.partOf(node)
+            dispatch(SelectionEvent.ContextAt(part, table.parts[part].name, table.occurrenceOf(part)))
+        }
+        onContext(MenuRequest(MenuOrigin.Tree, xPx, rowBottomPx(node)))
+    }
+
+    fun toggleNode(node: Int) {
+        val part = tree.partOf(node)
+        val group = selection.value.selectedGroup?.let { tree.nodeOfKey(it) } ?: -1
+        dispatch(
+            SelectionEvent.TogglePart(
+                part,
+                table.parts[part].name,
+                table.occurrenceOf(part),
+                groupRefs = if (group >= 0) SelectionMachine.groupRefs(tree, group, table) else emptyList(),
+                groupTotal = if (group >= 0) tree.leafCount(group) else 0,
+            ),
+        )
+    }
+
+    fun rangeTo(node: Int) {
+        val s = selection.value
+        val anchorPart =
+            if (s.selectedGroup != null) -1 else s.anchorRef?.let { table.indexOfName(it.name, it.occurrence) } ?: -1
+        val anchorNode = if (anchorPart >= 0) tree.leafNodeOfPart(anchorPart) else -1
+        val range = TreeViewLogic.rangeRefs(tree, view, table, anchorNode, node)
+        dispatch(SelectionEvent.SelectRange(range.refs, range.total))
     }
 
     // a part chosen in the viewer opens its ancestors ...
@@ -183,6 +253,11 @@ internal fun AssemblyTreePanel(
             .semantics { contentDescription = "Assembly tree, ${table.parts.size} parts" }
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (event.key == Key.Menu || (event.key == Key.F10 && event.isShiftPressed)) {
+                    if (selectedNode < 0) return@onPreviewKeyEvent false
+                    onContext(MenuRequest(MenuOrigin.Tree, 0f, rowBottomPx(selectedNode)))
+                    return@onPreviewKeyEvent true
+                }
                 if (event.isMetaPressed || event.isCtrlPressed || event.isAltPressed) return@onPreviewKeyEvent false
                 // Spacebar cycles the visibility of the selection; without one the key stays free
                 if (visibilityAction(event.key, event.isShiftPressed, false, false, false, true) ==
@@ -205,7 +280,12 @@ internal fun AssemblyTreePanel(
                         else -> return@onPreviewKeyEvent false
                     }
                 // Escape only ends a selection; without one it must stay free for others
-                if (key == TreeKey.Escape && selectedNode < 0) return@onPreviewKeyEvent false
+                val anySelected = selectedNode >= 0 || selection.value.parts.isNotEmpty()
+                if (key == TreeKey.Escape && !anySelected) return@onPreviewKeyEvent false
+                if (key == TreeKey.Escape) {
+                    dispatch(SelectionEvent.Escape)
+                    return@onPreviewKeyEvent true
+                }
                 val step = TreeViewLogic.onKey(tree, view, rows, selectedNode, key)
                 if (step.view !== view) onView(step.view)
                 step.select?.let { selectNode(it.node) }
@@ -253,20 +333,33 @@ internal fun AssemblyTreePanel(
                     tree = tree,
                     node = node,
                     expanded = TreeViewLogic.isExpanded(tree, view, node),
-                    selected = selectedNode == node,
+                    selected =
+                        selectedNode == node ||
+                            (!tree.isGroup(node) && multiMask.value?.getOrNull(tree.partOf(node)) == true),
                     panelFocused = focused,
                     accent = accent,
                     dark = dark,
                     visibility = nodeVisibility?.getOrNull(node) ?: PartMode.VISIBLE,
                     onToggle = { onView(TreeViewLogic.toggle(tree, view, node)) },
                     onEye = { onCycleNode(node) },
-                    onPress = { zone, now ->
+                    onPress = { press ->
+                        val zone = press.zone
+                        val now = press.nanos
                         focusRequester.requestFocus()
-                        if (zone == PressZone.Eye) {
+                        val intent = ClickIntents.of(press.secondary, press.meta, press.ctrl, os)
+                        if (intent == ClickIntent.Menu) {
+                            openContext(node, press.x)
+                        } else if (zone == PressZone.Eye) {
                             // the eye changes the visibility only: no selection, no group toggle
                             onCycleNode(node)
                         } else if (zone == PressZone.Arrow) {
                             onView(TreeViewLogic.toggle(tree, view, node))
+                        } else if (intent == ClickIntent.Toggle && !tree.isGroup(node)) {
+                            lastPressNode = -1
+                            toggleNode(node)
+                        } else if (press.shift && !tree.isGroup(node)) {
+                            lastPressNode = -1
+                            rangeTo(node)
                         } else {
                             val doubleClick = lastPressNode == node && now - lastPressAt < DOUBLE_CLICK_NANOS
                             lastPressNode = node
@@ -307,7 +400,7 @@ private fun TreeRow(
     visibility: Byte,
     onToggle: () -> Unit,
     onEye: () -> Unit,
-    onPress: (zone: PressZone, nowNanos: Long) -> Unit,
+    onPress: (TreePress) -> Unit,
     onHover: (Boolean) -> Unit,
 ) {
     var hovered by remember { mutableStateOf(false) }
@@ -349,13 +442,25 @@ private fun TreeRow(
                 hovered = false
                 onHover(false)
             }.onPointerEvent(PointerEventType.Press) { event ->
-                if (!event.buttons.isPrimaryPressed) return@onPointerEvent
+                val secondary = event.buttons.isSecondaryPressed
+                if (!event.buttons.isPrimaryPressed && !secondary) return@onPointerEvent
                 val x =
                     event.changes
                         .firstOrNull()
                         ?.position
                         ?.x ?: return@onPointerEvent
-                onPress(pressZone(x, eyeStartPx, eyeEndPx, arrowStartPx, arrowEndPx, isGroup), System.nanoTime())
+                val mods = event.keyboardModifiers
+                onPress(
+                    TreePress(
+                        zone = pressZone(x, eyeStartPx, eyeEndPx, arrowStartPx, arrowEndPx, isGroup),
+                        nanos = System.nanoTime(),
+                        x = x,
+                        secondary = secondary,
+                        shift = mods.isPointerShiftPressed,
+                        meta = mods.isPointerMetaPressed,
+                        ctrl = mods.isPointerCtrlPressed,
+                    ),
+                )
             }.semantics(mergeDescendants = true) {
                 contentDescription = "$description, $visibilityName"
                 this.selected = selected

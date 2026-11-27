@@ -25,6 +25,8 @@ import dev.kstep.desktop.model.PartInfo
 import dev.kstep.desktop.pick.GroupInfo
 import dev.kstep.desktop.pick.GroupInspection
 import dev.kstep.desktop.pick.InspectionText
+import dev.kstep.desktop.pick.MultiInfo
+import dev.kstep.desktop.pick.MultiInspection
 import dev.kstep.desktop.pick.ShowInScriptMessage
 
 private val LABEL = Color(0xFF8A8A8A)
@@ -130,6 +132,33 @@ internal fun GroupInspectionPanel(
         Line("Triangles", GroupInspection.triangles(info))
         Line("Size", GroupInspection.size(info))
         Line("Center", InspectionText.point(info.center))
+        action?.let { ShowInScriptRow(it) }
+    }
+}
+
+/**
+ * The inspection panel of a multi-selection (ADR-0092): how many parts, their triangles and the common box, the first
+ * names (made safe to show). No mass: the model carries none. Show in Script is listed but disabled with its reason.
+ */
+@Composable
+internal fun MultiInspectionPanel(
+    info: MultiInfo,
+    names: List<String>,
+    background: Color,
+    modifier: Modifier = Modifier,
+    action: ShowInScriptUi? = null,
+) {
+    Column(
+        modifier
+            .width(260.dp)
+            .background(background.copy(alpha = 0.92f))
+            .border(1.dp, LABEL.copy(alpha = 0.5f))
+            .padding(10.dp),
+    ) {
+        Text(MultiInspection.title(info), fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
+        Line("Triangles", MultiInspection.triangles(info))
+        Line("Combined size", MultiInspection.size(info))
+        names.forEach { Text(it, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         action?.let { ShowInScriptRow(it) }
     }
 }

@@ -48,6 +48,7 @@ import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.key.Key
@@ -120,12 +121,19 @@ import dev.kstep.desktop.okf.PathCheck
 import dev.kstep.desktop.okf.WorkspaceEntry
 import dev.kstep.desktop.okf.WorkspaceState
 import dev.kstep.desktop.pick.AssemblyTree
+import dev.kstep.desktop.pick.CopyNames
 import dev.kstep.desktop.pick.GroupInspection
 import dev.kstep.desktop.pick.HoverThrottle
+import dev.kstep.desktop.pick.MaskMemo
+import dev.kstep.desktop.pick.MenuAction
+import dev.kstep.desktop.pick.MenuModel
+import dev.kstep.desktop.pick.MultiInspection
+import dev.kstep.desktop.pick.PartContextMenu
 import dev.kstep.desktop.pick.PartMode
 import dev.kstep.desktop.pick.PickIndex
 import dev.kstep.desktop.pick.SelectionEvent
 import dev.kstep.desktop.pick.SelectionMachine
+import dev.kstep.desktop.pick.SelectionNotices
 import dev.kstep.desktop.pick.SelectionState
 import dev.kstep.desktop.pick.ShowInScriptInput
 import dev.kstep.desktop.pick.ShowInScriptMessage
@@ -331,6 +339,10 @@ fun FrameWindowScope.DesktopApp(
     // a part NAME, so it survives a re-run that keeps the part.
     val parts: PartTable? = display?.parts
     val selection = remember { mutableStateOf(SelectionState()) }
+    // Context menu (ADR-0092): one request at a time, from the canvas or from the tree.
+    val menuRequest = remember { mutableStateOf<MenuRequest?>(null) }
+    val canvasFocus = remember { FocusRequester() }
+    val treeFocus = remember { FocusRequester() }
     val pickIndex =
         remember(display?.generation, openCount) {
             display?.mesh?.let { m ->
@@ -359,6 +371,7 @@ fun FrameWindowScope.DesktopApp(
         remember(visibilityView) { derivedStateOf { visibilityView.value?.canvas } }
     LaunchedEffect(display?.generation, openCount) {
         selection.value = SelectionMachine.reduce(selection.value, SelectionEvent.SceneReplaced(parts, tree))
+        menuRequest.value = null
         // a different file starts from the first-sight state, a re-run carries the open groups over
         val previous = if (shownOpenCount == openCount) shownTree else null
         treeView =
@@ -376,7 +389,16 @@ fun FrameWindowScope.DesktopApp(
     val picking =
         remember(pickIndex) {
             if (pickIndex != null && parts != null) {
-                DesktopPicking(pickIndex, parts, display?.generation ?: -1L, selection, visibilityView)
+                DesktopPicking(
+                    pickIndex,
+                    parts,
+                    display?.generation ?: -1L,
+                    selection,
+                    visibilityView,
+                    tree = tree,
+                    menu = menuRequest,
+                    onNotice = { transientNotice = SelectionNotices.text(it) },
+                )
             } else {
                 null
             }
@@ -396,6 +418,12 @@ fun FrameWindowScope.DesktopApp(
         }
     }
     val accent = if (dark) ACCENT_DARK else ACCENT_LIGHT
+    // The multi-selection mask is built when the selection changes, never on a hover (the list instance is kept).
+    val maskMemo = remember(parts) { MaskMemo() }
+    val multiMask =
+        remember(parts) {
+            derivedStateOf<BooleanArray?> { parts?.let { maskMemo.of(selection.value, it) } }
+        }
     val highlight =
         remember(parts, tree, dark) {
             derivedStateOf<CanvasHighlight?> {
@@ -417,13 +445,21 @@ fun FrameWindowScope.DesktopApp(
                             ),
                         selectedLast = chosen.last,
                         hoveredLast = over.last,
+                        selectedMask = multiMask.value,
                     )
                 }
             }
         }
+    val multiSelected = selection.value.more.isNotEmpty()
     val selectedPart: PartInfo? =
-        parts?.let { table ->
+        parts?.takeIf { !multiSelected }?.let { table ->
             SelectionMachine.selectedIndex(selection.value, table).takeIf { it >= 0 }?.let { table.parts[it] }
+        }
+    val multiInfo =
+        if (multiSelected && parts != null) {
+            MultiInspection.of(SelectionMachine.partIndices(selection.value, tree, parts), parts)
+        } else {
+            null
         }
 
     val selectedGroup =
@@ -840,6 +876,81 @@ fun FrameWindowScope.DesktopApp(
             },
         )
     }
+    // Context menu actions (ADR-0092). The selection is not changed by Hide, Isolate or Show All.
+    val menuPartsOrNull = parts
+    val menuModel: MenuModel? =
+        menuRequest.value?.let { req ->
+            if (menuPartsOrNull == null || visibilityScene == null) {
+                null
+            } else {
+                val groupName =
+                    selection.value.selectedGroup
+                        ?.let {
+                            tree?.nodeOfKey(
+                                it,
+                            )
+                        }?.takeIf { it >= 0 }
+                        ?.let { tree?.name(it) }
+                PartContextMenu.build(
+                    selection.value,
+                    menuPartsOrNull,
+                    tree,
+                    visibilityState,
+                    visibilityScene,
+                    showInScriptReason(selection.value.selected ?: groupName ?: ""),
+                    req.overPart,
+                )
+            }
+        }
+    val onMenuAction: (MenuAction) -> Unit = { action ->
+        val table = parts
+        val sel = selection.value
+        val indices = SelectionMachine.partIndices(sel, tree, table)
+        val groupNode = sel.selectedGroup?.let { tree?.nodeOfKey(it) } ?: -1
+        when (action) {
+            MenuAction.ShowInScript ->
+                if (groupNode >= 0 && tree != null) {
+                    showInScript(tree.name(groupNode), -1)
+                } else if (sel.selected != null && table != null) {
+                    showInScript(sel.selected, table.indexOfName(sel.selected, sel.occurrence))
+                }
+            MenuAction.Hide ->
+                visibilityScene?.let {
+                    visibilityState =
+                        VisibilityMachine.hideParts(visibilityState, it, indices)
+                }
+            MenuAction.Isolate ->
+                visibilityScene?.let { visibilityState = VisibilityMachine.isolateParts(visibilityState, it, indices) }
+            MenuAction.ShowAll -> visibilityState = VisibilityMachine.showAll(visibilityState)
+            MenuAction.CopyName -> {
+                val text =
+                    when {
+                        groupNode >= 0 && tree != null -> CopyNames.text(tree.name(groupNode))
+                        table != null -> CopyNames.text(sel.parts, table)
+                        else -> ""
+                    }
+                // only ever on this user action
+                scope.launch {
+                    if (!ClipboardText.write(
+                            clipboard,
+                            text,
+                        )
+                    ) {
+                        transientNotice = ClipboardNotices.NOT_COPIED
+                    }
+                }
+            }
+            MenuAction.SelectChildren ->
+                if (groupNode >= 0 && tree != null && table != null) {
+                    val refs = SelectionMachine.groupRefs(tree, groupNode, table)
+                    selection.value =
+                        SelectionMachine.reduce(
+                            selection.value,
+                            SelectionEvent.SelectParts(refs, tree.leafCount(groupNode)),
+                        )
+                }
+        }
+    }
     val home: () -> Unit = {
         camera.value = ViewerCameraState.HOME
         fitReference = displayMesh
@@ -1204,24 +1315,44 @@ fun FrameWindowScope.DesktopApp(
                                 parts != null &&
                                 viewerWidth >= TREE_WIDTH + TREE_DIVIDER_DP.dp + MIN_PANE_DP.dp
                         if (showTree && tree != null && parts != null) {
-                            AssemblyTreePanel(
-                                tree = tree,
-                                table = parts,
-                                view = treeView ?: remember(tree) { TreeViewLogic.initial(tree) },
-                                onView = { treeView = it },
-                                selection = selection,
-                                dispatch = { selection.value = SelectionMachine.reduce(selection.value, it) },
-                                dark = dark,
-                                background = MaterialTheme.colorScheme.background,
-                                nodeVisibility = visibilityView.value?.arrays?.nodeState,
-                                counts = counts ?: VisibilityCounts(0, 0),
-                                onCycleNode = { node ->
-                                    applyVisibility(tree.firstPart(node)..tree.lastPart(node), VisibilityMachine::cycle)
-                                },
-                                onCycleSelected = { applyVisibility(target, VisibilityMachine::cycle) },
-                                modifier = Modifier.fillMaxHeight(),
-                                onShowInScript = showInScript,
-                            )
+                            Box(Modifier.fillMaxHeight()) {
+                                AssemblyTreePanel(
+                                    tree = tree,
+                                    table = parts,
+                                    view = treeView ?: remember(tree) { TreeViewLogic.initial(tree) },
+                                    onView = { treeView = it },
+                                    selection = selection,
+                                    dispatch = { selection.value = SelectionMachine.reduce(selection.value, it) },
+                                    dark = dark,
+                                    background = MaterialTheme.colorScheme.background,
+                                    nodeVisibility = visibilityView.value?.arrays?.nodeState,
+                                    counts = counts ?: VisibilityCounts(0, 0),
+                                    onCycleNode = { node ->
+                                        applyVisibility(
+                                            tree.firstPart(node)..tree.lastPart(node),
+                                            VisibilityMachine::cycle,
+                                        )
+                                    },
+                                    onCycleSelected = { applyVisibility(target, VisibilityMachine::cycle) },
+                                    modifier = Modifier.fillMaxHeight(),
+                                    onShowInScript = showInScript,
+                                    multiMask = multiMask,
+                                    onContext = { menuRequest.value = it },
+                                    focusRequester = treeFocus,
+                                )
+                                menuRequest.value?.takeIf { it.origin == MenuOrigin.Tree }?.let { req ->
+                                    menuModel?.let { model ->
+                                        MenuAnchor(req) {
+                                            PartContextMenuPopup(
+                                                initial = model,
+                                                onAction = onMenuAction,
+                                                onDismiss = { menuRequest.value = null },
+                                                restoreFocus = { runCatching { treeFocus.requestFocus() } },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                             Box(Modifier.width(TREE_DIVIDER_DP.dp).fillMaxHeight().background(DIM.copy(alpha = 0.5f)))
                         }
                         Column(Modifier.weight(1f).fillMaxHeight()) {
@@ -1248,6 +1379,7 @@ fun FrameWindowScope.DesktopApp(
                                         highlight,
                                         picking,
                                         canvasVisibility,
+                                        canvasFocus,
                                         if (workspace is WorkspaceState.None) recent.entries else emptyList(),
                                         openFromRecent,
                                     )
@@ -1260,6 +1392,28 @@ fun FrameWindowScope.DesktopApp(
                                         Modifier.align(Alignment.TopEnd).padding(12.dp),
                                         action = showInScriptUi(it.name, parts?.parts?.indexOf(it) ?: -1),
                                     )
+                                }
+                                multiInfo?.let {
+                                    val reason = PartContextMenu.reasonSeveralParts(it.partCount)
+                                    MultiInspectionPanel(
+                                        it,
+                                        MultiInspection.nameLines(selection.value.parts),
+                                        MaterialTheme.colorScheme.background,
+                                        Modifier.align(Alignment.TopEnd).padding(12.dp),
+                                        action = ShowInScriptUi(enabled = false, disabledReason = reason),
+                                    )
+                                }
+                                menuRequest.value?.takeIf { it.origin == MenuOrigin.Viewer }?.let { req ->
+                                    menuModel?.let { model ->
+                                        MenuAnchor(req) {
+                                            PartContextMenuPopup(
+                                                initial = model,
+                                                onAction = onMenuAction,
+                                                onDismiss = { menuRequest.value = null },
+                                                restoreFocus = { runCatching { canvasFocus.requestFocus() } },
+                                            )
+                                        }
+                                    }
                                 }
                                 selectedGroup?.let {
                                     GroupInspectionPanel(
@@ -1426,6 +1580,7 @@ private fun Canvas(
     highlight: State<CanvasHighlight?>,
     picking: CanvasPicking?,
     visibility: State<CanvasVisibility?>,
+    canvasFocus: FocusRequester,
     recent: List<RecentEntry>,
     onRecent: (RecentEntry) -> Unit,
 ) {
@@ -1490,7 +1645,7 @@ private fun Canvas(
                 heading = "kSTEP Desktop has no geometry to show.",
                 showInstallInstructions = false,
             )
-        else -> ShapeCanvas(display.mesh, modifier, camera, fitReference, highlight, picking, visibility)
+        else -> ShapeCanvas(display.mesh, modifier, camera, fitReference, highlight, picking, visibility, canvasFocus)
     }
 }
 

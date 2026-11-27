@@ -2,21 +2,28 @@ package dev.kstep.desktop.ui
 
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.State
+import dev.kstep.desktop.menu.MenuOs
 import dev.kstep.desktop.model.PartTable
+import dev.kstep.desktop.pick.AssemblyTree
+import dev.kstep.desktop.pick.ClickIntent
+import dev.kstep.desktop.pick.ClickIntents
 import dev.kstep.desktop.pick.HoverThrottle
 import dev.kstep.desktop.pick.PickCache
 import dev.kstep.desktop.pick.PickIndex
 import dev.kstep.desktop.pick.SelectionEvent
 import dev.kstep.desktop.pick.SelectionMachine
+import dev.kstep.desktop.pick.SelectionNotice
 import dev.kstep.desktop.pick.SelectionState
 import dev.kstep.desktop.pick.rayFor
 import dev.kstep.render.mesh.ScreenFrame
 import dev.kstep.viewer.ui.CanvasPicking
+import dev.kstep.viewer.ui.PickModifiers
 
 /**
  * Connects the canvas pointer callbacks to the [PickIndex] and the [SelectionMachine] (ADR-0053). Picking runs
  * synchronously on the UI thread: the per-part boxes and the triangle limit keep one pick cheap, hover picks are
- * throttled to one per 33 ms, and the last pick is cached for an unchanged pixel and screen mapping.
+ * throttled to one per 33 ms, and the last pick is cached for an unchanged pixel and screen mapping. Modifier clicks
+ * and the secondary button follow the platform rule of [ClickIntents] (ADR-0092).
  */
 internal class DesktopPicking(
     private val index: PickIndex,
@@ -25,6 +32,10 @@ internal class DesktopPicking(
     private val selection: MutableState<SelectionState>,
     private val visibility: State<VisibilityView?>? = null,
     clock: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
+    private val tree: AssemblyTree? = null,
+    private val os: MenuOs = MenuOs.current(),
+    private val menu: MutableState<MenuRequest?>? = null,
+    private val onNotice: (SelectionNotice) -> Unit = {},
 ) : CanvasPicking {
     private val throttle = HoverThrottle(clock)
     private val cache = PickCache()
@@ -32,7 +43,9 @@ internal class DesktopPicking(
     private var lastView: VisibilityView? = null
 
     private fun dispatch(event: SelectionEvent) {
-        selection.value = SelectionMachine.reduce(selection.value, event)
+        val (next, notice) = SelectionMachine.reduceWithNotice(selection.value, event)
+        selection.value = next
+        notice?.let(onNotice)
     }
 
     private fun partAt(
@@ -74,15 +87,67 @@ internal class DesktopPicking(
         x: Float,
         y: Float,
         frame: ScreenFrame?,
+    ) = onClick(x, y, frame, PickModifiers())
+
+    override fun onClick(
+        x: Float,
+        y: Float,
+        frame: ScreenFrame?,
+        modifiers: PickModifiers,
     ) {
         val part = if (frame == null) -1 else partAt(x, y, frame)
-        if (part >= 0) {
-            val name = table.parts[part].name
-            val occurrence = table.occurrenceOf(part)
-            dispatch(SelectionEvent.ClickAt(part, name, occurrence))
-        } else {
-            dispatch(SelectionEvent.ClickAt(null, null))
+        when (ClickIntents.of(false, modifiers.meta, modifiers.ctrl, os)) {
+            ClickIntent.Menu -> openMenu(x, y, part)
+            ClickIntent.Toggle -> if (part >= 0) toggle(part)
+            ClickIntent.Select ->
+                if (part >= 0) {
+                    dispatch(SelectionEvent.ClickAt(part, table.parts[part].name, table.occurrenceOf(part)))
+                } else {
+                    dispatch(SelectionEvent.ClickAt(null, null))
+                }
         }
+    }
+
+    override fun onSecondaryClick(
+        x: Float,
+        y: Float,
+        frame: ScreenFrame?,
+        modifiers: PickModifiers,
+    ) = openMenu(x, y, if (frame == null) -1 else partAt(x, y, frame))
+
+    override fun onMenuKey(): Boolean {
+        val menu = menu ?: return false
+        val s = selection.value
+        menu.value =
+            MenuRequest(MenuOrigin.Viewer, overPart = s.selected != null || s.selectedGroup != null, centered = true)
+        return true
+    }
+
+    /** Opens the menu at the pointer; a part under it that is not selected replaces the selection first. */
+    private fun openMenu(
+        x: Float,
+        y: Float,
+        part: Int,
+    ) {
+        val menu = menu ?: return
+        if (part >= 0) {
+            dispatch(SelectionEvent.ContextAt(part, table.parts[part].name, table.occurrenceOf(part)))
+        }
+        menu.value = MenuRequest(MenuOrigin.Viewer, x, y, overPart = part >= 0)
+    }
+
+    private fun toggle(part: Int) {
+        val node = selection.value.selectedGroup?.let { tree?.nodeOfKey(it) } ?: -1
+        val resolved = node >= 0 && tree != null
+        dispatch(
+            SelectionEvent.TogglePart(
+                part,
+                table.parts[part].name,
+                table.occurrenceOf(part),
+                groupRefs = if (resolved) SelectionMachine.groupRefs(tree!!, node, table) else emptyList(),
+                groupTotal = if (resolved) tree!!.leafCount(node) else 0,
+            ),
+        )
     }
 
     override fun onDragStart() {
@@ -96,7 +161,7 @@ internal class DesktopPicking(
     }
 
     override fun onEscape(): Boolean {
-        if (selection.value.selected == null && selection.value.selectedGroup == null) return false
+        if (selection.value.parts.isEmpty() && selection.value.selectedGroup == null) return false
         dispatch(SelectionEvent.Escape)
         return true
     }

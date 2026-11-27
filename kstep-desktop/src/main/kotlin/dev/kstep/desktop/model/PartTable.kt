@@ -64,6 +64,14 @@ class PartTable(
         return seen
     }
 
+    private val occurrences: IntArray by lazy {
+        val seen = HashMap<String, Int>()
+        IntArray(parts.size) { i -> seen.merge(parts[i].name, 1, Int::plus)!! - 1 }
+    }
+
+    /** [occurrenceOf] for every part at once, in one O(n) pass; read-only. */
+    fun occurrenceArray(): IntArray = occurrences
+
     /** The raw triangle-to-part map (read-only use: highlight lookup in the viewer). */
     fun triangleToPartArray(): IntArray = triangleToPart
 }

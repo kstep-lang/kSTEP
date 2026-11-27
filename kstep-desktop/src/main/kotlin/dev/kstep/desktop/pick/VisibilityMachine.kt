@@ -58,8 +58,21 @@ object VisibilityMachine {
     ): VisibilityState {
         val r = clip(scene, range)
         if (r.isEmpty()) return s
+        return setEach(s, scene, r.last - r.first + 1, { r.first + it }, target)
+    }
+
+    /** Sets [count] parts (the i-th is `at(i)`, out-of-scene indices are skipped) to [target]; `===` when unchanged. */
+    private inline fun setEach(
+        s: VisibilityState,
+        scene: VisibilityScene,
+        count: Int,
+        at: (Int) -> Int,
+        target: Visibility,
+    ): VisibilityState {
         var map: HashMap<PartKey, Visibility>? = null
-        for (i in r) {
+        for (n in 0 until count) {
+            val i = at(n)
+            if (i !in 0 until scene.size) continue
             val key = scene.partKey[i]
             val current = (map ?: s.leafStates)[key] ?: Visibility.Visible
             if (current == target) continue
@@ -122,6 +135,19 @@ object VisibilityMachine {
         range: IntRange,
     ): VisibilityState = setRange(s, scene, range, Visibility.Hidden)
 
+    /** [hide] for an arbitrary set of part indices (a multi-selection); indices outside the scene are skipped. */
+    fun hideParts(
+        s: VisibilityState,
+        scene: VisibilityScene,
+        parts: IntArray,
+    ): VisibilityState = setEach(s, scene, parts.size, { parts[it] }, Visibility.Hidden)
+
+    /** Whether any part of [scene] is hidden or transparent, i.e. whether "Show All" would change anything. */
+    fun anyNotVisible(
+        s: VisibilityState,
+        scene: VisibilityScene,
+    ): Boolean = s.leafStates.keys.any { scene.contains(it) }
+
     /** Every part visible again; the opacity stays. */
     fun showAll(s: VisibilityState): VisibilityState =
         if (s.leafStates.isEmpty()) s else s.copy(leafStates = emptyMap())
@@ -134,9 +160,35 @@ object VisibilityMachine {
     ): VisibilityState {
         val r = clip(scene, range)
         if (r.isEmpty()) return s
+        return isolateWhere(s, scene) { it in r }
+    }
+
+    /** [isolate] for an arbitrary set of part indices; no valid index is a no-op. */
+    fun isolateParts(
+        s: VisibilityState,
+        scene: VisibilityScene,
+        parts: IntArray,
+    ): VisibilityState {
+        val keep = BooleanArray(scene.size)
+        var any = false
+        for (p in parts) {
+            if (p in keep.indices) {
+                keep[p] = true
+                any = true
+            }
+        }
+        if (!any) return s
+        return isolateWhere(s, scene) { keep[it] }
+    }
+
+    private inline fun isolateWhere(
+        s: VisibilityState,
+        scene: VisibilityScene,
+        isKept: (Int) -> Boolean,
+    ): VisibilityState {
         val map = HashMap<PartKey, Visibility>()
         for (i in 0 until scene.size) {
-            if (i in r) continue
+            if (isKept(i)) continue
             val key = scene.partKey[i]
             map[key] = if (s.leafStates[key] == Visibility.Hidden) Visibility.Hidden else Visibility.Transparent
         }

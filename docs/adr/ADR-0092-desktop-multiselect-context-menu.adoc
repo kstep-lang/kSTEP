@@ -1,0 +1,34 @@
+= ADR-0092: Multi-Selection and Part Context Menu (Welle D3c-2)
+:toc:
+
+== Status
+
+Accepted (Welle D3c-2). Scope: `kstep-viewer` (`CanvasPicking`, `CanvasHighlight`, `ShapeCanvas`), `kstep-desktop` (`SelectionMachine`, `TreeViewLogic`, `VisibilityMachine`, `PartContextMenu`, `CopyNames`, `MultiInspection`, `ClickIntents`, `PartContextMenuPopup`, `DesktopPicking`, `AssemblyTreePanel`, `InspectionPanel`, `DesktopApp`) and tests. No new dependency, no new error code, no migration (nothing is persisted: selection and visibility live in memory only), `layout.json` unchanged, worker protocol unchanged. Not checked by hand in a real window on every platform.
+
+== Context
+
+ADR-0053 and ADR-0054 select one part or one group, ADR-0055 hides and isolates a part range, ADR-0068 and ADR-0091 jump to a part in the script. Left open in ADR-0068: a context menu and multi-select. A user could not pick two unrelated parts and hide them together, and every visibility action was hidden behind keys.
+
+== Decision
+
+D1. Selection model. `SelectionState` keeps the primary part (`selected`, `occurrence`, as before) and adds `more` (further parts) and `anchor`. `parts` is derived (primary first), so `selected` and `parts` can never drift apart and all code that knows one part (inspection, Show in Script) is unchanged. A multi-selection consists of parts only; a group is selected on its own and is resolved to its parts by the caller when a part is toggled (the reducer stays pure; the resolved list is passed in the event). At most `MAX_SELECTION` = 1000 parts: the 1001st toggle returns the very same state plus a notice (`LimitReached`), a longer range or "Select Children" is cut to 1000 with `Truncated(total)`; a group over 1000 restarts with the clicked part.
+
+D2. Gestures. macOS: Cmd+click toggles, Ctrl+click and the secondary button open the menu (Ctrl+click is the system's secondary click). Windows and Linux: Ctrl+click toggles, the secondary button opens the menu. Shift+click in the tree selects the visible part rows between the anchor and the click (no group rows, nothing from a closed group); the anchor stays, so the next Shift+click starts from it. In the viewer Shift stays pan; there is no range there. The rule is `ClickIntents` (pure, `MenuOs` injectable, tested per platform). Menu key and Shift+F10 open the menu from the keyboard in the viewer and in the tree. A press on a part that is not selected replaces the selection first; a press on a selected part keeps it; empty space selects nothing.
+
+D3. Viewer. `CanvasPicking` gets default methods only (`onClick` with `PickModifiers`, `onSecondaryClick`, `onMenuKey`), so every old implementation compiles and behaves as before. The gesture now starts on a press of any button: the stock `awaitFirstDown` ignores the secondary and middle buttons, which also meant that right-drag orbit and middle-drag pan, described in the hint text, never started the gesture in the picking path (found while testing the secondary click; now they do). A secondary press that stays below the drag threshold is a click, a longer one is an orbit as before. The highlight gets `selectedMask`, built once per selection change (`MaskMemo`, keyed on the part list, not on hover), read in the draw phase only; the recomposition test is unchanged.
+
+D4. Menu. `PartContextMenu.build` (pure) returns the entries Show in Script, Hide, "Isolate (others transparent)", Show All, Copy Name(s), Select Children, each enabled or disabled with a reason: several parts, "Already hidden", "Already isolated", "Nothing is hidden or transparent", "Select an assembly group", "Group has N parts, limit is 1000", or the host's reason for Show in Script (ADR-0068). A disabled entry stays reachable with Up and Down (so the reason can be read) and shows the reason in a footnote and a tooltip; Enter on it does nothing. Empty space offers Show All only, and only when it would change something (otherwise no menu). Hide, Isolate and Show All do not change the selection; Isolate keeps ADR-0055 semantics (others transparent, hidden stays hidden). The popup is a `DropdownMenu` with a focusable popup; when it closes the focus goes back to where it came from (explicit `FocusRequester`s for the tree and the canvas). Escape closes the menu first, then the selection.
+
+D5. Visibility. `VisibilityMachine.hideParts`, `isolateParts` and `anyNotVisible` work on arbitrary part indices with the same semantics as the range versions (tested: a contiguous array equals the range) and return the same instance when nothing changes.
+
+D6. Copy and inspection. "Copy Name(s)" writes one line per part to the clipboard, only when the user chooses it: control and bidirectional characters are made visible (`DisplayName.escaped`), a name is cut at 256 characters, repeated names get `#k`, at most 1000 lines. A multi-selection shows its own panel: count, triangle sum, common bounding box, up to five names and "and M more". No mass: the model carries none. Show in Script is listed there but disabled with its reason.
+
+== Security
+
+Names come from an untrusted script or worker output. Names are only drawn as text (menu header, panel, copied text), always through `DisplayName.escaped` and clipped (40 characters in the header, 256 on the clipboard); the clipboard is written only on a menu action; the selection is bounded to 1000 and the mask and the index lookup are O(parts + selection), never quadratic (`PartTable.occurrenceArray`). No worker, sandbox, file or network code is touched.
+
+== Consequences and open points
+
+* Cmd/Ctrl+A, lasso selection, an outline instead of a tint, BVH or GPU picking (D3c-3), a mass, positioning the menu at the part's projected bounding box and hand-testing on Windows and Linux are not part of this wave.
+* Ctrl+click on macOS reaches the app either as a secondary button or as Ctrl plus primary, depending on the JDK; both open the menu. Not hand-tested.
+* The menu key and Shift+F10 open the viewer menu at the centre of the canvas, the tree menu below the selected row.

@@ -765,6 +765,13 @@ scan before either lands.
   `KSTEP-D-041` (start failed). Recent now also keeps single notes with their workspace folder (`recent.json` version 1, additive
   `root`). Known gaps: macOS only, no single instance (every call is a new instance), the shell environment (AI keys) does not
   reach the app, "Started" only means the start was handed over. Checked by hand on one Mac only.
+* Welle D3c-2 (ADR-0092): multi-selection and a part context menu in `kstep-desktop` and `kstep-viewer`. `SelectionState` keeps the
+  primary part plus `more` (at most 1000 parts); Cmd/Ctrl+click toggles, Shift+click in the tree selects the visible part rows,
+  secondary click, Menu key and Shift+F10 open the menu (Show in Script, Hide, Isolate, Show All, Copy Name(s), Select Children;
+  disabled entries stay reachable and explain themselves). `VisibilityMachine.hideParts/isolateParts`, `CopyNames`,
+  `MultiInspection`, `CanvasHighlight.selectedMask`, `CanvasPicking` default methods. The canvas gesture now also starts on a
+  secondary or middle press (right-drag orbit, middle-drag pan). Open: Cmd/Ctrl+A, lasso, outline, GPU picking (D3c-3), a mass,
+  hand-testing on Windows and Linux.
 * Welle D3c-1 (ADR-0091): part source lines in `kstep-desktop`. The worker reports the script line of each part's `shape`/`place`
   call (stack walk bounded to 256 frames, desktop worker only), the desktop validates it strictly and trusts it only against exactly
   the evaluated text. Show in Script selects the name, else the unique literal, else marks the call line (line only, no column).

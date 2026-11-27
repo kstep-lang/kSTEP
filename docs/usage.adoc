@@ -905,6 +905,26 @@ the whole call line is marked and the message "Marked the line where this part i
 This works only while the editor still holds exactly the text that was run; after an edit the app falls back to searching for the
 name as a literal. Only the line is known, not the column.
 
+== Selecting several parts and the part menu (Desktop)
+
+Select more than one part (ADR-0092):
+
+|===
+| Gesture | macOS | Windows, Linux
+
+| Add or remove a part | Cmd+click | Ctrl+click
+| Select the rows between (tree only) | Shift+click | Shift+click
+| Part menu | secondary click, Ctrl+click, Menu key or Shift+F10 | secondary click, Menu key or Shift+F10
+| End the selection | Escape or a click on empty space | Escape or a click on empty space
+|===
+
+At most 1000 parts can be selected; a longer selection is cut and a short message says so. In the viewer Shift stays pan, so there
+is no range there. The menu offers Show in Script (one part only), Hide, Isolate (others become transparent), Show All, Copy Name(s)
+and Select Children (an assembly group). An entry that cannot work now is greyed out; reach it with the arrow keys to read why.
+Hide, Isolate and Show All do not change the selection. Escape closes the menu first. Copy puts one name per line on the clipboard
+(control characters shown as `‹U+xxxx›`), and only when you choose it. With several parts selected the panel shows the count, the
+triangles and the combined size; there is no mass.
+
 == Reading input files from a script
 
 A script can read files that lie next to it and have the desktop preview follow them (ADR-0080):

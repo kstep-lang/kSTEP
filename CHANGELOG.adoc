@@ -9,6 +9,16 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: multi-selection and a part context menu (Welle D3c-2, ADR-0092). Cmd+click (macOS) or Ctrl+click (Windows,
+  Linux) adds or removes a part, Shift+click in the assembly tree selects the visible part rows between the anchor and the
+  click, at most 1000 parts (a longer selection is cut and says so). The secondary button, Ctrl+click on macOS, the Menu key
+  and Shift+F10 open a menu: Show in Script, Hide, Isolate (others transparent), Show All, Copy Name(s), Select Children;
+  an entry that cannot work stays visible, can be reached with the arrow keys and shows why. Copy writes the names (control
+  characters made visible) only on that action. A multi-selection has its own panel (count, triangles, common size, no mass).
+  Viewer: `CanvasPicking` gained default methods only; the canvas now also starts the gesture on a secondary or middle press, so
+  right-drag orbit and middle-drag pan work in the picking path. No new error code, no new dependency, no protocol change,
+  `layout.json` unchanged. Not checked by hand on every platform.
+
 * kSTEP Desktop: Show in Script selects the name, or marks the call line (Welle D3c-1, ADR-0091). The render worker now reports
   the script line of the `shape(...)`/`place(...)` call behind each part (`sourceLine`, desktop worker only; the public
   `kstep render --output json` is unchanged). Show in Script selects the name on that line, else the unique name literal, else

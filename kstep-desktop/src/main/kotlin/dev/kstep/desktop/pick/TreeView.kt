@@ -1,5 +1,7 @@
 package dev.kstep.desktop.pick
 
+import dev.kstep.desktop.model.PartTable
+
 /** Which groups are open, by node key, and which keys the tree had when this state was made (ADR-0054). */
 data class TreeViewState(
     val expanded: Set<String>,
@@ -58,6 +60,44 @@ object TreeViewLogic {
             i = if (tree.isGroup(i) && tree.key(i) !in s.expanded) tree.subtreeEnd(i) else i + 1
         }
         return rows.copyOf(count)
+    }
+
+    /** The parts of a range selection: at most [MAX_SELECTION] + 1 [refs] and the real number of parts in [total]. */
+    class RangeRefs(
+        val refs: List<PartRef>,
+        val total: Int,
+    )
+
+    /**
+     * The parts between the rows of [anchorNode] and [clickNode], both included, in tree order: only part rows that are
+     * visible now, never group rows and nothing from a closed group. Without a usable anchor the click row alone.
+     */
+    fun rangeRefs(
+        tree: AssemblyTree,
+        view: TreeViewState,
+        table: PartTable,
+        anchorNode: Int,
+        clickNode: Int,
+    ): RangeRefs {
+        val rows = visibleRows(tree, view)
+        val occurrences = table.occurrenceArray()
+
+        fun ref(node: Int): PartRef? {
+            val p = tree.partOf(node)
+            return if (p in table.parts.indices) PartRef(table.parts[p].name, occurrences[p]) else null
+        }
+        val from = java.util.Arrays.binarySearch(rows, anchorNode)
+        val to = java.util.Arrays.binarySearch(rows, clickNode)
+        if (to < 0) return RangeRefs(emptyList(), 0)
+        if (from < 0) return ref(clickNode)?.let { RangeRefs(listOf(it), 1) } ?: RangeRefs(emptyList(), 0)
+        val out = ArrayList<PartRef>()
+        var total = 0
+        for (i in minOf(from, to)..maxOf(from, to)) {
+            val r = ref(rows[i]) ?: continue
+            total++
+            if (out.size <= MAX_SELECTION) out += r
+        }
+        return RangeRefs(out, total)
     }
 
     fun isExpanded(

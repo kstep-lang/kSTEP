@@ -4,7 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.drag
@@ -37,12 +36,19 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.skiaCanvas
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.isAltPressed
+import androidx.compose.ui.input.pointer.isCtrlPressed
+import androidx.compose.ui.input.pointer.isMetaPressed
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isShiftPressed
@@ -127,12 +133,18 @@ class CanvasHighlight(
     val hoverT: Double = DEFAULT_HOVER_T,
     val selectedLast: Int = selected,
     val hoveredLast: Int = hovered,
+    /**
+     * One flag per part for a selection that is not one range (a multi-selection, ADR-0092); checked before the
+     * [selected] range. Built once per selection change by the host, read-only afterwards.
+     */
+    val selectedMask: BooleanArray? = null,
 ) {
     internal fun tintFor(sourceIndex: Int): Double {
         if (sourceIndex < 0 || sourceIndex >= triangleToPart.size) return 0.0
         val part = triangleToPart[sourceIndex]
         return when {
             part < 0 -> 0.0
+            selectedMask != null && part < selectedMask.size && selectedMask[part] -> selectT
             part in selected..selectedLast -> selectT
             part in hovered..hoveredLast -> hoverT
             else -> 0.0
@@ -181,6 +193,13 @@ class CanvasVisibility(
     }
 }
 
+/** The modifier keys held when a click was pressed (ADR-0092); the host decides what they mean. */
+data class PickModifiers(
+    val meta: Boolean = false,
+    val ctrl: Boolean = false,
+    val alt: Boolean = false,
+)
+
 /**
  * Pointer callbacks for picking, implemented by the host. [frame] is the screen mapping the canvas drew with last
  * (`null` before the first frame); the host inverts pixels with it, so picking cannot drift from the drawing.
@@ -199,6 +218,25 @@ interface CanvasPicking {
         y: Float,
         frame: ScreenFrame?,
     )
+
+    /** [onClick] with the modifier keys held at the press; by default they are ignored. */
+    fun onClick(
+        x: Float,
+        y: Float,
+        frame: ScreenFrame?,
+        modifiers: PickModifiers,
+    ) = onClick(x, y, frame)
+
+    /** A secondary-button press and release that stayed below the drag threshold (ADR-0092); ignored by default. */
+    fun onSecondaryClick(
+        x: Float,
+        y: Float,
+        frame: ScreenFrame?,
+        modifiers: PickModifiers,
+    ) {}
+
+    /** The Menu key or Shift+F10 while the canvas has the keyboard focus; `true` if it was consumed. */
+    fun onMenuKey(): Boolean = false
 
     fun onDragStart()
 
@@ -235,7 +273,18 @@ fun ShapeCanvas(
     highlight: State<CanvasHighlight?>,
     picking: CanvasPicking?,
     visibility: State<CanvasVisibility?>?,
-) = ShapeCanvasInternal(coloredMesh.mesh, coloredMesh, modifier, state, fitReference, highlight, picking, visibility)
+    focusRequester: FocusRequester? = null,
+) = ShapeCanvasInternal(
+    coloredMesh.mesh,
+    coloredMesh,
+    modifier,
+    state,
+    fitReference,
+    highlight,
+    picking,
+    visibility,
+    focusRequester,
+)
 
 private fun androidx.compose.ui.input.pointer.PointerButtons.anyPressed(): Boolean =
     isPrimaryPressed || isSecondaryPressed || isTertiaryPressed
@@ -272,6 +321,17 @@ private class FrameHolder {
 
 private val DRAG_THRESHOLD = 4.dp
 
+/**
+ * The first press of ANY mouse button, consumed or not. The stock `awaitFirstDown` only reacts to the primary button, so
+ * a secondary press (the context menu, ADR-0092, and the orbit by right-drag) would never start the gesture.
+ */
+private suspend fun AwaitPointerEventScope.awaitAnyButtonDown(): PointerInputChange {
+    while (true) {
+        val event = awaitPointerEvent()
+        event.changes.firstOrNull { it.changedToDownIgnoreConsumed() }?.let { return it }
+    }
+}
+
 @OptIn(ExperimentalComposeUiApi::class) // Modifier.onPointerEvent (scroll-to-zoom) is experimental
 // in this Compose Multiplatform version -- no unstable behavior relied on beyond the API shape
 // itself, and there is no stable scroll-event API in this version to use instead.
@@ -285,9 +345,11 @@ private fun ShapeCanvasInternal(
     highlight: State<CanvasHighlight?>?,
     picking: CanvasPicking?,
     visibility: State<CanvasVisibility?>?,
+    externalFocus: FocusRequester? = null,
 ) {
     val frameHolder = remember { FrameHolder() }
-    val focusRequester = remember { FocusRequester() }
+    val ownFocus = remember { FocusRequester() }
+    val focusRequester = externalFocus ?: ownFocus
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
 
     // The auto-fit scale for the CURRENT (mesh, canvasSize) pair, computed once per resize --
@@ -350,13 +412,22 @@ private fun ShapeCanvasInternal(
                     // internally (awaitFirstDown/awaitTouchSlopOrCancel/drag), so touch-slop
                     // behavior (no jitter-orbit from a near-stationary press) is preserved exactly.
                     awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val down = awaitAnyButtonDown()
                         val isPan =
                             currentEvent.buttons.isTertiaryPressed || currentEvent.keyboardModifiers.isShiftPressed
                         if (picking != null) {
                             // Escape must reach THIS canvas afterwards, not the script editor.
                             focusRequester.requestFocus()
                             val primary = currentEvent.buttons.isPrimaryPressed && !isPan
+                            val secondary = currentEvent.buttons.isSecondaryPressed && !isPan
+                            val mods =
+                                currentEvent.keyboardModifiers.let {
+                                    PickModifiers(
+                                        meta = it.isMetaPressed,
+                                        ctrl = it.isCtrlPressed,
+                                        alt = it.isAltPressed,
+                                    )
+                                }
                             val threshold = DRAG_THRESHOLD.toPx()
                             var dragging = false
                             var released = false
@@ -391,7 +462,9 @@ private fun ShapeCanvasInternal(
                                     }
                             }
                             if (released && !dragging && primary) {
-                                picking.onClick(down.position.x, down.position.y, frameHolder.frame)
+                                picking.onClick(down.position.x, down.position.y, frameHolder.frame, mods)
+                            } else if (released && !dragging && secondary) {
+                                picking.onSecondaryClick(down.position.x, down.position.y, frameHolder.frame, mods)
                             }
                             return@awaitEachGesture
                         }
@@ -452,6 +525,11 @@ private fun ShapeCanvasInternal(
                         true
                     } else if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.Escape && picking != null) {
                         picking.onEscape()
+                    } else if (keyEvent.type == KeyEventType.KeyDown &&
+                        picking != null &&
+                        (keyEvent.key == Key.Menu || (keyEvent.key == Key.F10 && keyEvent.isShiftPressed))
+                    ) {
+                        picking.onMenuKey()
                     } else {
                         false
                     }
