@@ -41,7 +41,7 @@ is not opened before the token has been checked:
 
 . method not `POST` -> `405` (also the CORS preflight `OPTIONS`; no `Access-Control-*` header is ever sent)
 . path not exactly `/mcp`, or any query -> `404`
-. `Host` missing, repeated, or not `127.0.0.1:<port>` / `localhost:<port>` -> `403` (DNS rebinding)
+. `Host` missing or not `127.0.0.1:<port>` / `localhost:<port>` -> `403` (DNS rebinding). A repeated `Host` header is rejected with `403` only where the JDK HttpServer exposes the repetition to the handler; see the open points.
 . `Origin` present but repeated, or not `http://127.0.0.1:<port>` / `http://localhost:<port>` -> `403` (`null` too); absent is fine
 . `Authorization` not exactly one `Bearer <43 characters>` that matches (constant-time compare) -> `401` with `WWW-Authenticate: Bearer`
 . `Content-Type` not `application/json` (parameters allowed) -> `415`
@@ -109,6 +109,8 @@ until a token exists.
 * Opening the server on all interfaces or with TLS: a local desktop tool; the loopback address and the token are the boundary.
 
 == Consequences and open points
+
+* A repeated `Host` header: the handler rejects it when it sees more than one value, but what the JDK HttpServer passes on for a repeated header differs between JDK builds (on Temurin 21.0.13 the handler saw one value, so a request with `Host: 127.0.0.1:<port>` plus `Host: evil.com` was accepted; the Oracle 21.0.12.1 build exposed both). The test therefore does not assert this case. The DNS-rebinding client this check is for is a browser, which sends exactly one `Host` header; a local program that can send a second one already holds the token to get past the next check. The case is a known limit, not a guarantee.
 
 * Any program on the computer that has the token (same user, or a user who can read the file) can read the status and the editor
   text. That is the trust boundary; the dialog says so. The clipboard is not cleared by the application.
