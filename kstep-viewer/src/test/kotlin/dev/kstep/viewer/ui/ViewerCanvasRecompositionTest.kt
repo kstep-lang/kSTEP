@@ -94,6 +94,39 @@ class ViewerCanvasRecompositionTest :
             }
         }
 
+        "changing the selection recomposes neither the canvas nor its body (draw phase only)" {
+            val counts = HashMap<String, Int>()
+            recompositionProbe = { counts.merge(it, 1, Int::plus) }
+            try {
+                val highlight = mutableStateOf<CanvasHighlight?>(null)
+                runDesktopComposeUiTest(width = SIZE, height = SIZE) {
+                    setContent {
+                        ShapeCanvas(
+                            square,
+                            Modifier.size(SIZE.dp),
+                            mutableStateOf(ViewerCameraState.HOME),
+                            null,
+                            highlight,
+                            null,
+                            null,
+                        )
+                    }
+                    waitForIdle()
+                    val canvas = counts["canvas"] ?: 0
+                    val body = counts["body"] ?: 0
+                    repeat(TOGGLES) { i ->
+                        highlight.value =
+                            CanvasHighlight(intArrayOf(0), if (i % 2 == 0) 0 else -1, -1, doubleArrayOf(0.0, 0.0, 1.0))
+                        waitForIdle()
+                    }
+                    counts["canvas"] shouldBe canvas
+                    counts["body"] shouldBe body
+                }
+            } finally {
+                recompositionProbe = null
+            }
+        }
+
         "the probe counts a scope that does recompose (the test is not trivially green)" {
             val counts = HashMap<String, Int>()
             recompositionProbe = { counts.merge(it, 1, Int::plus) }

@@ -32,3 +32,4 @@ Names come from an untrusted script or worker output. Names are only drawn as te
 * Cmd/Ctrl+A, lasso selection, an outline instead of a tint, BVH or GPU picking (D3c-3), a mass, positioning the menu at the part's projected bounding box and hand-testing on Windows and Linux are not part of this wave.
 * Ctrl+click on macOS reaches the app either as a secondary button or as Ctrl plus primary, depending on the JDK; both open the menu. Not hand-tested.
 * The menu key and Shift+F10 open the viewer menu at the centre of the canvas, the tree menu below the selected row.
+* Update: the outline is done in ADR-0093; BVH was measured and not built (ADR-0093). Lasso and GPU picking remain open.

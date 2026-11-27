@@ -925,6 +925,13 @@ Hide, Isolate and Show All do not change the selection. Escape closes the menu f
 (control characters shown as `‹U+xxxx›`), and only when you choose it. With several parts selected the panel shows the count, the
 triangles and the combined size; there is no mass.
 
+=== The outline of the selection
+
+Selected parts are outlined in the accent colour with a thin halo in the window colour, so they stay visible when other parts
+cover them (x-ray) or when they are transparent; a hidden part has no outline (ADR-0093). Where two selected parts touch, both
+outlines are drawn. A part that is only hovered is tinted, not outlined. A selection of very many triangles (more than 40 000)
+or with a very ragged silhouette falls back to the tint alone: it is a limit, not an error, and nothing is shown about it.
+
 == Reading input files from a script
 
 A script can read files that lie next to it and have the desktop preview follow them (ADR-0080):

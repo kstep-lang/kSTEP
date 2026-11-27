@@ -68,6 +68,8 @@ import dev.kstep.render.mesh.ScreenFrame
 import dev.kstep.viewer.camera.CameraInteraction
 import dev.kstep.viewer.camera.ViewerCameraState
 import org.jetbrains.skia.BlendMode
+import org.jetbrains.skia.PaintMode
+import org.jetbrains.skia.PaintStrokeCap
 import org.jetbrains.skia.VertexMode
 import java.awt.Cursor
 import org.jetbrains.skia.Color as SkiaColor
@@ -138,14 +140,38 @@ class CanvasHighlight(
      * [selected] range. Built once per selection change by the host, read-only afterwards.
      */
     val selectedMask: BooleanArray? = null,
+    /** Tint strength of a selected part while its outline is drawn (ADR-0093); [selectT] when there is no outline. */
+    val outlineSelectT: Double = DEFAULT_OUTLINE_SELECT_T,
+    /** Background colour (0..1 RGB) for the halo under the outline; `null` draws the outline without a halo. */
+    val haloRgb: DoubleArray? = null,
 ) {
-    internal fun tintFor(sourceIndex: Int): Double {
+    private fun partSelected(part: Int): Boolean =
+        part >= 0 &&
+            ((selectedMask != null && part < selectedMask.size && selectedMask[part]) || part in selected..selectedLast)
+
+    /** Whether the SOURCE triangle belongs to a selected part (hover does not count). */
+    internal fun isSelected(sourceIndex: Int): Boolean {
+        if (sourceIndex < 0 || sourceIndex >= triangleToPart.size) return false
+        return partSelected(triangleToPart[sourceIndex])
+    }
+
+    /** How many source triangles belong to selected parts; counted once per instance (ADR-0093). */
+    internal val selectedTriangleCount: Int by lazy {
+        var n = 0
+        for (p in triangleToPart) if (partSelected(p)) n++
+        n
+    }
+
+    internal fun tintFor(
+        sourceIndex: Int,
+        selectFactor: Double = selectT,
+    ): Double {
         if (sourceIndex < 0 || sourceIndex >= triangleToPart.size) return 0.0
         val part = triangleToPart[sourceIndex]
         return when {
             part < 0 -> 0.0
-            selectedMask != null && part < selectedMask.size && selectedMask[part] -> selectT
-            part in selected..selectedLast -> selectT
+            selectedMask != null && part < selectedMask.size && selectedMask[part] -> selectFactor
+            part in selected..selectedLast -> selectFactor
             part in hovered..hoveredLast -> hoverT
             else -> 0.0
         }
@@ -153,6 +179,7 @@ class CanvasHighlight(
 
     companion object {
         const val DEFAULT_SELECT_T: Double = 0.45
+        const val DEFAULT_OUTLINE_SELECT_T: Double = 0.30
         const val DEFAULT_HOVER_T: Double = 0.20
     }
 }
@@ -317,9 +344,32 @@ private fun CursorHost(
 
 private class FrameHolder {
     var frame: ScreenFrame? = null
+
+    /** Outline hash tables, reused every frame; a plain field, never state (ADR-0093). */
+    val outlineScratch = OutlineScratch()
 }
 
 private val DRAG_THRESHOLD = 4.dp
+private val OUTLINE_WIDTH = 2.dp
+private val OUTLINE_HALO_WIDTH = 4.dp
+
+private fun outlinePaint(
+    rgb: DoubleArray,
+    width: Float,
+): SkiaPaint =
+    SkiaPaint().apply {
+        isAntiAlias = true
+        mode = PaintMode.STROKE
+        strokeWidth = width
+        strokeCap = PaintStrokeCap.ROUND
+        color =
+            SkiaColor.makeARGB(
+                255,
+                (rgb[0].coerceIn(0.0, 1.0) * 255.0).toInt(),
+                (rgb[1].coerceIn(0.0, 1.0) * 255.0).toInt(),
+                (rgb[2].coerceIn(0.0, 1.0) * 255.0).toInt(),
+            )
+    }
 
 /**
  * The first press of ANY mouse button, consumed or not. The stock `awaitFirstDown` only reacts to the primary button, so
@@ -585,6 +635,19 @@ private fun ShapeCanvasInternal(
             val accent = highlightNow?.accentRgb
             // Read here too, so a visibility change invalidates the draw phase only (ADR-0012, ADR-0055).
             val visibilityNow = visibility?.value
+            // The selection outline (ADR-0093): computed before the fill so the tint can be lighter when it shows.
+            val outline =
+                if (highlightNow != null) {
+                    SelectionOutline.compute(triangles, highlightNow, visibilityNow, frameHolder.outlineScratch)
+                } else {
+                    OutlineResult.None
+                }
+            val selectFactor =
+                if (highlightNow != null && outline is OutlineResult.Segments) {
+                    highlightNow.outlineSelectT
+                } else {
+                    highlightNow?.selectT ?: 0.0
+                }
             // Two DISJOINT draw paths, never mixed within one frame's triangle list -- see
             // docs/adr/ADR-0018-smooth-vertex-normals.adoc. `triangles` is homogeneous by
             // construction: `MeshProjection.projectInternal` sets EVERY triangle's
@@ -629,9 +692,9 @@ private fun ShapeCanvasInternal(
                     positions[pIndex++] = t.by.toFloat()
                     positions[pIndex++] = t.cx.toFloat()
                     positions[pIndex++] = t.cy.toFloat()
+                    val tint = highlightNow?.tintFor(t.sourceIndex, selectFactor) ?: 0.0
                     for (corner in 0..2) {
                         val rgb = t.litRgbAt(corner)
-                        val tint = highlightNow?.tintFor(t.sourceIndex) ?: 0.0
                         if (tint > 0.0 && accent != null) {
                             for (k in 0..2) rgb[k] = rgb[k] + (accent[k] - rgb[k]) * tint
                         }
@@ -671,7 +734,7 @@ private fun ShapeCanvasInternal(
                     // by construction (shade is coerced in MeshProjection, color channels are
                     // guaranteed in 0.0..1.0 by MeshColor's own init check), so no extra coerceIn is
                     // needed here, matching this file's pre-wave style.
-                    val tint = highlightNow?.tintFor(t.sourceIndex) ?: 0.0
+                    val tint = highlightNow?.tintFor(t.sourceIndex, selectFactor) ?: 0.0
                     val color =
                         if (tint > 0.0 && accent != null) {
                             Color(
@@ -692,6 +755,17 @@ private fun ShapeCanvasInternal(
                     // Same color, 1px stroke -- closes the antialiasing seams between coplanar
                     // neighboring triangles (Atkinson's "haarriss" fix, see ADR-0010).
                     drawPath(path, color, style = Stroke(width = 1f))
+                }
+            }
+            if (outline is OutlineResult.Segments && highlightNow != null) {
+                val lines = outline.points.copyOf(outline.count * 4)
+                val halo = highlightNow.haloRgb
+                val haloWidth = OUTLINE_HALO_WIDTH.toPx()
+                val lineWidth = OUTLINE_WIDTH.toPx()
+                drawIntoCanvas { canvas ->
+                    // Two opaque passes: a wider halo in the background colour, then the accent line on top.
+                    if (halo != null) canvas.skiaCanvas.drawLines(lines, outlinePaint(halo, haloWidth))
+                    if (accent != null) canvas.skiaCanvas.drawLines(lines, outlinePaint(accent, lineWidth))
                 }
             }
         }

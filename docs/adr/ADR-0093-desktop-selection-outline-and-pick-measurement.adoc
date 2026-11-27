@@ -1,0 +1,49 @@
+= ADR-0093: Selection Outline and a Measured Look at Picking Cost (Welle D3c-3)
+:toc:
+
+== Status
+
+Accepted (Welle D3c-3). Scope: `kstep-viewer` (`SelectionOutline`, `CanvasHighlight`, `ShapeCanvas`), `kstep-desktop` (`DesktopApp` sets the halo colour, `PickIndexScalingTest`) and tests. No new dependency, no error code, no migration (nothing is persisted), no worker or protocol change, no native code. Not checked by hand in a real window on every platform.
+
+== Context
+
+A selected part was only tinted (ADR-0053, ADR-0092). A tint is weak when the part is behind another one, transparent, or has a colour close to the accent. ADR-0053, ADR-0068 and ADR-0092 left two points open: an outline instead of a tint, and whether picking needs a BVH or GPU picking once the caps are raised.
+
+== Decision
+
+D1. Outline, not tint alone. The outline of the selected parts is the set of edges of the projected triangle soup that exactly one selected triangle of a part touches. Two triangles of the same part that share an edge cancel it, so the inside and the diagonals vanish. The part index is part of the key: the border between two selected parts is kept once per part (two lines), and an edge shared with a part that is not selected stays.
+
+D2. Computation (`SelectionOutline`, no Compose import). Edge end points are rounded to 1/16 px and packed into `Long`s, ordered, and counted in a fixed-size open-addressing table (2^18 slots, linear probing, at most 64 probes). Count saturates at 2; an edge that ends with count 1 is a segment. Reused tables (`OutlineScratch`, about 5.5 MB, allocated on the first outline, a generation stamp instead of clearing), no allocation per frame beyond one copy of the segment array for Skia. Cost is linear in the selected triangles; there is no quadratic step.
+
+D3. Limits and fallback. More than 40 000 selected triangles (counted once per `CanvasHighlight` instance, so the budget is stable for a selection and does not flicker with the camera), more than 16 384 open edges, or 64 probes without a free slot: no outline, the plain tint (0.45) as before. No message: a limit, not an error. Triangles with a NaN, infinite or very large (above 1 000 000 px) coordinate are skipped; a degenerate triangle contributes its non-degenerate edges. Hidden parts get no outline, transparent ones do (x-ray).
+
+D4. Drawing. After the fill, two passes of Skia `drawLines` with round caps: a halo 4 dp wide in the surface colour (`CanvasHighlight.haloRgb`, set by the desktop from the Material surface colour for the current theme; `null` draws no halo) and the accent line 2 dp wide, both opaque. While an outline is shown the selection tint is lighter (`outlineSelectT` 0.30 instead of 0.45) because the outline now carries most of the signal. Hover keeps its tint (0.20) and gets no outline. Both draw paths (smooth and flat) use the same tint factor.
+
+D5. Draw phase only. `highlight` and `visibility` are still read inside the draw lambda; the outline reads them there too and writes no state. The recomposition test with a changing selection shows no recomposition of the canvas or its body.
+
+D6. Picking is measured, not changed. `PickIndexScalingTest` counts the triangle tests of `PickIndex.pick` and compares each result with a brute-force picker. Results (macOS arm64, deterministic rays, the numbers are tests per pick):
+
+|===
+| Scene | Triangles | Parts | Median | p95 | Max
+
+| Grid of parts at the load limit | 126 976 | 4096 | 31 | 31 | 31
+| One part | 130 000 | 1 | 130 000 | 130 000 | 130 000
+| 64 nested shells, ray through the holes (worst case for boxes) | 6 400 | 64 | 6 400 | 6 400 | 6 400
+| Beyond the load limit, many parts (measured only) | 1 048 576 | 4096 | 256 | 256 | 256
+| Beyond the load limit, one part (measured only) | 1 048 576 | 1 | 1 048 576 | 1 048 576 | 1 048 576
+|===
+
+The claims the numbers back: a pick never tests more triangles than the scene has (twice that with a visibility mode, which runs the search up to twice), and it agrees with a brute-force picker on every ray. The per-part boxes make a many-part scene cheap; a single huge part, or boxes that all contain the ray, cost one test per triangle. "Triangle caps" in ADR-0053 means the load limit (`RenderLimits.EXPORT_MAX_TRIANGLES` = 130 000 and 4096 parts at the time of writing), not a limit inside the picker: picking itself is gap-free. At the load limit the worst case is 130 000 triangle tests for a single click, no timing was asserted (the macOS CI runner is slow); the test counts triangle tests only. No BVH was built. The test fails when the load limit changes, to force a new measurement.
+
+D7. Trigger for a BVH. A BVH per part is built when the load limit is raised above 130 000 triangles, or when the median in the many-parts scene exceeds 13 000 tests per pick. Neither is the case. GPU picking is not planned.
+
+== Security
+
+The outline reads geometry that comes from a script and the worker. All tables are fixed size, probing and edge counts are bounded, a hostile triangle (NaN, infinity, huge) is skipped before it reaches the hash, no index comes from the input without a range check (`isSelected`, `modeOf` check the source index and the part index), and nothing about the geometry is logged. Memory is 5.5 MB once per canvas. The scaling test builds hypothetical scenes beyond the load limit through reflection in test code only; production code still refuses them.
+
+== Consequences and open points
+
+* Hidden sections of an outline (where a part covers another one) are drawn like visible ones; a dashed line for them is not part of this wave.
+* An outline needs 2 passes over at most 16 384 segments per frame; a selection above the budget silently keeps the tint, which can surprise someone selecting a very large assembly.
+* Two selected neighbouring parts show two lines on their common border, by design.
+* A BVH per part, GPU picking, lasso selection and hand-testing on Windows and Linux are open.

@@ -418,6 +418,9 @@ fun FrameWindowScope.DesktopApp(
         }
     }
     val accent = if (dark) ACCENT_DARK else ACCENT_LIGHT
+    // The viewer sits on the surface colour of the Material scheme chosen in `MaterialTheme(...)` below; the
+    // outline halo (ADR-0093) is drawn in that colour so the line stays readable over any part colour.
+    val viewerBackground = if (dark) darkColorScheme().surface else lightColorScheme().surface
     // The multi-selection mask is built when the selection changes, never on a hover (the list instance is kept).
     val maskMemo = remember(parts) { MaskMemo() }
     val multiMask =
@@ -446,6 +449,12 @@ fun FrameWindowScope.DesktopApp(
                         selectedLast = chosen.last,
                         hoveredLast = over.last,
                         selectedMask = multiMask.value,
+                        haloRgb =
+                            doubleArrayOf(
+                                viewerBackground.red.toDouble(),
+                                viewerBackground.green.toDouble(),
+                                viewerBackground.blue.toDouble(),
+                            ),
                     )
                 }
             }

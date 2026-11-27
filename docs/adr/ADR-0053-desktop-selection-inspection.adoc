@@ -50,3 +50,5 @@ D10. API additions in the published modules are additive and have defaults: `Pro
 == Follow-up
 
 Jump from the selection to its place in the script: heuristic by name done in ADR-0068, position-exact (source positions from the worker) still open; hover cursor out of the composition scope: done in ADR-0068; multi-select; BVH or GPU picking if the caps are raised; an outline instead of a tint; a recompose-count test for the highlight; hand-testing of cursor, tooltip and Escape focus on every platform.
+
+Update: the outline instead of a tint is done in ADR-0093; a BVH was measured against and deliberately not built (ADR-0093), GPU picking is still open.
