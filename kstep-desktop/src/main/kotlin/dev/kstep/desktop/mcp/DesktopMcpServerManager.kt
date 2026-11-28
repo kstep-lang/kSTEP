@@ -104,12 +104,17 @@ class DesktopMcpServerManager(
         }
     }
 
+    // Reading the latest settings and writing them is one step: two saves must not cross (an older value written last).
+    private val saveLock = Any()
+
+    private fun saveLatest(): Boolean = synchronized(saveLock) { preferences.save(settingsFlow.value) }
+
     fun setEnabled(on: Boolean) {
         val next = settingsFlow.value.copy(enabled = on)
         settingsFlow.value = next
         scope.launch {
             // Save the latest snapshot, not the captured one: a setting changed meanwhile must not be overwritten.
-            saveFailedFlow.value = !preferences.save(settingsFlow.value)
+            saveFailedFlow.value = !saveLatest()
             if (on) doStart(next.port) else doStop()
         }
     }
@@ -123,7 +128,7 @@ class DesktopMcpServerManager(
         val next = settingsFlow.value.copy(allowActions = on)
         settingsFlow.value = next
         allowActionsFlow.value = on
-        val saved = preferences.save(next)
+        val saved = saveLatest()
         saveFailedFlow.value = !saved
         return if (saved) ActionsChange.CHANGED else ActionsChange.SAVE_FAILED
     }
