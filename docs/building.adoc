@@ -301,3 +301,22 @@ scripts/release/verify-native-dist.sh kstep-cli/build/distributions/kstep-<versi
 
 Host platform only (linux-x86-64, macos-aarch64). The build cache is enabled in `gradle.properties`, so always pass
 `--no-build-cache` for verification. See ADR-0050.
+
+The release workflow builds the same archive on both platforms (ADR-0100) and also runs `scripts/release/check-native-linkage.sh <zip> <version>`
+(needs `otool` on macOS, `readelf` and `objdump` on Linux). On Linux, `KSTEP_OCCT_LIB_DIR=/absolute/dir` makes the launcher prepend that
+directory to `LD_LIBRARY_PATH` for an OCCT outside `/usr/lib/x86_64-linux-gnu`; macOS ignores it.
+
+=== Checking the Homebrew formula locally
+
+The tap is `kstep-lang/homebrew-kstep` (`Formula/kstep.rb`). To test a freshly built archive without publishing anything:
+
+[source,bash]
+----
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
+brew tap-new --no-git kstep-local/verify
+cp <tap>/Formula/kstep.rb "$(brew --repository kstep-local/verify)/Formula/"
+# in the copy: point the macOS url at file://<zip>, set sha256 to the zip's checksum (it has no version line)
+brew install --formula kstep-local/verify/kstep && brew test kstep-local/verify/kstep
+brew linkage kstep-local/verify/kstep && brew audit --strict --formula kstep-local/verify/kstep
+brew uninstall --formula kstep-local/verify/kstep && brew untap kstep-local/verify   # clean up
+----

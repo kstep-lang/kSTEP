@@ -44,9 +44,9 @@ A manual run (`workflow_dispatch`) takes an existing `tag` and `dry_run`, which 
 it builds and verifies but publishes nothing. Re-running a release is idempotent: an existing
 release is edited and its assets are replaced.
 
-The zip contains *no* native bridges: OCCT and PlaneGCS functions fall back to their documented
-unavailable path. Not part of the pipeline yet: a Homebrew tap, signatures and provenance for the
-zip (follow-up waves). The library modules go to Maven Central, see below.
+The `kstep-cli` zip contains *no* native bridges: OCCT and PlaneGCS functions fall back to their documented
+unavailable path. Since ADR-0100 the release also carries two native archives (see below). Not part of the
+pipeline yet: signatures and provenance (follow-up waves). The library modules go to Maven Central, see below.
 
 == Publishing to Maven Central
 
@@ -133,6 +133,29 @@ Without `-Pkstep.native.exclude=true` the task `verifyNoNativeLibraries` fails t
 local bridge can never end up in a jar. For a signed rehearsal use a throw-away key in a temporary `GNUPGHOME` and pass it
 as `ORG_GRADLE_PROJECT_signingInMemoryKey` (never commit it), then add `--signed` to the verification.
 
-== Native runtime archive
+== Native runtime archives and the Homebrew tap (ADR-0100)
 
-The native runtime archive (ADR-0050) is *not* part of the release pipeline yet; `release.yml` neither builds nor publishes it.
+The job `native` (matrix: `ubuntu-26.04` and `macos-latest`, `fail-fast: false`) builds `kstep-<version>-<platform>-native.zip` with
+the real OCCT and PlaneGCS bridges, then runs `verify-native-dist.sh` (strict: a missing OCCT fails, `KSTEP_VERIFY_ALLOW_NO_OCCT`
+must not be set) and `check-native-linkage.sh` (allowed dependencies, rpaths, glibc floor, macOS `minos`; the output goes to the job
+summary). Both legs are mandatory: if one fails, `publish` does not run. Tags older than ADR-0050 have no such task and release the
+JVM zip only (`has_native=false`). `publish` checks every asset name against a whitelist and requires exactly two native archives.
+
+The job `homebrew-tap` runs after `publish` and sends a `repository_dispatch` (`kstep-release`) to `kstep-lang/homebrew-kstep`. It
+needs the repository secret `HOMEBREW_TAP_TOKEN`: a fine-grained personal access token limited to `kstep-lang/homebrew-kstep` with
+*Contents: read and write*. *Creating the tap repository and setting the secret is done by the repository owner by hand.* Without the
+secret the job prints a notice and does nothing; a failed dispatch is an error but never invalidates the release, which is idempotent.
+Manual route:
+
+[source,bash]
+----
+gh workflow run update-formula.yml -R kstep-lang/homebrew-kstep \
+  -f version=<version> -f macos_sha256=<sha> -f linux_sha256=<sha>
+----
+
+A trial run on GitHub (`workflow_dispatch`, `dry_run=true`) is only possible after the workflow is on `master`. Status: the new jobs
+were checked with `actionlint`/`yamllint` and their scripts with the self-test, but have not run on GitHub yet.
+
+== Native runtime archive (local build)
+
+Locally the archive is built as described in ADR-0050 and `docs/building.adoc`.

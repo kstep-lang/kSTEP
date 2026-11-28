@@ -17,6 +17,13 @@ report "unavailable" and a hint is printed.
 
 macOS: a downloaded, unsigned dylib may be blocked by Gatekeeper (xattr -d com.apple.quarantine).
 
+Linux with OCCT outside /usr/lib/x86_64-linux-gnu (for example Linuxbrew): set the absolute directory
+in KSTEP_OCCT_LIB_DIR; bin/kstep prepends it to LD_LIBRARY_PATH. This is unverified for Linuxbrew and
+can fail on glibc/libstdc++ symbol versions: the Linux bridge is built on Ubuntu 26.04. macOS ignores
+the variable; its OCCT dependencies are absolute /opt/homebrew/opt/opencascade/lib install names, so
+Homebrew on Apple Silicon is the supported route there. Windows and Intel Macs are not supported.
+No Java runtime is bundled: install JDK 21 (macOS: brew install openjdk@21).
+
 Licensing: OCCT is LGPL 2.1 with an exception and is linked dynamically, not redistributed here.
 The PlaneGCS sources are vendored and compiled into libkstep_planegcs_bridge; see NOTICE.
 

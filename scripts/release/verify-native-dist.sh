@@ -51,6 +51,10 @@ BAD="$(printf '%s\n' "$NATIVE" | grep -vE "^$ROOT/lib/native/$PLATFORM/libkstep_
 OCCT_BUNDLED="$(printf '%s\n' "$LIST" | grep -E '(^|/)(libTK|libOCC|libocct)' || true)"
 [ -z "$OCCT_BUNDLED" ] || fail "OCCT libraries must not be bundled: $OCCT_BUNDLED"
 
+# No Java runtime may ship in the archive (ADR-0100): the launcher uses the host's JDK 21.
+JAVA_BUNDLED="$(printf '%s\n' "$LIST" | grep -E "^$ROOT/(runtime|jre|jdk)/|(^|/)bin/java(\.exe)?$|(^|/)libjvm\.(so|dylib)$|\.jmod$" || true)"
+[ -z "$JAVA_BUNDLED" ] || fail "a Java runtime must not be bundled: $JAVA_BUNDLED"
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 unzip -q "$ZIP" -d "$TMP/x"
@@ -71,6 +75,21 @@ printf '%s' "$HELP" | grep -q 'Usage:' || fail "--help output lacks 'Usage:'"
 VER_OUT="$("$BIN" --version 2>/dev/null)" || fail "bin/kstep --version exited non-zero"
 [ "$(printf '%s\n' "$VER_OUT" | head -n 1)" = "kstep $VERSION" ] \
   || fail "--version first line is not 'kstep $VERSION' (got: $(printf '%s\n' "$VER_OUT" | head -n 1))"
+
+# The optional OCCT directory override must not break the launcher (Linux prepends it to LD_LIBRARY_PATH,
+# macOS ignores it). A nonexistent directory is skipped silently; a relative one is refused with exit 2.
+OVR_OUT="$(KSTEP_OCCT_LIB_DIR=/nonexistent-kstep-dir "$BIN" --version 2>/dev/null | head -n 1)" \
+  || fail "launcher failed with KSTEP_OCCT_LIB_DIR=/nonexistent-kstep-dir"
+[ "$OVR_OUT" = "kstep $VERSION" ] || fail "launcher printed '$OVR_OUT' with KSTEP_OCCT_LIB_DIR set"
+# An existing absolute directory takes the real LD_LIBRARY_PATH prepend branch on Linux.
+OVR_OUT="$(KSTEP_OCCT_LIB_DIR="$TMP" "$BIN" --version 2>/dev/null | head -n 1)" \
+  || fail "launcher failed with KSTEP_OCCT_LIB_DIR=$TMP"
+[ "$OVR_OUT" = "kstep $VERSION" ] || fail "launcher printed '$OVR_OUT' with an existing KSTEP_OCCT_LIB_DIR"
+if [ "$PLATFORM" = "linux-x86-64" ]; then
+  if KSTEP_OCCT_LIB_DIR=relative/dir "$BIN" --version >/dev/null 2>&1; then
+    fail "launcher accepted a relative KSTEP_OCCT_LIB_DIR"
+  fi
+fi
 
 # APP_HOME resolution through a symlink and from another working directory.
 ln -s "$BIN" "$TMP/kstep-link"

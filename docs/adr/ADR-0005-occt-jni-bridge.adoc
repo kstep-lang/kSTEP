@@ -7,6 +7,8 @@ Accepted, implemented (kSTEP Geometrie Welle 1 -- run as its own track,
 alongside the M1/M2 numbering, per this ADR's own open question below on
 milestone naming; not yet decided whether a future M3 absorbs it).
 
+Note (ADR-0100): OCCT is also not distributed in the native release archives or the Homebrew tap; they link to the user's own OCCT.
+
 == Context
 
 Per kSTEP-ADR-0001 (V1 scope reduction, recorded in the project vault, not this

@@ -1,7 +1,9 @@
 name: Release
 
 # Builds the kstep-cli distribution for a pushed vX.Y.Z tag, verifies it, and creates or
-# updates the GitHub release with the zip and its SHA-256 checksum. See ADR-0025.
+# updates the GitHub release with the zip and its SHA-256 checksum. See ADR-0025. Since ADR-0100
+# the release also carries two native runtime archives (linux-x86-64, macos-aarch64) built and
+# verified on their own platform, and a repository_dispatch updates the Homebrew tap.
 #
 # Design notes
 # - GitHub release handling uses the `gh` CLI only. softprops/action-gh-release is avoided
@@ -13,8 +15,15 @@ name: Release
 #   processResources, so a runner image with Eigen/Boost headers would otherwise leak a
 #   Linux-only library into a zip that is advertised as platform independent.
 # - Maven Central is published by the job `maven-central`, after the GitHub release, gated on
-#   secrets and idempotent (ADR-0043). Not part of this workflow: Homebrew tap, provenance.
-# - Deliberately NOT pull_request_target and no secrets other than the job's github.token.
+#   secrets and idempotent (ADR-0043). Not part of this workflow: provenance.
+# - Native archives (job `native`, ADR-0100): built with the real OCCT/PlaneGCS bridges, verified by
+#   verify-native-dist.sh (strict: exit 3 without OCCT) and check-native-linkage.sh. Both legs are
+#   mandatory; if one fails there is no release. `check` is not repeated there: job `build` ran it
+#   and ci.yml covers the native test suites on both platforms.
+# - The tap job `homebrew-tap` only dispatches; it is skipped (notice) without HOMEBREW_TAP_TOKEN and
+#   can never fail the release, which is idempotent and can be re-run.
+# - Deliberately NOT pull_request_target. Secrets: the job's github.token, the Maven Central set (one
+#   job) and HOMEBREW_TAP_TOKEN (one step).
 on:
   push:
     tags: ['v*.*.*']
@@ -51,6 +60,7 @@ jobs:
       prerelease: ${{ steps.resolve.outputs.prerelease }}
       commit: ${{ steps.onmaster.outputs.commit }}
       has_publishing: ${{ steps.pubsupport.outputs.has }}
+      has_native: ${{ steps.nativesupport.outputs.has }}
     steps:
       - name: Resolve and validate tag
         id: resolve
@@ -116,6 +126,18 @@ jobs:
           else
             echo "has=false" >> "$GITHUB_OUTPUT"
             echo "::notice::The tagged source has no Maven Central publishing configuration; the Maven steps are skipped."
+          fi
+
+      - name: Detect native archive support in the tagged source
+        id: nativesupport
+        run: |
+          # Tags older than ADR-0050 have no nativeRuntimeZip task; they get the JVM zip only.
+          if grep -q 'register<Zip>("nativeRuntimeZip")' src/kstep-cli/build.gradle.kts \
+            && [ -f src/kstep-cli/src/native-dist/bin/kstep ]; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::The tagged source has no native runtime archive support; only the JVM zip is released."
           fi
 
       - name: Version check (tag vs build.gradle.kts)
@@ -234,10 +256,202 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  native:
+    name: build + verify native archive (${{ matrix.platform }})
+    needs: build
+    if: needs.build.outputs.has_native == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-26.04 is a preview label (as in ci.yml). Fallback if it disappears: runs-on
+          # ubuntu-latest with `container: ubuntu:26.04` and apt run without sudo.
+          - platform: linux-x86-64
+            runner: ubuntu-26.04
+          - platform: macos-aarch64
+            runner: macos-latest
+    steps:
+      - name: Re-validate tag and version
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ "$TAG" =~ $RE ]] || [ "$VERSION" != "${TAG#v}" ]; then
+            echo "::error::Invalid tag/version from build job."
+            exit 1
+          fi
+
+      - name: Check out release tooling (workflow revision)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          persist-credentials: false
+          sparse-checkout: scripts/release
+
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.build.outputs.tag }}
+          path: src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag still points at the built commit
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          BUILT_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          COMMIT="$(git -C src rev-parse "refs/tags/$TAG^{commit}")"
+          if [ "$COMMIT" != "$BUILT_COMMIT" ]; then
+            echo "::error::Tag $TAG moved since the build job ($BUILT_COMMIT -> $COMMIT); refusing to build."
+            exit 1
+          fi
+
+      - name: Compute the apt cache key (one cache entry per ISO week)
+        id: aptweek
+        if: matrix.platform == 'linux-x86-64'
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the downloaded apt packages (the OCCT dev set is ~450 MB)
+        if: matrix.platform == 'linux-x86-64'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-occt-release-ubuntu-26.04-${{ steps.aptweek.outputs.week }}
+          restore-keys: |
+            apt-occt-release-ubuntu-26.04-
+            apt-occt-ubuntu-26.04-
+        # Restore only: a release run never writes a shared cache (see the setup-gradle comment).
+
+      - name: Install OCCT and PlaneGCS build dependencies (Linux)
+        if: matrix.platform == 'linux-x86-64'
+        timeout-minutes: 40
+        run: |
+          # Same logic as ci.yml build-native: download first (resumable), then install offline.
+          APT_DIR="$HOME/apt-archives"
+          mkdir -p "$APT_DIR/partial"
+          APT_OPTS=(-o Dir::Cache::Archives="$APT_DIR" -o APT::Sandbox::User=root -o Acquire::Retries=3 -o Acquire::http::Timeout=30)
+          PKGS=(libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-data-exchange-dev libocct-ocaf-dev libeigen3-dev libboost-dev libgl1 libfontconfig1 libfreetype6 libx11-6)
+          downloaded=0
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get "${APT_OPTS[@]}" update \
+              && sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends --download-only "${PKGS[@]}"; then
+              downloaded=1
+              break
+            fi
+            echo "::warning::apt download attempt $attempt failed or timed out"
+            sleep 15
+          done
+          if [ "$downloaded" != 1 ]; then
+            echo "::error::apt-get could not download the packages after 3 attempts"
+            exit 1
+          fi
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends "${PKGS[@]}"
+          sudo chown -R "$(id -u):$(id -g)" "$APT_DIR"
+          for lib in libTKDESTEP libTKXCAF libTKOffset; do
+            if [ ! -f "/usr/lib/x86_64-linux-gnu/$lib.so" ]; then
+              echo "::error::No $lib.so; kstep-geometry links it (see ci.yml build-native)."
+              exit 1
+            fi
+          done
+          grep -m1 'OCC_VERSION_COMPLETE  *"' /usr/include/opencascade/Standard_Version.hxx || true
+
+      - name: Install OCCT and PlaneGCS build dependencies (macOS)
+        if: matrix.platform == 'macos-aarch64'
+        run: |
+          [ "$(uname -m)" = "arm64" ] || { echo "::error::expected an Apple Silicon runner"; exit 1; }
+          brew install opencascade eigen boost
+          brew list --versions opencascade
+          # The bridge links the 7.9 install names (libTK*.7.9.dylib); any other series breaks the archive.
+          brew list --versions opencascade | grep -Eq ' 7\.9\.' \
+            || { echo "::error::Homebrew OCCT is not 7.9.x; the archive's linkage check would fail."; exit 1; }
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-read-only: true
+
+      - name: Build the native archive
+        working-directory: src
+        env:
+          # Lowest macOS the bridge may need; the Linux leg ignores it. Checked via `minos` below.
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          ./gradlew clean :kstep-cli:nativeRuntimeZip \
+            -Pkstep.native.embedInJar=false \
+            -Pkstep.occt.require=true \
+            -Pkstep.planegcs.require=true \
+            --no-build-cache --stacktrace
+
+      - name: Verify the archive (strict) and its linkage
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+          KSTEP_VERIFY_ALLOW_NO_OCCT: ''
+        run: |
+          # The strict mode must be on: a missing OCCT is a failure here, never a skip.
+          test -z "${KSTEP_VERIFY_ALLOW_NO_OCCT:-}"
+          ZIP="kstep-cli/build/distributions/kstep-$VERSION-$PLATFORM-native.zip"
+          cd src
+          bash ../tools/scripts/release/verify-native-dist.sh "$ZIP" "$VERSION" \
+            kstep-tests/src/test/resources/export-box-20x30x40.kstep.kts
+          bash ../tools/scripts/release/check-native-linkage.sh "$ZIP" "$VERSION" | tee "$RUNNER_TEMP/linkage.txt"
+          {
+            echo "### Native archive $PLATFORM"
+            echo '```'
+            cat "$RUNNER_TEMP/linkage.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Assemble the archive and its checksum
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir native-assets
+          cp "src/kstep-cli/build/distributions/kstep-$VERSION-$PLATFORM-native.zip" native-assets/
+          bash tools/scripts/release/checksum.sh "native-assets/kstep-$VERSION-$PLATFORM-native.zip"
+          ls -l native-assets
+
+      - name: Upload the native archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-${{ matrix.platform }}
+          path: native-assets/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-reports-native-${{ matrix.platform }}
+          path: |
+            src/**/build/reports/
+            src/**/build/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   publish:
     name: publish GitHub release
-    needs: build
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    needs: [build, native]
+    # `native` is skipped for tags without native archive support (has_native=false); a failed or
+    # cancelled native leg blocks the release. A dry run publishes nothing.
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      (needs.native.result == 'success' || (needs.native.result == 'skipped' && needs.build.outputs.has_native == 'false')) &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The only job with write access. It checks out and executes no repository code.
@@ -250,10 +464,19 @@ jobs:
           name: release-assets
           path: release-assets
 
+      - name: Download native archives
+        if: needs.build.outputs.has_native == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: release-assets
+
       - name: Re-validate tag and verify checksum
         env:
           TAG: ${{ needs.build.outputs.tag }}
           VERSION: ${{ needs.build.outputs.version }}
+          HAS_NATIVE: ${{ needs.build.outputs.has_native }}
         run: |
           # Defense in depth: job outputs are never trusted unchecked.
           RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -263,6 +486,31 @@ jobs:
           fi
           cd release-assets
           sha256sum -c "kstep-cli-$VERSION.zip.sha256"
+          # Only known file names may be released (a stray artifact must not slip into the release).
+          NRE="^(RELEASE_NOTES\\.md|kstep-cli-$VERSION\\.zip(\\.sha256)?|kstep-$VERSION-(linux-x86-64|macos-aarch64)-native\\.zip(\\.sha256)?)$"
+          for f in *; do
+            [[ "$f" =~ $NRE ]] || { echo "::error::unexpected file in the release assets: $f"; exit 1; }
+          done
+          if [ "$HAS_NATIVE" = "true" ]; then
+            for p in linux-x86-64 macos-aarch64; do
+              sha256sum -c "kstep-$VERSION-$p-native.zip.sha256"
+            done
+            NATIVE_ZIPS=(kstep-*-native.zip)
+            [ "${#NATIVE_ZIPS[@]}" = "2" ] || { echo "::error::expected exactly two native archives"; exit 1; }
+          fi
+
+      - name: Tag still points at the built commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          BUILT_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          COMMIT="$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)"
+          if [ "$COMMIT" != "$BUILT_COMMIT" ]; then
+            echo "::error::Tag $TAG moved since the build job ($BUILT_COMMIT -> $COMMIT); refusing to publish."
+            exit 1
+          fi
 
       - name: Create or update GitHub release
         env:
@@ -275,15 +523,19 @@ jobs:
           ZIP="release-assets/kstep-cli-$VERSION.zip"
           SUM="$ZIP.sha256"
           NOTES="release-assets/RELEASE_NOTES.md"
+          FILES=("$ZIP" "$SUM")
+          for f in release-assets/kstep-"$VERSION"-*-native.zip release-assets/kstep-"$VERSION"-*-native.zip.sha256; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
           ERR="$(mktemp)"
           if gh release view "$TAG" >/dev/null 2>"$ERR"; then
             gh release edit "$TAG" --title "kSTEP $VERSION" --notes-file "$NOTES" \
               --prerelease="$PRERELEASE" --draft=false
-            gh release upload "$TAG" "$ZIP" "$SUM" --clobber
+            gh release upload "$TAG" "${FILES[@]}" --clobber
           elif grep -qi 'release not found' "$ERR"; then
             FLAGS=()
             if [ "$PRERELEASE" = "true" ]; then FLAGS+=(--prerelease --latest=false); fi
-            gh release create "$TAG" "$ZIP" "$SUM" --verify-tag \
+            gh release create "$TAG" "${FILES[@]}" --verify-tag \
               --title "kSTEP $VERSION" --notes-file "$NOTES" "${FLAGS[@]}"
           else
             # Auth or network failure must not be mistaken for "release does not exist".
@@ -308,6 +560,7 @@ jobs:
     name: publish libraries to Maven Central
     needs: [build, publish]
     if: >-
+      !cancelled() && needs.publish.result == 'success' &&
       needs.build.outputs.has_publishing == 'true' &&
       (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
     runs-on: ubuntu-latest
@@ -446,4 +699,101 @@ jobs:
             echo "Version $VERSION, state before upload: $STATE."
             echo 'Deployments: https://central.sonatype.com/publishing/deployments'
             echo 'Artifacts can take up to about 30 minutes to appear on repo1.maven.org.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  homebrew-tap:
+    name: update the Homebrew tap
+    needs: [build, publish]
+    if: needs.publish.result == 'success' && needs.build.outputs.has_native == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Dispatch only. Failing here never invalidates the release: it is idempotent and the tap can be
+    # updated by hand (see docs/releasing.adoc).
+    permissions:
+      contents: read
+    steps:
+      - name: Detect the tap token
+        id: gate
+        env:
+          HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HOMEBREW_TAP_TOKEN not set, skipping the tap update"
+          fi
+
+      - name: Re-validate tag and version, tag still on the built commit
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BUILT_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ "$TAG" =~ $RE ]] || [ "$VERSION" != "${TAG#v}" ]; then
+            echo "::error::Invalid tag/version from build job."
+            exit 1
+          fi
+          COMMIT="$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)"
+          if [ "$COMMIT" != "$BUILT_COMMIT" ]; then
+            echo "::error::Tag $TAG moved since the build job; refusing to update the tap."
+            exit 1
+          fi
+
+      - name: Check out release tooling (workflow revision)
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          persist-credentials: false
+          sparse-checkout: scripts/release
+
+      - name: Download the published native archives and verify them
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          # The real release content, not the workflow artifacts: this is what Homebrew will download.
+          mkdir assets
+          gh release download "$TAG" -p 'kstep-*-native.zip' -p 'kstep-*-native.zip.sha256' -D assets
+          cd assets
+          for f in *.sha256; do sha256sum -c "$f"; done
+
+      - name: Build the payload
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: bash tools/scripts/release/tap-payload.sh assets "$VERSION" "$GH_REPO" > payload.json
+
+      - name: Dispatch the tap update
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          # The only step that sees the tap token. No set -x; errors are shown without the response body.
+          if ! jq -n --slurpfile p payload.json '{event_type: "kstep-release", client_payload: $p[0]}' \
+            | gh api repos/kstep-lang/homebrew-kstep/dispatches --method POST --input - >/dev/null 2>dispatch.err; then
+            echo "::error::The tap dispatch failed; update the tap by hand (docs/releasing.adoc)."
+            head -c 300 dispatch.err | sed -E 's/(token|Bearer) [A-Za-z0-9_-]+/\1 ***/g' >&2
+            exit 1
+          fi
+
+      - name: Summary
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          # shellcheck disable=SC2016  # the backticks are Markdown, not command substitution
+          {
+            echo '### Homebrew tap'
+            echo 'Dispatched `kstep-release` to kstep-lang/homebrew-kstep with:'
+            echo '```json'
+            cat payload.json
+            echo '```'
+            echo 'Manual alternative: `gh workflow run update-formula.yml -R kstep-lang/homebrew-kstep -f version=<v> -f macos_sha256=<sha> -f linux_sha256=<sha>`'
           } >> "$GITHUB_STEP_SUMMARY"

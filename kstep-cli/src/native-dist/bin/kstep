@@ -33,6 +33,24 @@ if [ "$PLATFORM" != "@PLATFORM@" ]; then
     exit 2
 fi
 
+# Optional OCCT library directory (linux-x86-64 only, ADR-0100). The Linux OCCT bridge carries a
+# baked-in rpath of the build machine's distro directory (/usr/lib/x86_64-linux-gnu); where OCCT lives
+# elsewhere (e.g. Linuxbrew), the Homebrew formula sets KSTEP_OCCT_LIB_DIR and it is prepended to
+# LD_LIBRARY_PATH. On macOS the OCCT dependencies are absolute install names, so it is ignored.
+if [ "$PLATFORM" = "linux-x86-64" ] && [ -n "${KSTEP_OCCT_LIB_DIR:-}" ]; then
+    case "$KSTEP_OCCT_LIB_DIR" in
+        /*) ;;
+        *)
+            echo "kstep: KSTEP_OCCT_LIB_DIR must be an absolute path (got: $KSTEP_OCCT_LIB_DIR)" >&2
+            exit 2
+            ;;
+    esac
+    if [ -d "$KSTEP_OCCT_LIB_DIR" ]; then
+        LD_LIBRARY_PATH="$KSTEP_OCCT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        export LD_LIBRARY_PATH
+    fi
+fi
+
 OCCT_LIB="$APP_HOME/lib/native/$PLATFORM/libkstep_occt_bridge.$EXT"
 PGCS_LIB="$APP_HOME/lib/native/$PLATFORM/libkstep_planegcs_bridge.$EXT"
 for f in "$OCCT_LIB" "$PGCS_LIB"; do

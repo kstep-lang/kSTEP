@@ -3,7 +3,8 @@
 
 == Status
 
-Accepted (Welle D0a). Verified on macOS arm64 locally and on Linux x86-64 (Ubuntu 26.04, OCCT 7.9.2) by a CI step.
+Accepted (Welle D0a). Verified on macOS arm64 locally and on Linux x86-64 (Ubuntu 26.04, OCCT 7.9.2) by a CI step. Extended by ADR-0100
+(release legs, linkage check, Homebrew tap).
 
 == Context
 

@@ -1,0 +1,99 @@
+= ADR-0100: Native release archives and a Homebrew tap (Welle DIST-1)
+:toc:
+
+== Status
+
+Accepted (Welle DIST-1), implemented on a feature branch. Extends ADR-0025 (release pipeline) and ADR-0050 (native runtime
+distribution). Scope: `.github/workflows/release.yml`, `scripts/release/` (`check-native-linkage.sh`, `tap-payload.sh`,
+`verify-native-dist.sh`, `test-release-scripts.sh`), `kstep-cli/src/native-dist/` and the new repository
+`kstep-lang/homebrew-kstep` (created locally, not yet on GitHub). No Kotlin code, no database, so there is no migration, and no
+new error code.
+
+*What is verified and what is not.* Verified on a real machine (macOS 27, Apple Silicon, Homebrew OCCT 7.9.3_1): building the
+archive, `verify-native-dist.sh`, `check-native-linkage.sh`, and a Homebrew install of the formula from a temporary tap with
+`brew test`, `brew linkage` and `brew audit --strict` (see Measured results). Not verified: Linux (neither the new Linux release leg
+nor the formula under Linuxbrew ever ran), and the workflows, which were only checked with `actionlint` and `yamllint` and have
+never run on GitHub (the feature branch is not pushed). The Linux leg is unproven until a first run.
+
+== Context
+
+The released CLI zip is JVM-only (ADR-0025): geometry and constraint features report "unavailable". ADR-0050 added an opt-in native
+archive, but it was neither built by the release workflow nor installable without manual steps. Geometry must work in the package a
+user installs.
+
+== Decision
+
+D1. The release carries, besides `kstep-cli-<version>.zip`, two native archives `kstep-<version>-linux-x86-64-native.zip` and
+`kstep-<version>-macos-aarch64-native.zip`, each with a `.sha256` file. They are built and verified on their own platform by the job
+`native` (matrix, `fail-fast: false`). Both legs are mandatory: if one fails there is no release (the job `publish` does not run).
+Tags that predate ADR-0050 (no `nativeRuntimeZip` task) are detected (`has_native=false`) and release the JVM zip only.
+
+D2. Verification is strict. `verify-native-dist.sh` runs without `KSTEP_VERIFY_ALLOW_NO_OCCT` (the job fails if it is set): a missing
+OCCT is an error, not a skip. It now also rejects a bundled Java runtime and checks that the launcher survives `KSTEP_OCCT_LIB_DIR`.
+The new `check-native-linkage.sh` inspects the bridge libraries (see D4) and reports the glibc/libstdc++ floor on Linux and the
+minimum macOS version.
+
+D3. OCCT and Java are not distributed. OCCT stays an external, dynamically linked LGPL dependency (ADR-0005, NOTICE); no `libTK*` may
+be in an archive. Java is the host's JDK 21.
+
+D4. How the archive finds OCCT (measured, not assumed):
+
+* macOS: the bridge's own id is `@rpath/libkstep_occt_bridge.dylib`; its OCCT dependencies are absolute
+  `/opt/homebrew/opt/opencascade/lib/libTK*.7.9.dylib` install names (Homebrew sets the ids of its OCCT dylibs to opt paths) and its only
+  `LC_RPATH` is `/opt/homebrew/opt/opencascade/lib`. The opt symlink survives upgrades within 7.9.x. No `DYLD_LIBRARY_PATH` is needed.
+  The check rejects versioned `Cellar` paths and build-machine paths. PlaneGCS has no third-party dependency.
+* Linux: the bridge is linked on Ubuntu 26.04 against the distro OCCT with a DT_RPATH of `/usr/lib/x86_64-linux-gnu`. The check
+  demands exactly that RPATH (no RUNPATH, no path under `/home`) and a NEEDED list of OCCT 7.9, libstdc++, libm, libgcc_s and libc.
+  Where OCCT lives elsewhere, the launcher prepends the absolute directory in `KSTEP_OCCT_LIB_DIR` to `LD_LIBRARY_PATH` (Linux only,
+  ignored on macOS, refused if relative).
+* The macOS deployment target is pinned to 14.0 (`MACOSX_DEPLOYMENT_TARGET`); the check prints the resulting `minos` (14.0 in the local
+  build).
+
+D5. Homebrew tap `kstep-lang/homebrew-kstep`, formula `kstep`: installs the archive into `libexec`, depends on `opencascade` and
+`openjdk@21`, and writes a wrapper that sets `JAVA_HOME` to JDK 21 (deliberately not overridable: a user's JDK 17 would break the
+launcher) and, on Linux, `KSTEP_OCCT_LIB_DIR` to Homebrew's OCCT. The formula uses `preserve_rpath`: without it Homebrew's own
+dylib-id rewrite failed on the PlaneGCS bridge ("Updated load commands do not fit in the header"), found by the real install. The
+formula has no `version` line (Homebrew reads it from the URL). Its test runs `--version` (OCCT available), an STL render and a STEP
+export with geometry and looks for `MANIFOLD_SOLID_BREP`.
+
+D6. The tap is updated by `repository_dispatch` (`kstep-release`) from the job `homebrew-tap`, which runs only after the release is
+published, only with the secret `HOMEBREW_TAP_TOKEN` (otherwise a notice), and can never invalidate the release. The payload is
+built by `tap-payload.sh` from the *published* assets after `sha256sum -c`; the tap workflow validates every value, builds the URLs
+itself from the version and the fixed repository, downloads both archives and recomputes their SHA-256, refuses a downgrade and
+passes event data only through `env:`.
+
+D7. Security of the workflow: `publish` stays the only job with `contents: write` and runs no repository code; it now also checks the
+asset names against a whitelist and requires exactly two native archives. The tag is re-checked against the built commit in `native`,
+`publish` and `homebrew-tap`. The tap token exists in one step. No third-party action touches a secret (no `peter-evans/repository-dispatch`),
+and `softprops/action-gh-release` stays unused.
+
+== Platforms and honest limits
+
+* macOS Apple Silicon with Homebrew: verified end to end locally.
+* Linux x86-64 with the distro OCCT (Ubuntu 26.04): verified by the existing CI job for the archive; the new release leg has not run.
+* Linux with Linuxbrew: *unverified* and may fail. The bridge needs the glibc and libstdc++ symbol versions of Ubuntu 26.04
+  (`check-native-linkage.sh` prints them as `glibc_floor` and `glibcxx_floor`), which Linuxbrew's runtime may not provide, and the RPATH
+  does not match Linuxbrew's OCCT directory (hence `KSTEP_OCCT_LIB_DIR`).
+* An OCCT 8.x upgrade changes the library names; `kstep --version` then reports `occt: unavailable` until a new kSTEP release exists.
+* Windows and Intel Macs: not supported. The archives are not signed or notarised; the first run on a downloaded archive can hit
+  Gatekeeper (Homebrew installs avoid the quarantine flag).
+
+== Alternatives rejected
+
+* Bundling OCCT in the archive: licence and size; ADR-0005 stands.
+* A jlink runtime with Java inside: platform-specific, large, and Homebrew provides JDK 21.
+* A Homebrew cask: this is a command line tool with dependencies, a formula fits.
+* `softprops/action-gh-release` (known 401 failure) and `peter-evans/repository-dispatch` (a third-party action holding the token).
+* Interpolating `${{ }}` into `run:` as the kUML tap workflow does: an injection risk.
+
+== Measured results
+
+macOS 27.2.1 arm64, Homebrew 7.0.16, OCCT 7.9.3_1, openjdk@21 21.0.13.1, archive 88 MB (`kstep-0.5.0-macos-aarch64-native.zip`):
+
+* `verify-native-dist.sh`: passes, including the native STL render.
+* `check-native-linkage.sh`: passes, `minos=14.0`.
+* Install of the formula from a temporary local tap (`file://` URL, real checksum): `brew install` did not upgrade OCCT or the JDK,
+  `kstep --version` printed `occt: available 7.9.3` and `planegcs: available`, `brew test` exit 0, `brew linkage` lists only
+  `/usr/lib` libraries and `/opt/homebrew/opt/opencascade/lib/libTK*.7.9.dylib`, `brew audit --strict` and `brew style` report nothing.
+* The temporary tap, keg, cache download and links were removed afterwards.
+* `scripts/release/test-release-scripts.sh` passes (stubbed `otool`/`readelf`/`objdump`, tampered archives, injection attempts).

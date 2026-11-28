@@ -292,6 +292,7 @@ if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
       echo x > "$r/lib/native/$NP/libkstep_occt_bridge.$NE"; echo x > "$r/lib/native/$NP/libkstep_planegcs_bridge.$NE"
       cat > "$r/bin/kstep" <<'STUB'
 #!/bin/sh
+case "${KSTEP_OCCT_LIB_DIR:-}" in ""|/*) ;; *) echo "kstep: KSTEP_OCCT_LIB_DIR must be absolute" >&2; exit 2 ;; esac
 case "$1" in
   --help) echo "Usage: kstep"; exit 0 ;;
   --version) echo "kstep 1.0.0"; echo "occt: available 7.9.3"; echo "planegcs: available abc"; exit 0 ;;
@@ -319,6 +320,11 @@ STUB
     (cd "$WORK/njarsrc" && zip -qr "$r/lib/kstep-geometry-1.0.0.jar" dev); Z="$(zipnative jar)"
     expect_rc "verify-native rejects natives embedded in a jar" 1 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
     contains "$WORK/err" "embeds native bridge"; check "verify-native reports embedded bridge" $?
+    r="$(mknative java1)"; mkdir -p "$r/jre/bin"; echo x > "$r/jre/bin/java"; Z="$(zipnative java1)"
+    expect_rc "verify-native rejects a bundled jre/bin/java" 1 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
+    contains "$WORK/err" "Java runtime"; check "verify-native reports the bundled Java" $?
+    r="$(mknative java2)"; mkdir -p "$r/lib/server"; echo x > "$r/lib/server/libjvm.$NE"; Z="$(zipnative java2)"
+    expect_rc "verify-native rejects a bundled libjvm" 1 bash "$ND" "$Z" 1.0.0 "$WORK/nfixture.kts"
     r="$(mknative dup)"; Z="$(zipnative dup)"
     python3 - "$Z" "$NR/NOTICE" <<'PY' 2>/dev/null
 import sys, zipfile, warnings
@@ -335,6 +341,142 @@ PY
   contains "$WORK/err" "wrong host"; check "verify-native reports wrong host" $?
 else
   echo "note: zip/unzip missing, skipping verify-native-dist tests" >&2
+fi
+
+# ---- check-native-linkage (otool/readelf/objdump replaced by stubs) -----------------------------
+if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+  CL="$HERE/check-native-linkage.sh"
+  FB="$WORK/fakebin"; mkdir -p "$FB"
+  for t in otool readelf objdump; do
+    cat > "$FB/$t" <<'STUB'
+#!/bin/sh
+# Prints $FAKE_DIR/<tool>.<flag>.<occt|pgcs>; the last argument is the library path.
+tool=$(basename "$0"); flag="$1"; shift
+case "$flag" in -L) flag=-deps ;; -l) flag=-cmds ;; esac
+for a in "$@"; do last="$a"; done
+case "$last" in *planegcs*) kind=pgcs ;; *) kind=occt ;; esac
+f="$FAKE_DIR/$tool$flag.$kind"
+[ -f "$f" ] || f="$FAKE_DIR/$tool$flag"
+cat "$f"
+STUB
+    chmod +x "$FB/$t"
+  done
+  mklink() { # platform name -> zip path with two stub bridge files
+    local plat="$1" nm="$2" ext=so
+    [ "$plat" = macos-aarch64 ] && ext=dylib
+    local r="$WORK/cl-$nm/kstep-1.0.0-$plat-native"
+    mkdir -p "$r/lib/native/$plat" "$WORK/clz-$nm"
+    echo x > "$r/lib/native/$plat/libkstep_occt_bridge.$ext"; echo x > "$r/lib/native/$plat/libkstep_planegcs_bridge.$ext"
+    (cd "$WORK/cl-$nm" && zip -qr "$WORK/clz-$nm/kstep-1.0.0-$plat-native.zip" "kstep-1.0.0-$plat-native")
+    mkdir -p "$WORK/fake-$nm"; echo "$WORK/clz-$nm/kstep-1.0.0-$plat-native.zip"
+  }
+  runcl() { # name zip -> runs with stubs
+    FAKE_DIR="$WORK/fake-$1" PATH="$FB:$PATH" bash "$CL" "$2" 1.0.0
+  }
+  clcase() { # name want-rc zip
+    local name="$1" want="$2" z="$3"
+    FAKE_DIR="$WORK/fake-$name" PATH="$FB:$PATH" bash "$CL" "$z" 1.0.0 >"$WORK/out" 2>"$WORK/err"
+    local rc=$?
+    [ "$rc" -eq "$want" ]; check "check-native-linkage $name (rc=$rc, want $want)" $?
+  }
+  # macOS fixtures
+  OPT=/opt/homebrew/opt/opencascade/lib
+  mac_L() { # file, extra-dep
+    { echo "x.dylib:"; echo "	@rpath/libkstep_occt_bridge.dylib (compatibility version 0.0.0, current version 0.0.0)"
+      echo "	$OPT/libTKernel.7.9.dylib (compatibility version 7.9.0, current version 7.9.0)"
+      echo "	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1900.0.0)"
+      [ -n "${2:-}" ] && echo "	$2 (compatibility version 1.0.0, current version 1.0.0)"; } > "$1"
+  }
+  mac_l() { printf 'Load command 1\n          cmd LC_RPATH\n      cmdsize 48\n         path %s (offset 12)\nLoad command 2\n      cmd LC_BUILD_VERSION\n     platform 1\n        minos 14.0\n' "$1" > "$2"; }
+  pg_L() { { echo "p.dylib:"; echo "	@rpath/libkstep_planegcs_bridge.dylib (compatibility version 0.0.0, current version 0.0.0)"; echo "	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1900.0.0)"; } > "$1"; }
+  mkmac() { # name extra-dep rpath
+    local z; z="$(mklink macos-aarch64 "$1")"; local d="$WORK/fake-$1"
+    mac_L "$d/otool-deps.occt" "$2"; pg_L "$d/otool-deps.pgcs"; mac_l "$3" "$d/otool-cmds.occt"; : > "$d/otool-cmds.pgcs"
+    echo "$z"
+  }
+  Z="$(mkmac macok "" $OPT)"; clcase macok 0 "$Z"
+  contains "$WORK/out" "minos=14.0"; check "linkage prints minos" $?
+  Z="$(mkmac maccellar "/opt/homebrew/Cellar/opencascade/7.9.3_1/lib/libTKernel.7.9.dylib" $OPT)"; clcase maccellar 1 "$Z"
+  contains "$WORK/err" "versioned path"; check "linkage names the Cellar path" $?
+  Z="$(mkmac macrunner "/Users/runner/work/lib/libfoo.dylib" $OPT)"; clcase macrunner 1 "$Z"
+  Z="$(mkmac macrpath "" /Users/runner/occt/lib)"; clcase macrpath 1 "$Z"
+  contains "$WORK/err" "LC_RPATH"; check "linkage names the foreign LC_RPATH" $?
+  Z="$(mkmac macforeign "/usr/local/lib/libfoo.dylib" $OPT)"; clcase macforeign 1 "$Z"
+  Z="$(mkmac macotherocct "/opt/homebrew/opt/opencascade/lib/libTKernel.8.0.dylib" $OPT)"; clcase macotherocct 1 "$Z"
+  # Linux fixtures
+  lin_d() { # file, rpathline, extra needed
+    { echo "Dynamic section at offset 0x1 contains 9 entries:"
+      echo " 0x0000000000000001 (NEEDED)             Shared library: [libTKernel.so.7.9]"
+      echo " 0x0000000000000001 (NEEDED)             Shared library: [libstdc++.so.6]"
+      echo " 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]"
+      [ -n "${3:-}" ] && echo " 0x0000000000000001 (NEEDED)             Shared library: [$3]"
+      echo "$2"; } > "$1"
+  }
+  mklin() { # name rpathline needed
+    local z; z="$(mklink linux-x86-64 "$1")"; local d="$WORK/fake-$1"
+    lin_d "$d/readelf-d.occt" "$2" "${3:-}"
+    printf 'Dynamic section:\n 0x1 (NEEDED)             Shared library: [libstdc++.so.6]\n 0x1 (NEEDED)             Shared library: [libm.so.6]\n' > "$d/readelf-d.pgcs"
+    printf 'x  DF *UND*  0000  GLIBC_2.34 memcpy\nx  DF *UND*  0000  GLIBC_2.38 strlcpy\nx  DF *UND*  0000  GLIBCXX_3.4.32 foo\nx  DF *UND*  0000  GLIBCXX_3.4.9 bar\n' > "$d/objdump-T.occt"
+    : > "$d/objdump-T.pgcs"
+    echo "$z"
+  }
+  Z="$(mklin linok ' 0x000000000000000f (RPATH)              Library rpath: [/usr/lib/x86_64-linux-gnu]')"; clcase linok 0 "$Z"
+  contains "$WORK/out" "glibc_floor=2.38"; check "linkage prints glibc_floor" $?
+  contains "$WORK/out" "glibcxx_floor=3.4.32"; check "linkage prints glibcxx_floor" $?
+  Z="$(mklin linrunpath ' 0x000000000000001d (RUNPATH)            Library runpath: [/usr/lib/x86_64-linux-gnu]')"; clcase linrunpath 1 "$Z"
+  contains "$WORK/err" "RUNPATH"; check "linkage names the RUNPATH" $?
+  Z="$(mklin linhome ' 0x000000000000000f (RPATH)              Library rpath: [/home/runner/occt/lib]')"; clcase linhome 1 "$Z"
+  Z="$(mklin linforeign ' 0x000000000000000f (RPATH)              Library rpath: [/usr/lib/x86_64-linux-gnu]' libfoo.so.1)"; clcase linforeign 1 "$Z"
+  contains "$WORK/err" "libfoo.so.1"; check "linkage names the foreign NEEDED" $?
+  Z="$(mklin linnorpath '')"; clcase linnorpath 1 "$Z"
+  # usage errors
+  expect_rc "check-native-linkage wrong archive name" 2 bash "$CL" "$WORK/nope.zip" 1.0.0
+  : > "$WORK/weird.zip"; expect_rc "check-native-linkage unknown platform name" 2 bash "$CL" "$WORK/weird.zip" 1.0.0
+else
+  echo "note: zip/unzip missing, skipping check-native-linkage tests" >&2
+fi
+
+# ---- tap-payload ---------------------------------------------------------------------------------
+TP="$HERE/tap-payload.sh"
+if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  if command -v sha256sum >/dev/null 2>&1; then TS=(sha256sum); else TS=(shasum -a 256); fi
+  mkassets() { # name -> dir with both zips + valid sums
+    local d="$WORK/tp-$1"; mkdir -p "$d"
+    for p in macos-aarch64 linux-x86-64; do
+      printf 'zip-%s' "$p" > "$d/kstep-1.2.3-$p-native.zip"
+      (cd "$d" && "${TS[@]}" "kstep-1.2.3-$p-native.zip" > "kstep-1.2.3-$p-native.zip.sha256")
+    done
+    echo "$d"
+  }
+  d="$(mkassets ok)"
+  expect_rc "tap-payload good" 0 bash "$TP" "$d" 1.2.3 kstep-lang/kSTEP
+  cp "$WORK/out" "$WORK/payload.json"
+  python3 - "$WORK/payload.json" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))
+assert p["version"] == "1.2.3"
+m = p["platforms"]["macos-aarch64"]; l = p["platforms"]["linux-x86-64"]
+assert m["url"] == "https://github.com/kstep-lang/kSTEP/releases/download/v1.2.3/kstep-1.2.3-macos-aarch64-native.zip"
+assert l["url"].endswith("/kstep-1.2.3-linux-x86-64-native.zip")
+assert len(m["sha256"]) == 64 and len(l["sha256"]) == 64 and m["sha256"] != l["sha256"]
+PY
+  check "tap-payload JSON structure" $?
+  d="$(mkassets noplat)"; rm "$d/kstep-1.2.3-linux-x86-64-native.zip" "$d/kstep-1.2.3-linux-x86-64-native.zip.sha256"
+  expect_rc "tap-payload missing platform" 1 bash "$TP" "$d" 1.2.3 kstep-lang/kSTEP
+  d="$(mkassets badline)"; echo "nothex  kstep-1.2.3-macos-aarch64-native.zip" > "$d/kstep-1.2.3-macos-aarch64-native.zip.sha256"
+  expect_rc "tap-payload malformed sha line" 1 bash "$TP" "$d" 1.2.3 kstep-lang/kSTEP
+  d="$(mkassets tamper)"; printf 'evil' > "$d/kstep-1.2.3-linux-x86-64-native.zip"
+  expect_rc "tap-payload tampered zip" 1 bash "$TP" "$d" 1.2.3 kstep-lang/kSTEP
+  contains "$WORK/err" "does not match"; check "tap-payload reports the mismatch" $?
+  d="$(mkassets ok2)"
+  expect_rc "tap-payload injection in version" 2 bash "$TP" "$d" '1.2.3;rm -rf /' kstep-lang/kSTEP
+  expect_rc "tap-payload quote in version" 2 bash "$TP" "$d" '1.2.3"' kstep-lang/kSTEP
+  expect_rc "tap-payload command substitution in version" 2 bash "$TP" "$d" '$(id)' kstep-lang/kSTEP
+  expect_rc "tap-payload repo with space" 2 bash "$TP" "$d" 1.2.3 'kstep-lang/kSTEP x'
+  expect_rc "tap-payload repo with quote" 2 bash "$TP" "$d" 1.2.3 'a/b"c'
+  expect_rc "tap-payload usage" 2 bash "$TP" "$d"
+else
+  echo "note: jq/python3 missing, skipping tap-payload tests" >&2
 fi
 
 # ---- check-maven-central (curl stubbed, no network) ----------------------------------

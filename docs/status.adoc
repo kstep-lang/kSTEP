@@ -278,7 +278,7 @@ this writing:
   the real shape live from `ap242-v1-entities.exp` on every run and
   fails the build on any divergence not explicitly named in its
   allowlist — so the gap is now bounded and guarded, not open-ended.
-  An opt-in native runtime archive for the host platform exists (ADR-0050): macOS arm64 verified, Linux x86-64 not yet verified.
+  A native runtime archive for the host platform exists (ADR-0050): macOS arm64 verified locally, Linux x86-64 verified by a CI step on the archive. The release workflow builds both archives and a Homebrew tap is prepared (ADR-0100), but no release carries them yet and neither the workflow nor Linux has run on GitHub.
 
 See xref:roadmap.adoc#roadmap[Roadmap] for the full divergence inventory and what
   remains deliberately deferred.
@@ -946,6 +946,6 @@ scan before either lands.
   releases. Still open: PMI, Windows and Intel Macs for the
   native bridges, interoperability beyond OpenCascade-based readers.
 
-An opt-in native runtime archive for the host platform exists (ADR-0050): macOS arm64 verified, Linux x86-64 not yet verified.
+A native runtime archive for the host platform exists (ADR-0050): macOS arm64 verified locally, Linux x86-64 verified by a CI step on the archive. The release workflow builds both archives and a Homebrew tap is prepared (ADR-0100), but no release carries them yet and neither the workflow nor Linux has run on GitHub.
 
 See xref:roadmap.adoc#roadmap[Roadmap] for what's planned next.

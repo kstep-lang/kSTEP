@@ -15,7 +15,8 @@ link:CHANGELOG.adoc[CHANGELOG]) are pre-releases: v0.1.0 is source-only, from
 v0.1.1 on a JVM-only CLI zip without native bridges is attached. The twelve library
 modules are published to Maven Central (group `dev.kstep`) from v0.4.0 on, without
 native libraries (see link:docs/releasing.adoc[releasing]); nothing is published to
-Homebrew. See link:docs/status.adoc[Status] for what actually works today.
+Homebrew. Native archives with geometry and a Homebrew tap are prepared (ADR-0100) but no release carries
+them yet. See link:docs/status.adoc[Status] for what actually works today.
 
 Licensed under the Apache License, Version 2.0. See link:LICENSE[LICENSE].
 
@@ -83,6 +84,19 @@ OpenCascade-based readers (OCCT, FreeCAD).
 
 The wave-by-wave log is in link:docs/status.adoc[Status]; open points are in
 the link:docs/roadmap.adoc[Roadmap]. Both say what is and is not verified.
+
+== Installation
+
+* *JVM zip* (`kstep-cli-<version>.zip`, every release, JDK 21): the CLI without geometry. OCCT and constraint functions report
+  "unavailable".
+* *Native archive* (`kstep-<version>-<platform>-native.zip`, prepared by ADR-0100, attached from the first release built with it):
+  the CLI plus the OCCT and PlaneGCS bridges, so geometry works. Needs JDK 21 and OCCT 7.9.x on the machine, not bundled.
+  Ubuntu 26.04 (x86-64): `apt install libocct-data-exchange-dev libocct-modeling-algorithms-dev libocct-ocaf-dev`. macOS Apple
+  Silicon: `brew install opencascade openjdk@21`.
+* *Homebrew* (prepared, the tap `kstep-lang/homebrew-kstep` is not published yet and the formula holds placeholders):
+  `brew install kstep-lang/kstep/kstep` installs the native archive with `opencascade` and `openjdk@21`. Verified on Apple Silicon
+  only; Linuxbrew is unverified.
+* Not supported: Windows and Intel Macs.
 
 == Quickstart
 
@@ -326,5 +340,6 @@ provenance discussion.
 == Native runtime archive (opt-in)
 
 `./gradlew :kstep-cli:nativeRuntimeZip -Pkstep.native.embedInJar=false` builds a host-platform archive with the OCCT and
-PlaneGCS bridges as plain files and a `bin/kstep` launcher. OCCT 7.9.x must be installed separately. Not part of releases;
-see ADR-0050 and `docs/building.adoc`.
+PlaneGCS bridges as plain files and a `bin/kstep` launcher. OCCT 7.9.x must be installed separately. From the first release
+after ADR-0100 the release workflow builds and verifies these archives for linux-x86-64 and macos-aarch64; see ADR-0050,
+ADR-0100 and `docs/building.adoc`.

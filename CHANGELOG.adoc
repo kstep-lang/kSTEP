@@ -9,6 +9,14 @@ minor versions may contain breaking changes.
 
 === Added
 
+* Release pipeline prepared for native archives and a Homebrew tap (Welle DIST-1, ADR-0100). `release.yml` gets a job `native` that builds
+  `kstep-<version>-linux-x86-64-native.zip` and `kstep-<version>-macos-aarch64-native.zip` with the real OCCT and PlaneGCS bridges,
+  verifies them strictly (`verify-native-dist.sh`, now also rejecting a bundled Java runtime) and checks their linkage
+  (`check-native-linkage.sh`: allowed dependencies, rpaths, glibc floor, macOS `minos`), and a job `homebrew-tap` that dispatches the
+  tap update. The Linux launcher honours `KSTEP_OCCT_LIB_DIR`. New tap repository `kstep-lang/homebrew-kstep` (formula `kstep`,
+  updater with tests, update workflow), created locally only. Not released: no tag carries these archives yet, the tap is not on
+  GitHub, the formula holds placeholders, and the workflows have only been linted, never run. Verified on Apple Silicon (archive,
+  `brew install`, `brew test`, `brew linkage`, `brew audit --strict` from a temporary tap); Linux and Linuxbrew are unverified.
 * kSTEP Desktop: a status bar at the bottom of the window (Welle SB-1, ADR-0099). The status that stood in the toolbar (file name,
   export line with "Show in Folder", sandbox notice, run status, preview origin) moved into it; the toolbar keeps only the icon
   buttons. While the MCP server runs, an indicator at the right end replaces the "MCP", "MCP edit" and "MCP files" segments: a dot that
