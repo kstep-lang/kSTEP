@@ -352,7 +352,14 @@ class ImportWorkerSupervisorTest :
                 kstepEntries(base).size shouldBe 1
                 harness.destroy()
                 harness.waitFor(30, TimeUnit.SECONDS) shouldBe true
-                awaitDead(checkNotNull(workerPid), 30_000) shouldBe true
+                val worker = checkNotNull(workerPid)
+                // On a failure the message says what is left: the worker's state and the temp entries (CI flake, Nov 2026).
+                val dead = awaitDead(worker, 30_000)
+                check(dead) {
+                    "worker $worker still alive after the supervisor ended: " +
+                        ProcessHandle.of(worker).map { it.info().toString() }.orElse("gone") +
+                        "; temp entries: ${kstepEntries(base)}"
+                }
                 kstepEntries(base) shouldBe emptyList()
             } finally {
                 harness.destroyForcibly()
