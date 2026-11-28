@@ -26,7 +26,7 @@ D2. The MCP segments leave the run status. Their place is the MCP indicator at t
 and the word "MCP" ("MCP edit" or "MCP files" in the warning colour when agents may make changes or use files; the permission is never
 shown by colour alone). Click, Enter and Space open the MCP dialog.
 
-D3. The indicator shows a phase, not a 600 ms light: `Ready` (grey dot), `Busy` (accent dot that pulses while at least one call runs)
+D3. The indicator shows a phase, not a 600 ms light: `Ready` (green dot, as in kUML Desktop; a grey dot read as "off", changed 2026-11-28), `Busy` (accent dot that pulses while at least one call runs)
 and `Failed` (red dot, until the next successful call). A short flash of the dot follows each call that ends. The tooltip names the
 address and port, the state, the permissions and the last five calls (time, name, result). The accessibility text names the state and
 the permissions.

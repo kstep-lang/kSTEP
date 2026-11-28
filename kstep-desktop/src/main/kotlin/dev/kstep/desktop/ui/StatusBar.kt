@@ -192,12 +192,7 @@ internal fun McpIndicator(
     }
     val dark = isSystemInDarkTheme()
     val warn = warningTextColor(dark)
-    val dot =
-        when {
-            activity.phase == McpPhase.Failed -> MaterialTheme.colorScheme.error
-            activity.phase == McpPhase.Busy || flash -> accent
-            else -> DIM
-        }
+    val dot = mcpDotColor(activity.phase, flash, dark, accent, MaterialTheme.colorScheme.error)
     val label =
         if (model.files) {
             "MCP files"
@@ -263,3 +258,24 @@ internal fun McpIndicator(
         }
     }
 }
+
+private val READY_GREEN_LIGHT = Color(0xFF228822)
+private val READY_GREEN_DARK = Color(0xFF55C155)
+
+/**
+ * The colour of the MCP dot (ADR-0099): red after a failed call, the accent colour while a call runs or just ended,
+ * and green when the server is ready, as in kUML Desktop. A grey dot looked like "off".
+ */
+internal fun mcpDotColor(
+    phase: McpPhase,
+    flash: Boolean,
+    dark: Boolean,
+    accent: Color,
+    error: Color,
+): Color =
+    when {
+        phase == McpPhase.Failed -> error
+        phase == McpPhase.Busy || flash -> accent
+        dark -> READY_GREEN_DARK
+        else -> READY_GREEN_LIGHT
+    }
