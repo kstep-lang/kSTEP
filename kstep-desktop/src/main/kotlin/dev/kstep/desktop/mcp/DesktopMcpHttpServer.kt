@@ -22,14 +22,20 @@ private val logger = KotlinLogging.logger {}
 
 /**
  * Limits of the JDK HTTP server that are system properties, read once when the JDK class loads (ADR-0095). Set only
- * when the user has not set them. `maxRspTime` also bounds a body that is sent slowly: the JDK starts that timer when the
- * headers are read and stops it when the response is sent. `drainAmount=0` makes the server close the connection after a rejection instead of
+ * when the user has not set them. `maxRspTime` is the time a call may take until its answer is sent: the JDK starts
+ * that timer when the headers are read and drops the connection without an answer when it runs out. It must therefore
+ * outlast the longest wait a tool has: the user's decision in a file dialog (60 s plus the 5 s backstop, ADR-0098) and a
+ * run that waits for its result (30 s). A value of 10 made the agent lose the answer of any call that waited longer
+ * (found by hand on 2026-11-28). A request that is sent slowly is bounded separately by `maxReqTime`. `drainAmount=0` makes the server close the connection after a rejection instead of
  * reading up to 64 KiB of a body that was never authorised.
  */
 object McpHttpDefaults {
+    /** The longest a call may take: confirmation timeout 60 s + backstop 5 s + a margin of 5 s. */
+    const val MAX_RESPONSE_SECONDS = "70"
+
     fun apply() {
         setIfAbsent("sun.net.httpserver.maxReqTime", "10")
-        setIfAbsent("sun.net.httpserver.maxRspTime", "10")
+        setIfAbsent("sun.net.httpserver.maxRspTime", MAX_RESPONSE_SECONDS)
         setIfAbsent("sun.net.httpserver.maxReqHeaders", "64")
         setIfAbsent("sun.net.httpserver.maxReqHeaderSize", "16384")
         setIfAbsent("jdk.httpserver.maxConnections", "64")

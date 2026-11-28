@@ -113,6 +113,9 @@ class RawResponse(
 }
 
 object Raw {
+    /** The read timeout of the test client; a test of a slow answer raises it and puts it back. */
+    @Volatile var readTimeoutMs: Int = 8000
+
     /**
      * Sends [bytes] to 127.0.0.1:[port] and reads what comes back until the server closes. A connection that is closed
      * or reset before a status line gives status -1. The body of the request is written in a separate thread so a
@@ -124,7 +127,7 @@ object Raw {
         keepOpenMs: Long = 0,
     ): RawResponse {
         Socket().use { socket ->
-            socket.soTimeout = 8000
+            socket.soTimeout = readTimeoutMs
             socket.connect(InetSocketAddress("127.0.0.1", port), 3000)
             val writer =
                 Thread {

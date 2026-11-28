@@ -29,6 +29,7 @@ import dev.kstep.desktop.mcp.snap
 import dev.kstep.desktop.menu.MenuContext
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldNotContain
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.serialization.json.JsonObject
@@ -85,6 +86,9 @@ class McpFileActionsEndToEndHttpTest :
 
             @Volatile var answer: McpConfirmDecision? = McpConfirmDecision.ALLOW
 
+            /** How long the "user" thinks before answering a dialog. */
+            @Volatile var thinkMs = 0L
+
             @Volatile private var alive = true
             val asked = java.util.concurrent.CopyOnWriteArrayList<String>()
             var token: String = ""
@@ -125,6 +129,7 @@ class McpFileActionsEndToEndHttpTest :
                         if (request != null && request.id != last) {
                             last = request.id
                             asked += request.action.name
+                            if (thinkMs > 0) Thread.sleep(thinkMs)
                             answer?.let { actions.confirmations.resolve(request.id, it) }
                         }
                         Thread.sleep(2)
@@ -245,6 +250,25 @@ class McpFileActionsEndToEndHttpTest :
                     )
                 r.code shouldBe "DENIED"
                 Files.list(rig.out).use { it.count() } shouldBe 0
+            }
+        }
+
+        "a user who decides after 12 s still gets the answer: the server does not drop a call after 10 s" {
+            withRig { rig ->
+                rig.manager.setAllowFiles(true)
+                rig.thinkMs = 12_000
+                Raw.readTimeoutMs = 30_000
+                val rev = McpAgentText.revisionOf("box(1)\n")
+                rig.session.onTextChanged("box(3)\n", 7)
+                val rev3 = McpAgentText.revisionOf("box(3)\n")
+                try {
+                    val saved = rig.tool("kstep_desktop_save", """{"expectedRevision":"$rev3"}""")
+                    saved.isError shouldBe false
+                    Files.readString(rig.script) shouldBe "box(3)\n"
+                } finally {
+                    Raw.readTimeoutMs = 8000
+                }
+                rev shouldNotBe rev3
             }
         }
 
