@@ -10,6 +10,8 @@ database, so there is no migration. `mcp.json` keeps `version: 1`; the optional 
 boolean and its value is ignored (see D1). `export.json` and `recent.json` do not change. Built and unit tested on macOS only; the
 dialog and the status line were not looked at on a screen and no real agent was used (see Open points).
 
+NOTE: Since Welle SB-1 (ADR-0099) the status line lives in a status bar at the bottom of the window, and the MCP segments ("MCP", "MCP edit", "MCP files") are an indicator at its right end. Statements below about the toolbar and the MCP segment describe the state before that change.
+
 == Context
 
 ADR-0097 gave an agent six tools that change the app, with the explicit exclusion of saving, export and opening files. An agent that

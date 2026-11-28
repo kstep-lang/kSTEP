@@ -10,6 +10,8 @@ an old file loads with `false`, and the parser of the previous version reads onl
 version still loads there (checked by reading its parser, not by running it). Built and unit tested on macOS only; the tools were not
 tried by hand with a real agent and the dialog and the status line were not looked at on a screen (see Open points).
 
+NOTE: Since Welle SB-1 (ADR-0099) the status line lives in a status bar at the bottom of the window, and the MCP segments ("MCP", "MCP edit", "MCP files") are an indicator at its right end. Statements below about the toolbar and the MCP segment describe the state before that change.
+
 == Context
 
 ADR-0095 and ADR-0096 gave an agent eight read tools. An agent that works on a script must also change something: replace text,

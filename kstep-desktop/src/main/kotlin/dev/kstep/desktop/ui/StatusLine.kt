@@ -11,8 +11,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,10 +27,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.kstep.desktop.run.SandboxNotice
@@ -58,7 +55,7 @@ internal fun Modifier.tagged(
     }
 
 /**
- * The right part of the toolbar (ADR-0064): file name, then the export line, the sandbox notice and the run status.
+ * The left part of the bottom status bar (ADR-0099, formerly the right part of the toolbar, ADR-0064): file name, then the export line, the sandbox notice and the run status.
  * Separators only stand between things that are shown. When the room is short the file name gives way first (never
  * below 64 dp), then the run status, then the export line; "Show in Folder" and the sandbox notice are never cut.
  * [probe] reports the bounds of the tagged parts (tests only).
@@ -76,17 +73,12 @@ internal fun RowScope.StatusLine(
     /** What the picture came from (ADR-0086); drawn in the accent colour when it is an unsaved buffer. */
     previewLabel: PreviewOriginLabel? = null,
     accent: Color = ACCENT_LIGHT,
-    /** The "MCP" segment shows in the accent colour while an agent is using the server (ADR-0095). */
-    mcpLit: Boolean = false,
-    /** An extra tooltip line while the MCP server runs (ADR-0095); `null` when it is off. */
-    mcpTooltip: String? = null,
-    /** The "MCP files" segment is drawn in the warning colour while agents may save, export and open files (ADR-0098). */
-    mcpFiles: Boolean = false,
 ) {
     val hasRight = exportText != null || sandboxNotice != null || statusSegments.isNotEmpty() || previewLabel != null
     Text(
         StatusLineText.fileLabel(fileName),
-        fontSize = 13.sp,
+        fontSize = 12.sp,
+        color = MaterialTheme.colorScheme.onSurface,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier =
@@ -112,7 +104,7 @@ internal fun RowScope.StatusLine(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false).tagged(TAG_STATUS_EXPORT, probe),
             )
-            TextButton(onClick = onShowInFolder) { Text("Show in Folder", fontSize = 12.sp, softWrap = false) }
+            StatusBarLink("Show in Folder", onShowInFolder)
             if (sandboxNotice != null || statusSegments.isNotEmpty()) {
                 Text(StatusLineText.SEPARATOR, fontSize = 12.sp, color = DIM, maxLines = 1, softWrap = false)
             }
@@ -132,10 +124,6 @@ internal fun RowScope.StatusLine(
                 statusSegments,
                 fitProbe,
                 Modifier.weight(1f, fill = false).tagged(TAG_STATUS_RUN, probe),
-                mcpLit,
-                accent,
-                mcpTooltip,
-                if (mcpFiles) warningTextColor(isSystemInDarkTheme()) else null,
             )
         }
         if (previewLabel != null) {
@@ -166,10 +154,6 @@ private fun RunStatusText(
     segments: List<StatusSegment>,
     fitProbe: ((FittedStatus) -> Unit)?,
     modifier: Modifier,
-    mcpLit: Boolean = false,
-    accent: Color = ACCENT_LIGHT,
-    mcpTooltip: String? = null,
-    mcpWarn: Color? = null,
 ) {
     BoxWithConstraints(modifier) {
         val fitted = StatusSegments.fit(segments, StatusSegments.maxChars(maxWidth.value))
@@ -177,7 +161,7 @@ private fun RunStatusText(
         var cut by remember { mutableStateOf(false) }
         val text: @Composable () -> Unit = {
             Text(
-                lightUp(fitted, mcpLit, accent, mcpWarn),
+                fitted.shown,
                 fontSize = 12.sp,
                 color = DIM,
                 maxLines = 1,
@@ -186,12 +170,12 @@ private fun RunStatusText(
                 modifier = Modifier.semantics { contentDescription = fitted.full },
             )
         }
-        if (fitted.droppedCount > 0 || cut || (mcpTooltip != null && fitted.ranges.containsKey("mcp"))) {
+        if (fitted.droppedCount > 0 || cut) {
             TooltipArea(
                 tooltip = {
                     Box(Modifier.background(Color.Black.copy(alpha = 0.8f)).padding(6.dp)) {
                         Text(
-                            if (mcpTooltip != null) fitted.full + "\n" + mcpTooltip else fitted.full,
+                            fitted.full,
                             color = Color.White,
                             fontSize = 12.sp,
                         )
@@ -201,25 +185,5 @@ private fun RunStatusText(
         } else {
             text()
         }
-    }
-}
-
-/** The shown status; the MCP segment is drawn in the accent colour when [lit]. Same text, same width. */
-private fun lightUp(
-    fitted: FittedStatus,
-    lit: Boolean,
-    accent: Color,
-    warn: Color? = null,
-): androidx.compose.ui.text.AnnotatedString {
-    val range = fitted.ranges[StatusSegments.MCP_SEGMENT_ID]
-    val color = if (lit) accent else warn
-    if (color == null || range == null) {
-        return androidx.compose.ui.text
-            .AnnotatedString(fitted.shown)
-    }
-    return buildAnnotatedString {
-        append(fitted.shown.substring(0, range.first))
-        withStyle(SpanStyle(color = color)) { append(fitted.shown.substring(range.first, range.last + 1)) }
-        append(fitted.shown.substring(range.last + 1))
     }
 }

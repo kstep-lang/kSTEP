@@ -790,6 +790,7 @@ scan before either lands.
   agent notices. Tests: registry (FakePort, about 35 cases), text rules, rate limits, bridge, session (undo order, never saved), manager,
   real server, port, status, architecture. Not done: a hand test with a real agent, a look at the dialog and status line on a screen, any
   run on Windows or Linux, group names in `select`, the menu "Agents", Save/Export/files (MCP-4).
+* Welle SB-1 (ADR-0099): status bar at the bottom of `kstep-desktop` with the MCP activity indicator (`StatusBar`, `McpIndicator`, `McpActivityTracker` with phases and a history of five calls, `McpCallLabel`, `McpCallOutcomes`); the status line left the toolbar and the MCP status segments were removed. Not hand-tested on a screen.
 * Welle MCP-4 (ADR-0098): file actions in `kstep-desktop` behind a third, session-only switch ("Allow agents to save and export files",
   `DesktopMcpServerManager.allowFiles`, `setAllowFiles`; never stored) and a confirmation for every action (`McpConfirmationGate` with an
   injected scheduler and clock, `McpConfirmDialog`/`McpConfirmContent`, `McpDisplayText`). New `McpFilePort` (ten methods, no path

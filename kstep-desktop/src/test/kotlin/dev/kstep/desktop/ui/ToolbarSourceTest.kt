@@ -21,7 +21,7 @@ class ToolbarSourceTest :
         val toolbar =
             app.substring(
                 app.indexOf("private fun Toolbar("),
-                app.indexOf("StatusLine(", app.indexOf("private fun Toolbar(")),
+                app.indexOf("private fun ToolbarDivider("),
             )
 
         "the toolbar row holds no text button, text or button label" {

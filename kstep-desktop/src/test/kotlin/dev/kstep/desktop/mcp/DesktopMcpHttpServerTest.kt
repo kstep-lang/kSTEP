@@ -457,9 +457,14 @@ class DesktopMcpHttpServerTest :
             withServer { fx ->
                 Raw.mcp(fx.port, ping, null).status shouldBe 401
                 fx.call("{broken").status shouldBe 400
-                fx.activity.lastLitAtMs.value shouldBe Long.MIN_VALUE / 2
+                fx.activity.state.value.finished shouldBe 0L
+                fx.activity.state.value.recent shouldBe emptyList()
                 fx.call(ping).status shouldBe 200
-                (fx.activity.lastLitAtMs.value > 0) shouldBe true
+                fx.activity.state.value.finished shouldBe 1L
+                fx.activity.state.value.recent
+                    .single()
+                    .label shouldBe "ping"
+                fx.activity.state.value.phase shouldBe McpPhase.Ready
             }
         }
 

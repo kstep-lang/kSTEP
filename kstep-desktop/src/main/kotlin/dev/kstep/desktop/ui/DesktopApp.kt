@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -84,7 +85,6 @@ import dev.kstep.desktop.edit.BannerActions
 import dev.kstep.desktop.edit.CaretMapper
 import dev.kstep.desktop.edit.EditorSession
 import dev.kstep.desktop.edit.EditorState
-import dev.kstep.desktop.edit.EditorView
 import dev.kstep.desktop.edit.PartSourceResolution
 import dev.kstep.desktop.edit.PartSourceResolver
 import dev.kstep.desktop.export.ExportController
@@ -169,7 +169,6 @@ import dev.kstep.desktop.run.ErrorBarText
 import dev.kstep.desktop.run.LiveRunController
 import dev.kstep.desktop.run.PackagedHint
 import dev.kstep.desktop.run.PreviewOrigin
-import dev.kstep.desktop.run.SandboxNotice
 import dev.kstep.desktop.run.UserSandboxState
 import dev.kstep.desktop.run.sandboxNotice
 import dev.kstep.desktop.settings.LayoutPreferences
@@ -291,21 +290,13 @@ fun FrameWindowScope.DesktopApp(
     val aiUi by ai.ui.collectAsState()
     val aiRepair by ai.repair.collectAsState()
     var aiVisible by remember { mutableStateOf(false) }
-    // The MCP server (ADR-0095): its dialog, the "MCP" status segment and the quiet light while an agent is calling.
+    // The MCP server (ADR-0095): its dialog and the indicator in the status bar (ADR-0099).
     var mcpDialogVisible by remember { mutableStateOf(false) }
     val mcpStatus by mcp.status.collectAsState()
     val mcpAllowActions by mcp.allowActions.collectAsState()
     val mcpAllowFiles by mcp.allowFiles.collectAsState()
     val mcpConfirm by mcpActions.confirmations.pending.collectAsState()
-    val mcpLastLit by mcpActivity.lastLitAtMs.collectAsState()
-    var mcpLit by remember { mutableStateOf(false) }
-    LaunchedEffect(mcpLastLit) {
-        if (McpActivityTracker.isLit(mcpLastLit, System.currentTimeMillis())) {
-            mcpLit = true
-            delay(McpActivityTracker.LIT_MS)
-            mcpLit = false
-        }
-    }
+    val mcpActivityState by mcpActivity.state.collectAsState()
     var aiFocus by remember { mutableStateOf(0) }
     var aiNow by remember { mutableStateOf(System.currentTimeMillis()) }
     val aiRunning = aiRepair is RepairState.Requesting || aiRepair is RepairState.Compiling
@@ -1352,20 +1343,9 @@ fun FrameWindowScope.DesktopApp(
                 val windowWidth = maxWidth
                 Column(Modifier.fillMaxSize()) {
                     Toolbar(
-                        state,
-                        editorView,
                         onOpen = openFile,
                         onExport = openExport,
                         menuContext = menuContext,
-                        knowledgeOpen = knowledgeOpen,
-                        knowledgeLabel =
-                            (workspace as? WorkspaceState.Open)?.scan?.root?.let {
-                                "Knowledge · " + DisplayName.escaped(it.fileName?.toString() ?: it.toString(), 48)
-                            },
-                        transientNotice = transientNotice,
-                        sandboxNotice = sandboxNotice,
-                        exportNotice = exportNotice,
-                        onShowInFolder = { exportNotice?.let { showInFolder(it.dir) } },
                         onHome = home,
                         treeAvailable = treeAvailable,
                         treeOn = treeVisible,
@@ -1382,11 +1362,6 @@ fun FrameWindowScope.DesktopApp(
                             aiVisible = !aiVisible
                             if (aiVisible) aiFocus++
                         },
-                        aiStatus = aiStatusText(aiRepair, aiNow, ai.limitsInUse.maxAttempts),
-                        mcpRunning = mcpStatus as? McpServerStatus.Running,
-                        mcpEditable = mcpAllowActions,
-                        mcpFiles = mcpAllowFiles,
-                        mcpLit = mcpLit,
                     )
 
                     val totalPx = with(LocalDensity.current) { windowWidth.toPx() }
@@ -1635,6 +1610,37 @@ fun FrameWindowScope.DesktopApp(
                     if (okWarnings.isNotEmpty()) {
                         ErrorBar(okWarnings, dark, maxHeight = errorBarMax, warning = true)
                     }
+                    HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
+                    val barCounts = counts ?: VisibilityCounts(0, 0)
+                    val mcpRunning = mcpStatus as? McpServerStatus.Running
+                    StatusBar(
+                        fileName = state.file?.fileName?.toString(),
+                        exportText = exportNotice?.text?.takeIf { !knowledgeOpen },
+                        onShowInFolder = { exportNotice?.let { showInFolder(it.dir) } },
+                        sandboxNotice = sandboxNotice,
+                        statusSegments =
+                            statusSegmentsFor(
+                                state,
+                                (workspace as? WorkspaceState.Open)?.scan?.root?.let {
+                                    "Knowledge · " + DisplayName.escaped(it.fileName?.toString() ?: it.toString(), 48)
+                                },
+                                transientNotice,
+                                aiStatusText(aiRepair, aiNow, ai.limitsInUse.maxAttempts),
+                                barCounts,
+                                editorView.dirty,
+                            ),
+                        previewLabel =
+                            previewOriginLabel(
+                                state.lastGood?.origin,
+                                editorView.text.takeIf { editorView.state is EditorState.Editing },
+                            )?.takeIf { editorView.dirty || it != PreviewOriginLabel.SAVED },
+                        accent = if (dark) ACCENT_DARK else ACCENT_LIGHT,
+                        mcp =
+                            mcpRunning?.let {
+                                McpIndicatorModel(it.port, mcpAllowActions, mcpAllowFiles, mcpActivityState)
+                            },
+                        onMcpClick = { mcpDialogVisible = true },
+                    )
                 }
             }
             dragHint?.let { DropOverlay(it, editorView.dirty) }
@@ -1644,13 +1650,9 @@ fun FrameWindowScope.DesktopApp(
 
 @Composable
 private fun Toolbar(
-    state: DesktopState,
-    editor: EditorView,
     onOpen: () -> Unit,
     onExport: () -> Unit,
     menuContext: MenuContext,
-    exportNotice: ExportNotice.Notice?,
-    onShowInFolder: () -> Unit,
     onHome: () -> Unit,
     treeAvailable: Boolean,
     treeOn: Boolean,
@@ -1664,15 +1666,6 @@ private fun Toolbar(
     onAlpha: (Float) -> Unit,
     aiOn: Boolean,
     onAi: () -> Unit,
-    aiStatus: String,
-    knowledgeOpen: Boolean,
-    knowledgeLabel: String?,
-    transientNotice: String?,
-    sandboxNotice: SandboxNotice? = null,
-    mcpRunning: McpServerStatus.Running? = null,
-    mcpEditable: Boolean = false,
-    mcpFiles: Boolean = false,
-    mcpLit: Boolean = false,
 ) {
     Row(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
@@ -1694,37 +1687,6 @@ private fun Toolbar(
                 VisibilityControls(menuContext, counts, alphaStep, onShowAll, onIsolate, onHide, onAlpha)
             }
         }
-        StatusLine(
-            fileName = state.file?.fileName?.toString(),
-            exportText = exportNotice?.text?.takeIf { !knowledgeOpen },
-            onShowInFolder = onShowInFolder,
-            sandboxNotice = sandboxNotice,
-            statusSegments =
-                statusSegmentsFor(
-                    state,
-                    knowledgeLabel,
-                    transientNotice,
-                    aiStatus,
-                    counts,
-                    editor.dirty,
-                    mcpRunning?.let { "MCP" },
-                    mcpEditable && mcpRunning != null,
-                    mcpFiles && mcpRunning != null,
-                ),
-            previewLabel =
-                previewOriginLabel(state.lastGood?.origin, editor.text.takeIf { editor.state is EditorState.Editing })
-                    ?.takeIf { editor.dirty || it != PreviewOriginLabel.SAVED },
-            accent = if (isSystemInDarkTheme()) ACCENT_DARK else ACCENT_LIGHT,
-            mcpLit = mcpLit,
-            mcpFiles = mcpFiles && mcpRunning != null,
-            mcpTooltip =
-                mcpRunning?.let {
-                    "MCP server running on 127.0.0.1:${it.port}" +
-                        (if (mcpEditable) " — agents may make changes" else "") +
-                        (if (mcpFiles) " — agents may save, export and open files (each asks you)" else "") +
-                        " — View › MCP Server…"
-                },
-        )
     }
 }
 
@@ -1747,9 +1709,6 @@ private fun statusSegmentsFor(
     aiStatus: String?,
     counts: VisibilityCounts,
     dirty: Boolean,
-    mcp: String? = null,
-    mcpEditable: Boolean = false,
-    mcpFiles: Boolean = false,
 ): List<StatusSegment> {
     val ok = state as? DesktopState.Ok
     val runState =
@@ -1773,9 +1732,6 @@ private fun statusSegmentsFor(
         hidden = counts.hidden,
         transparent = counts.transparent,
         dirty = dirty,
-        mcp = mcp,
-        mcpEditable = mcpEditable,
-        mcpFiles = mcpFiles,
     )
 }
 

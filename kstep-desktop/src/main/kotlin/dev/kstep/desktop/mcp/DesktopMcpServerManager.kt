@@ -236,6 +236,7 @@ class DesktopMcpServerManager(
         synchronized(lock) {
             running?.stop()
             running = null
+            activity.reset()
             statusFlow.value = McpServerStatus.Off
             filesOff()
         }

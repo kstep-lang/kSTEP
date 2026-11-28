@@ -93,6 +93,8 @@ Both take no arguments (`additionalProperties: false`; extra arguments were igno
 never sent; a failure is logged at debug level with the class name only. Paths and the script text are always JSON strings built
 from the value, never put together with string concatenation.
 
+NOTE: The "MCP" segment and its 600 ms light are superseded by the status bar indicator (ADR-0099).
+
 D7. Visible. View > "MCP Server..." (no key, always available, in the group of Show AI Panel) opens the dialog: a switch with the
 status text, the port field, the command preview with the literal `<token>` (not selectable), and the buttons Copy Command, Copy
 Token, Regenerate Token (with a confirmation whose default is Cancel). Closing the dialog leaves the server running. While the

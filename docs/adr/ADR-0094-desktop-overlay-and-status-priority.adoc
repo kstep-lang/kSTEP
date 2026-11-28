@@ -5,6 +5,8 @@
 
 Accepted (Welle D3d-1). Scope: `kstep-desktop` packages `ui` and `status` and their tests. No new dependency, no error code, no migration (nothing is persisted), no worker or protocol change. The findings come from a hand test on macOS; nothing was checked on Windows or Linux.
 
+NOTE: Since Welle SB-1 (ADR-0099) the status line lives in a status bar at the bottom of the window, and the MCP segments ("MCP", "MCP edit", "MCP files") are an indicator at its right end. Statements below about the toolbar and the MCP segment describe the state before that change.
+
 == Context
 
 A hand test of the desktop viewer showed three visual faults: the "Showing last good result" badge ran under the inspection panel in a narrow viewer; the status line cut its text in the middle ("2 hidden" and "unsaved changes" disappeared behind an ellipsis while the duration stayed); and the Show in Script button jumped down when its message appeared.

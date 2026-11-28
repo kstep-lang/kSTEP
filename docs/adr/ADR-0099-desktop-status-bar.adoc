@@ -1,0 +1,59 @@
+= ADR-0099: Status Bar with MCP Indicator in the Desktop (Welle SB-1)
+:toc:
+
+== Status
+
+Accepted (Welle SB-1). Scope: `kstep-desktop` (`ui/StatusBar.kt`, `ui/StatusLine.kt`, `ui/DesktopApp.kt`, `ui/McpTooltipText.kt`;
+package `mcp`: `McpActivityTracker`, `McpCallLabel`, `McpCallOutcomes`, `DesktopMcpHttpServer`, `DesktopMcpServerManager`,
+`McpProtocol`; `status/StatusSegments.kt`). No new dependency, no database and no stored data, so there is no migration. Built and
+unit tested on macOS; the bar was not hand-tested on a screen (see Open points).
+
+== Context
+
+The status of the app (file name, export line, sandbox notice, run status, preview origin and the "MCP" segments of ADR-0095, ADR-0097
+and ADR-0098) stood in the toolbar, to the right of the icon buttons (ADR-0064, ADR-0094). The toolbar then had to share its width
+between icons and text. kUML Desktop keeps such information in a bar at the bottom of the window, with the MCP connection at its right
+end. kSTEP now does the same.
+
+== Decision
+
+D1. A status bar, 24 dp high, at the bottom of the window, below the error bars, separated by a 1 dp line. The toolbar keeps only the
+icon buttons. The left part is the former status line (file name in 12 sp, export line with a "Show in Folder" link, sandbox notice, run
+status, preview origin); the layout rules of ADR-0064 and ADR-0094 are unchanged. "Show in Folder" is a text link (focusable,
+Enter, Space, underline on hover, accent focus ring) instead of a button, to fit the bar height.
+
+D2. The MCP segments leave the run status. Their place is the MCP indicator at the right end, shown only while the server runs: a dot
+and the word "MCP" ("MCP edit" or "MCP files" in the warning colour when agents may make changes or use files; the permission is never
+shown by colour alone). Click, Enter and Space open the MCP dialog.
+
+D3. The indicator shows a phase, not a 600 ms light: `Ready` (grey dot), `Busy` (accent dot that pulses while at least one call runs)
+and `Failed` (red dot, until the next successful call). A short flash of the dot follows each call that ends. The tooltip names the
+address and port, the state, the permissions and the last five calls (time, name, result). The accessibility text names the state and
+the permissions.
+
+D4. `Declined` is not a failure. A tool answer with `DENIED` or `CONFIRMATION_TIMEOUT` means the user said no or did not answer; it ends
+the call but changes neither the phase nor the failed mark. Every other error answer, protocol error or exception is `Failed`.
+
+D5. The tracker records only calls that are authenticated and well formed (a string method, an id, `jsonrpc` 2.0); a notification or a
+rejected request begins nothing. `McpActivityTracker` is free of Compose, thread safe (one lock; a set of the open call ids), holds at
+most five calls and never counts below zero. A call whose answer is a malformed-request error is discarded, not counted. Stopping the
+server resets the tracker; a late `end` of a call cut off by the stop finds no open id and does nothing.
+
+D6. Unknown names are never shown. A label is either a tool name that this server registered or a method it implements; anything else
+shows as `tools/call (unknown tool)` or `(unknown method)`. Arguments, scripts and results are never read or stored, labels have control
+characters removed and are cut at 48 characters without splitting a surrogate pair. So no text that an agent chose reaches the tooltip.
+
+D7. The scrim of a modal dialog (the MCP confirmation, ADR-0098) also dims the status bar. While a confirmation is open the indicator
+pulses but cannot be used. This is intended: the dialog must be answered first.
+
+== Consequences
+
+* `ADR-0094` (fitting of the run status) and `ADR-0095` D7 (the "MCP" segment and its light) are superseded where they speak of the
+  toolbar and of the 600 ms light; the segment ranks, `id` and `ranges` of `StatusSegment` are removed with them.
+* Nothing new crosses the network: the tracker only reads what the HTTP layer already has.
+
+== Open points
+
+* Not looked at on a screen: the look of the bar, the pulse and the focus ring in light and dark mode, and the Swing interop panels
+  (the bar is part of the Compose column, below them, not an overlay).
+* The web site `kstep.dev` was not checked for descriptions of the toolbar status.

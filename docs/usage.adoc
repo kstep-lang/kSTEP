@@ -1070,7 +1070,7 @@ click) and `Show all`, `Isolate`, `Hide` in the toolbar. The slider sets the opa
 not drawn and not picked; a click picks the nearest opaque part, and a transparent one only if no opaque part is hit. A hidden part
 that was selected stays selected, so its panel and tree row remain. The setting survives a re-run of the same file (parts that vanished
 are dropped), is reset when you open another file, and is not saved. It is a view setting only: the script and an export do not change.
-When the toolbar is too narrow the status line leaves out the least important parts (duration, triangle count first); its tooltip then shows the full text.
+When the window is too narrow the status bar at the bottom leaves out the least important parts (duration, triangle count first); its tooltip then shows the full text.
 The status line and the tree header count the hidden and transparent parts. Known limit: parts are sorted by the depth of the middle of
 each triangle, so a part inside a transparent hull can show over it when the hull has large slanted triangles; and only the front side of
 a transparent hull is drawn. The colour transparency written in a STEP file is not drawn in the desktop.
@@ -1153,7 +1153,7 @@ claude mcp add --transport http kstep-desktop http://127.0.0.1:7391/mcp --header
 
 If the port is busy the server takes the next free one (up to nine further) and the dialog says so; "Use ... from now on" stores
 that port. "Regenerate Token..." replaces the token at once; agents that use the old one lose access. While the server runs, the
-status line shows "MCP", which lights up briefly when an agent calls. There are eighteen tools: eight only read (the next list), six change the app and four work with files (both described below):
+status bar at the bottom right shows an "MCP" indicator: a dot that pulses while an agent call runs, flashes when one ends and turns red when the last call failed (a denied or unanswered confirmation is not a failure); its tooltip lists the last five calls, a click opens this dialog. There are eighteen tools: eight only read (the next list), six change the app and four work with files (both described below):
 
 * `kstep_desktop_get_status`: file, unsaved changes, state of the preview, size of the model.
 * `kstep_desktop_get_script`: the editor text including unsaved changes, with a revision hash; more than 1 MiB is cut and marked.
@@ -1173,7 +1173,7 @@ use them, so treat it like a password.
 
 Under the server switch, "Allow agents to make changes" is off by default. You can turn it on only while the server runs, and you can
 always turn it off. It is checked at every call, so switching it off acts at once and also stops a call that is already waiting. While it is on,
-the status line shows "MCP edit". The six tools below do nothing without it (`ACTIONS_DISABLED`). None of them can save or export a file,
+the indicator reads "MCP edit". The six tools below do nothing without it (`ACTIONS_DISABLED`). None of them can save or export a file,
 open a file or use the clipboard, and none moves the camera.
 
 [cols="2,5"]
@@ -1209,7 +1209,7 @@ edit it also schedules a crash draft. Agent text may not contain control or bidi
 
 Under "Allow agents to make changes" there is a third switch, "Allow agents to save and export files". It can be turned on only while the
 server runs and changes are allowed; it is **off after every restart** (it is never stored) and it goes off when changes are turned off, the
-server stops or the token is regenerated. While it is on, the status line shows "MCP files" in a warning colour. Every file action then
+server stops or the token is regenerated. While it is on, the indicator reads "MCP files" in a warning colour. Every file action then
 asks you first: a dialog names the file, the folder and what will happen, and Deny has the focus. Allow can be clicked only after one
 second; Enter, Escape and a click outside deny; after 60 seconds the request denies itself ("Denies automatically in N s"). One question
 is open at a time, and after a denial the agent has to wait ten seconds.

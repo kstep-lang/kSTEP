@@ -46,6 +46,7 @@ private fun reachable(port: Int): Boolean =
 private class Rig(
     dir: Path,
     initial: McpSettings? = null,
+    val activity: McpActivityTracker = McpActivityTracker(),
 ) {
     val prefs = McpPreferencesStore(dir)
     val tokens = McpTokenStore(dir)
@@ -54,7 +55,7 @@ private class Rig(
 
     init {
         initial?.let { prefs.save(it) }
-        manager = DesktopMcpServerManager(prefs, tokens, FakeHost(snap()), McpActivityTracker())
+        manager = DesktopMcpServerManager(prefs, tokens, FakeHost(snap()), activity)
     }
 
     fun settle() = manager.awaitIdle()
@@ -62,6 +63,29 @@ private class Rig(
 
 class DesktopMcpServerManagerTest :
     StringSpec({
+        "a call is counted by the real server and stopping the server clears the activity" {
+            withDir { dir ->
+                val base = freeBase()
+                val rig = Rig(dir, McpSettings(false, base))
+                try {
+                    rig.manager.startFromSettings()
+                    rig.manager.setEnabled(true)
+                    rig.settle()
+                    val token = rig.manager.copyToken()!!
+                    Raw.mcp(base, rpc("ping"), token).status shouldBe 200
+                    rig.activity.state.value.finished shouldBe 1L
+                    rig.activity.state.value.recent
+                        .single()
+                        .outcome shouldBe McpCallOutcome.Ok
+                    rig.manager.setEnabled(false)
+                    rig.settle()
+                    rig.activity.state.value shouldBe McpActivity(finished = 1L)
+                } finally {
+                    rig.manager.shutdown()
+                }
+            }
+        }
+
         "by default nothing listens and no token file exists" {
             withDir { dir ->
                 val rig = Rig(dir)

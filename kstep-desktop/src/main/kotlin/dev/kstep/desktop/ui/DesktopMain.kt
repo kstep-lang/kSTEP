@@ -110,7 +110,7 @@ fun runDesktopApp(args: Array<String>) {
         // Own session directory and worker for exports: the live preview is never disturbed (ADR-0057).
         val exporter = remember { ExportController.production(userSandbox) }
         // The built-in MCP server (ADR-0095): off unless the saved settings say on. The host only holds the snapshot the
-        // window publishes; the activity tracker drives the quiet light in the status line.
+        // window publishes; the activity tracker drives the indicator in the status bar.
         val mcpHost = remember { SnapshotHost(kstepVersion()) }
         val mcpActivity = remember { McpActivityTracker() }
         // The action tools (ADR-0097) run their changes on the Swing event thread through this bridge.

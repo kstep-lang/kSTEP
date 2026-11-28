@@ -9,6 +9,13 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: a status bar at the bottom of the window (Welle SB-1, ADR-0099). The status that stood in the toolbar (file name,
+  export line with "Show in Folder", sandbox notice, run status, preview origin) moved into it; the toolbar keeps only the icon
+  buttons. While the MCP server runs, an indicator at the right end replaces the "MCP", "MCP edit" and "MCP files" segments: a dot that
+  pulses while an agent call runs, flashes when one ends and turns red when the last call failed (a denied or unanswered confirmation
+  is not a failure), the word "MCP" ("MCP edit", "MCP files" in the warning colour), a tooltip with the address and the last five calls,
+  and a click that opens the MCP dialog. Only known tool and method names are shown, never arguments or unknown names. No new
+  dependency, no error code, no protocol change. Only built and unit tested on macOS; the look was not hand-tested on a screen.
 * kSTEP Desktop: file actions for agents through the MCP server (Welle MCP-4, ADR-0098), behind a third switch "Allow agents to save and
   export files" (needs the server and "make changes"; off after every restart because it is never stored; `mcp.json` always gets
   `"allowFiles": false`) and a confirmation dialog for every action (modal, Deny has the focus, Allow only after one second, Enter/Escape

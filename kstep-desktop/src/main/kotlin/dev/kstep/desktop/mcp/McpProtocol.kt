@@ -55,6 +55,10 @@ internal class McpProtocol(
     private val tools: McpToolRegistry,
     private val serverVersion: String,
 ) {
+    /** The tool names and methods this server knows; the only names the activity display ever shows (ADR-0099). */
+    val knownTools: Set<String> = tools.all.map { it.name }.toSet()
+    val knownMethods: Set<String> get() = KNOWN_METHODS
+
     /** [headerVersion] is the already validated `MCP-Protocol-Version` header, or `null` when it was not sent. */
     fun handle(
         request: JsonObject,
@@ -133,6 +137,7 @@ internal class McpProtocol(
     }
 
     companion object {
+        val KNOWN_METHODS = setOf("initialize", "ping", "tools/list", "tools/call")
         const val SERVER_NAME = "kstep-desktop"
         const val DEFAULT_VERSION = "2025-03-26"
         const val STRUCTURED_VERSION = "2025-06-18"

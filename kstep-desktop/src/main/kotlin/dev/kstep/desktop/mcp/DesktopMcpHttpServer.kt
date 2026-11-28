@@ -6,6 +6,7 @@ import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -246,12 +247,33 @@ class DesktopMcpHttpServer internal constructor(
             return Reply(BAD_REQUEST)
         }
         // 11. the call
-        val response = protocol.handle(element, versions?.singleOrNull())
+        val callId =
+            if (isCall(element)) {
+                activity.begin(McpCallLabel.of(element, protocol.knownTools, protocol.knownMethods))
+            } else {
+                null
+            }
+        val response =
+            try {
+                protocol.handle(element, versions?.singleOrNull())
+            } catch (e: Exception) {
+                callId?.let { activity.end(it, McpCallOutcome.Failed) }
+                throw e
+            }
+        val outcome = McpCallOutcomes.classify(response)
+        if (callId != null) {
+            if (outcome == null) activity.discard(callId) else activity.end(callId, outcome)
+        }
         if (response == null) return Reply(ACCEPTED)
         val status = if (JsonRpc.errorCode(response) == JsonRpc.INVALID_REQUEST) BAD_REQUEST else OK
-        if (status == OK) activity.record()
         return Reply(status, response.toString().toByteArray(Charsets.UTF_8))
     }
+
+    /** A request that will be answered: a string method, an id and `jsonrpc` 2.0. Notifications are no calls. */
+    private fun isCall(element: JsonObject): Boolean =
+        (element["method"] as? JsonPrimitive)?.isString == true &&
+            "id" in element &&
+            (element["jsonrpc"] as? JsonPrimitive)?.takeIf { it.isString }?.content == "2.0"
 
     private fun rpcError(
         status: Int,

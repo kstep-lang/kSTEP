@@ -13,33 +13,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-class McpActivityTrackerTest :
-    StringSpec({
-        "calls closer than 600 ms do not update, one at 600 ms does" {
-            var now = 0L
-            val tracker = McpActivityTracker { now }
-            tracker.record()
-            tracker.lastLitAtMs.value shouldBe 0L
-            now = 100
-            tracker.record()
-            tracker.lastLitAtMs.value shouldBe 0L
-            now = 599
-            tracker.record()
-            tracker.lastLitAtMs.value shouldBe 0L
-            now = 600
-            tracker.record()
-            tracker.lastLitAtMs.value shouldBe 600L
-        }
-
-        "isLit is true for 600 ms and not before or after" {
-            McpActivityTracker.isLit(1000, 999) shouldBe false
-            McpActivityTracker.isLit(1000, 1000) shouldBe true
-            McpActivityTracker.isLit(1000, 1599) shouldBe true
-            McpActivityTracker.isLit(1000, 1600) shouldBe false
-            McpActivityTracker.isLit(Long.MIN_VALUE / 2, 1_700_000_000_000L) shouldBe false
-        }
-    })
-
 class McpUiBridgeTest :
     StringSpec({
         "the block's result comes back" {
