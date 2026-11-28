@@ -1,5 +1,6 @@
 package dev.kstep.desktop.mcp
 
+import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -72,6 +73,8 @@ class McpToolException(
 
 /** The arguments of a call are not valid (JSON-RPC `-32602`). */
 internal class McpInvalidParams : RuntimeException(null, null, false, false)
+
+private val toolLogger = KotlinLogging.logger {}
 
 /** A tool: [call] turns the arguments and the snapshot into the structured result. */
 internal class McpToolDef(
@@ -194,7 +197,8 @@ internal class McpToolRegistry(
             }
         } catch (e: McpToolException) {
             errorResult(e.code, e.reason, structured, e.extra)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            toolLogger.warn(e) { "tool failed: ${e::class.simpleName}" }
             errorResult(McpToolCodes.INTERNAL, null, structured)
         }
     }

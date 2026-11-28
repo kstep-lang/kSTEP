@@ -63,7 +63,8 @@ class McpUiBridge(
                 awaitStarted(job)
             } catch (e: McpToolException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                logger.warn(e) { "UI block failed" }
                 throw McpToolException(McpToolCodes.INTERNAL)
             }
         return (boxed ?: throw McpToolException(McpToolCodes.UI_BUSY)).value

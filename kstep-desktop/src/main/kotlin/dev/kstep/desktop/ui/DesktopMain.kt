@@ -35,7 +35,6 @@ import dev.kstep.desktop.run.WorkerRunner
 import dev.kstep.desktop.run.WorkerSandbox
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
-import kotlinx.coroutines.Dispatchers
 import java.awt.Desktop
 import java.awt.Dimension
 import java.awt.EventQueue
@@ -116,7 +115,7 @@ fun runDesktopApp(args: Array<String>) {
         val mcpActivity = remember { McpActivityTracker() }
         // The action tools (ADR-0097) run their changes on the Swing event thread through this bridge.
         val mcpActions =
-            remember { McpActionHost(McpUiBridge(Dispatchers.Main, { EventQueue.isDispatchThread() })) }
+            remember { McpActionHost(McpUiBridge(SwingEventThreadDispatcher, { EventQueue.isDispatchThread() })) }
         val mcp =
             remember {
                 DesktopMcpServerManager(McpPreferencesStore(), McpTokenStore(), mcpHost, mcpActivity, mcpActions).also {
