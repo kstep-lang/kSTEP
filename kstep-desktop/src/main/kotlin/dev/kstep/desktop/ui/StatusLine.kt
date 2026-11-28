@@ -80,6 +80,8 @@ internal fun RowScope.StatusLine(
     mcpLit: Boolean = false,
     /** An extra tooltip line while the MCP server runs (ADR-0095); `null` when it is off. */
     mcpTooltip: String? = null,
+    /** The "MCP files" segment is drawn in the warning colour while agents may save, export and open files (ADR-0098). */
+    mcpFiles: Boolean = false,
 ) {
     val hasRight = exportText != null || sandboxNotice != null || statusSegments.isNotEmpty() || previewLabel != null
     Text(
@@ -133,6 +135,7 @@ internal fun RowScope.StatusLine(
                 mcpLit,
                 accent,
                 mcpTooltip,
+                if (mcpFiles) warningTextColor(isSystemInDarkTheme()) else null,
             )
         }
         if (previewLabel != null) {
@@ -166,6 +169,7 @@ private fun RunStatusText(
     mcpLit: Boolean = false,
     accent: Color = ACCENT_LIGHT,
     mcpTooltip: String? = null,
+    mcpWarn: Color? = null,
 ) {
     BoxWithConstraints(modifier) {
         val fitted = StatusSegments.fit(segments, StatusSegments.maxChars(maxWidth.value))
@@ -173,7 +177,7 @@ private fun RunStatusText(
         var cut by remember { mutableStateOf(false) }
         val text: @Composable () -> Unit = {
             Text(
-                lightUp(fitted, mcpLit, accent),
+                lightUp(fitted, mcpLit, accent, mcpWarn),
                 fontSize = 12.sp,
                 color = DIM,
                 maxLines = 1,
@@ -205,15 +209,17 @@ private fun lightUp(
     fitted: FittedStatus,
     lit: Boolean,
     accent: Color,
+    warn: Color? = null,
 ): androidx.compose.ui.text.AnnotatedString {
     val range = fitted.ranges[StatusSegments.MCP_SEGMENT_ID]
-    if (!lit || range == null) {
+    val color = if (lit) accent else warn
+    if (color == null || range == null) {
         return androidx.compose.ui.text
             .AnnotatedString(fitted.shown)
     }
     return buildAnnotatedString {
         append(fitted.shown.substring(0, range.first))
-        withStyle(SpanStyle(color = accent)) { append(fitted.shown.substring(range.first, range.last + 1)) }
+        withStyle(SpanStyle(color = color)) { append(fitted.shown.substring(range.first, range.last + 1)) }
         append(fitted.shown.substring(range.last + 1))
     }
 }

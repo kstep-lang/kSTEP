@@ -58,7 +58,8 @@ internal fun McpServerDialog(
     val settings by manager.settingsState.collectAsState()
     val saveFailed by manager.lastSaveFailed.collectAsState()
     val hasToken by manager.hasToken.collectAsState()
-    val state = mcpDialogState(status, settings, hasToken, saveFailed)
+    val allowFiles by manager.allowFiles.collectAsState()
+    val state = mcpDialogState(status, settings, hasToken, saveFailed, allowFiles)
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf<String?>(null) }
@@ -112,6 +113,22 @@ internal fun McpServerDialog(
                         Text(McpDialogText.ACTIONS_SWITCH, fontSize = 14.sp)
                         Text(McpDialogText.ACTIONS_SUBTITLE, fontSize = 12.sp, color = DIM)
                         state.actionsReason?.let { Text(it, fontSize = 12.sp, color = DIM) }
+                    }
+                }
+                Row(
+                    Modifier.padding(start = 48.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Switch(
+                        checked = state.filesChecked,
+                        enabled = state.filesEnabled,
+                        onCheckedChange = { manager.setAllowFiles(it) },
+                    )
+                    Column {
+                        Text(McpDialogText.FILES_SWITCH, fontSize = 14.sp)
+                        Text(McpDialogText.FILES_SUBTITLE, fontSize = 12.sp, color = DIM)
+                        state.filesReason?.let { Text(it, fontSize = 12.sp, color = DIM) }
                     }
                 }
                 state.useActualPortLabel?.let { label ->

@@ -122,6 +122,130 @@ class DesktopMcpServerManagerTest :
             }
         }
 
+        "setAllowFiles needs a running server and the permission for changes; off always works" {
+            withDir { dir ->
+                val base = freeBase()
+                val rig = Rig(dir, McpSettings(false, base))
+                try {
+                    rig.manager.startFromSettings()
+                    rig.settle()
+                    rig.manager.setAllowFiles(true) shouldBe FilesChange.ACTIONS_OFF
+                    rig.manager.setEnabled(true)
+                    rig.settle()
+                    rig.manager.setAllowFiles(true) shouldBe FilesChange.ACTIONS_OFF
+                    rig.manager.setAllowActions(true) shouldBe ActionsChange.CHANGED
+                    rig.manager.setAllowFiles(true) shouldBe FilesChange.CHANGED
+                    rig.manager.allowFiles.value shouldBe true
+                    rig.manager.setAllowFiles(false) shouldBe FilesChange.CHANGED
+                    rig.manager.allowFiles.value shouldBe false
+                    rig.manager.setAllowActions(false)
+                    rig.manager.setEnabled(false)
+                    rig.settle()
+                    rig.manager.setAllowActions(true) shouldBe ActionsChange.SERVER_NOT_RUNNING
+                    rig.manager.setAllowFiles(true) shouldBe FilesChange.ACTIONS_OFF
+                } finally {
+                    rig.manager.shutdown()
+                }
+            }
+        }
+
+        "the file permission goes off with actions off, a new token, switching off, and is never restored" {
+            withDir { dir ->
+                val base = freeBase()
+                val rig = Rig(dir, McpSettings(true, base, allowActions = true))
+                try {
+                    rig.manager.startFromSettings()
+                    rig.settle()
+                    val on = { rig.manager.setAllowFiles(true) shouldBe FilesChange.CHANGED }
+                    on()
+                    rig.manager.setAllowActions(false)
+                    rig.manager.allowFiles.value shouldBe false
+                    rig.manager.setAllowActions(true)
+                    on()
+                    rig.manager.regenerateToken() shouldBe true
+                    rig.manager.allowFiles.value shouldBe false
+                    on()
+                    rig.manager.setEnabled(false)
+                    rig.settle()
+                    rig.manager.allowFiles.value shouldBe false
+                    rig.manager.setEnabled(true)
+                    rig.settle()
+                    on()
+                } finally {
+                    rig.manager.shutdown()
+                }
+                // a new manager on the same file, even one that says true by hand, starts with the permission off
+                Files.writeString(
+                    dir.resolve(McpPreferencesStore.FILE_NAME),
+                    """{"version":1,"enabled":true,"port":$base,"allowActions":true,"allowFiles":true}""",
+                )
+                val again = Rig(dir)
+                try {
+                    again.manager.startFromSettings()
+                    again.settle()
+                    again.manager.allowFiles.value shouldBe false
+                } finally {
+                    again.manager.shutdown()
+                }
+            }
+        }
+
+        "an open confirmation ends with FILES_DISABLED when the permission is taken back" {
+            withDir { dir ->
+                val base = freeBase()
+                val gate = McpConfirmationGate(FakeConfirmScheduler(), System::currentTimeMillis)
+                val host =
+                    McpActionHost(McpUiBridge(kotlinx.coroutines.Dispatchers.Default, { false }), gate)
+                val manager =
+                    DesktopMcpServerManager(
+                        McpPreferencesStore(dir).also { it.save(McpSettings(true, base, allowActions = true)) },
+                        McpTokenStore(dir),
+                        FakeHost(snap()),
+                        McpActivityTracker(),
+                        host,
+                    )
+                try {
+                    manager.startFromSettings()
+                    manager.awaitIdle()
+                    manager.setAllowFiles(true) shouldBe FilesChange.CHANGED
+                    val answer =
+                        java.util.concurrent.CompletableFuture.supplyAsync {
+                            gate.request { McpConfirmRequest(it, McpFileAction.SAVE, "a", "b", "c", 0) }
+                        }
+                    while (gate.pending.value == null) Thread.sleep(2)
+                    manager.setAllowFiles(false)
+                    val outcome = answer.get(30, java.util.concurrent.TimeUnit.SECONDS)
+                    (outcome as McpConfirmOutcome.Cancelled).code shouldBe McpToolCodes.FILES_DISABLED
+                } finally {
+                    manager.shutdown()
+                }
+            }
+        }
+
+        "two threads switching the permissions leave the last value on the disk" {
+            withDir { dir ->
+                val base = freeBase()
+                val rig = Rig(dir, McpSettings(true, base))
+                try {
+                    rig.manager.startFromSettings()
+                    rig.settle()
+                    val t1 = Thread { repeat(200) { rig.manager.setAllowActions(it % 2 == 0) } }
+                    val t2 = Thread { repeat(200) { rig.manager.setAllowFiles(it % 2 == 0) } }
+                    t1.start()
+                    t2.start()
+                    t1.join()
+                    t2.join()
+                    rig.manager.setAllowActions(true)
+                    rig.manager.setAllowActions(false)
+                    rig.prefs.load().allowActions shouldBe false
+                    rig.manager.allowFiles.value shouldBe false
+                    rig.manager.settingsState.value.allowActions shouldBe false
+                } finally {
+                    rig.manager.shutdown()
+                }
+            }
+        }
+
         "the saved setting starts the server at app start" {
             withDir { dir ->
                 val base = freeBase()

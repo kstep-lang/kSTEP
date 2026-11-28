@@ -1153,7 +1153,7 @@ claude mcp add --transport http kstep-desktop http://127.0.0.1:7391/mcp --header
 
 If the port is busy the server takes the next free one (up to nine further) and the dialog says so; "Use ... from now on" stores
 that port. "Regenerate Token..." replaces the token at once; agents that use the old one lose access. While the server runs, the
-status line shows "MCP", which lights up briefly when an agent calls. There are fourteen tools: eight only read (the next list), six change the app and are described below:
+status line shows "MCP", which lights up briefly when an agent calls. There are eighteen tools: eight only read (the next list), six change the app and four work with files (both described below):
 
 * `kstep_desktop_get_status`: file, unsaved changes, state of the preview, size of the model.
 * `kstep_desktop_get_script`: the editor text including unsaved changes, with a revision hash; more than 1 MiB is cut and marked.
@@ -1204,6 +1204,42 @@ A typical round: `get_script` (note `revision`), `replace_in_script` with that `
 An agent edit is one step in the undo history of its own: press Undo (Cmd/Ctrl+Z) to take it back. The edit is never saved; the file on disk
 changes only when you save. If "Preview Unsaved Changes" is on, an agent edit starts the automatic preview run just like typing does. Like every
 edit it also schedules a crash draft. Agent text may not contain control or bidirectional characters and is limited to 1 MiB.
+
+==== Letting an agent save, export and open files
+
+Under "Allow agents to make changes" there is a third switch, "Allow agents to save and export files". It can be turned on only while the
+server runs and changes are allowed; it is **off after every restart** (it is never stored) and it goes off when changes are turned off, the
+server stops or the token is regenerated. While it is on, the status line shows "MCP files" in a warning colour. Every file action then
+asks you first: a dialog names the file, the folder and what will happen, and Deny has the focus. Allow can be clicked only after one
+second; Enter, Escape and a click outside deny; after 60 seconds the request denies itself ("Denies automatically in N s"). One question
+is open at a time, and after a denial the agent has to wait ten seconds.
+
+[cols="2,5"]
+|===
+|Tool |What it does
+
+|`kstep_desktop_save`
+|Saves the open script to its own file (never another path). Needs `expectedRevision`. The dialog shows how many lines differ from the file on
+disk. Nothing is asked when there is nothing to save. `SAVE_FAILED` when the file changed on disk meanwhile (the other text stays).
+
+|`kstep_desktop_list_recent`
+|The names (no paths) of the recent scripts, up to ten. Asks nothing.
+
+|`kstep_desktop_open_recent`
+|Opens a recent script by `index` or `name`. Refused with `UNSAVED_CHANGES` while the editor has unsaved changes, and with `NOT_A_SCRIPT` while a
+folder of notes is open.
+
+|`kstep_desktop_export`
+|Exports the open, saved script as `step`, `glb`, `stl` or `3mf` into the folder you last exported to, as a new file: an existing file is never
+replaced (a free name like `part-2.step` is chosen). Without such a folder: `NOT_AVAILABLE`, export once by hand first. An optional `name`
+must be a plain file name. The answer has the name, never a path. Your remembered export format and folder stay as they are.
+|===
+
+The agent never gives a path or a folder, and no answer of these tools contains one. Further codes: `FILES_DISABLED`, `DENIED`,
+`CONFIRMATION_TIMEOUT` (do not retry at once; ask the user), `CONFIRMATION_PENDING`, `UNSAVED_CHANGES`, `EXISTS`, `INVALID_NAME`,
+`SAVE_FAILED`, `EXPORT_FAILED` (with the `KSTEP-D` code). `kstep_desktop_screenshot` is reserved and answers `NOT_AVAILABLE`. An agent's
+own time limit may be shorter than your decision time: the action can have happened although the agent saw a time-out. Hard links are
+needed for the export; a folder on a file system without them (some network or FAT volumes) makes the export fail.
 
 === Starting the desktop from the CLI
 

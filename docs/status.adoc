@@ -790,6 +790,16 @@ scan before either lands.
   agent notices. Tests: registry (FakePort, about 35 cases), text rules, rate limits, bridge, session (undo order, never saved), manager,
   real server, port, status, architecture. Not done: a hand test with a real agent, a look at the dialog and status line on a screen, any
   run on Windows or Linux, group names in `select`, the menu "Agents", Save/Export/files (MCP-4).
+* Welle MCP-4 (ADR-0098): file actions in `kstep-desktop` behind a third, session-only switch ("Allow agents to save and export files",
+  `DesktopMcpServerManager.allowFiles`, `setAllowFiles`; never stored) and a confirmation for every action (`McpConfirmationGate` with an
+  injected scheduler and clock, `McpConfirmDialog`/`McpConfirmContent`, `McpDisplayText`). New `McpFilePort` (ten methods, no path
+  parameter; checked by reflection) with `DesktopMcpFilePort` in `ui`; tools `save`, `list_recent`, `open_recent`, `export`
+  (`McpFileTools`, `McpFileName`); `ExportController.startExclusive` and `ExportAtomicWriter.writeExclusive` (hard link, never
+  replaces); "MCP files" status segment. Tests: gate (fake scheduler), file names, tools (fake port, about 20 cases), real session and
+  controller port, end-to-end over HTTP with the real bridge, exclusive writer, dialog content by keyboard in a headless scene,
+  stores, manager, status, architecture. Not done: `kstep_desktop_screenshot` (only reserved, `NOT_AVAILABLE`; a viewer readback needs a
+  follow-up ADR), a hand test with a real agent, a look at the dialog and status line on a screen (the real dialog window was never
+  opened; only its content was tested headless), any run on Windows or Linux, absolute path in `get_status`.
 * Welle D3d-1 (ADR-0094): three visual fixes in `kstep-desktop` (packages `ui`, `status`). `ViewerOverlayLayout` places the
   last-good badge (top left while 140 dp fit next to the 260 dp panel, i.e. from a 432 dp viewer; else bottom left; wrapping text).
   `StatusSegments` builds the run status from prioritised whole segments and `fit` drops duration, triangles, medium, then high

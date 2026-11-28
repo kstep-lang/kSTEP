@@ -90,6 +90,51 @@ class StatusSegmentsMcpTest :
             segment.priority shouldBe SegmentPriority.ESSENTIAL
         }
 
+        "with the file permission the segment reads MCP files in the same place, essential" {
+            val segment =
+                StatusSegments
+                    .build(
+                        knowledgeLabel = null,
+                        runState = "● Ok",
+                        durationMs = null,
+                        triangles = null,
+                        triangleWarning = null,
+                        note = null,
+                        transientNotice = null,
+                        aiStatus = null,
+                        hidden = 0,
+                        transparent = 0,
+                        dirty = false,
+                        mcp = "MCP",
+                        mcpEditable = true,
+                        mcpFiles = true,
+                    ).single { it.id == "mcp" }
+            segment.text shouldBe "MCP files"
+            segment.priority shouldBe SegmentPriority.ESSENTIAL
+        }
+
+        "without the file permission the segment stays MCP edit" {
+            val files =
+                StatusSegments
+                    .build(
+                        null,
+                        "● Ok",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        0,
+                        0,
+                        false,
+                        mcp = "MCP",
+                        mcpEditable = true,
+                        mcpFiles = false,
+                    ).single { it.id == "mcp" }
+            files.text shouldBe "MCP edit"
+        }
+
         "without the permission it stays the quiet MCP segment of medium priority" {
             val segment = build("MCP").single { it.id == "mcp" }
             segment.text shouldBe "MCP"

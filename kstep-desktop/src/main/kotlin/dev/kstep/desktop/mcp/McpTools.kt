@@ -32,6 +32,18 @@ object McpToolCodes {
     const val BUFFER_NOT_RUN = "BUFFER_NOT_RUN"
     const val SANDBOX_UNAVAILABLE = "SANDBOX_UNAVAILABLE"
 
+    // ADR-0098: the file tools
+    const val FILES_DISABLED = "FILES_DISABLED"
+    const val CONFIRMATION_PENDING = "CONFIRMATION_PENDING"
+    const val DENIED = "DENIED"
+    const val CONFIRMATION_TIMEOUT = "CONFIRMATION_TIMEOUT"
+    const val UNSAVED_CHANGES = "UNSAVED_CHANGES"
+    const val EXISTS = "EXISTS"
+    const val INVALID_NAME = "INVALID_NAME"
+    const val NOT_AVAILABLE = "NOT_AVAILABLE"
+    const val SAVE_FAILED = "SAVE_FAILED"
+    const val EXPORT_FAILED = "EXPORT_FAILED"
+
     val MESSAGES =
         mapOf(
             NO_FILE to "No script or note is open in the editor.",
@@ -53,6 +65,17 @@ object McpToolCodes {
             BUFFER_NOT_RUN to "The editor text has not been run yet.",
             SANDBOX_UNAVAILABLE to
                 "No sandbox is available on this system, so agents may not start runs or edit while Preview Unsaved Changes is on.",
+            FILES_DISABLED to
+                "Agents may not save, export or open files. The user can allow it in View > MCP Server.",
+            CONFIRMATION_PENDING to "Another request waits for the user's decision. Try again later.",
+            DENIED to "The user denied the request. Do not retry at once; ask the user.",
+            CONFIRMATION_TIMEOUT to "The user did not answer in time. Do not retry at once; ask the user.",
+            UNSAVED_CHANGES to "The editor has unsaved changes. Save first.",
+            EXISTS to "A file with that name already exists; nothing was replaced.",
+            INVALID_NAME to "The file name is not allowed.",
+            NOT_AVAILABLE to "This is not available.",
+            SAVE_FAILED to "The file could not be saved.",
+            EXPORT_FAILED to "The export failed.",
         )
 }
 
@@ -83,6 +106,8 @@ internal class McpToolDef(
     val args: McpArgSpec,
     /** An action tool (ADR-0097): changes the app, needs the permission, runs through [actingCall]. */
     val acting: Boolean = false,
+    /** A file tool (ADR-0098): also needs the third switch. */
+    val files: Boolean = false,
     val actingCall: ((args: McpParsedArgs, ctx: McpActionContext) -> JsonObject)? = null,
     val call: (args: McpParsedArgs, snapshot: DesktopStateSnapshot, protocolVersion: String) -> JsonObject =
         { _, _, _ -> throw McpToolException(McpToolCodes.INTERNAL) },
@@ -153,7 +178,7 @@ internal class McpToolRegistry(
                         "unsaved changes, with a revision hash. Long text is shortened. Read only.",
                 args = none,
             ) { _, snapshot, _ -> script(snapshot) },
-        ) + McpReadTools.definitions(limits) + McpActionTools.definitions()
+        ) + McpReadTools.definitions(limits) + McpActionTools.definitions() + McpFileTools.definitions()
 
     private val byName = all.associateBy { it.name }
 
@@ -187,6 +212,10 @@ internal class McpToolRegistry(
         protocolVersion: String,
     ): JsonObject {
         val structured = protocolVersion == McpProtocol.STRUCTURED_VERSION
+        // reserved, not listed: answers at once and touches nothing (ADR-0098 D9)
+        if (name == McpFileTools.SCREENSHOT) {
+            return errorResult(McpToolCodes.NOT_AVAILABLE, "viewer capture is not implemented", structured)
+        }
         val tool = byName[name] ?: throw McpInvalidParams()
         return try {
             if (tool.acting) {
@@ -203,7 +232,7 @@ internal class McpToolRegistry(
         }
     }
 
-    /** The fixed order of an action call (ADR-0097): rate limit, permission, arguments, the tool itself. */
+    /** The fixed order of an action call (ADR-0097, ADR-0098): rate limit, permissions, arguments, the tool itself. */
     private fun callActing(
         tool: McpToolDef,
         args: JsonObject?,
@@ -212,6 +241,12 @@ internal class McpToolRegistry(
         val ctx = actions
         if (ctx != null && !ctx.window.tryAcquire(ctx.clock())) throw McpToolException(McpToolCodes.RATE_LIMITED)
         if (ctx == null || !ctx.allowActions()) throw McpToolException(McpToolCodes.ACTIONS_DISABLED)
+        if (tool.files && !ctx.allowFiles()) {
+            throw McpToolException(
+                McpToolCodes.FILES_DISABLED,
+                "turn on 'Allow agents to save and export files' in View > MCP Server",
+            )
+        }
         val parsed = tool.args.parse(args ?: JsonObject(emptyMap()))
         val run = tool.actingCall ?: throw McpToolException(McpToolCodes.INTERNAL)
         return mcpToolResult(run(parsed, ctx), structured)

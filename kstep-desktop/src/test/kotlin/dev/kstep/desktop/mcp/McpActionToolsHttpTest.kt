@@ -53,7 +53,7 @@ class McpActionToolsHttpTest :
                             .getValue("tools")
                             .jsonArray
                             .map { it.jsonObject }
-                    tools.size shouldBe 14
+                    tools.size shouldBe 18
                     for (t in tools) {
                         val name = t.getValue("name").jsonPrimitive.content
                         val schema = t.getValue("inputSchema").jsonObject
@@ -69,9 +69,26 @@ class McpActionToolsHttpTest :
                                     "kstep_desktop_select",
                                     "kstep_desktop_set_visibility",
                                     "kstep_desktop_show_in_script",
+                                    "kstep_desktop_save",
+                                    "kstep_desktop_list_recent",
+                                    "kstep_desktop_open_recent",
+                                    "kstep_desktop_export",
                                 )
                         if (acting) {
-                            description shouldStartWith "[Changes the app; requires 'Allow agents to make changes'.]"
+                            val files =
+                                name in
+                                    setOf(
+                                        "kstep_desktop_save",
+                                        "kstep_desktop_list_recent",
+                                        "kstep_desktop_open_recent",
+                                        "kstep_desktop_export",
+                                    )
+                            description shouldStartWith
+                                if (files) {
+                                    "[Changes files;"
+                                } else {
+                                    "[Changes the app; requires 'Allow agents to make changes'.]"
+                                }
                         } else {
                             description.contains("Changes the app") shouldBe false
                         }

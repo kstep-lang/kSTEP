@@ -16,6 +16,12 @@ object McpDialogText {
             "can still read your files; without a sandbox (Windows, or Linux without bubblewrap) runs are refused. " +
             "Undo reverts an edit."
     const val ACTIONS_LOCKED = "Turn the server on to change this"
+    const val FILES_SWITCH = "Allow agents to save and export files"
+    const val FILES_HINT =
+        "Agents can save the open file, export to your last export folder and open recent files. Every file " +
+            "action asks you first. Off after every restart."
+    const val FILES_SUBTITLE = FILES_HINT
+    const val FILES_LOCKED = "Allow agents to make changes first"
 
     private const val HINT_LOCAL =
         "Only reachable from this computer (127.0.0.1). Any program on this computer that has the token can use " +
@@ -25,10 +31,20 @@ object McpDialogText {
             "selection."
 
     /** The hint under the port, for the state of the permission to make changes. */
-    fun hint(allowActions: Boolean): String =
+    fun hint(
+        allowActions: Boolean,
+        allowFiles: Boolean = false,
+    ): String =
         if (allowActions) {
+            val files =
+                if (allowFiles) {
+                    "It may also save the open file, export to your last export folder and open recent files, " +
+                        "but only after you agreed in a dialog each time"
+                } else {
+                    "It cannot save, export or open files itself"
+                }
             "$HINT_LOCAL, $HINT_READ It may also change things: the editor text (not saved to disk), runs, the " +
-                "selection and the visibility of parts. It cannot save, export or open files itself, but it can have " +
+                "selection and the visibility of parts. $files, but it can have " +
                 "the app run a script it wrote: that script runs as you, can read any file and is only refused " +
                 "when no sandbox is available."
         } else {
@@ -73,6 +89,9 @@ data class McpDialogState(
     val actionsChecked: Boolean,
     val actionsEnabled: Boolean,
     val actionsReason: String?,
+    val filesChecked: Boolean,
+    val filesEnabled: Boolean,
+    val filesReason: String?,
     val hintText: String,
 )
 
@@ -81,6 +100,7 @@ fun mcpDialogState(
     settings: McpSettings,
     hasToken: Boolean,
     saveFailed: Boolean,
+    allowFiles: Boolean = false,
 ): McpDialogState {
     val running = status as? McpServerStatus.Running
     val statusText =
@@ -109,7 +129,18 @@ fun mcpDialogState(
         // turning it off always works, so a saved permission can be taken back while the server is off
         actionsEnabled = running != null || settings.allowActions,
         actionsReason = if (running != null || settings.allowActions) null else McpDialogText.ACTIONS_LOCKED,
-        hintText = McpDialogText.hint(settings.allowActions),
+        filesChecked = allowFiles,
+        // turning it off always works; turning it on needs a running server and the permission for changes
+        filesEnabled = (running != null && settings.allowActions) || allowFiles,
+        filesReason =
+            if ((running != null && settings.allowActions) ||
+                allowFiles
+            ) {
+                null
+            } else {
+                McpDialogText.FILES_LOCKED
+            },
+        hintText = McpDialogText.hint(settings.allowActions, allowFiles),
     )
 }
 

@@ -189,7 +189,7 @@ class ExportPreferencesStore(
         key: String,
     ): String? = (obj?.get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content
 
-    private fun validDir(
+    internal fun validDir(
         text: String,
         maxChars: Int,
     ): Path? {

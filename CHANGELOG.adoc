@@ -9,6 +9,18 @@ minor versions may contain breaking changes.
 
 === Added
 
+* kSTEP Desktop: file actions for agents through the MCP server (Welle MCP-4, ADR-0098), behind a third switch "Allow agents to save and
+  export files" (needs the server and "make changes"; off after every restart because it is never stored; `mcp.json` always gets
+  `"allowFiles": false`) and a confirmation dialog for every action (modal, Deny has the focus, Allow only after one second, Enter/Escape
+  deny, 60 s time-out, one question at a time, 10 s pause after a denial). New tools: `kstep_desktop_save` (the open file only, with the
+  changed line count), `kstep_desktop_list_recent` (names only), `kstep_desktop_open_recent` (by index or name; refused with unsaved
+  changes or an open notes folder) and `kstep_desktop_export` (step, glb, stl, 3mf, into the folder the user last exported to, always a
+  new file created exclusively, never replacing; without a remembered folder `NOT_AVAILABLE`). No answer contains a path.
+  `kstep_desktop_screenshot` is only reserved (`NOT_AVAILABLE`, not listed). New codes `FILES_DISABLED`, `CONFIRMATION_PENDING`, `DENIED`,
+  `CONFIRMATION_TIMEOUT`, `UNSAVED_CHANGES`, `EXISTS`, `INVALID_NAME`, `NOT_AVAILABLE`, `SAVE_FAILED`, `EXPORT_FAILED`. The status line
+  shows "MCP files" in a warning colour. `ExportAtomicWriter.writeExclusive` creates a file without ever replacing one. Port and
+  settings changes now save under one lock. Only built and unit tested on macOS; the dialog and the status line were not looked at on a
+  screen and no real agent was used.
 * kSTEP Desktop: six MCP tools that change the app (Welle MCP-3, ADR-0097), behind a second switch "Allow agents to make changes"
   in View > MCP Server... (off by default, stored as `allowActions` in `mcp.json`, checked at every call): `kstep_desktop_set_script`,
   `kstep_desktop_replace_in_script` (both need the `expectedRevision` from `get_script`; one undo step of their own; the file is

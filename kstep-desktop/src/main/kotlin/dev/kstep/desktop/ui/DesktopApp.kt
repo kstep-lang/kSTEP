@@ -101,6 +101,7 @@ import dev.kstep.desktop.mcp.DesktopMcpServerManager
 import dev.kstep.desktop.mcp.McpActionHost
 import dev.kstep.desktop.mcp.McpActionScene
 import dev.kstep.desktop.mcp.McpActivityTracker
+import dev.kstep.desktop.mcp.McpDisplayText
 import dev.kstep.desktop.mcp.McpRunMode
 import dev.kstep.desktop.mcp.McpRunOutcome
 import dev.kstep.desktop.mcp.McpServerStatus
@@ -205,6 +206,7 @@ internal val DIM = Color(0xFF8A8A8A)
 internal val WARN = Color(0xFFF9A825)
 private const val PROGRESS_DELAY_MS = 300L
 private const val NOTICE_MS = 6_000L
+private const val AGENT_EXPORT_NAME_MAX = 80
 private const val EMPTY_RECENT_SHOWN = 5
 private const val AI_TICK_MS = 1_000L
 private const val AI_PANEL_DP = 360
@@ -293,6 +295,8 @@ fun FrameWindowScope.DesktopApp(
     var mcpDialogVisible by remember { mutableStateOf(false) }
     val mcpStatus by mcp.status.collectAsState()
     val mcpAllowActions by mcp.allowActions.collectAsState()
+    val mcpAllowFiles by mcp.allowFiles.collectAsState()
+    val mcpConfirm by mcpActions.confirmations.pending.collectAsState()
     val mcpLastLit by mcpActivity.lastLitAtMs.collectAsState()
     var mcpLit by remember { mutableStateOf(false) }
     LaunchedEffect(mcpLastLit) {
@@ -811,6 +815,12 @@ fun FrameWindowScope.DesktopApp(
     }
     LaunchedEffect(exportState) {
         val done = exportState as? ExportState.Succeeded ?: return@LaunchedEffect
+        // An export an agent started (ADR-0098): the user's remembered format and folder stay as they are.
+        if (done.generation == exporter.exclusiveGeneration) {
+            transientNotice = "Agent exported " + McpDisplayText.forDialog(done.fileName, AGENT_EXPORT_NAME_MAX)
+            noticeNonce++
+            return@LaunchedEffect
+        }
         // Only with a shown script (a notice for no file would never be visible); the generation is taken NOW so the
         // run the export's own save may have started does not clear it (ADR-0064).
         state.file?.let {
@@ -843,7 +853,7 @@ fun FrameWindowScope.DesktopApp(
         exportNotice = ExportNotice.retain(exportNotice, state.file, state, knowledgeOpen, exportDialogOpened = false)
     }
     LaunchedEffect(exportState.generation, exportState is ExportState.Running) {
-        (exportState as? ExportState.Running)?.let { run ->
+        (exportState as? ExportState.Running)?.takeIf { it.generation != exporter.exclusiveGeneration }?.let { run ->
             lastExportFormat = run.format
             lastExportTargetName = run.selectedScriptTarget?.let { run.scriptTargets.getOrNull(it)?.fileName }
         }
@@ -1105,6 +1115,28 @@ fun FrameWindowScope.DesktopApp(
             )
         onDispose { mcpActions.port = null }
     }
+    // The file tools (ADR-0098) reach the window through their own port: nothing in it takes a path.
+    val recentNow = rememberUpdatedState(recent)
+    val workspaceNow = rememberUpdatedState(workspace)
+    val exportVisibleNow = rememberUpdatedState(exportVisible)
+    val convertingNow = rememberUpdatedState(convertState !is ConvertState.Idle)
+    DisposableEffect(mcpActions, session, exporter) {
+        mcpActions.filePort =
+            DesktopMcpFilePort(
+                session = session,
+                menuContext = { menuContextNow.value },
+                knowledgeOpen = { knowledgeOpenNow.value },
+                workspaceActive = { workspaceNow.value !is WorkspaceState.None },
+                recent = { recentNow.value },
+                openPath = openPath,
+                forgetRecent = { path -> updateRecent { it.remove(path) } },
+                exporter = exporter,
+                exportPrefs = exportPreferences,
+                exportDialogOpen = { exportVisibleNow.value },
+                converting = { convertingNow.value },
+            )
+        onDispose { mcpActions.filePort = null }
+    }
     AutoPreviewDriver(
         enabled = previewUnsaved,
         state = state,
@@ -1270,6 +1302,11 @@ fun FrameWindowScope.DesktopApp(
             }
             convertHost.ConvertDialogHost()
             if (mcpDialogVisible) McpServerDialog(mcp) { mcpDialogVisible = false }
+            mcpConfirm?.let { request ->
+                McpConfirmDialog(request, mcpActions.confirmations.timeoutMs, System::currentTimeMillis) { decision ->
+                    mcpActions.confirmations.resolve(request.id, decision)
+                }
+            }
             if (exportVisible) {
                 ExportDialog(
                     sandboxNotice = sandboxNotice,
@@ -1348,6 +1385,7 @@ fun FrameWindowScope.DesktopApp(
                         aiStatus = aiStatusText(aiRepair, aiNow, ai.limitsInUse.maxAttempts),
                         mcpRunning = mcpStatus as? McpServerStatus.Running,
                         mcpEditable = mcpAllowActions,
+                        mcpFiles = mcpAllowFiles,
                         mcpLit = mcpLit,
                     )
 
@@ -1633,6 +1671,7 @@ private fun Toolbar(
     sandboxNotice: SandboxNotice? = null,
     mcpRunning: McpServerStatus.Running? = null,
     mcpEditable: Boolean = false,
+    mcpFiles: Boolean = false,
     mcpLit: Boolean = false,
 ) {
     Row(
@@ -1670,16 +1709,20 @@ private fun Toolbar(
                     editor.dirty,
                     mcpRunning?.let { "MCP" },
                     mcpEditable && mcpRunning != null,
+                    mcpFiles && mcpRunning != null,
                 ),
             previewLabel =
                 previewOriginLabel(state.lastGood?.origin, editor.text.takeIf { editor.state is EditorState.Editing })
                     ?.takeIf { editor.dirty || it != PreviewOriginLabel.SAVED },
             accent = if (isSystemInDarkTheme()) ACCENT_DARK else ACCENT_LIGHT,
             mcpLit = mcpLit,
+            mcpFiles = mcpFiles && mcpRunning != null,
             mcpTooltip =
                 mcpRunning?.let {
                     "MCP server running on 127.0.0.1:${it.port}" +
-                        (if (mcpEditable) " — agents may make changes" else "") + " — View › MCP Server…"
+                        (if (mcpEditable) " — agents may make changes" else "") +
+                        (if (mcpFiles) " — agents may save, export and open files (each asks you)" else "") +
+                        " — View › MCP Server…"
                 },
         )
     }
@@ -1706,6 +1749,7 @@ private fun statusSegmentsFor(
     dirty: Boolean,
     mcp: String? = null,
     mcpEditable: Boolean = false,
+    mcpFiles: Boolean = false,
 ): List<StatusSegment> {
     val ok = state as? DesktopState.Ok
     val runState =
@@ -1731,6 +1775,7 @@ private fun statusSegmentsFor(
         dirty = dirty,
         mcp = mcp,
         mcpEditable = mcpEditable,
+        mcpFiles = mcpFiles,
     )
 }
 

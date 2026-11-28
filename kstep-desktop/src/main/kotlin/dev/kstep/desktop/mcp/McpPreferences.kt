@@ -58,6 +58,12 @@ class McpPreferencesStore(
                 is JsonPrimitive -> if (element.isString) null else element.booleanOrNull
                 else -> null
             } ?: return McpSettings()
+        // allowFiles is never restored (ADR-0098 D1): only a JSON boolean or nothing is accepted, the value is ignored
+        when (val element = obj["allowFiles"]) {
+            null -> Unit
+            is JsonPrimitive -> if (element.isString || element.booleanOrNull == null) return McpSettings()
+            else -> return McpSettings()
+        }
         return McpSettings(enabled, port, allowActions)
     }
 
@@ -69,6 +75,8 @@ class McpPreferencesStore(
                 put("enabled", settings.enabled)
                 put("port", settings.port.coerceIn(MIN_PORT, MAX_PORT))
                 put("allowActions", settings.allowActions)
+                // always false: the permission for file actions lasts for one session only (ADR-0098 D1)
+                put("allowFiles", false)
             }
         return PrivateConfigFile.writeAtomic(dir, FILE_NAME, "mcp", body.toString())
     }

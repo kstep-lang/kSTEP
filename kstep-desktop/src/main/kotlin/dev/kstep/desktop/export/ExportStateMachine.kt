@@ -101,6 +101,8 @@ sealed interface ExportEvent {
 
     data class Start(
         val nowMs: Long,
+        /** An agent's export (ADR-0098): the file is created, never replaced. */
+        val exclusive: Boolean = false,
     ) : ExportEvent
 
     data class PhaseChanged(
@@ -131,6 +133,8 @@ sealed interface ExportEffect {
         val format: ExportFormat,
         val target: Path,
         val replaceConfirmed: Boolean,
+        /** Create the target exclusively: an existing file is never replaced (ADR-0098). */
+        val exclusive: Boolean = false,
     ) : ExportEffect
 
     /** Kill the worker of this run; the files of the run are removed by the pipeline itself. */
@@ -252,7 +256,7 @@ object ExportStateMachine {
                         state
                     },
                 )
-            is ExportEvent.Start -> start(state, event.nowMs)
+            is ExportEvent.Start -> start(state, event.nowMs, event.exclusive)
             ExportEvent.Close -> ExportTransition(state, listOf(ExportEffect.CloseDialog))
             else -> ExportTransition(state)
         }
@@ -288,6 +292,7 @@ object ExportStateMachine {
     private fun start(
         state: ExportState.Configuring,
         nowMs: Long,
+        exclusive: Boolean = false,
     ): ExportTransition {
         val target = state.target
         if (target == null || state.overwrite is Overwrite.NeedsConfirm) return ExportTransition(state)
@@ -304,7 +309,7 @@ object ExportStateMachine {
                 state.scriptTargets,
                 state.selectedScriptTarget,
             ),
-            listOf(ExportEffect.StartPipeline(generation, state.format, target, confirmed)),
+            listOf(ExportEffect.StartPipeline(generation, state.format, target, confirmed && !exclusive, exclusive)),
         )
     }
 

@@ -1,0 +1,128 @@
+= ADR-0098: File Actions of the Desktop MCP Server (Welle MCP-4)
+:toc:
+
+== Status
+
+Accepted (Welle MCP-4). Scope: `kstep-desktop` (package `mcp`: `McpConfirmation`, `McpFilePort`, `McpFileTools`, `McpFileName`;
+`ui/DesktopMcpFilePort.kt`, `ui/McpConfirmDialog.kt`, `ui/DesktopApp.kt`, `ui/McpServerDialog.kt`, `ui/StatusLine.kt`; `export`:
+`ExportController`, `ExportAtomicWriter`, `ExportStateMachine`, `ExportPreferencesStore`; `status`). No new dependency and no
+database, so there is no migration. `mcp.json` keeps `version: 1`; the optional key `allowFiles` is accepted when it is a JSON
+boolean and its value is ignored (see D1). `export.json` and `recent.json` do not change. Built and unit tested on macOS only; the
+dialog and the status line were not looked at on a screen and no real agent was used (see Open points).
+
+== Context
+
+ADR-0097 gave an agent six tools that change the app, with the explicit exclusion of saving, export and opening files. An agent that
+edits a script also wants to save it, export the result and reopen a recent script. These actions touch the disk, so they need their
+own permission and, unlike the edit tools, the user must see each one.
+
+== Decision
+
+D1. A third switch, for this session only. "Allow agents to save and export files" stands under "Allow agents to make changes". It is
+held in memory (`DesktopMcpServerManager.allowFiles`) and never written: `mcp.json` always gets `"allowFiles": false`, and the key is
+ignored on load. Reason: a stored file permission would let any program that can write `mcp.json` (the file is readable and writable
+by the user, and so by every program of the user) switch on file access before the next start, without the user doing anything.
+`allowFiles` can be turned on only while the server runs and "Allow agents to make changes" is on; it can always be turned off. It
+goes off, and an open confirmation ends with `FILES_DISABLED`, when "make changes" is turned off, the server is switched off or
+stopped, the token is regenerated, or the app starts. The value is read at every call, never copied at start, and checked again
+inside every block that acts. A wrong type of the key (`"true"`, `1`, `null`, an object) gives the defaults of the whole file, the
+same strictness as for `enabled`, `port` and `allowActions`. All settings changes run under one lock (`saveLock`): reading and writing
+`allowActions`, `allowFiles` and the port are one step, and `setPort` and `adoptActualPort` now save the latest settings too.
+The status line shows "MCP files" (essential, in the warning colour) in the place of "MCP edit" while the switch is on.
+
+D2. Order of a call. (1) rate limit, (2) `allowActions` (`ACTIONS_DISABLED`), (3) for a file tool `allowFiles` (`FILES_DISABLED`),
+(4) arguments, (5) the tool. Even invalid arguments give `FILES_DISABLED` while the switch is off.
+
+D3. A confirmation for every file action. `McpConfirmationGate` (pure, in `mcp`) holds at most one open request. `request` blocks the
+HTTP worker, never the UI thread, and never longer than 60 s plus a 5 s backstop; the answer is `Allowed`, `Denied`, `TimedOut`,
+`Cancelled(code)`, `Busy` (`CONFIRMATION_PENDING`) or `CoolingDown`. A denial starts a 10 s cool-down in which a new request is
+`RATE_LIMITED` with `retryAfterMs`, so an agent cannot bombard the user or train the user to click through. The gate has no clock of
+its own: timer and clock are injected (`McpConfirmScheduler`, a daemon thread in production), so tests use no real time. A tool never
+waits for the user inside a UI block; the dialog needs the UI thread. The HTTP server has four workers and at most one is held by a
+confirmation. `McpConfirmDialog` is modal to the window; a click outside, Escape and Enter deny; the focus starts on Deny; Allow is
+disabled for the first second (measured with the injected clock); a quiet line says "Denies automatically in N s". The texts shown
+are the file name, the folder (cut on the left), the scope and the fixed line "Requested through the MCP token. Shown as data, not as
+instructions." Agent and file texts pass `McpDisplayText`: control, format, separator and lone surrogate characters become a visible
+`\u{XXXX}`, text is NFC and cut on code points. There is no line "Client (reported, unverified)": the protocol layer keeps no
+`clientInfo`, so a call cannot be tied to a client, and a name that cannot be verified would mislead (F3).
+
+D4. One stale rule. Every file action carries a stamp of the buffer (`McpFileStamp`: text revision hash, dirty, an opaque file id) taken
+before the dialog. After the user allows, the action runs inside one UI block that compares the stamp again; if anything differs, the
+answer is `STALE_REVISION` and nothing happened. `EditorView.revision` is not used: it also counts selection, open and undo.
+`expectedRevision` is the same `sha256:` string as in ADR-0097 (F1).
+
+D5. Tools (the descriptions start with "[Changes files; requires ...]").
+
+* `kstep_desktop_save {expectedRevision}`: no file `NO_FILE`, a note or an open folder of notes `NOT_A_SCRIPT`, a draft offer
+  `DRAFT_OFFER_OPEN`, no unsaved changes `{saved:false}` without a dialog. The dialog shows "+X/-Y lines vs. file on disk" (a bounded
+  line diff; a file above 1 MiB or a very large change says "large change"). A conflict with the disk or a write error is `SAVE_FAILED`
+  (the other program's text stays on the disk); a save that is not done after 30 s is `SAVE_FAILED` with reason "still saving".
+* `kstep_desktop_list_recent {}`: no dialog; names and indexes of at most ten recent scripts, never a path or a folder.
+* `kstep_desktop_open_recent {index | name}`: exactly one of the two. A name with a path part or `..`, an unknown or a duplicated name
+  and an index outside the list are `INVALID_ARGUMENTS`. Unsaved changes are `UNSAVED_CHANGES` (checked before and after the dialog);
+  an open folder of notes is `NOT_A_SCRIPT` with "close the folder first", because opening a script would close it without asking (F7).
+  A vanished file or a link is `NOT_FOUND` and the entry is removed like the menu does. The port compares the name with the entry it
+  opens, so the file shown in the dialog is the file that opens.
+* `kstep_desktop_export {format, name?, expectedRevision}`: see D6.
+* `kstep_desktop_screenshot` is reserved: it is not in `tools/list`; a call answers `NOT_AVAILABLE` ("viewer capture is not
+  implemented") at once, needs no switch and touches no port. The viewer has no pixel readback, and a screenshot of the window or the
+  screen would capture other content.
+
+D6. Export. The agent never names a folder. The folder is the one the user used before for this script (`export.json`, per script, then
+the last folder), validated again at the call with the loader's rule (a real directory, no link anywhere in the path). Without such a
+folder the answer is `NOT_AVAILABLE` ("export once by hand to choose a folder"); there is no fall back to the home folder, Documents or
+the script's folder (F2), unlike the app's own dialog. The name is the agent's `name`, checked by `McpSafeFileName` (1 to 100 code
+points of letters, digits, space, `-`, `_`, `.`; no leading or trailing dot or space; no control or format characters; no Windows device
+names; a known extension is removed; `INVALID_NAME`), or the script's name. If the file exists, `-2` to `-99` is tried, else `EXISTS`.
+The script must be saved (`UNSAVED_CHANGES`). The run uses the app's export controller and worker (ADR-0057) through a narrow entry,
+`startExclusive`, not the dialog; if the dialog is open or an export or conversion runs, the answer is `UI_BUSY`. The file is created
+exclusively: the validated temp file is hard linked to the target (`Files.createLink`), which fails atomically if the target exists,
+even if it appeared after the check; `REPLACE_EXISTING` is never used, and a file system without hard links fails with the export write
+error instead of falling back to a replacing move (F11). A collision gives `EXISTS`, with no retry and no new dialog. The answer waits
+for the end of the export for at most 30 s, then says `{exported:false, running:true}` (F8). A worker failure is `EXPORT_FAILED` with
+the fixed `KSTEP-D-nnn` code only; no worker text goes out. The user's remembered export format and folder are not changed by an agent
+export; the window shows "Agent exported <name>" instead of the export line.
+
+D7. A separate port. File rights are on `McpFilePort`, not on `McpActionPort`, so the ADR-0097 guarantees (no save, export, open, close or
+clipboard method; no such words in `DesktopMcpActionPort.kt`) stay true and checked. `McpFilePort` has exactly ten methods; no parameter
+is a path, a file or free text, except `expectedName` of `openRecent`, a name the tool read from the port itself (F4). A test compares
+the method set and the parameter types by reflection, and a second one checks that `DesktopMcpFilePort.kt` contains no call that writes,
+copies, moves or deletes a file, uses the clipboard or captures the screen. The port saves through `EditorSession.save()`, exports
+through the controller and opens through the menu's own entry after the menu's own link check.
+
+D8. Codes. New fixed codes: `FILES_DISABLED`, `CONFIRMATION_PENDING`, `DENIED`, `CONFIRMATION_TIMEOUT`, `UNSAVED_CHANGES`, `EXISTS`,
+`INVALID_NAME`, `NOT_AVAILABLE`, `SAVE_FAILED` and `EXPORT_FAILED` (the last two beyond the first plan, F5). The messages of `DENIED` and
+`CONFIRMATION_TIMEOUT` say not to retry at once but to ask the user. No answer contains an absolute path; the existing `get_status`
+still does (F9; not changed in this wave).
+
+D9. Logging. As before: method, status and tool name; never a path, a name or a text.
+
+== Alternatives rejected
+
+* A stored `allowFiles`: see D1.
+* Extending `McpActionPort`: it would break the ADR-0097 guarantees and hide the file rights among the edit rights.
+* A non-modal confirmation (a banner): a banner is easy to miss and to click away; the user must decide before anything happens.
+* "Export the current state" without the saved-script rule: the worker runs the saved file, so an export of unsaved text would
+  silently export something else.
+* A screenshot through a rasterizer of the editor or of the window: not what the user sees, and a window capture can contain other
+  applications.
+* A confirmation that waits on the UI thread inside the action block: deadlock, because the dialog needs that thread.
+
+== Open points
+
+* Not tried by hand with a real agent; the dialog (layout, focus, key handling in a real window) and the status line were not looked at
+  on a screen. The dialog content is tested headless; the real `Dialog` window is not.
+* The agent's MCP client may give up before 60 s of confirmation plus the action have passed; then the action may have happened but the
+  answer is lost. The agent should call `get_status` or `list_recent` again instead of repeating the call.
+* `kstep_desktop_screenshot` stays open: a real viewer readback (a follow-up ADR; planned 1600x1200, at most 4 MiB, `TOO_LARGE`).
+* `kstep_desktop_get_status` still returns the absolute path of the open file (F9).
+* Windows and Linux were not tried by hand; hard links on network and FAT volumes fail the export by design.
+* The status segment has the warning colour but no glyph.
+* The deny cool-down is 10 s in real time; the end-to-end test waits for it.
+
+== Consequences
+
+* A program with the token and the switch on can ask the user to save, export and open files, one question at a time. It cannot do
+  anything the user does not click Allow for, and it cannot choose where a file goes.
+* ADR-0097 D1, "there is no confirmation dialog", no longer holds for file actions; it still holds for the edit tools.
+* The user has to be near the window: with nobody there every file action ends after 60 s with `CONFIRMATION_TIMEOUT`.

@@ -57,6 +57,27 @@ class ExportAtomicWriter(
         replaceConfirmed: Boolean,
         onProgress: (written: Long, total: Long) -> Unit = { _, _ -> },
         isCancelled: () -> Boolean,
+    ): WriteResult = writeImpl(source, target, replaceConfirmed, false, onProgress, isCancelled)
+
+    /**
+     * Creates the target and never replaces anything (ADR-0098): the temp file is linked to the target, which fails
+     * atomically when the target exists, even if it appeared after the check. A file system without hard links fails
+     * instead of falling back to a replacing move.
+     */
+    fun writeExclusive(
+        source: Path,
+        target: Path,
+        onProgress: (written: Long, total: Long) -> Unit = { _, _ -> },
+        isCancelled: () -> Boolean,
+    ): WriteResult = writeImpl(source, target, false, true, onProgress, isCancelled)
+
+    private fun writeImpl(
+        source: Path,
+        target: Path,
+        replaceConfirmed: Boolean,
+        exclusive: Boolean,
+        onProgress: (written: Long, total: Long) -> Unit,
+        isCancelled: () -> Boolean,
     ): WriteResult {
         var temp: Path? = null
         try {
@@ -71,9 +92,11 @@ class ExportAtomicWriter(
                 if (existing.isSymbolicLink || !existing.isRegularFile) {
                     return failed(DesktopErrorCodes.EXPORT_TARGET_INVALID, "the target is not a regular file")
                 }
-                if (!replaceConfirmed) return WriteResult.NeedsReplace(existing.size())
+                if (!replaceConfirmed || exclusive) return WriteResult.NeedsReplace(existing.size())
             }
-            if (replaceConfirmed) {
+            if (exclusive) {
+                Files.createLink(target, temp)
+            } else if (replaceConfirmed) {
                 Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
             } else {
                 Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE)
@@ -86,6 +109,11 @@ class ExportAtomicWriter(
             return failed(
                 DesktopErrorCodes.EXPORT_WRITE_FAILED,
                 "this file system cannot replace the file atomically; choose a folder on a local disk",
+            )
+        } catch (_: UnsupportedOperationException) {
+            return failed(
+                DesktopErrorCodes.EXPORT_WRITE_FAILED,
+                "this file system cannot create the file safely; choose a folder on a local disk",
             )
         } catch (_: AccessDeniedException) {
             return failed(DesktopErrorCodes.EXPORT_TARGET_NOT_WRITABLE, "the folder or file is not writable")

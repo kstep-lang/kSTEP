@@ -2,6 +2,7 @@ package dev.kstep.desktop
 
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldBeEmpty
+import io.kotest.matchers.shouldBe
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -137,6 +138,76 @@ class DesktopArchitectureTest :
                 .flatMap { line -> banned.filter { line.contains(it) }.map { "$it in: ${line.trim()}" } }
                 .toList()
                 .shouldBeEmpty()
+        }
+
+        "the file port has exactly the ADR-0098 methods and no parameter that could carry a path" {
+            val expected =
+                setOf(
+                    "target",
+                    "recentScripts",
+                    "lineDelta",
+                    "recentStillValid",
+                    "beginSave",
+                    "awaitSave",
+                    "openRecent",
+                    "planExport",
+                    "startExport",
+                    "awaitExport",
+                )
+            val methods = dev.kstep.desktop.mcp.McpFilePort::class.java.methods
+            methods.map { it.name }.toSet() shouldBe expected
+            val carriers = setOf(java.nio.file.Path::class.java, java.io.File::class.java, String::class.java)
+            methods
+                .flatMap { m -> m.parameterTypes.filter { it in carriers }.map { "${m.name}: ${it.simpleName}" } }
+                .shouldBe(listOf("openRecent: String"))
+        }
+
+        "the window side of the file port never writes, copies, deletes, captures or uses the clipboard (ADR-0098)" {
+            val text =
+                sources()
+                    .single { (path, _) ->
+                        root.relativize(path).toString().replace('\\', '/') ==
+                            "dev/kstep/desktop/ui/DesktopMcpFilePort.kt"
+                    }.second
+            val code =
+                text.lineSequence().filter {
+                    !it.trimStart().startsWith(
+                        "*",
+                    ) &&
+                        !it.trimStart().startsWith("/*")
+                }
+            val banned =
+                listOf(
+                    "Files.write",
+                    "newOutputStream",
+                    "Files.move",
+                    "Files.copy",
+                    "Files.delete",
+                    "clipboard",
+                    "Clipboard",
+                    "Robot",
+                    "createScreenCapture",
+                    "chooseScript",
+                    "JFileChooser",
+                )
+            code
+                .flatMap { line -> banned.filter { line.contains(it) }.map { "$it in: ${line.trim()}" } }
+                .toList()
+                .shouldBeEmpty()
+        }
+
+        "nothing in the desktop takes a screenshot of the screen or uses Dispatchers.Main" {
+            sources()
+                .flatMap { (path, text) ->
+                    text
+                        .lineSequence()
+                        .filter { !it.trimStart().startsWith("*") && !it.trimStart().startsWith("//") }
+                        .flatMap { line ->
+                            listOf("java.awt.Robot", "createScreenCapture", "Dispatchers.Main")
+                                .filter { line.contains(it) }
+                                .map { "${root.relativize(path)} uses $it" }
+                        }.toList()
+                }.shouldBeEmpty()
         }
 
         "com.sun.net.httpserver is only used by the MCP HTTP server (ADR-0095)" {

@@ -76,6 +76,14 @@ class ExportController(
 
     val state: StateFlow<ExportState> = mutableState.asStateFlow()
 
+    /**
+     * The generation of the last export an agent started (ADR-0098), or -1. The window uses it to leave the user's
+     * remembered format and folder alone and to show a different notice.
+     */
+    @Volatile
+    var exclusiveGeneration: Long = -1
+        private set
+
     /** Elapsed milliseconds since [startedAtMs] on this controller's clock (the dialog's progress line). */
     fun elapsedSince(startedAtMs: Long): Long = (clock() - startedAtMs).coerceAtLeast(0)
 
@@ -143,6 +151,29 @@ class ExportController(
                     ),
                 )
         }
+    }
+
+    /**
+     * Starts an export to exactly [target] without the dialog, for an agent (ADR-0098): the file is created, never
+     * replaced. Returns the generation of the started run, or `null` when nothing started (a run is in progress, or the
+     * target was rejected or exists). The caller makes sure that the dialog is not open.
+     */
+    fun startExclusive(
+        scriptPath: Path,
+        format: ExportFormat,
+        target: Path,
+    ): Long? {
+        val folder = target.parent ?: return null
+        synchronized(lock) { if (mutableState.value is ExportState.Running) return null }
+        begin(scriptPath, format, folder)
+        chooseExact(target)
+        val configuring = mutableState.value as? ExportState.Configuring ?: return null
+        if (configuring.target != target || configuring.overwrite !is Overwrite.None) return null
+        val generation = configuring.generation + 1
+        // set before the run can end, so that the window never sees the end of this run as a user's export
+        exclusiveGeneration = generation
+        dispatch(ExportEvent.Start(clock(), exclusive = true))
+        return (mutableState.value as? ExportState.Running)?.generation?.takeIf { it == generation }
     }
 
     fun confirmReplace() = dispatch(ExportEvent.ConfirmReplace)
@@ -244,9 +275,14 @@ class ExportController(
             val onProgress: (Long, Long) -> Unit = { written, total ->
                 if (throttle.admit(written, total)) dispatch(ExportEvent.WriteProgress(generation, written, total))
             }
+            val stopped = { !isActive(generation) }
             return when (
                 val written =
-                    writer.write(file, ok.file, effect.replaceConfirmed, onProgress) { !isActive(generation) }
+                    if (effect.exclusive) {
+                        writer.writeExclusive(file, ok.file, onProgress, stopped)
+                    } else {
+                        writer.write(file, ok.file, effect.replaceConfirmed, onProgress, stopped)
+                    }
             ) {
                 is WriteResult.Written ->
                     PipelineOutcome.Success(ok.file.fileName.toString(), written.bytes, ok.dir)

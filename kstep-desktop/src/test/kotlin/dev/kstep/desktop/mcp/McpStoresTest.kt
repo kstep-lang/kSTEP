@@ -199,6 +199,33 @@ class McpPreferencesStoreTest :
             }
         }
 
+        "allowFiles is never restored: true, false or missing all load as the saved settings, the writer writes false" {
+            withDir { dir ->
+                val expected = McpSettings(true, 8000, true)
+                for (value in listOf("true", "false", null)) {
+                    val field = if (value == null) "" else ""","allowFiles":$value"""
+                    loadOf(dir, """{"version":1,"enabled":true,"port":8000,"allowActions":true$field}""") shouldBe
+                        expected
+                }
+                McpPreferencesStore(dir).save(McpSettings(true, 8000, true))
+                Files.readString(dir.resolve(McpPreferencesStore.FILE_NAME)) shouldContain "\"allowFiles\":false"
+                // an old file without the key still loads
+                loadOf(dir, """{"version":1,"enabled":false}""") shouldBe McpSettings(false, 7391)
+            }
+        }
+
+        "a wrong type of allowFiles gives all defaults: server off" {
+            withDir { dir ->
+                listOf(
+                    """{"version":1,"enabled":true,"allowFiles":"true"}""",
+                    """{"version":1,"enabled":true,"allowFiles":1}""",
+                    """{"version":1,"enabled":true,"allowFiles":null}""",
+                    """{"version":1,"enabled":true,"allowFiles":{}}""",
+                    """{"version":1,"enabled":true,"allowFiles":[]}""",
+                ).forEach { loadOf(dir, it) shouldBe default }
+            }
+        }
+
         "a file with the new field stays within the 1 KiB limit" {
             withDir { dir ->
                 McpPreferencesStore(dir).save(McpSettings(true, 65535, true)) shouldBe true

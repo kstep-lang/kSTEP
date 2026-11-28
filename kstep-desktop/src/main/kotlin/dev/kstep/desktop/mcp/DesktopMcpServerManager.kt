@@ -37,6 +37,9 @@ sealed interface McpServerStatus {
 /** The outcome of [DesktopMcpServerManager.setAllowActions]. */
 enum class ActionsChange { CHANGED, SERVER_NOT_RUNNING, SAVE_FAILED }
 
+/** The outcome of [DesktopMcpServerManager.setAllowFiles] (ADR-0098). */
+enum class FilesChange { CHANGED, ACTIONS_OFF, SERVER_NOT_RUNNING }
+
 /** The outcome of [DesktopMcpServerManager.setPort]. */
 enum class PortChange { CHANGED, OUT_OF_RANGE, SERVER_RUNNING, SAVE_FAILED }
 
@@ -52,10 +55,11 @@ class DesktopMcpServerManager(
     private val activity: McpActivityTracker,
     /** The UI link of the action tools (ADR-0097); without a port in it every action answers `UI_BUSY`. */
     private val actions: McpActionHost = McpActionHost(McpUiBridge(Dispatchers.Default, { false })),
-    private val serverFactory: (token: () -> McpToken?, allowActions: () -> Boolean) -> DesktopMcpServerHandle =
-        { token, allowActions ->
-            // the permission is read at every call, never copied at start (ADR-0097 D1)
-            val context = McpActionContext(actions, allowActions = allowActions)
+    private val serverFactory:
+        (token: () -> McpToken?, allowActions: () -> Boolean, allowFiles: () -> Boolean) -> DesktopMcpServerHandle =
+        { token, allowActions, allowFiles ->
+            // the permissions are read at every call, never copied at start (ADR-0097 D1, ADR-0098 D1)
+            val context = McpActionContext(actions, allowActions = allowActions, allowFiles = allowFiles)
             DesktopMcpServerHandle.of(
                 DesktopMcpHttpServer(
                     McpProtocol(McpToolRegistry(host, actions = context), host.appVersion),
@@ -80,11 +84,17 @@ class DesktopMcpServerManager(
 
     private val allowActionsFlow = MutableStateFlow(false)
 
+    // Never saved and never restored: off after every start (ADR-0098 D1).
+    private val allowFilesFlow = MutableStateFlow(false)
+
     val status: StateFlow<McpServerStatus> get() = statusFlow
 
     /** Agents may change things (ADR-0097); off by default and saved with the settings. */
     val allowActions: StateFlow<Boolean> get() = allowActionsFlow
     val settingsState: StateFlow<McpSettings> get() = settingsFlow
+
+    /** Agents may save, export and open files, each after the user agreed (ADR-0098); this session only. */
+    val allowFiles: StateFlow<Boolean> get() = allowFilesFlow
 
     /** `KSTEP-D-052`: the last attempt to save the settings failed. */
     val lastSaveFailed: StateFlow<Boolean> get() = saveFailedFlow
@@ -98,6 +108,7 @@ class DesktopMcpServerManager(
         val loaded = preferences.load()
         settingsFlow.value = loaded
         allowActionsFlow.value = loaded.allowActions
+        filesOff()
         scope.launch {
             hasTokenFlow.value = tokens.current() != null
             if (loaded.enabled) doStart(loaded.port)
@@ -108,6 +119,12 @@ class DesktopMcpServerManager(
     private val saveLock = Any()
 
     private fun saveLatest(): Boolean = synchronized(saveLock) { preferences.save(settingsFlow.value) }
+
+    /** Takes the file permission back and ends an open confirmation with `FILES_DISABLED`. */
+    private fun filesOff() {
+        allowFilesFlow.value = false
+        actions.confirmations.cancelAll(McpToolCodes.FILES_DISABLED)
+    }
 
     fun setEnabled(on: Boolean) {
         val next = settingsFlow.value.copy(enabled = on)
@@ -125,21 +142,46 @@ class DesktopMcpServerManager(
      */
     fun setAllowActions(on: Boolean): ActionsChange {
         if (on && statusFlow.value !is McpServerStatus.Running) return ActionsChange.SERVER_NOT_RUNNING
-        val next = settingsFlow.value.copy(allowActions = on)
-        settingsFlow.value = next
-        allowActionsFlow.value = on
-        val saved = saveLatest()
+        val saved =
+            synchronized(saveLock) {
+                settingsFlow.value = settingsFlow.value.copy(allowActions = on)
+                allowActionsFlow.value = on
+                // without the permission for changes there is no permission for files (ADR-0098 D1)
+                if (!on) filesOff()
+                saveLatest()
+            }
         saveFailedFlow.value = !saved
         return if (saved) ActionsChange.CHANGED else ActionsChange.SAVE_FAILED
     }
+
+    /**
+     * Switches the permission for file actions (ADR-0098). Turning it on needs a running server and the permission to
+     * make changes; turning it off always works and ends an open confirmation. Never saved.
+     */
+    fun setAllowFiles(on: Boolean): FilesChange =
+        synchronized(saveLock) {
+            if (!on) {
+                filesOff()
+                FilesChange.CHANGED
+            } else if (!settingsFlow.value.allowActions) {
+                FilesChange.ACTIONS_OFF
+            } else if (statusFlow.value !is McpServerStatus.Running) {
+                FilesChange.SERVER_NOT_RUNNING
+            } else {
+                allowFilesFlow.value = true
+                FilesChange.CHANGED
+            }
+        }
 
     /** Only while the server does not run. Saves the new port. */
     fun setPort(port: Int): PortChange {
         if (statusFlow.value is McpServerStatus.Running) return PortChange.SERVER_RUNNING
         if (port !in McpPreferencesStore.MIN_PORT..McpPreferencesStore.MAX_PORT) return PortChange.OUT_OF_RANGE
-        val next = settingsFlow.value.copy(port = port)
-        settingsFlow.value = next
-        val saved = preferences.save(next)
+        val saved =
+            synchronized(saveLock) {
+                settingsFlow.value = settingsFlow.value.copy(port = port)
+                saveLatest()
+            }
         saveFailedFlow.value = !saved
         return if (saved) PortChange.CHANGED else PortChange.SAVE_FAILED
     }
@@ -147,9 +189,12 @@ class DesktopMcpServerManager(
     /** "Use q from now on": stores the port the server actually runs on. */
     fun adoptActualPort() {
         val current = statusFlow.value as? McpServerStatus.Running ?: return
-        val next = settingsFlow.value.copy(port = current.port)
-        settingsFlow.value = next
-        saveFailedFlow.value = !preferences.save(next)
+        val saved =
+            synchronized(saveLock) {
+                settingsFlow.value = settingsFlow.value.copy(port = current.port)
+                saveLatest()
+            }
+        saveFailedFlow.value = !saved
         statusFlow.value = current.copy(preferred = current.port)
     }
 
@@ -158,6 +203,8 @@ class DesktopMcpServerManager(
         try {
             val fresh = tokens.regenerate()
             tokenRef = fresh
+            // a new token means a new trust decision: the file permission does not survive it (ADR-0098 D1)
+            filesOff()
             hasTokenFlow.value = true
             true
         } catch (_: McpTokenWriteException) {
@@ -177,6 +224,7 @@ class DesktopMcpServerManager(
         closed = true
         doStop()
         scope.cancel()
+        actions.confirmations.shutdown()
     }
 
     /** Waits until all queued start and stop work is done (tests). */
@@ -189,6 +237,7 @@ class DesktopMcpServerManager(
             running?.stop()
             running = null
             statusFlow.value = McpServerStatus.Off
+            filesOff()
         }
     }
 
@@ -206,7 +255,16 @@ class DesktopMcpServerManager(
             hasTokenFlow.value = true
             val last = minOf(preferred + FALLBACK_PORTS, McpPreferencesStore.MAX_PORT)
             for (candidate in preferred..last) {
-                val server = serverFactory({ tokenRef }, { settingsFlow.value.allowActions })
+                val server =
+                    serverFactory(
+                        { tokenRef },
+                        { settingsFlow.value.allowActions },
+                        {
+                            settingsFlow.value.allowActions &&
+                                allowFilesFlow.value &&
+                                statusFlow.value is McpServerStatus.Running
+                        },
+                    )
                 try {
                     val actual = server.start(candidate)
                     running = server

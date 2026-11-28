@@ -23,8 +23,8 @@ D1. A second switch, off by default. The dialog has "Allow agents to make change
 off (otherwise a saved permission could not be taken back). The value is read at every call, never copied at the start of the
 server, so a switch-off acts on the next call without a restart. Every block that changes something checks it again on the UI
 thread, so a call that is already waiting for the UI thread is refused too (`ACTIONS_DISABLED`). The status line shows "MCP edit" as
-an essential segment while the server runs with the permission, otherwise "MCP". There is no confirmation dialog: the switch is the
-decision.
+an essential segment while the server runs with the permission, otherwise "MCP". There is no confirmation dialog for these tools: the switch is the
+decision (for file actions this is replaced by ADR-0098).
 
 D2. Order of a call. (1) rate limit (`RATE_LIMITED`), (2) permission (`ACTIONS_DISABLED`), (3) arguments (`INVALID_ARGUMENTS`),
 (4) the tool. Under the lock a call never reaches the port; even invalid arguments give `ACTIONS_DISABLED`.
@@ -108,7 +108,7 @@ their own code as the user.
 * Frame the camera on a selection or a part: an agent must not move the user's view.
 * `mode` of `run` as required: the default follows what the user would do (run what they see).
 
-== Not included (MCP-4)
+== Not included (MCP-4, done in ADR-0098 except the screenshot)
 
 Saving, export, opening files and folders, paths, the clipboard, a screenshot of the viewer, a flash of the changed lines in the
 gutter, a pen glyph.

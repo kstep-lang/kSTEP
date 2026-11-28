@@ -128,6 +128,10 @@ class DesktopMcpHttpServerTest :
                         "kstep_desktop_select",
                         "kstep_desktop_set_visibility",
                         "kstep_desktop_show_in_script",
+                        "kstep_desktop_save",
+                        "kstep_desktop_list_recent",
+                        "kstep_desktop_open_recent",
+                        "kstep_desktop_export",
                     )
 
                 val status =

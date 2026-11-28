@@ -86,6 +86,28 @@ class McpDialogStateTest :
     StringSpec({
         val settings = McpSettings(true, 7391)
 
+        "the file switch: locked without actions and a running server, off always possible, wording exact" {
+            McpDialogText.FILES_SWITCH shouldBe "Allow agents to save and export files"
+            McpDialogText.FILES_HINT shouldBe
+                "Agents can save the open file, export to your last export folder and open recent files. Every file " +
+                "action asks you first. Off after every restart."
+            McpDialogText.FILES_LOCKED shouldBe "Allow agents to make changes first"
+            val running = McpServerStatus.Running(7391, 7391)
+            val acts = McpSettings(true, 7391, allowActions = true)
+            mcpDialogState(running, acts, true, false).filesEnabled shouldBe true
+            mcpDialogState(running, settings, true, false).filesEnabled shouldBe false
+            mcpDialogState(running, settings, true, false).filesReason shouldBe McpDialogText.FILES_LOCKED
+            mcpDialogState(McpServerStatus.Off, acts, true, false).filesEnabled shouldBe false
+            mcpDialogState(McpServerStatus.Off, acts, true, false, allowFiles = true).filesEnabled shouldBe true
+            mcpDialogState(running, acts, true, false, allowFiles = true).filesChecked shouldBe true
+        }
+
+        "the hint says it cannot save, export or open files, until the file switch is on" {
+            McpDialogText.hint(true).contains("It cannot save, export or open files itself") shouldBe true
+            McpDialogText.hint(true, true).contains("It cannot save, export or open files itself") shouldBe false
+            McpDialogText.hint(true, true).contains("only after you agreed in a dialog each time") shouldBe true
+        }
+
         "the status texts" {
             mcpDialogState(McpServerStatus.Off, settings, false, false).statusText shouldBe "Off"
             mcpDialogState(McpServerStatus.Running(7391, 7391), settings, true, false).statusText shouldBe

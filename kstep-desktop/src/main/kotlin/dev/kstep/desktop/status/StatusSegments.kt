@@ -47,6 +47,7 @@ object StatusSegments {
         dirty: Boolean,
         mcp: String? = null,
         mcpEditable: Boolean = false,
+        mcpFiles: Boolean = false,
     ): List<StatusSegment> {
         val all =
             listOf(
@@ -62,7 +63,10 @@ object StatusSegments {
                 StatusSegment(note.orEmpty(), SegmentPriority.MEDIUM),
                 StatusSegment(transientNotice.orEmpty(), SegmentPriority.HIGH),
                 StatusSegment(aiStatus.orEmpty(), SegmentPriority.HIGH),
-                if (mcpEditable && mcp != null) {
+                if (mcpFiles && mcp != null) {
+                    // agents may also save, export and open files (each asks the user): never missed (ADR-0098)
+                    StatusSegment("MCP files", SegmentPriority.ESSENTIAL, id = MCP_SEGMENT_ID)
+                } else if (mcpEditable && mcp != null) {
                     // agents may change things: the user must never miss it, so the segment stays (ADR-0097)
                     StatusSegment("MCP edit", SegmentPriority.ESSENTIAL, id = MCP_SEGMENT_ID)
                 } else {
